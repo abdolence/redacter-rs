@@ -1,0 +1,50 @@
+[package]
+name = "redacter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
+license = "Apache-2.0"
+homepage = "https://github.com/abdolence/redacter-rs"
+repository = "https://github.com/abdolence/redacter-rs"
+documentation = "https://docs.rs/redacter"
+readme = "README.md"
+include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
+rust-version = "1.77.0"
+
+[features]
+default = []
+ci-gcp = [] # For testing on CI/GCP
+ci-aws = [] # For testing on CI/AWS
+ci = ["ci-gcp", "ci-aws"]
+
+
+[dependencies]
+rsb_derive = "0.5"
+rvstruct = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+console = { version = "0.15" }
+indicatif = { version = "0.17" }
+clap = { version = "4.1", features = ["derive"] }
+tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+gcloud-sdk = { version = "0.25.4", features = ["google-privacy-dlp-v2", "google-rest-storage-v1"] }
+futures = "0.3"
+sha2 = "0.10"
+async-trait = "0.1"
+hex = "0.4"
+thiserror = "1"
+sync_wrapper = { version = "1", features = ["futures"] }
+async-recursion = "1"
+mime = "0.3"
+mime_guess = "2"
+zip = "2"
+globset = "0.4"
+tempdir = "0.3"
+csv-async = { version = "1", default-features = false, features = ["tokio", "tokio-stream"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1" }
+
+
+[dev-dependencies]
+cargo-husky = { version = "1.5", default-features = false, features = ["run-for-all", "prepush-hook", "run-cargo-fmt"] }

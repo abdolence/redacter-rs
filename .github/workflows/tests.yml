@@ -1,0 +1,45 @@
+name: tests & formatting
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+env:
+  GCP_PROJECT: latestbit
+  GCP_PROJECT_ID: 288860578009
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_protected && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Authenticate to Google Cloud development
+        id: auth
+        uses: google-github-actions/auth@v2
+        if: github.ref == 'refs/heads/master'
+        with:
+          workload_identity_provider: 'projects/${{ env.GCP_PROJECT_ID }}/locations/global/workloadIdentityPools/lb-github-identity-pool/providers/lb-github-identity-pool-provider'
+          service_account: 'lb-github-service-account@${{ env.GCP_PROJECT }}.iam.gserviceaccount.com'
+          create_credentials_file: true
+          access_token_lifetime: '240s'
+      - name: 'Set up Cloud SDK'
+        uses: google-github-actions/setup-gcloud@v2
+        if: github.ref == 'refs/heads/master'
+      - name: 'Checking formatting and clippy'
+        run: cargo fmt -- --check && cargo clippy -- -Dwarnings
+      - name: 'Run tests without access to GCP'
+        run: cargo test
+        if: github.ref != 'refs/heads/master'
+      - name: 'Run all test'
+        run: cargo test --features "ci"
+        if: github.ref == 'refs/heads/master'
