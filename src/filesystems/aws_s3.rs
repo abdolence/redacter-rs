@@ -75,8 +75,8 @@ impl<'a> AwsS3FileSystem<'a> {
                                 name.trim_start_matches(&self.object_name).into();
                             let media_type = mime_guess::from_path(&name).first();
                             FileSystemRef {
-                                relative_path: relative_path,
-                                media_type: media_type,
+                                relative_path,
+                                media_type,
                                 file_size: item.size.map(|v| v as u64),
                             }
                         })
@@ -246,6 +246,7 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
     }
 }
 
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use crate::reporter::AppReporter;

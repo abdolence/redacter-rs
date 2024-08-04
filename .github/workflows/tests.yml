@@ -41,5 +41,5 @@ jobs:
         run: cargo test
         if: github.ref != 'refs/heads/master'
       - name: 'Run all test'
-        run: cargo test --features "ci"
+        run: cargo test --features "ci-gcp"
         if: github.ref == 'refs/heads/master'

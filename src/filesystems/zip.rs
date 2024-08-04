@@ -10,7 +10,7 @@ use gcloud_sdk::prost::bytes::Bytes;
 use rvstruct::ValueStruct;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempdir::TempDir;
+use tempfile::TempDir;
 use zip::*;
 
 pub struct ZipFileSystem<'a> {
@@ -51,7 +51,7 @@ impl<'a> ZipFileSystem<'a> {
         if self.mode.is_none() {
             let file = std::fs::File::open(&self.zip_file_path)?;
             let mut archive = ZipArchive::new(file)?;
-            let temp_dir = TempDir::new("redacter")?;
+            let temp_dir = tempfile::TempDir::with_prefix("redacter")?;
             archive.extract(temp_dir.path())?;
             let temp_dir_str = temp_dir.path().to_string_lossy();
             self.reporter
@@ -177,17 +177,18 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
     }
 }
 
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use gcloud_sdk::prost::bytes;
     use std::io::Read;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::new("zip_file_system_tests_download")?;
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_download")?;
         let temp_dir_path = temp_dir.path();
         let zip_file_path = temp_dir_path.join("test.zip");
         let mut zip = ZipWriter::new(std::fs::File::create(&zip_file_path)?);
@@ -225,7 +226,7 @@ mod tests {
     async fn upload_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::new("zip_file_system_tests_upload")?;
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_upload")?;
         let temp_dir_path = temp_dir.path();
         let zip_file_path = temp_dir_path.join("test.zip");
 
@@ -262,7 +263,7 @@ mod tests {
     async fn list_files_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::new("zip_file_system_tests_list_files")?;
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_list_files")?;
         let temp_dir_path = temp_dir.path();
         let zip_file_path = temp_dir_path.join("test.zip");
         let mut zip = ZipWriter::new(std::fs::File::create(&zip_file_path)?);

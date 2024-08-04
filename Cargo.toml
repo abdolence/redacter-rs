@@ -40,7 +40,7 @@ mime = "0.3"
 mime_guess = "2"
 zip = "2"
 globset = "0.4"
-tempdir = "0.3"
+tempfile = "3"
 csv-async = { version = "1", default-features = false, features = ["tokio", "tokio-stream"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }

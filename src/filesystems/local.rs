@@ -169,6 +169,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
     }
 }
 
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use crate::filesystems::DetectFileSystem;
@@ -178,7 +179,7 @@ mod tests {
     async fn download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = tempdir::TempDir::new("local_file_system_tests_download")?;
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_download")?;
         let temp_dir_path = temp_dir.path();
 
         let fs = DetectFileSystem::open(
@@ -217,7 +218,7 @@ mod tests {
     async fn upload_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = tempdir::TempDir::new("local_file_system_tests_upload")?;
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_upload")?;
         let temp_dir_path = temp_dir.path();
 
         let fs = DetectFileSystem::open(
@@ -252,7 +253,7 @@ mod tests {
     async fn list_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = tempdir::TempDir::new("local_file_system_tests_list")?;
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_list")?;
         let temp_dir_path = temp_dir.path();
 
         let fs = DetectFileSystem::open(

@@ -359,6 +359,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ByteContentItem> for Redacter
     }
 }
 
+#[allow(unused_imports)]
 mod tests {
     use super::*;
     use crate::redacters::RedacterProviderOptions;
