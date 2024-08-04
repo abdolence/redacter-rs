@@ -10,6 +10,9 @@ documentation = "https://docs.rs/redacter"
 readme = "README.md"
 include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
 rust-version = "1.77.0"
+keywords = ["redact", "pii", "dlp"]
+categories = ["command-line-utilities"]
+description = "Copy & Redact files cli tool utilizing Data Loss Prevention (DLP) capabilities"
 
 [features]
 default = []
