@@ -47,6 +47,7 @@ tempfile = "3"
 csv-async = { version = "1", default-features = false, features = ["tokio", "tokio-stream"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
+aws-sdk-comprehend = { version = "1" }
 
 
 [dev-dependencies]

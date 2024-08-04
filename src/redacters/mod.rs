@@ -5,11 +5,15 @@ use gcloud_sdk::prost::bytes;
 use mime::Mime;
 use std::fmt::Display;
 
-mod gcp_dlp;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::reporter::AppReporter;
+
+mod gcp_dlp;
 pub use gcp_dlp::*;
+
+mod aws_comprehend;
+pub use aws_comprehend::*;
 
 #[derive(Debug, Clone)]
 pub struct RedacterDataItem {
