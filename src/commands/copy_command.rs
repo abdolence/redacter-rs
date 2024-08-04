@@ -3,7 +3,7 @@ use crate::filesystems::{
     AbsoluteFilePath, DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection,
     FileSystemRef,
 };
-use crate::redacters::{Redacter, RedacterOptions, Redacters};
+use crate::redacters::{RedactSupportedOptions, Redacter, RedacterOptions, Redacters};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::{Style, Term};
@@ -228,7 +228,9 @@ async fn redact_upload_file<'a, SFS: FileSystemConnection<'a>, DFS: FileSystemCo
     dest_file_ref: &FileSystemRef,
     redacter: &impl Redacter,
 ) -> AppResult<TransferFileResult> {
-    if redacter.is_redact_supported(dest_file_ref).await? {
+    if redacter.redact_supported_options(dest_file_ref).await?
+        != RedactSupportedOptions::Unsupported
+    {
         match redacter.redact_stream(source_reader, dest_file_ref).await {
             Ok(redacted_reader) => {
                 destination_fs

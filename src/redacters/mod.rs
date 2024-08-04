@@ -108,10 +108,20 @@ impl<'a> Redacters<'a> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedactSupportedOptions {
+    Supported,
+    SupportedAsText,
+    Unsupported,
+}
+
 pub trait Redacter {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent>;
 
-    async fn is_redact_supported(&self, file_ref: &FileSystemRef) -> AppResult<bool>;
+    async fn redact_supported_options(
+        &self,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactSupportedOptions>;
 
     fn options(&self) -> &RedacterOptions;
 
@@ -123,14 +133,21 @@ pub trait Redacter {
         file_ref: &FileSystemRef,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>>
     {
+        let supported_options = self.redact_supported_options(file_ref).await?;
         let content_to_redact = match file_ref.media_type {
-            Some(ref mime) if Redacters::is_mime_text(mime) => {
+            Some(ref mime)
+                if Redacters::is_mime_text(mime)
+                    || (Redacters::is_mime_table(mime)
+                        && matches!(
+                            supported_options,
+                            RedactSupportedOptions::SupportedAsText
+                        )) =>
+            {
                 let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
                 let all_bytes = all_chunks.concat();
-                let content =
-                    String::from_utf8(all_bytes).map_err(|e| crate::AppError::SystemError {
-                        message: format!("Failed to convert bytes to string: {}", e),
-                    })?;
+                let content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
+                    message: format!("Failed to convert bytes to string: {}", e),
+                })?;
                 Ok(RedacterDataItem {
                     content: RedacterDataItemContent::Value(content),
                     file_ref: file_ref.clone(),
@@ -223,10 +240,15 @@ impl<'a> Redacter for Redacters<'a> {
         }
     }
 
-    async fn is_redact_supported(&self, file_ref: &FileSystemRef) -> AppResult<bool> {
+    async fn redact_supported_options(
+        &self,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactSupportedOptions> {
         match self {
-            Redacters::GcpDlp(redacter) => redacter.is_redact_supported(file_ref).await,
-            Redacters::AwsComprehendDlp(redacter) => redacter.is_redact_supported(file_ref).await,
+            Redacters::GcpDlp(redacter) => redacter.redact_supported_options(file_ref).await,
+            Redacters::AwsComprehendDlp(redacter) => {
+                redacter.redact_supported_options(file_ref).await
+            }
         }
     }
 

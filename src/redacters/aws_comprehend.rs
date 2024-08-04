@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
+    Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -89,19 +90,28 @@ impl<'a> AwsComprehendDlpRedacter<'a> {
 impl<'a> Redacter for AwsComprehendDlpRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
         match &input.content {
-            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Value(_) => {
-                self.redact_text_file(input).await
+            RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Image { .. } => {
+                Err(AppError::SystemError {
+                    message: "Attempt to redact of unsupported image type".to_string(),
+                })
             }
-            RedacterDataItemContent::Image { .. } => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported image type".to_string(),
-            }),
         }
     }
 
-    async fn is_redact_supported(&self, file_ref: &FileSystemRef) -> AppResult<bool> {
-        Ok(file_ref.media_type.as_ref().iter().all(|media_type| {
-            Redacters::is_mime_text(media_type) || Redacters::is_mime_table(media_type)
-        }))
+    async fn redact_supported_options(
+        &self,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactSupportedOptions> {
+        Ok(match file_ref.media_type.as_ref() {
+            Some(media_type) if Redacters::is_mime_text(media_type) => {
+                RedactSupportedOptions::Supported
+            }
+            Some(media_type) if Redacters::is_mime_table(media_type) => {
+                RedactSupportedOptions::SupportedAsText
+            }
+            _ => RedactSupportedOptions::Unsupported,
+        })
     }
 
     fn options(&self) -> &RedacterOptions {
