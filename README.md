@@ -6,6 +6,8 @@
 
 Copy & Redact cli tool to securely copy and redact files across various sources and destinations,
 utilizing Data Loss Prevention (DLP) capabilities.
+The tool doesn't implement DLP itself, but rather relies on external models such as
+Google Cloud Platform's DLP API.
 
 ## Features
 
@@ -15,13 +17,21 @@ utilizing Data Loss Prevention (DLP) capabilities.
     * Google Cloud Storage (GCS)
     * Amazon Simple Storage Service (S3)
     * Zip files
-* **GCP DLP Integration:**  Leverage the power of GCP's DLP API for accurate and customizable redaction.
+* **DLP Integration:**
+    * GCP DLP API for accurate and customizable redaction for:
+        * text, html, json files
+        * structured data table files (csv)
+        * images (jpeg, png, bpm, gif)
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
 
 ## Installation
 
-**Cargo:**
+### Binary releases
+
+Download the latest release from [the GitHub releases](https://github.com/abdolence/redacter-rs/releases).
+
+### Cargo
 
 ```sh
 cargo install redacter
@@ -29,15 +39,53 @@ cargo install redacter
 
 ## Command line options
 
-TBD
+Copy and redact files from a source to a destination.
 
-## Google authentication
+```
+Usage: redacter cp [OPTIONS] <SOURCE> <DESTINATION>
 
-Looks for credentials in the following places, preferring the first location found:
+Arguments:
+  <SOURCE>       Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
+  <DESTINATION>  Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
-- A JSON file whose path is specified by the GOOGLE_APPLICATION_CREDENTIALS environment variable.
-- A JSON file in a location known to the gcloud command-line tool using `gcloud auth application-default login`.
-- On Google Compute Engine, it fetches credentials from the metadata server.
+Options:
+  -m, --max-size-limit <MAX_SIZE_LIMIT>
+          Maximum size of files to copy in bytes
+  -f, --filename-filter <FILENAME_FILTER>
+          Filter by name using glob patterns such as *.txt
+  -d, --redact <REDACT>
+          Redacter type [possible values: gcp-dlp]
+      --gcp-project-id <GCP_PROJECT_ID>
+          GCP project id that will be used to redact and bill API calls
+      --allow-unsupported-copies
+          Allow unsupported types to be copied without redaction
+      --csv-headers-disable
+          Disable CSV headers (if they are not present)
+      --csv-delimiter <CSV_DELIMITER>
+          CSV delimiter (default is ','
+  -h, --help
+          Print help
+```
+
+DLP is optional and should be enabled with `--redact` (`-d`) option.
+Without DLP enabled, the tool will copy all files without redaction.
+With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
+
+To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
+account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+
+### Examples:
+
+```sh
+# Copy and redact a file from local filesystem to GCS
+redacter cp -d gcp-dlp --gcp-project-id <your-gcp-project-with-dlp> sensitive.png gs://my-bucket-name/test/test.png  
+```
+
+The tool supports recursive copy of multiple files from directory:
+
+```sh
+redacter cp s3://my-bucket-name/sensitive-files/ tmp/
+```
 
 ## Licence
 
