@@ -76,6 +76,13 @@ With DLP enabled, the tool will redact files based on the DLP model and skip uns
 To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
 account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 
+Source/destination can be a local file or directory, or a file in GCS, S3, or a zip archive:
+
+- Local file: `/tmp/file.txt` or `/tmp` for whole directory recursive copy
+- GCS: `gs://bucket/file.txt` or `gs://bucket/test-dir/` for whole directory recursive copy
+- S3: `s3://bucket/file.txt` or `s3://bucket/test-dir/` for whole directory recursive copy
+- Zip archive: `zip://tmp/archive.zip`
+
 ### Examples:
 
 ```sh
