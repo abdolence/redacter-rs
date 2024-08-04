@@ -21,57 +21,57 @@ jobs:
           - os_name: FreeBSD-x86_64
             os: ubuntu-20.04
             target: x86_64-unknown-freebsd
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-FreeBSD-x86_64.tar.gz
+            bin: redacter
+            name: redacter-FreeBSD-x86_64.tar.gz
             skip_tests: true
           - os_name: Linux-x86_64
             os: ubuntu-20.04
             target: x86_64-unknown-linux-musl
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Linux-x86_64-musl.tar.gz
+            bin: redacter
+            name: redacter-Linux-x86_64-musl.tar.gz
           - os_name: Linux-aarch64
             os: ubuntu-20.04
             target: aarch64-unknown-linux-musl
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Linux-aarch64-musl.tar.gz
+            bin: redacter
+            name: redacter-Linux-aarch64-musl.tar.gz
           - os_name: Linux-arm
             os: ubuntu-20.04
             target: arm-unknown-linux-musleabi
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Linux-arm-musl.tar.gz
+            bin: redacter
+            name: redacter-Linux-arm-musl.tar.gz
           - os_name: Linux-i686
             os: ubuntu-20.04
             target: i686-unknown-linux-musl
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Linux-i686-musl.tar.gz
+            bin: redacter
+            name: redacter-Linux-i686-musl.tar.gz
             skip_tests: true
           - os_name: Windows-aarch64
             os: windows-latest
             target: aarch64-pc-windows-msvc
-            bin: ${{ env.CRATE_NAME }}.exe
-            name: ${{ env.CRATE_NAME }}-Windows-aarch64.zip
+            bin: redacter.exe
+            name: redacter-Windows-aarch64.zip
             skip_tests: true
           - os_name: Windows-i686
             os: windows-latest
             target: i686-pc-windows-msvc
-            bin: ${{ env.CRATE_NAME }}.exe
-            name: ${{ env.CRATE_NAME }}-Windows-i686.zip
+            bin: redacter.exe
+            name: redacter-Windows-i686.zip
             skip_tests: true
           - os_name: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: ${{ env.CRATE_NAME }}.exe
-            name: ${{ env.CRATE_NAME }}-Windows-x86_64.zip
+            bin: redacter.exe
+            name: redacter-Windows-x86_64.zip
           - os_name: macOS-x86_64
             os: macOS-latest
             target: x86_64-apple-darwin
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Darwin-x86_64.tar.gz
+            bin: redacter
+            name: redacter-Darwin-x86_64.tar.gz
           - os_name: macOS-aarch64
             os: macOS-latest
             target: aarch64-apple-darwin
-            bin: ${{ env.CRATE_NAME }}
-            name: ${{ env.CRATE_NAME }}-Darwin-aarch64.tar.gz
+            bin: redacter
+            name: redacter-Darwin-aarch64.tar.gz
             skip_tests: true
         toolchain:
           - stable
@@ -115,8 +115,8 @@ jobs:
       - name: Publish release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.CRATE_NAME }}-${{ matrix.platform.os_name }}
-          path: "${{ env.CRATE_NAME }}-*"
+          name: redacter-${{ matrix.platform.os_name }}
+          path: "redacter-*"
         if: matrix.toolchain == 'stable' && ( startsWith( github.ref, 'refs/tags/v' ) || github.ref == 'refs/tags/test-release' )
       - name: Generate SHA-256
         run: shasum -a 256 ${{ matrix.platform.name }}
