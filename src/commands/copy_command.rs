@@ -53,7 +53,7 @@ pub async fn command_copy(
     };
     term.write_line(
         format!(
-            "Copying and redacting from {} to {}.\nRedacting: {}.",
+            "Copying from {} to {}.\nRedacting: {}.",
             bold_style.clone().white().apply_to(source),
             bold_style.clone().yellow().apply_to(destination),
             redacted_output
