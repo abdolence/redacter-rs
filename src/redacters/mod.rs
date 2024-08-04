@@ -157,8 +157,6 @@ impl<'a> Redacters<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedactSupportedOptions {
     Supported,
-    SupportedAsText,
-    SupportedAsImages,
     Unsupported,
 }
 

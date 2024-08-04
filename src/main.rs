@@ -82,7 +82,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
             .await?;
             term.write_line(
                 format!(
-                    "{} -> {}\n{} files processed.\n{} files skipped.",
+                    "\n{} -> {}: {} files processed. {} files skipped.",
                     source,
                     destination,
                     Style::new()

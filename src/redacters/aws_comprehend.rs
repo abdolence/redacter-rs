@@ -96,9 +96,6 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             Some(media_type) if Redacters::is_mime_text(media_type) => {
                 RedactSupportedOptions::Supported
             }
-            Some(media_type) if Redacters::is_mime_table(media_type) => {
-                RedactSupportedOptions::SupportedAsText
-            }
             _ => RedactSupportedOptions::Unsupported,
         })
     }

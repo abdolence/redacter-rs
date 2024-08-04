@@ -281,9 +281,6 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
             Some(media_type) if Self::check_supported_image_type(media_type) => {
                 RedactSupportedOptions::Supported
             }
-            Some(media_type) if Redacters::is_mime_pdf(media_type) => {
-                RedactSupportedOptions::SupportedAsImages
-            }
             _ => RedactSupportedOptions::Unsupported,
         })
     }

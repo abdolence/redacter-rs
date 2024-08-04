@@ -46,8 +46,19 @@ pub enum AppError {
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]
     JsonSerializeError(#[from] serde_json::Error),
+    #[cfg(feature = "ocr")]
+    #[error("Model load error: {0}")]
+    OcrModelLoadError(#[from] rten::ModelLoadError),
+    #[cfg(feature = "ocr")]
+    #[error("OCR image error: {0}")]
+    OcrImageError(#[from] ocrs::ImageSourceError),
     #[error("System error: {message}")]
     SystemError { message: String },
+    #[error("System error: {message}")]
+    SystemErrorWithCause {
+        message: String,
+        cause: Box<dyn std::fmt::Debug + Send + Sync + 'static>,
+    },
 }
 
 impl<
@@ -65,5 +76,14 @@ impl<T: std::fmt::Debug + Send + Sync + 'static>
 {
     fn from(err: gcloud_sdk::google_rest_apis::storage_v1::Error<T>) -> Self {
         Self::GoogleCloudRestSdkApiError(Box::new(err))
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::SystemErrorWithCause {
+            message: err.to_string(),
+            cause: Box::new(err),
+        }
     }
 }

@@ -1,9 +1,9 @@
 use crate::args::RedacterType;
-use crate::common_types::GcpProjectId;
+use crate::common_types::{GcpProjectId, TextImageCoords};
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_image_at_coords, PiiImageCoords, RedactSupportedOptions, Redacter, RedacterDataItem,
+    redact_image_at_coords, RedactSupportedOptions, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
@@ -306,7 +306,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                 ) => acc + text,
                                 _ => acc,
                             });
-                    let pii_image_coords: Vec<PiiImageCoords> =
+                    let pii_image_coords: Vec<TextImageCoords> =
                         serde_json::from_str(&content_json)?;
                     Ok(RedacterDataItem {
                         file_ref: input.file_ref,
@@ -356,12 +356,6 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
             }
             Some(media_type) if Redacters::is_mime_image(media_type) => {
                 RedactSupportedOptions::Supported
-            }
-            Some(media_type) if Redacters::is_mime_table(media_type) => {
-                RedactSupportedOptions::SupportedAsText
-            }
-            Some(media_type) if Redacters::is_mime_pdf(media_type) => {
-                RedactSupportedOptions::SupportedAsImages
             }
             _ => RedactSupportedOptions::Unsupported,
         })

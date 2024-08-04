@@ -2,10 +2,7 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
-use crate::redacters::{
-    redact_stream, RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions,
-    Redacters,
-};
+use crate::redacters::{Redacter, RedacterBaseOptions, RedacterOptions, Redacters, StreamRedacter};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::{pad_str, Alignment, Style, Term};
@@ -49,48 +46,17 @@ pub async fn command_copy(
     options: CopyCommandOptions,
     redacter_options: Option<RedacterOptions>,
 ) -> AppResult<CopyCommandResult> {
-    let bold_style = Style::new().bold();
-    let redacted_output = if let Some(ref options) = redacter_options.as_ref() {
-        bold_style
-            .clone()
-            .green()
-            .apply_to(format!("✓ Yes ({})", &options))
-    } else {
-        bold_style.clone().red().apply_to("✗ No".to_string())
-    };
-    let sampling_output = if let Some(ref sampling_size) = redacter_options
-        .as_ref()
-        .and_then(|o| o.base_options.sampling_size)
-    {
-        Style::new().apply_to(format!("{} bytes.", sampling_size))
-    } else {
-        Style::new().dim().apply_to("-".to_string())
-    };
+    let term_reporter = AppReporter::from(term);
+    let file_converters = FileConverters::new().init(&term_reporter).await?;
 
-    let mut file_converters = FileConverters::new();
-    file_converters.init().await?;
-
-    let converter_style = Style::new();
-    let pdf_support_output = if file_converters.pdf_image_converter.is_some() {
-        converter_style
-            .clone()
-            .green()
-            .apply_to("✓ Yes".to_string())
-    } else {
-        converter_style.clone().dim().apply_to("✗ No".to_string())
-    };
-
-    term.write_line(
-        format!(
-            "Copying from {} to {}.\nRedacting: {}.\nSampling: {}\nPDF to image support: {}\n",
-            bold_style.clone().white().apply_to(source),
-            bold_style.clone().yellow().apply_to(destination),
-            redacted_output,
-            sampling_output,
-            pdf_support_output,
-        )
-        .as_str(),
-    )?;
+    report_copy_info(
+        term,
+        source,
+        destination,
+        &redacter_options,
+        &file_converters,
+    )
+    .await?;
 
     let bar = ProgressBar::new(1);
     bar.set_style(
@@ -131,6 +97,7 @@ pub async fn command_copy(
             .iter()
             .map(|file| file.file_size.unwrap_or(0))
             .sum();
+        let bold_style = Style::new().bold();
         bar.println(
             format!(
                 "Found {} files. Total size: {}",
@@ -196,6 +163,65 @@ pub async fn command_copy(
     copy_result
 }
 
+async fn report_copy_info(
+    term: &Term,
+    source: &str,
+    destination: &str,
+    redacter_options: &Option<RedacterOptions>,
+    file_converters: &FileConverters<'_>,
+) -> AppResult<()> {
+    let bold_style = Style::new().bold();
+    let redacted_output = if let Some(ref options) = redacter_options.as_ref() {
+        bold_style
+            .clone()
+            .green()
+            .apply_to(format!("✓ Yes ({})", &options))
+    } else {
+        bold_style.clone().red().apply_to("✗ No".to_string())
+    };
+    let sampling_output = if let Some(ref sampling_size) = redacter_options
+        .as_ref()
+        .and_then(|o| o.base_options.sampling_size)
+    {
+        Style::new().apply_to(format!("{} bytes.", sampling_size))
+    } else {
+        Style::new().dim().apply_to("-".to_string())
+    };
+
+    let converter_style = Style::new();
+    let pdf_support_output = if file_converters.pdf_image_converter.is_some() {
+        converter_style
+            .clone()
+            .green()
+            .apply_to("✓ Yes".to_string())
+    } else {
+        converter_style.clone().dim().apply_to("✗ No".to_string())
+    };
+
+    let ocr_support_output = if file_converters.ocr.is_some() {
+        converter_style
+            .clone()
+            .green()
+            .apply_to("✓ Yes".to_string())
+    } else {
+        converter_style.clone().dim().apply_to("✗ No".to_string())
+    };
+
+    term.write_line(
+        format!(
+            "Copying from {} to {}.\nRedacting: {}. | Sampling: {} | PDF to image support: {} | OCR support: {}\n",
+            bold_style.clone().white().apply_to(source),
+            bold_style.clone().yellow().apply_to(destination),
+            redacted_output,
+            sampling_output,
+            pdf_support_output,
+            ocr_support_output,
+        )
+        .as_str(),
+    )?;
+    Ok(())
+}
+
 enum TransferFileResult {
     Copied,
     Skipped,
@@ -214,7 +240,7 @@ async fn transfer_and_redact_file<
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
     redacter: &Option<(RedacterBaseOptions, Vec<impl Redacter>)>,
-    file_converters: &FileConverters,
+    file_converters: &FileConverters<'a>,
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -312,31 +338,28 @@ async fn redact_upload_file<
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
-    file_converters: &FileConverters,
+    file_converters: &FileConverters<'a>,
 ) -> AppResult<TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
-    let mut support_redacters = Vec::new();
+    let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters, bar);
+
     let dest_file_ref_overridden = options
         .file_mime_override
         .override_for_file_ref(dest_file_ref.clone());
-    for redacter in redacters {
-        let redacter_supported_options = redacter
-            .redact_supported_options(&dest_file_ref_overridden)
-            .await?;
-        if redacter_supported_options != RedactSupportedOptions::Unsupported {
-            support_redacters.push(redacter);
-        }
-    }
-    if !support_redacters.is_empty() {
-        match redact_stream(
-            &support_redacters,
-            redacter_base_options,
-            source_reader,
-            &dest_file_ref_overridden,
-            file_converters,
-            bar,
-        )
-        .await
+
+    let (redact_plan, supported_redacters) = stream_redacter
+        .create_redact_plan(redacters, &dest_file_ref_overridden)
+        .await?;
+
+    if !supported_redacters.is_empty() {
+        match stream_redacter
+            .redact_stream(
+                source_reader,
+                redact_plan,
+                &supported_redacters,
+                &dest_file_ref_overridden,
+            )
+            .await
         {
             Ok(redacted_result)
                 if redacted_result.number_of_redactions > 0
