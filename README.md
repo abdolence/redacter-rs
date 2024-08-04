@@ -89,6 +89,24 @@ The tool supports recursive copy of multiple files from directory:
 redacter cp s3://my-bucket-name/sensitive-files/ tmp/
 ```
 
+Zip archives are supported too:
+
+```sh
+redacter cp gs://my-bucket-name/sensitive-files/ zip://tmp/sensitive-files.zip
+```
+
+Filter files by name:
+
+```sh
+/redacter cp -f "*.jpg" ...
+```
+
+and/or by size:
+
+```sh
+/redacter cp -m 1024 ...
+```
+
 ## Security considerations
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
