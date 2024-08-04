@@ -91,7 +91,9 @@ impl<'a> Redacters<'a> {
             && (mime.subtype() == mime::PLAIN
                 || mime.subtype() == mime::HTML
                 || mime.subtype() == mime::XML
-                || mime.subtype() == mime::CSS))
+                || mime.subtype() == mime::CSS
+                || mime.subtype() == "x-yaml"
+                || mime.subtype() == "yaml"))
             || (mime.type_() == mime::APPLICATION
                 && (mime.subtype() == mime::XML
                     || mime.subtype() == mime::JSON

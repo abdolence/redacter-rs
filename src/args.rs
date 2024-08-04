@@ -112,9 +112,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             },
             Some(RedacterType::AwsComprehendDlp) => Ok(RedacterProviderOptions::AwsComprehendDlp(
                 crate::redacters::AwsComprehendDlpRedacterOptions {
-                    region: self
-                        .aws_region
-                        .map(|region_str| aws_config::Region::new(region_str)),
+                    region: self.aws_region.map(aws_config::Region::new),
                 },
             )),
             None => Err(AppError::RedacterConfigError {

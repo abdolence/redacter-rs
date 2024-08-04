@@ -134,6 +134,9 @@ and/or by size:
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
 - The tool was mostly design to redact files internally. Not recommended use it in public environments without proper
   security measures and manual review.
+- Integrity of the files is not guaranteed due to DLP implementation specifics. Some of the formats such as
+  HTML/XML/JSON
+  may be corrupted after redaction since they treated as text.
 - Use it at your own risk. The author is not responsible for any data loss or security breaches.
 
 ## Licence
