@@ -8,6 +8,8 @@ on:
 env:
   GCP_PROJECT: latestbit
   GCP_PROJECT_ID: 288860578009
+  TEST_GCS_BUCKET_NAME: latestbit.appspot.com
+  TEST_GCP_PROJECT: latestbit
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_protected && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
