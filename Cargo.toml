@@ -1,6 +1,6 @@
 [package]
 name = "redacter"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
 license = "Apache-2.0"
@@ -47,6 +47,7 @@ tempfile = "3"
 csv-async = { version = "1", default-features = false, features = ["tokio", "tokio-stream"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
+aws-sdk-comprehend = { version = "1" }
 
 
 [dev-dependencies]

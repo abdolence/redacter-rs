@@ -2,7 +2,8 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
+    Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -14,10 +15,10 @@ use rvstruct::ValueStruct;
 
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
-    pub client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
-    pub redacter_options: RedacterOptions,
-    pub gcp_dlp_options: GcpDlpRedacterOptions,
-    pub reporter: &'a AppReporter<'a>,
+    client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
+    redacter_options: RedacterOptions,
+    gcp_dlp_options: GcpDlpRedacterOptions,
+    reporter: &'a AppReporter<'a>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,12 +205,21 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
         }
     }
 
-    async fn is_redact_supported(&self, file_ref: &FileSystemRef) -> AppResult<bool> {
-        Ok(file_ref.media_type.as_ref().iter().all(|media_type| {
-            Redacters::is_mime_text(media_type)
-                || Redacters::is_mime_table(media_type)
-                || Self::check_supported_image_type(media_type)
-        }))
+    async fn redact_supported_options(
+        &self,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactSupportedOptions> {
+        Ok(
+            if file_ref.media_type.as_ref().iter().all(|media_type| {
+                Redacters::is_mime_text(media_type)
+                    || Redacters::is_mime_table(media_type)
+                    || Self::check_supported_image_type(media_type)
+            }) {
+                RedactSupportedOptions::Supported
+            } else {
+                RedactSupportedOptions::Unsupported
+            },
+        )
     }
 
     fn options(&self) -> &RedacterOptions {
@@ -366,7 +376,7 @@ mod tests {
     use console::Term;
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci"), ignore)]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);

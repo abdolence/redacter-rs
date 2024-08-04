@@ -271,6 +271,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-comprehend"
+version = "1.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b660cee83c4a583a8cc025d7a656d77df44c5874c8d42cd4f9bec7dde7182db5"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "once_cell",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2197,11 +2220,12 @@ dependencies = [
 
 [[package]]
 name = "redacter"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-recursion",
  "async-trait",
  "aws-config",
+ "aws-sdk-comprehend",
  "aws-sdk-s3",
  "cargo-husky",
  "chrono",

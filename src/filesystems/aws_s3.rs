@@ -23,7 +23,6 @@ impl<'a> AwsS3FileSystem<'a> {
         let shared_config = aws_config::load_from_env().await;
         let (bucket_name, object_name) = Self::parse_s3_path(path)?;
         let is_dir = object_name.ends_with('/');
-        println!("Bucket: {}, Object: {}", bucket_name, object_name);
         let client = aws_sdk_s3::Client::new(&shared_config);
 
         Ok(AwsS3FileSystem {

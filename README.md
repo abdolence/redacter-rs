@@ -24,6 +24,8 @@ Google Cloud Platform's DLP API.
         * text, html, json files
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
+    * AWS Comprehend PII redaction for text files.
+    * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
 
@@ -56,7 +58,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp]
+          Redacter type [possible values: gcp-dlp, aws-comprehend-dlp]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
@@ -65,6 +67,8 @@ Options:
           Disable CSV headers (if they are not present)
       --csv-delimiter <CSV_DELIMITER>
           CSV delimiter (default is ','
+      --aws-region <AWS_REGION>
+          AWS region for AWS Comprehend DLP redacter
   -h, --help
           Print help
 ```
@@ -73,9 +77,6 @@ DLP is optional and should be enabled with `--redact` (`-d`) option.
 Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
 
-To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
-account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
-
 Source/destination can be a local file or directory, or a file in GCS, S3, or a zip archive:
 
 - Local file: `/tmp/file.txt` or `/tmp` for whole directory recursive copy
@@ -83,7 +84,20 @@ Source/destination can be a local file or directory, or a file in GCS, S3, or a 
 - S3: `s3://bucket/file.txt` or `s3://bucket/test-dir/` for whole directory recursive copy
 - Zip archive: `zip://tmp/archive.zip`
 
-### Examples:
+## DLP redacters
+
+### Google Cloud Platform DLP
+
+To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
+account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+
+### AWS Comprehend DLP
+
+To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
+To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
+AWS Comprehend DLP is only available for unstructured text files.
+
+## Examples:
 
 ```sh
 # Copy and redact a file from local filesystem to GCS
@@ -120,6 +134,9 @@ and/or by size:
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
 - The tool was mostly design to redact files internally. Not recommended use it in public environments without proper
   security measures and manual review.
+- Integrity of the files is not guaranteed due to DLP implementation specifics. Some of the formats such as
+  HTML/XML/JSON
+  may be corrupted after redaction since they treated as text.
 - Use it at your own risk. The author is not responsible for any data loss or security breaches.
 
 ## Licence
