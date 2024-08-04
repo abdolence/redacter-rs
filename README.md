@@ -87,6 +87,14 @@ The tool supports recursive copy of multiple files from directory:
 redacter cp s3://my-bucket-name/sensitive-files/ tmp/
 ```
 
+## Security considerations
+
+- Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
+- The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
+- The tool was mostly design to redact files internally. Not recommended use it in public environments without proper
+  security measures and manual review.
+- Use it at your own risk. The author is not responsible for any data loss or security breaches.
+
 ## Licence
 
 Apache Software License (ASL)
