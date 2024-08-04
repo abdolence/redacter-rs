@@ -66,6 +66,7 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
             Some(items) => Ok({
                 let all_found: Vec<FileSystemRef> = items
                     .into_iter()
+                    .filter(|item| item.name.iter().all(|key| !key.ends_with('/')))
                     .filter_map(|item| {
                         item.name.map(|name| FileSystemRef {
                             relative_path: name.trim_start_matches(&self.object_name).into(),

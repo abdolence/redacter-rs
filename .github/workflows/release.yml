@@ -10,6 +10,10 @@ env:
   GITHUB_TOKEN: ${{ github.token }}
   RUST_BACKTRACE: 1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_protected && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     name: ${{ matrix.platform.os_name }} with rust ${{ matrix.toolchain }}
