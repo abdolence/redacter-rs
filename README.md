@@ -9,6 +9,12 @@ utilizing Data Loss Prevention (DLP) capabilities.
 The tool doesn't implement DLP itself, but rather relies on external models such as
 Google Cloud Platform's DLP API.
 
+
+
+https://github.com/user-attachments/assets/81303ed6-fe03-464b-8340-38fce07308b7
+
+
+
 ## Features
 
 * **Copy & Redact:**  copy files while applying DLP redaction to protect sensitive information.
