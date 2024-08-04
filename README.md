@@ -119,13 +119,13 @@ redacter cp gs://my-bucket-name/sensitive-files/ zip://tmp/sensitive-files.zip
 Filter files by name:
 
 ```sh
-/redacter cp -f "*.jpg" ...
+redacter cp -f "*.jpg" ...
 ```
 
 and/or by size:
 
 ```sh
-/redacter cp -m 1024 ...
+redacter cp -m 1024 ...
 ```
 
 ## Security considerations
