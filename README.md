@@ -9,12 +9,7 @@ utilizing Data Loss Prevention (DLP) capabilities.
 The tool doesn't implement DLP itself, but rather relies on external models such as
 Google Cloud Platform's DLP API.
 
-
-
-![redacter-demo-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/f6138848-7a2c-4c5e-9ad4-8ee2429f4cb7)
-
-
-
+![redacter-demo](media/redacter-demo.gif)
 
 ## Features
 
