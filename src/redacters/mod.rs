@@ -37,6 +37,7 @@ pub enum RedacterDataItemContent {
 #[derive(Clone)]
 pub enum Redacters<'a> {
     GcpDlp(GcpDlpRedacter<'a>),
+    AwsComprehendDlp(AwsComprehendDlpRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -50,12 +51,14 @@ pub struct RedacterOptions {
 #[derive(Debug, Clone)]
 pub enum RedacterProviderOptions {
     GcpDlp(GcpDlpRedacterOptions),
+    AwsComprehendDlp(AwsComprehendDlpRedacterOptions),
 }
 
 impl Display for RedacterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.provider_options {
             RedacterProviderOptions::GcpDlp(_) => write!(f, "gcp-dlp"),
+            RedacterProviderOptions::AwsComprehendDlp(_) => write!(f, "aws-comprehend-dlp"),
         }
     }
 }
@@ -69,6 +72,16 @@ impl<'a> Redacters<'a> {
             RedacterProviderOptions::GcpDlp(ref options) => Ok(Redacters::GcpDlp(
                 GcpDlpRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
             )),
+            RedacterProviderOptions::AwsComprehendDlp(ref options) => {
+                Ok(Redacters::AwsComprehendDlp(
+                    AwsComprehendDlpRedacter::new(
+                        redacter_options.clone(),
+                        options.clone(),
+                        reporter,
+                    )
+                    .await?,
+                ))
+            }
         }
     }
 
@@ -206,18 +219,21 @@ impl<'a> Redacter for Redacters<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
+            Redacters::AwsComprehendDlp(redacter) => redacter.redact(input).await,
         }
     }
 
     async fn is_redact_supported(&self, file_ref: &FileSystemRef) -> AppResult<bool> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.is_redact_supported(file_ref).await,
+            Redacters::AwsComprehendDlp(redacter) => redacter.is_redact_supported(file_ref).await,
         }
     }
 
     fn options(&self) -> &RedacterOptions {
         match self {
             Redacters::GcpDlp(redacter) => redacter.options(),
+            Redacters::AwsComprehendDlp(redacter) => redacter.options(),
         }
     }
 }

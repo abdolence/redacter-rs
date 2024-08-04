@@ -40,6 +40,7 @@ pub enum CliCommand {
 #[derive(ValueEnum, Debug, Clone)]
 pub enum RedacterType {
     GcpDlp,
+    AwsComprehendDlp,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -48,6 +49,7 @@ impl std::str::FromStr for RedacterType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "gcp-dlp" => Ok(RedacterType::GcpDlp),
+            "aws-comprehend-dlp" => Ok(RedacterType::AwsComprehendDlp),
             _ => Err(format!("Unknown redacter type: {}", s)),
         }
     }
@@ -57,6 +59,7 @@ impl Display for RedacterType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RedacterType::GcpDlp => write!(f, "gcp-dlp"),
+            RedacterType::AwsComprehendDlp => write!(f, "aws-comprehend-dlp"),
         }
     }
 }
@@ -89,6 +92,9 @@ pub struct RedacterArgs {
 
     #[arg(long, help = "CSV delimiter (default is ','")]
     pub csv_delimiter: Option<char>,
+
+    #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]
+    pub aws_region: Option<String>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -104,6 +110,13 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     message: "GCP project id is required for GCP DLP redacter".to_string(),
                 }),
             },
+            Some(RedacterType::AwsComprehendDlp) => Ok(RedacterProviderOptions::AwsComprehendDlp(
+                crate::redacters::AwsComprehendDlpRedacterOptions {
+                    region: self
+                        .aws_region
+                        .map(|region_str| aws_config::Region::new(region_str)),
+                },
+            )),
             None => Err(AppError::RedacterConfigError {
                 message: "Redacter type is required".to_string(),
             }),

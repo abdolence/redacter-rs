@@ -14,10 +14,10 @@ use rvstruct::ValueStruct;
 
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
-    pub client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
-    pub redacter_options: RedacterOptions,
-    pub gcp_dlp_options: GcpDlpRedacterOptions,
-    pub reporter: &'a AppReporter<'a>,
+    client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
+    redacter_options: RedacterOptions,
+    gcp_dlp_options: GcpDlpRedacterOptions,
+    reporter: &'a AppReporter<'a>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,7 +366,7 @@ mod tests {
     use console::Term;
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci"), ignore)]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
