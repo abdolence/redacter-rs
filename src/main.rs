@@ -41,19 +41,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let cli = CliArgs::parse();
-    if let Err(err) = handle_args(cli, &term).await {
-        term.write_line(
-            format!(
-                "{}: {}\nDetails: {:?}",
-                bold_style.clone().red().apply_to("Error"),
-                err,
-                err.source()
-            )
-            .as_str(),
-        )?;
+    match handle_args(cli, &term).await {
+        Err(err) => {
+            term.write_line(
+                format!(
+                    "{}: {}\nDetails: {:?}",
+                    bold_style.clone().red().apply_to("Error"),
+                    &err,
+                    &err.source()
+                )
+                .as_str(),
+            )?;
+            std::process::exit(1);
+        }
+        Ok(_) => Ok(()),
     }
-
-    Ok(())
 }
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
