@@ -22,6 +22,16 @@ pub use file_matcher::*;
 #[derive(Debug, Clone, ValueStruct)]
 pub struct RelativeFilePath(pub String);
 
+impl RelativeFilePath {
+    pub fn filename(&self) -> String {
+        self.value()
+            .split('/')
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AbsoluteFilePath {
     pub file_path: String,

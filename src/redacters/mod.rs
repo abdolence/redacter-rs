@@ -15,6 +15,9 @@ pub use gcp_dlp::*;
 mod aws_comprehend;
 pub use aws_comprehend::*;
 
+mod ms_presidio;
+pub use ms_presidio::*;
+
 #[derive(Debug, Clone)]
 pub struct RedacterDataItem {
     pub content: RedacterDataItemContent,
@@ -38,6 +41,7 @@ pub enum RedacterDataItemContent {
 pub enum Redacters<'a> {
     GcpDlp(GcpDlpRedacter<'a>),
     AwsComprehendDlp(AwsComprehendRedacter<'a>),
+    MsPresidio(MsPresidioRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +56,7 @@ pub struct RedacterOptions {
 pub enum RedacterProviderOptions {
     GcpDlp(GcpDlpRedacterOptions),
     AwsComprehend(AwsComprehendRedacterOptions),
+    MsPresidio(MsPresidioRedacterOptions),
 }
 
 impl Display for RedacterOptions {
@@ -59,6 +64,7 @@ impl Display for RedacterOptions {
         match self.provider_options {
             RedacterProviderOptions::GcpDlp(_) => write!(f, "gcp-dlp"),
             RedacterProviderOptions::AwsComprehend(_) => write!(f, "aws-comprehend-dlp"),
+            RedacterProviderOptions::MsPresidio(_) => write!(f, "ms-presidio"),
         }
     }
 }
@@ -74,6 +80,10 @@ impl<'a> Redacters<'a> {
             )),
             RedacterProviderOptions::AwsComprehend(ref options) => Ok(Redacters::AwsComprehendDlp(
                 AwsComprehendRedacter::new(redacter_options.clone(), options.clone(), reporter)
+                    .await?,
+            )),
+            RedacterProviderOptions::MsPresidio(ref options) => Ok(Redacters::MsPresidio(
+                MsPresidioRedacter::new(redacter_options.clone(), options.clone(), reporter)
                     .await?,
             )),
         }
@@ -233,6 +243,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
             Redacters::AwsComprehendDlp(redacter) => redacter.redact(input).await,
+            Redacters::MsPresidio(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -245,6 +256,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::AwsComprehendDlp(redacter) => {
                 redacter.redact_supported_options(file_ref).await
             }
+            Redacters::MsPresidio(redacter) => redacter.redact_supported_options(file_ref).await,
         }
     }
 
@@ -252,6 +264,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.options(),
             Redacters::AwsComprehendDlp(redacter) => redacter.options(),
+            Redacters::MsPresidio(redacter) => redacter.options(),
         }
     }
 }

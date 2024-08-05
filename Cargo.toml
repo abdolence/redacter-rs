@@ -18,7 +18,8 @@ description = "Copy & Redact files cli tool utilizing Data Loss Prevention (DLP)
 default = []
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
-ci = ["ci-gcp", "ci-aws"]
+ci-ms-presidio = [] # For testing on CI/MS Presidiom
+ci = ["ci-gcp", "ci-aws", "ci-ms-presidio"]
 
 
 [dependencies]
@@ -48,6 +49,8 @@ csv-async = { version = "1", default-features = false, features = ["tokio", "tok
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
+url = "2"
+reqwest = { version = "0.12", features = ["multipart", "h2"] }
 
 
 [dev-dependencies]

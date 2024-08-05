@@ -39,6 +39,8 @@ pub enum AppError {
     AwsSdkError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("MIME error")]
     MimeError(#[from] mime::FromStrError),
+    #[error("HTTP client error")]
+    HttpClientError(#[from] reqwest::Error),
     #[error("Zip error")]
     ZipError(#[from] zip::result::ZipError),
     #[error("CSV parser error")]
