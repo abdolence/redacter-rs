@@ -90,6 +90,14 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 .as_str(),
             )?;
         }
+        CliCommand::Ls {
+            source,
+            max_size_limit,
+            filename_filter,
+        } => {
+            let options = LsCommandOptions::new(filename_filter, max_size_limit);
+            command_ls(term, &source, options).await?;
+        }
     }
 
     Ok(())

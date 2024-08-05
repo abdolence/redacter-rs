@@ -13,6 +13,7 @@ pub struct CliArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum CliCommand {
     #[command(about = "Copy and redact files from source to destination")]
     Cp {
@@ -35,6 +36,21 @@ pub enum CliCommand {
 
         #[command(flatten)]
         redacter_args: Option<RedacterArgs>,
+    },
+    #[command(about = "List files in the source")]
+    Ls {
+        #[arg(
+            help = "Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
+        )]
+        source: String,
+        #[arg(short = 'm', long, help = "Maximum size of files to copy in bytes")]
+        max_size_limit: Option<u64>,
+        #[arg(
+            short = 'f',
+            long,
+            help = "Filter by name using glob patterns such as *.txt"
+        )]
+        filename_filter: Option<globset::Glob>,
     },
 }
 
