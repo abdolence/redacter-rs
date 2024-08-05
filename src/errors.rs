@@ -1,7 +1,3 @@
-use gcloud_sdk::google_rest_apis::storage_v1::objects_api::{
-    StoragePeriodObjectsPeriodGetError, StoragePeriodObjectsPeriodInsertError,
-    StoragePeriodObjectsPeriodListError,
-};
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use thiserror::Error;
 
@@ -15,35 +11,23 @@ pub enum AppError {
     InputOutputError(#[from] std::io::Error),
     #[error("Destination '{destination}' doesn't support multiple files. Trailing slash needed?")]
     DestinationDoesNotSupportMultipleFiles { destination: String },
-    #[error("Google Cloud SDK error")]
+    #[error("Google Cloud REST SDK error:\n{0}")]
     GoogleCloudRestSdkError(#[from] gcloud_sdk::error::Error),
-    #[error("Google Cloud Storage download error")]
-    GoogleCloudStorageGetObjectError(
-        #[from] gcloud_sdk::google_rest_apis::storage_v1::Error<StoragePeriodObjectsPeriodGetError>,
-    ),
-    #[error("Google Cloud Storage upload error")]
-    GoogleCloudStorageInsertObjectError(
-        #[from]
-        gcloud_sdk::google_rest_apis::storage_v1::Error<StoragePeriodObjectsPeriodInsertError>,
-    ),
-    #[error("Google Cloud Storage upload error")]
-    GoogleCloudStorageListObjectError(
-        #[from]
-        gcloud_sdk::google_rest_apis::storage_v1::Error<StoragePeriodObjectsPeriodListError>,
-    ),
-    #[error("Google Cloud SDK error")]
+    #[error("Google Cloud REST SDK API error:\n{0:?}")]
+    GoogleCloudRestSdkApiError(Box<dyn std::fmt::Debug + Send + Sync + 'static>),
+    #[error("Google Cloud SDK error:\n{0}")]
     GoogleCloudGrpcError(#[from] gcloud_sdk::tonic::Status),
-    #[error("Google Cloud invalid metadata value")]
+    #[error("Google Cloud invalid metadata value:\n{0}")]
     GoogleCloudInvalidMetadataValue(#[from] InvalidMetadataValue),
     #[error("AWS SDK error occurred")]
     AwsSdkError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
-    #[error("MIME error")]
+    #[error("MIME error:\n{0}")]
     MimeError(#[from] mime::FromStrError),
-    #[error("HTTP client error")]
+    #[error("HTTP client error:\n{0}")]
     HttpClientError(#[from] reqwest::Error),
-    #[error("Zip error")]
+    #[error("Zip error:\n{0}")]
     ZipError(#[from] zip::result::ZipError),
-    #[error("CSV parser error")]
+    #[error("CSV parser error:\n{0}")]
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]
     RedacterConfigError { message: String },
@@ -58,5 +42,13 @@ impl<
 {
     fn from(err: aws_sdk_s3::error::SdkError<O, H>) -> Self {
         Self::AwsSdkError(Box::new(err))
+    }
+}
+
+impl<T: std::fmt::Debug + Send + Sync + 'static>
+    From<gcloud_sdk::google_rest_apis::storage_v1::Error<T>> for AppError
+{
+    fn from(err: gcloud_sdk::google_rest_apis::storage_v1::Error<T>) -> Self {
+        Self::GoogleCloudRestSdkApiError(Box::new(err))
     }
 }
