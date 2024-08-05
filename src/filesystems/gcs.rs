@@ -35,8 +35,12 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
         let path = path.trim_start_matches("gs://");
         let parts: Vec<&str> = path.split('/').collect();
         let bucket = parts[0];
-        let object = parts[1..].join("/");
-        (bucket.to_string(), object.to_string())
+        if parts.len() == 1 || (parts.len() == 2 && parts[1].is_empty()) {
+            (bucket.to_string(), "/".to_string())
+        } else {
+            let object = parts[1..].join("/");
+            (bucket.to_string(), object.to_string())
+        }
     }
 
     #[async_recursion::async_recursion]
@@ -202,7 +206,12 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             self.bucket_name, self.object_name
         ))?;
         if self.object_name.ends_with('/') {
-            self.list_files_with_token(Some(self.object_name.clone()), None, &file_matcher)
+            let prefix = if self.object_name != "/" {
+                Some(self.object_name.clone())
+            } else {
+                None
+            };
+            self.list_files_with_token(prefix, None, &file_matcher)
                 .await
         } else {
             Ok(ListFilesResult::EMPTY)

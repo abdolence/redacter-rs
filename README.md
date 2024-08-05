@@ -150,6 +150,28 @@ MS Presidio redacter:
 redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/analyze --ms-presidio-image-redact-url http://localhost:5003/redact ...
 ```
 
+## List (LS) command
+
+For convenience, the tool also supports listing files in the source directory so you can see what files will be copied:
+
+```
+Usage: redacter ls [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>  Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
+
+Options:
+  -m, --max-size-limit <MAX_SIZE_LIMIT>    Maximum size of files to copy in bytes
+  -f, --filename-filter <FILENAME_FILTER>  Filter by name using glob patterns such as *.txt
+  -h, --help                               Print help
+```
+
+Example: list files in the GCS bucket:
+
+```sh
+redacter ls gs://my-little-bucket/my-big-files/
+```
+
 ## Security considerations
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
