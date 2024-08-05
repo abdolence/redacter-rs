@@ -167,14 +167,12 @@ impl<'a> MsPresidioRedacter<'a> {
                 let redacted_image_bytes = response.bytes().await?;
                 Ok(RedacterDataItemContent::Image {
                     mime_type,
-                    data: redacted_image_bytes.into(),
+                    data: redacted_image_bytes,
                 })
             }
-            _ => {
-                return Err(AppError::SystemError {
-                    message: "Unsupported item for image redacting".to_string(),
-                });
-            }
+            _ => Err(AppError::SystemError {
+                message: "Unsupported item for image redacting".to_string(),
+            }),
         }
     }
 }
