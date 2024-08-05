@@ -37,7 +37,7 @@ pub enum RedacterDataItemContent {
 #[derive(Clone)]
 pub enum Redacters<'a> {
     GcpDlp(GcpDlpRedacter<'a>),
-    AwsComprehendDlp(AwsComprehendDlpRedacter<'a>),
+    AwsComprehendDlp(AwsComprehendRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -51,14 +51,14 @@ pub struct RedacterOptions {
 #[derive(Debug, Clone)]
 pub enum RedacterProviderOptions {
     GcpDlp(GcpDlpRedacterOptions),
-    AwsComprehendDlp(AwsComprehendDlpRedacterOptions),
+    AwsComprehend(AwsComprehendRedacterOptions),
 }
 
 impl Display for RedacterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.provider_options {
             RedacterProviderOptions::GcpDlp(_) => write!(f, "gcp-dlp"),
-            RedacterProviderOptions::AwsComprehendDlp(_) => write!(f, "aws-comprehend-dlp"),
+            RedacterProviderOptions::AwsComprehend(_) => write!(f, "aws-comprehend-dlp"),
         }
     }
 }
@@ -72,16 +72,10 @@ impl<'a> Redacters<'a> {
             RedacterProviderOptions::GcpDlp(ref options) => Ok(Redacters::GcpDlp(
                 GcpDlpRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
             )),
-            RedacterProviderOptions::AwsComprehendDlp(ref options) => {
-                Ok(Redacters::AwsComprehendDlp(
-                    AwsComprehendDlpRedacter::new(
-                        redacter_options.clone(),
-                        options.clone(),
-                        reporter,
-                    )
+            RedacterProviderOptions::AwsComprehend(ref options) => Ok(Redacters::AwsComprehendDlp(
+                AwsComprehendRedacter::new(redacter_options.clone(), options.clone(), reporter)
                     .await?,
-                ))
-            }
+            )),
         }
     }
 

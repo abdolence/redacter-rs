@@ -10,21 +10,21 @@ use aws_config::Region;
 use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]
-pub struct AwsComprehendDlpRedacterOptions {
+pub struct AwsComprehendRedacterOptions {
     pub region: Option<Region>,
 }
 
 #[derive(Clone)]
-pub struct AwsComprehendDlpRedacter<'a> {
+pub struct AwsComprehendRedacter<'a> {
     client: aws_sdk_comprehend::Client,
     redacter_options: RedacterOptions,
     reporter: &'a AppReporter<'a>,
 }
 
-impl<'a> AwsComprehendDlpRedacter<'a> {
+impl<'a> AwsComprehendRedacter<'a> {
     pub async fn new(
         redacter_options: RedacterOptions,
-        aws_dlp_options: AwsComprehendDlpRedacterOptions,
+        aws_dlp_options: AwsComprehendRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
         let region_provider = aws_config::meta::region::RegionProviderChain::first_try(
@@ -87,7 +87,7 @@ impl<'a> AwsComprehendDlpRedacter<'a> {
     }
 }
 
-impl<'a> Redacter for AwsComprehendDlpRedacter<'a> {
+impl<'a> Redacter for AwsComprehendRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
@@ -143,8 +143,8 @@ mod tests {
         let input = RedacterDataItem { file_ref, content };
 
         let redacter_options = RedacterOptions {
-            provider_options: RedacterProviderOptions::AwsComprehendDlp(
-                AwsComprehendDlpRedacterOptions {
+            provider_options: RedacterProviderOptions::AwsComprehend(
+                AwsComprehendRedacterOptions {
                     region: Some(Region::new(test_aws_region.clone())),
                 },
             ),
@@ -153,9 +153,9 @@ mod tests {
             csv_delimiter: None,
         };
 
-        let redacter = AwsComprehendDlpRedacter::new(
+        let redacter = AwsComprehendRedacter::new(
             redacter_options,
-            AwsComprehendDlpRedacterOptions {
+            AwsComprehendRedacterOptions {
                 region: Some(Region::new(test_aws_region)),
             },
             &reporter,

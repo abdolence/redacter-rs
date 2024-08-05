@@ -58,7 +58,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp, aws-comprehend-dlp]
+          Redacter type [possible values: gcp-dlp, aws-comprehend]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
