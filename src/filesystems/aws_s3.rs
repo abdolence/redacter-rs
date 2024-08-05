@@ -230,9 +230,14 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
     fn resolve(&self, file_ref: Option<&FileSystemRef>) -> AbsoluteFilePath {
         AbsoluteFilePath {
             file_path: if self.is_dir {
+                let object_name_prefix = if self.object_name == "/" {
+                    ""
+                } else {
+                    self.object_name.as_str()
+                };
                 format!(
                     "{}{}",
-                    &self.object_name,
+                    object_name_prefix,
                     file_ref
                         .map(|fr| fr.relative_path.value().clone())
                         .unwrap_or_default()
