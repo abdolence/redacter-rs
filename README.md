@@ -20,11 +20,16 @@ Google Cloud Platform's DLP API.
     * Amazon Simple Storage Service (S3)
     * Zip files
 * **DLP Integration:**
-    * GCP DLP API for accurate and customizable redaction for:
+    * [Google Cloud Platform DLP](https://cloud.google.com/security/products/dlp?hl=en) for accurate and customizable
+      redaction for:
         * text, html, json files
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
-    * AWS Comprehend PII redaction for text files.
+    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction for text files.
+    * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
+      install on-prem).
+        * text, html, json files
+        * images
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -58,7 +63,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp, aws-comprehend-dlp]
+          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
@@ -69,6 +74,10 @@ Options:
           CSV delimiter (default is ','
       --aws-region <AWS_REGION>
           AWS region for AWS Comprehend DLP redacter
+      --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
+          URL for text analyze endpoint for MsPresidio redacter
+      --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
+          URL for image redact endpoint for MsPresidio redacter
   -h, --help
           Print help
 ```
@@ -91,11 +100,18 @@ Source/destination can be a local file or directory, or a file in GCS, S3, or a 
 To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
 account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 
-### AWS Comprehend DLP
+### AWS Comprehend
 
 To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
 To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
 AWS Comprehend DLP is only available for unstructured text files.
+
+### Microsoft Presidio
+
+To be able to use Microsoft Presidio DLP you need to have a running instance of the Presidio API.
+You can use Docker to run it locally or deploy it to your infrastructure.
+You need to provide the URLs for text analysis and image redaction endpoints using `--ms-presidio-text-analyze-url` and
+`--ms-presidio-image-redact-url` options.
 
 ## Examples:
 
@@ -126,6 +142,12 @@ and/or by size:
 
 ```sh
 redacter cp -m 1024 ...
+```
+
+MS Presidio redacter:
+
+```sh
+redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/analyze --ms-presidio-image-redact-url http://localhost:5003/redact ...
 ```
 
 ## Security considerations

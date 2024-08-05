@@ -3,6 +3,7 @@ use crate::errors::AppError;
 use crate::redacters::{GcpDlpRedacterOptions, RedacterOptions, RedacterProviderOptions};
 use clap::*;
 use std::fmt::Display;
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(author, about)]
@@ -40,7 +41,8 @@ pub enum CliCommand {
 #[derive(ValueEnum, Debug, Clone)]
 pub enum RedacterType {
     GcpDlp,
-    AwsComprehendDlp,
+    AwsComprehend,
+    MsPresidio,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -49,7 +51,8 @@ impl std::str::FromStr for RedacterType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "gcp-dlp" => Ok(RedacterType::GcpDlp),
-            "aws-comprehend-dlp" => Ok(RedacterType::AwsComprehendDlp),
+            "aws-comprehend" => Ok(RedacterType::AwsComprehend),
+            "ms-presidio" => Ok(RedacterType::MsPresidio),
             _ => Err(format!("Unknown redacter type: {}", s)),
         }
     }
@@ -59,7 +62,8 @@ impl Display for RedacterType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RedacterType::GcpDlp => write!(f, "gcp-dlp"),
-            RedacterType::AwsComprehendDlp => write!(f, "aws-comprehend-dlp"),
+            RedacterType::AwsComprehend => write!(f, "aws-comprehend"),
+            RedacterType::MsPresidio => write!(f, "ms-presidio"),
         }
     }
 }
@@ -95,6 +99,12 @@ pub struct RedacterArgs {
 
     #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]
     pub aws_region: Option<String>,
+
+    #[arg(long, help = "URL for text analyze endpoint for MsPresidio redacter")]
+    pub ms_presidio_text_analyze_url: Option<Url>,
+
+    #[arg(long, help = "URL for image redact endpoint for MsPresidio redacter")]
+    pub ms_presidio_image_redact_url: Option<Url>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -110,11 +120,28 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     message: "GCP project id is required for GCP DLP redacter".to_string(),
                 }),
             },
-            Some(RedacterType::AwsComprehendDlp) => Ok(RedacterProviderOptions::AwsComprehendDlp(
-                crate::redacters::AwsComprehendDlpRedacterOptions {
+            Some(RedacterType::AwsComprehend) => Ok(RedacterProviderOptions::AwsComprehend(
+                crate::redacters::AwsComprehendRedacterOptions {
                     region: self.aws_region.map(aws_config::Region::new),
                 },
             )),
+            Some(RedacterType::MsPresidio) => {
+                if self.ms_presidio_text_analyze_url.is_none()
+                    && self.ms_presidio_image_redact_url.is_none()
+                {
+                    return Err(AppError::RedacterConfigError {
+                        message:
+                            "MsPresidio requires text analyze/image URL specified (at least one)"
+                                .to_string(),
+                    });
+                }
+                Ok(RedacterProviderOptions::MsPresidio(
+                    crate::redacters::MsPresidioRedacterOptions {
+                        text_analyze_url: self.ms_presidio_text_analyze_url,
+                        image_redact_url: self.ms_presidio_image_redact_url,
+                    },
+                ))
+            }
             None => Err(AppError::RedacterConfigError {
                 message: "Redacter type is required".to_string(),
             }),
