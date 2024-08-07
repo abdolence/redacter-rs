@@ -4,8 +4,9 @@
 
 # Redacter
 
-Copy & Redact cli tool to securely copy and redact files across various sources and destinations,
-utilizing Data Loss Prevention (DLP) capabilities.
+Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII)
+across various sources and destinations and utilizing Data Loss Prevention (DLP) capabilities.
+
 The tool doesn't implement DLP itself, but rather relies on external models such as
 Google Cloud Platform's DLP API.
 
@@ -25,11 +26,14 @@ Google Cloud Platform's DLP API.
         * text, html, json files
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
-    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction for text files.
+    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
+        * text, html, csv, json files
     * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
       install on-prem).
-        * text, html, json files
+        * text, html, csv, json files
         * images
+    * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
+        * text, html, csv, json files
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -63,7 +67,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio]
+          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
@@ -78,6 +82,8 @@ Options:
           URL for text analyze endpoint for MsPresidio redacter
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
           URL for image redact endpoint for MsPresidio redacter
+      --gemini-model <GEMINI_MODEL>
+          Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'
   -h, --help
           Print help
 ```
@@ -97,8 +103,11 @@ Source/destination can be a local file or directory, or a file in GCS, S3, or a 
 
 ### Google Cloud Platform DLP
 
-To be able to use GCP DLP you need to authenticate using `gcloud auth application-default login` or provide a service
-account key using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+To be able to use GCP DLP you need to:
+
+- authenticate using `gcloud auth application-default login` or provide a service account key
+  using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+- provide a GCP project id using `--gcp-project-id` option.
 
 ### AWS Comprehend
 
@@ -112,6 +121,17 @@ To be able to use Microsoft Presidio DLP you need to have a running instance of 
 You can use Docker to run it locally or deploy it to your infrastructure.
 You need to provide the URLs for text analysis and image redaction endpoints using `--ms-presidio-text-analyze-url` and
 `--ms-presidio-image-redact-url` options.
+
+### Gemini LLM
+
+To be able to use GCP DLP you need to:
+
+- authenticate using `gcloud auth application-default login --client-id-file=<client_secret-file>.json` or provide a
+  service account key
+  using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+  Please note that you need to also configure OAuth setup following the
+  official [instructions](https://ai.google.dev/gemini-api/docs/oauth#set-cloud).
+- provide a GCP project id using `--gcp-project-id` option.
 
 ## Examples:
 

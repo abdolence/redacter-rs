@@ -93,7 +93,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Image { .. } => {
                 Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported image type".to_string(),
+                    message: "Attempt to redact of unsupported type".to_string(),
                 })
             }
         }

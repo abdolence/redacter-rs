@@ -9,7 +9,7 @@ repository = "https://github.com/abdolence/redacter-rs"
 documentation = "https://docs.rs/redacter"
 readme = "README.md"
 include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
-rust-version = "1.77.0"
+rust-version = "1.80.0"
 keywords = ["redact", "pii", "dlp"]
 categories = ["command-line-utilities"]
 description = "Copy & Redact files cli tool utilizing Data Loss Prevention (DLP) capabilities"
@@ -19,7 +19,8 @@ default = []
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
-ci = ["ci-gcp", "ci-aws", "ci-ms-presidio"]
+ci-gcp-llm = [] # For testing on CI/GCP with LLM models
+ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm"]
 
 
 [dependencies]
@@ -32,7 +33,7 @@ indicatif = { version = "0.17" }
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.25.4", features = ["google-privacy-dlp-v2", "google-rest-storage-v1"] }
+gcloud-sdk = { version = "0.25.5", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta"] }
 futures = "0.3"
 sha2 = "0.10"
 async-trait = "0.1"
@@ -51,6 +52,8 @@ aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 
 [dev-dependencies]

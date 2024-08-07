@@ -1,13 +1,14 @@
+use std::error::Error;
+
 use clap::Parser;
 use console::{Style, Term};
 
-use std::error::Error;
-
-mod args;
-use crate::commands::*;
-use crate::errors::AppError;
 use args::*;
 
+use crate::commands::*;
+use crate::errors::AppError;
+
+mod args;
 mod reporter;
 
 mod filesystems;
