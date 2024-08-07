@@ -12,7 +12,7 @@ include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
 rust-version = "1.80.0"
 keywords = ["redact", "pii", "dlp"]
 categories = ["command-line-utilities"]
-description = "Copy & Redact files cli tool utilizing Data Loss Prevention (DLP) capabilities"
+description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
 
 [features]
 default = []
