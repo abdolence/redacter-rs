@@ -1,6 +1,6 @@
 [package]
 name = "redacter"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
 license = "Apache-2.0"
@@ -54,6 +54,7 @@ url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
 
 
 [dev-dependencies]

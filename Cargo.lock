@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "redacter"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -2261,6 +2261,7 @@ dependencies = [
  "indicatif",
  "mime",
  "mime_guess",
+ "rand",
  "reqwest",
  "rsb_derive",
  "rvstruct",
