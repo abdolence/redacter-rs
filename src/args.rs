@@ -1,6 +1,8 @@
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
-use crate::redacters::{GcpDlpRedacterOptions, RedacterOptions, RedacterProviderOptions};
+use crate::redacters::{
+    GcpDlpRedacterOptions, GeminiLlmModelName, RedacterOptions, RedacterProviderOptions,
+};
 use clap::*;
 use std::fmt::Display;
 use url::Url;
@@ -59,6 +61,7 @@ pub enum RedacterType {
     GcpDlp,
     AwsComprehend,
     MsPresidio,
+    GeminiLlm,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -69,6 +72,7 @@ impl std::str::FromStr for RedacterType {
             "gcp-dlp" => Ok(RedacterType::GcpDlp),
             "aws-comprehend" => Ok(RedacterType::AwsComprehend),
             "ms-presidio" => Ok(RedacterType::MsPresidio),
+            "gemini-llm" => Ok(RedacterType::GeminiLlm),
             _ => Err(format!("Unknown redacter type: {}", s)),
         }
     }
@@ -80,6 +84,7 @@ impl Display for RedacterType {
             RedacterType::GcpDlp => write!(f, "gcp-dlp"),
             RedacterType::AwsComprehend => write!(f, "aws-comprehend"),
             RedacterType::MsPresidio => write!(f, "ms-presidio"),
+            RedacterType::GeminiLlm => write!(f, "gemini-llm"),
         }
     }
 }
@@ -121,6 +126,12 @@ pub struct RedacterArgs {
 
     #[arg(long, help = "URL for image redact endpoint for MsPresidio redacter")]
     pub ms_presidio_image_redact_url: Option<Url>,
+
+    #[arg(
+        long,
+        help = "Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'"
+    )]
+    pub gemini_model: Option<GeminiLlmModelName>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -158,6 +169,17 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     },
                 ))
             }
+            Some(RedacterType::GeminiLlm) => Ok(RedacterProviderOptions::GeminiLlm(
+                crate::redacters::GeminiLlmRedacterOptions {
+                    project_id: self.gcp_project_id.ok_or_else(|| {
+                        AppError::RedacterConfigError {
+                            message: "GCP project id is required for Gemini LLM redacter"
+                                .to_string(),
+                        }
+                    })?,
+                    gemini_model: self.gemini_model,
+                },
+            )),
             None => Err(AppError::RedacterConfigError {
                 message: "Redacter type is required".to_string(),
             }),
