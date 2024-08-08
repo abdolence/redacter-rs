@@ -3,14 +3,11 @@ use crate::filesystems::{
     AbsoluteFilePath, DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection,
     FileSystemRef,
 };
-use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
-    Redacters,
-};
+use crate::redacters::{RedactSupportedOptions, Redacter, RedacterOptions, Redacters};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::{Style, Term};
-use futures::{Stream, TryStreamExt};
+use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
 use std::error::Error;
@@ -46,20 +43,27 @@ pub async fn command_copy(
     redacter_options: Option<RedacterOptions>,
 ) -> AppResult<CopyCommandResult> {
     let bold_style = Style::new().bold();
-    let redacted_output = if let Some(ref options) = redacter_options {
+    let redacted_output = if let Some(ref options) = redacter_options.as_ref() {
         bold_style
             .clone()
             .green()
-            .apply_to(format!("✓ Yes ({})", options))
+            .apply_to(format!("✓ Yes ({})", &options))
     } else {
         bold_style.clone().red().apply_to("✗ No".to_string())
     };
+    let sampling_output =
+        if let Some(ref sampling_size) = redacter_options.as_ref().and_then(|o| o.sampling_size) {
+            Style::new().apply_to(format!("{} bytes.", sampling_size))
+        } else {
+            Style::new().dim().apply_to("-".to_string())
+        };
     term.write_line(
         format!(
-            "Copying from {} to {}.\nRedacting: {}.",
+            "Copying from {} to {}.\nRedacting: {}.\nSampling: {}\n",
             bold_style.clone().white().apply_to(source),
             bold_style.clone().yellow().apply_to(destination),
-            redacted_output
+            redacted_output,
+            sampling_output
         )
         .as_str(),
     )?;
@@ -235,10 +239,10 @@ async fn redact_upload_file<
     base_resolved_file_ref: &AbsoluteFilePath,
     dest_file_ref: &FileSystemRef,
     redacter: &impl Redacter,
-) -> AppResult<TransferFileResult> {
+) -> AppResult<crate::commands::copy_command::TransferFileResult> {
     let redacter_supported_options = redacter.redact_supported_options(dest_file_ref).await?;
     if redacter_supported_options != RedactSupportedOptions::Unsupported {
-        match redact_stream(
+        match crate::redacters::redact_stream(
             redacter,
             &redacter_supported_options,
             source_reader,
@@ -298,108 +302,5 @@ async fn redact_upload_file<
             .as_str(),
         );
         Ok(TransferFileResult::Skipped)
-    }
-}
-
-async fn redact_stream<
-    S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
->(
-    redacter: &impl Redacter,
-    supported_options: &RedactSupportedOptions,
-    input: S,
-    file_ref: &FileSystemRef,
-) -> AppResult<Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>> {
-    let content_to_redact = match file_ref.media_type {
-        Some(ref mime)
-            if Redacters::is_mime_text(mime)
-                || (Redacters::is_mime_table(mime)
-                    && matches!(supported_options, RedactSupportedOptions::SupportedAsText)) =>
-        {
-            let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
-            let all_bytes = all_chunks.concat();
-            let content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
-                message: format!("Failed to convert bytes to string: {}", e),
-            })?;
-            Ok(RedacterDataItem {
-                content: RedacterDataItemContent::Value(content),
-                file_ref: file_ref.clone(),
-            })
-        }
-        Some(ref mime) if Redacters::is_mime_image(mime) => {
-            let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
-            let all_bytes = all_chunks.concat();
-            Ok(RedacterDataItem {
-                content: RedacterDataItemContent::Image {
-                    mime_type: mime.clone(),
-                    data: all_bytes.into(),
-                },
-                file_ref: file_ref.clone(),
-            })
-        }
-        Some(ref mime) if Redacters::is_mime_table(mime) => {
-            let reader = tokio_util::io::StreamReader::new(
-                input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
-            );
-            let mut reader = csv_async::AsyncReaderBuilder::default()
-                .has_headers(!redacter.options().csv_headers_disable)
-                .delimiter(
-                    redacter
-                        .options()
-                        .csv_delimiter
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or(b','),
-                )
-                .create_reader(reader);
-            let headers = if !redacter.options().csv_headers_disable {
-                reader
-                    .headers()
-                    .await?
-                    .into_iter()
-                    .map(|h| h.to_string())
-                    .collect()
-            } else {
-                vec![]
-            };
-            let records: Vec<csv_async::StringRecord> = reader.records().try_collect().await?;
-            Ok(RedacterDataItem {
-                content: RedacterDataItemContent::Table {
-                    headers,
-                    rows: records
-                        .iter()
-                        .map(|r| r.iter().map(|c| c.to_string()).collect())
-                        .collect(),
-                },
-                file_ref: file_ref.clone(),
-            })
-        }
-        Some(ref mime) => Err(AppError::SystemError {
-            message: format!("Media type {} is not supported for redaction", mime),
-        }),
-        None => Err(AppError::SystemError {
-            message: "Media type is not provided to redact".to_string(),
-        }),
-    }?;
-
-    let content = redacter.redact(content_to_redact).await?;
-
-    match content {
-        RedacterDataItemContent::Value(content) => {
-            let bytes = bytes::Bytes::from(content.into_bytes());
-            Ok(Box::new(futures::stream::iter(vec![Ok(bytes)])))
-        }
-        RedacterDataItemContent::Image { data, .. } => {
-            Ok(Box::new(futures::stream::iter(vec![Ok(data)])))
-        }
-        RedacterDataItemContent::Table { headers, rows } => {
-            let mut writer = csv_async::AsyncWriter::from_writer(vec![]);
-            writer.write_record(headers).await?;
-            for row in rows {
-                writer.write_record(row).await?;
-            }
-            writer.flush().await?;
-            let bytes = bytes::Bytes::from(writer.into_inner().await?);
-            Ok(Box::new(futures::stream::iter(vec![Ok(bytes)])))
-        }
     }
 }

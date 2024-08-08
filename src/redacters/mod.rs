@@ -1,10 +1,10 @@
+use crate::filesystems::FileSystemRef;
+use crate::reporter::AppReporter;
 use crate::AppResult;
+use futures::{Stream, TryStreamExt};
 use gcloud_sdk::prost::bytes;
 use mime::Mime;
 use std::fmt::Display;
-
-use crate::filesystems::FileSystemRef;
-use crate::reporter::AppReporter;
 
 mod gcp_dlp;
 pub use gcp_dlp::*;
@@ -16,6 +16,7 @@ mod ms_presidio;
 pub use ms_presidio::*;
 
 mod gemini_llm;
+use crate::errors::AppError;
 pub use gemini_llm::*;
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub struct RedacterOptions {
     pub allow_unsupported_copies: bool,
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
+    pub sampling_size: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +170,119 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::AwsComprehendDlp(redacter) => redacter.options(),
             Redacters::MsPresidio(redacter) => redacter.options(),
             Redacters::GeminiLlm(redacter) => redacter.options(),
+        }
+    }
+}
+
+pub async fn redact_stream<
+    S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
+>(
+    redacter: &impl Redacter,
+    supported_options: &RedactSupportedOptions,
+    input: S,
+    file_ref: &FileSystemRef,
+) -> AppResult<Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>> {
+    let content_to_redact = match file_ref.media_type {
+        Some(ref mime)
+            if Redacters::is_mime_text(mime)
+                || (Redacters::is_mime_table(mime)
+                    && matches!(supported_options, RedactSupportedOptions::SupportedAsText)) =>
+        {
+            let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
+            let all_bytes = all_chunks.concat();
+            let whole_content =
+                String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
+                    message: format!("Failed to convert bytes to string: {}", e),
+                })?;
+            let content = if let Some(sampling_size) = redacter.options().sampling_size {
+                let sampling_size = std::cmp::min(sampling_size, whole_content.len());
+                whole_content
+                    .chars()
+                    .take(sampling_size)
+                    .collect::<String>()
+            } else {
+                whole_content
+            };
+            Ok(RedacterDataItem {
+                content: RedacterDataItemContent::Value(content),
+                file_ref: file_ref.clone(),
+            })
+        }
+        Some(ref mime) if Redacters::is_mime_image(mime) => {
+            let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
+            let all_bytes = all_chunks.concat();
+            Ok(RedacterDataItem {
+                content: RedacterDataItemContent::Image {
+                    mime_type: mime.clone(),
+                    data: all_bytes.into(),
+                },
+                file_ref: file_ref.clone(),
+            })
+        }
+        Some(ref mime) if Redacters::is_mime_table(mime) => {
+            let reader = tokio_util::io::StreamReader::new(
+                input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
+            );
+            let mut reader = csv_async::AsyncReaderBuilder::default()
+                .has_headers(!redacter.options().csv_headers_disable)
+                .delimiter(
+                    redacter
+                        .options()
+                        .csv_delimiter
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or(b','),
+                )
+                .create_reader(reader);
+            let headers = if !redacter.options().csv_headers_disable {
+                reader
+                    .headers()
+                    .await?
+                    .into_iter()
+                    .map(|h| h.to_string())
+                    .collect()
+            } else {
+                vec![]
+            };
+            let records: Vec<csv_async::StringRecord> = reader.records().try_collect().await?;
+            Ok(RedacterDataItem {
+                content: RedacterDataItemContent::Table {
+                    headers,
+                    rows: records
+                        .iter()
+                        .map(|r| r.iter().map(|c| c.to_string()).collect())
+                        .collect(),
+                },
+                file_ref: file_ref.clone(),
+            })
+        }
+        Some(ref mime) => Err(AppError::SystemError {
+            message: format!("Media type {} is not supported for redaction", mime),
+        }),
+        None => Err(AppError::SystemError {
+            message: "Media type is not provided to redact".to_string(),
+        }),
+    }?;
+
+    let content = redacter.redact(content_to_redact).await?;
+
+    match content {
+        RedacterDataItemContent::Value(content) => {
+            let bytes = bytes::Bytes::from(content.into_bytes());
+            Ok(Box::new(futures::stream::iter(vec![Ok(bytes)])))
+        }
+        RedacterDataItemContent::Image { data, .. } => {
+            Ok(Box::new(futures::stream::iter(vec![Ok(data)])))
+        }
+        RedacterDataItemContent::Table { headers, rows } => {
+            let mut writer = csv_async::AsyncWriter::from_writer(vec![]);
+            writer.write_record(headers).await?;
+            for row in rows {
+                writer.write_record(row).await?;
+            }
+            writer.flush().await?;
+            let bytes = bytes::Bytes::from(writer.into_inner().await?);
+            Ok(Box::new(futures::stream::iter(vec![Ok(bytes)])))
         }
     }
 }
