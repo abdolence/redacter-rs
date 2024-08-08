@@ -84,6 +84,8 @@ Options:
           URL for image redact endpoint for MsPresidio redacter
       --gemini-model <GEMINI_MODEL>
           Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'
+      --sampling-size <SAMPLING_SIZE>
+          Sampling size in bytes before redacting files. Disabled by default
   -h, --help
           Print help
 ```

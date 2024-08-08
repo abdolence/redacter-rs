@@ -52,6 +52,7 @@ pub struct RedacterOptions {
     pub allow_unsupported_copies: bool,
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
+    pub sampling_size: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,9 +190,19 @@ pub async fn redact_stream<
         {
             let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
             let all_bytes = all_chunks.concat();
-            let content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
-                message: format!("Failed to convert bytes to string: {}", e),
-            })?;
+            let whole_content =
+                String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
+                    message: format!("Failed to convert bytes to string: {}", e),
+                })?;
+            let content = if let Some(sampling_size) = redacter.options().sampling_size {
+                let sampling_size = std::cmp::min(sampling_size, whole_content.len());
+                whole_content
+                    .chars()
+                    .take(sampling_size)
+                    .collect::<String>()
+            } else {
+                whole_content
+            };
             Ok(RedacterDataItem {
                 content: RedacterDataItemContent::Value(content),
                 file_ref: file_ref.clone(),

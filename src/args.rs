@@ -132,6 +132,12 @@ pub struct RedacterArgs {
         help = "Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'"
     )]
     pub gemini_model: Option<GeminiLlmModelName>,
+
+    #[arg(
+        long,
+        help = "Sampling size in bytes before redacting files. Disabled by default"
+    )]
+    pub sampling_size: Option<usize>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -189,6 +195,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             allow_unsupported_copies: self.allow_unsupported_copies,
             csv_headers_disable: self.csv_headers_disable,
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
+            sampling_size: self.sampling_size,
         })
     }
 }

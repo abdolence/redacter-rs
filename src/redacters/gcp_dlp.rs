@@ -400,6 +400,7 @@ mod tests {
             allow_unsupported_copies: false,
             csv_headers_disable: false,
             csv_delimiter: None,
+            sampling_size: None,
         };
 
         let redacter = GcpDlpRedacter::new(
