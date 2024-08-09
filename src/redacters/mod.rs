@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -16,8 +17,10 @@ mod ms_presidio;
 pub use ms_presidio::*;
 
 mod gemini_llm;
-use crate::errors::AppError;
 pub use gemini_llm::*;
+
+mod open_ai_llm;
+pub use open_ai_llm::*;
 
 #[derive(Debug, Clone)]
 pub struct RedacterDataItem {
@@ -44,6 +47,7 @@ pub enum Redacters<'a> {
     AwsComprehendDlp(AwsComprehendRedacter<'a>),
     MsPresidio(MsPresidioRedacter<'a>),
     GeminiLlm(GeminiLlmRedacter<'a>),
+    OpenAiLlm(OpenAiLlmRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +65,7 @@ pub enum RedacterProviderOptions {
     AwsComprehend(AwsComprehendRedacterOptions),
     MsPresidio(MsPresidioRedacterOptions),
     GeminiLlm(GeminiLlmRedacterOptions),
+    OpenAiLlm(OpenAiLlmRedacterOptions),
 }
 
 impl Display for RedacterOptions {
@@ -70,6 +75,7 @@ impl Display for RedacterOptions {
             RedacterProviderOptions::AwsComprehend(_) => write!(f, "aws-comprehend-dlp"),
             RedacterProviderOptions::MsPresidio(_) => write!(f, "ms-presidio"),
             RedacterProviderOptions::GeminiLlm(_) => write!(f, "gemini-llm"),
+            RedacterProviderOptions::OpenAiLlm(_) => write!(f, "openai-llm"),
         }
     }
 }
@@ -93,6 +99,9 @@ impl<'a> Redacters<'a> {
             )),
             RedacterProviderOptions::GeminiLlm(ref options) => Ok(Redacters::GeminiLlm(
                 GeminiLlmRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
+            )),
+            RedacterProviderOptions::OpenAiLlm(ref options) => Ok(Redacters::OpenAiLlm(
+                OpenAiLlmRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
             )),
         }
     }
@@ -147,6 +156,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::AwsComprehendDlp(redacter) => redacter.redact(input).await,
             Redacters::MsPresidio(redacter) => redacter.redact(input).await,
             Redacters::GeminiLlm(redacter) => redacter.redact(input).await,
+            Redacters::OpenAiLlm(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -161,6 +171,7 @@ impl<'a> Redacter for Redacters<'a> {
             }
             Redacters::MsPresidio(redacter) => redacter.redact_supported_options(file_ref).await,
             Redacters::GeminiLlm(redacter) => redacter.redact_supported_options(file_ref).await,
+            Redacters::OpenAiLlm(redacter) => redacter.redact_supported_options(file_ref).await,
         }
     }
 
@@ -170,6 +181,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::AwsComprehendDlp(redacter) => redacter.options(),
             Redacters::MsPresidio(redacter) => redacter.options(),
             Redacters::GeminiLlm(redacter) => redacter.options(),
+            Redacters::OpenAiLlm(redacter) => redacter.options(),
         }
     }
 }

@@ -193,8 +193,9 @@ async fn transfer_and_redact_file<
     };
     bar.println(
         format!(
-            "Copying {} ({}) to {}. Size: {}",
+            "Copying {} ({},{}) to {}. Size: {}",
             bold_style.apply_to(&base_resolved_file_ref.file_path),
+            base_resolved_file_ref.scheme,
             file_ref
                 .media_type
                 .as_ref()

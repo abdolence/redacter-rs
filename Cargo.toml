@@ -20,7 +20,8 @@ ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
 ci-gcp-llm = [] # For testing on CI/GCP with LLM models
-ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm"]
+ci-open-ai = [] # For testing on CI/OpenAIP
+ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm", "ci-open-ai"]
 
 
 [dependencies]
