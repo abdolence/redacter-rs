@@ -1,7 +1,8 @@
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GeminiLlmModelName, RedacterOptions, RedacterProviderOptions,
+    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, RedacterOptions,
+    RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
@@ -62,6 +63,7 @@ pub enum RedacterType {
     AwsComprehend,
     MsPresidio,
     GeminiLlm,
+    OpenAiLlm,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -85,6 +87,7 @@ impl Display for RedacterType {
             RedacterType::AwsComprehend => write!(f, "aws-comprehend"),
             RedacterType::MsPresidio => write!(f, "ms-presidio"),
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
+            RedacterType::OpenAiLlm => write!(f, "openai-llm"),
         }
     }
 }
@@ -138,6 +141,9 @@ pub struct RedacterArgs {
         help = "Sampling size in bytes before redacting files. Disabled by default"
     )]
     pub sampling_size: Option<usize>,
+
+    #[arg(long, help = "API key for OpenAI LLM redacter")]
+    pub open_ai_api_key: Option<OpenAiLlmApiKey>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -184,6 +190,16 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         }
                     })?,
                     gemini_model: self.gemini_model,
+                },
+            )),
+            Some(RedacterType::OpenAiLlm) => Ok(RedacterProviderOptions::OpenAiLlm(
+                crate::redacters::OpenAiLlmRedacterOptions {
+                    api_key: self
+                        .open_ai_api_key
+                        .ok_or_else(|| AppError::RedacterConfigError {
+                            message: "OpenAI API key is required for OpenAI LLM redacter"
+                                .to_string(),
+                        })?,
                 },
             )),
             None => Err(AppError::RedacterConfigError {

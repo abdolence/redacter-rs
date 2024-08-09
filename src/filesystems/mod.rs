@@ -38,18 +38,6 @@ pub struct AbsoluteFilePath {
     pub scheme: String,
 }
 
-impl AbsoluteFilePath {
-    pub fn value(&self) -> String {
-        format!("{}://{}", self.scheme, self.file_path)
-    }
-}
-
-impl RelativeFilePath {
-    pub fn is_dir(&self) -> bool {
-        self.value().ends_with('/')
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FileSystemRef {
     pub relative_path: RelativeFilePath,
