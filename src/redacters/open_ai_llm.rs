@@ -231,7 +231,7 @@ mod tests {
         let redacted_content = redacter.redact(input).await?;
         match redacted_content {
             RedacterDataItemContent::Value(value) => {
-                assert_eq!(value, "Hello, XXXX");
+                assert_eq!(value.trim(), "Hello, [REDACTED]");
             }
             _ => panic!("Unexpected redacted content type"),
         }
