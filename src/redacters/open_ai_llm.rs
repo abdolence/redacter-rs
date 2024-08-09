@@ -210,6 +210,7 @@ mod tests {
         let redacter_options = RedacterOptions {
             provider_options: RedacterProviderOptions::OpenAiLlm(OpenAiLlmRedacterOptions {
                 api_key: test_api_key.clone().into(),
+                model: None,
             }),
             allow_unsupported_copies: false,
             csv_headers_disable: false,
@@ -221,6 +222,7 @@ mod tests {
             redacter_options,
             OpenAiLlmRedacterOptions {
                 api_key: test_api_key.into(),
+                model: None,
             },
             &reporter,
         )
