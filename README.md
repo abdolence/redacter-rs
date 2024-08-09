@@ -34,6 +34,8 @@ Google Cloud Platform's DLP API.
         * images
     * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
         * text, html, csv, json files
+    * [Open AI LLM](https://openai.com/) based redaction
+        * text, html, csv, json files
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -67,7 +69,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm]
+          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
@@ -86,6 +88,10 @@ Options:
           Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'
       --sampling-size <SAMPLING_SIZE>
           Sampling size in bytes before redacting files. Disabled by default
+      --open-ai-api-key <OPEN_AI_API_KEY>
+          API key for OpenAI LLM redacter
+      --open-ai-model <OPEN_AI_MODEL>
+          Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'
   -h, --help
           Print help
 ```
@@ -134,6 +140,11 @@ To be able to use GCP DLP you need to:
   Please note that you need to also configure OAuth setup following the
   official [instructions](https://ai.google.dev/gemini-api/docs/oauth#set-cloud).
 - provide a GCP project id using `--gcp-project-id` option.
+
+### Open AI LLM
+
+To be able to use Open AI LLM you need to provide an API key using `--open-ai-api-key` command line option.
+Optionally, you can provide a model name using `--open-ai-model` option. Default is `gpt-4o-mini`.
 
 ## Examples:
 

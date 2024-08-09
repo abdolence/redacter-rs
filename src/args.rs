@@ -1,7 +1,7 @@
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, RedacterOptions,
+    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, OpenAiModelName, RedacterOptions,
     RedacterProviderOptions,
 };
 use clap::*;
@@ -144,6 +144,12 @@ pub struct RedacterArgs {
 
     #[arg(long, help = "API key for OpenAI LLM redacter")]
     pub open_ai_api_key: Option<OpenAiLlmApiKey>,
+
+    #[arg(
+        long,
+        help = "Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'"
+    )]
+    pub open_ai_model: Option<OpenAiModelName>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -200,6 +206,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             message: "OpenAI API key is required for OpenAI LLM redacter"
                                 .to_string(),
                         })?,
+                    model: self.open_ai_model,
                 },
             )),
             None => Err(AppError::RedacterConfigError {

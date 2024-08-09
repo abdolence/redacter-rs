@@ -14,9 +14,13 @@ use crate::AppResult;
 #[derive(Debug, Clone, ValueStruct)]
 pub struct OpenAiLlmApiKey(String);
 
+#[derive(Debug, Clone, ValueStruct)]
+pub struct OpenAiModelName(String);
+
 #[derive(Debug, Clone)]
 pub struct OpenAiLlmRedacterOptions {
     pub api_key: OpenAiLlmApiKey,
+    pub model: Option<OpenAiModelName>,
 }
 
 #[derive(Clone)]
@@ -50,6 +54,8 @@ struct OpenAiLlmAnalyzeChoice {
 }
 
 impl<'a> OpenAiLlmRedacter<'a> {
+    const DEFAULT_MODEL: &'static str = "gpt-4o-mini";
+
     pub async fn new(
         redacter_options: RedacterOptions,
         open_ai_llm_options: OpenAiLlmRedacterOptions,
@@ -84,7 +90,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
-            model: "gpt-4o".to_string(),
+            model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
             messages: vec![
                 OpenAiLlmAnalyzeMessage {
                     role: "system".to_string(),
