@@ -87,49 +87,25 @@ impl Display for RedacterOptions {
 
 impl<'a> Redacters<'a> {
     pub async fn new_redacter(
-        redacter_options: &RedacterOptions,
+        redacter_options: RedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
         match redacter_options.provider_options {
-            RedacterProviderOptions::GcpDlp(ref options) => Ok(Redacters::GcpDlp(
-                GcpDlpRedacter::new(
-                    redacter_options.base_options.clone(),
-                    options.clone(),
-                    reporter,
-                )
-                .await?,
+            RedacterProviderOptions::GcpDlp(options) => Ok(Redacters::GcpDlp(
+                GcpDlpRedacter::new(redacter_options.base_options, options, reporter).await?,
             )),
-            RedacterProviderOptions::AwsComprehend(ref options) => Ok(Redacters::AwsComprehendDlp(
-                AwsComprehendRedacter::new(
-                    redacter_options.base_options.clone(),
-                    options.clone(),
-                    reporter,
-                )
-                .await?,
+            RedacterProviderOptions::AwsComprehend(options) => Ok(Redacters::AwsComprehendDlp(
+                AwsComprehendRedacter::new(redacter_options.base_options, options, reporter)
+                    .await?,
             )),
-            RedacterProviderOptions::MsPresidio(ref options) => Ok(Redacters::MsPresidio(
-                MsPresidioRedacter::new(
-                    redacter_options.base_options.clone(),
-                    options.clone(),
-                    reporter,
-                )
-                .await?,
+            RedacterProviderOptions::MsPresidio(options) => Ok(Redacters::MsPresidio(
+                MsPresidioRedacter::new(redacter_options.base_options, options, reporter).await?,
             )),
-            RedacterProviderOptions::GeminiLlm(ref options) => Ok(Redacters::GeminiLlm(
-                GeminiLlmRedacter::new(
-                    redacter_options.base_options.clone(),
-                    options.clone(),
-                    reporter,
-                )
-                .await?,
+            RedacterProviderOptions::GeminiLlm(options) => Ok(Redacters::GeminiLlm(
+                GeminiLlmRedacter::new(redacter_options.base_options, options, reporter).await?,
             )),
-            RedacterProviderOptions::OpenAiLlm(ref options) => Ok(Redacters::OpenAiLlm(
-                OpenAiLlmRedacter::new(
-                    redacter_options.base_options.clone(),
-                    options.clone(),
-                    reporter,
-                )
-                .await?,
+            RedacterProviderOptions::OpenAiLlm(options) => Ok(Redacters::OpenAiLlm(
+                OpenAiLlmRedacter::new(redacter_options.base_options, options, reporter).await?,
             )),
         }
     }

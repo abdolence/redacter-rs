@@ -81,7 +81,7 @@ pub async fn command_copy(
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
     let maybe_redacter = match redacter_options {
-        Some(ref options) => Some(Redacters::new_redacter(options, &app_reporter).await?),
+        Some(options) => Some(Redacters::new_redacter(options, &app_reporter).await?),
         None => None,
     };
 
