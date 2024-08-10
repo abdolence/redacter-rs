@@ -1,8 +1,8 @@
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
-    Redacters,
+    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -17,13 +17,13 @@ pub struct AwsComprehendRedacterOptions {
 #[derive(Clone)]
 pub struct AwsComprehendRedacter<'a> {
     client: aws_sdk_comprehend::Client,
-    redacter_options: RedacterOptions,
+    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
     pub async fn new(
-        redacter_options: RedacterOptions,
+        base_options: RedacterBaseOptions,
         aws_dlp_options: AwsComprehendRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -35,7 +35,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         let client = aws_sdk_comprehend::Client::new(&shared_config);
         Ok(Self {
             client,
-            redacter_options,
+            base_options,
             reporter,
         })
     }
@@ -114,8 +114,8 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
         })
     }
 
-    fn options(&self) -> &RedacterOptions {
-        &self.redacter_options
+    fn options(&self) -> &RedacterBaseOptions {
+        &self.base_options
     }
 }
 
@@ -142,12 +142,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterOptions {
-            provider_options: RedacterProviderOptions::AwsComprehend(
-                AwsComprehendRedacterOptions {
-                    region: Some(Region::new(test_aws_region.clone())),
-                },
-            ),
+        let redacter_options = RedacterBaseOptions {
             allow_unsupported_copies: false,
             csv_headers_disable: false,
             csv_delimiter: None,

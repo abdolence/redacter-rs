@@ -1,8 +1,8 @@
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, OpenAiModelName, RedacterOptions,
-    RedacterProviderOptions,
+    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, OpenAiModelName,
+    RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
@@ -213,12 +213,15 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 message: "Redacter type is required".to_string(),
             }),
         }?;
-        Ok(RedacterOptions {
-            provider_options,
+        let base_options = RedacterBaseOptions {
             allow_unsupported_copies: self.allow_unsupported_copies,
             csv_headers_disable: self.csv_headers_disable,
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
+        };
+        Ok(RedacterOptions {
+            provider_options,
+            base_options,
         })
     }
 }

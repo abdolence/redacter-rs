@@ -53,6 +53,11 @@ pub enum Redacters<'a> {
 #[derive(Debug, Clone)]
 pub struct RedacterOptions {
     pub provider_options: RedacterProviderOptions,
+    pub base_options: RedacterBaseOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct RedacterBaseOptions {
     pub allow_unsupported_copies: bool,
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
@@ -87,21 +92,44 @@ impl<'a> Redacters<'a> {
     ) -> AppResult<Self> {
         match redacter_options.provider_options {
             RedacterProviderOptions::GcpDlp(ref options) => Ok(Redacters::GcpDlp(
-                GcpDlpRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
+                GcpDlpRedacter::new(
+                    redacter_options.base_options.clone(),
+                    options.clone(),
+                    reporter,
+                )
+                .await?,
             )),
             RedacterProviderOptions::AwsComprehend(ref options) => Ok(Redacters::AwsComprehendDlp(
-                AwsComprehendRedacter::new(redacter_options.clone(), options.clone(), reporter)
-                    .await?,
+                AwsComprehendRedacter::new(
+                    redacter_options.base_options.clone(),
+                    options.clone(),
+                    reporter,
+                )
+                .await?,
             )),
             RedacterProviderOptions::MsPresidio(ref options) => Ok(Redacters::MsPresidio(
-                MsPresidioRedacter::new(redacter_options.clone(), options.clone(), reporter)
-                    .await?,
+                MsPresidioRedacter::new(
+                    redacter_options.base_options.clone(),
+                    options.clone(),
+                    reporter,
+                )
+                .await?,
             )),
             RedacterProviderOptions::GeminiLlm(ref options) => Ok(Redacters::GeminiLlm(
-                GeminiLlmRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
+                GeminiLlmRedacter::new(
+                    redacter_options.base_options.clone(),
+                    options.clone(),
+                    reporter,
+                )
+                .await?,
             )),
             RedacterProviderOptions::OpenAiLlm(ref options) => Ok(Redacters::OpenAiLlm(
-                OpenAiLlmRedacter::new(redacter_options.clone(), options.clone(), reporter).await?,
+                OpenAiLlmRedacter::new(
+                    redacter_options.base_options.clone(),
+                    options.clone(),
+                    reporter,
+                )
+                .await?,
             )),
         }
     }
@@ -146,7 +174,7 @@ pub trait Redacter {
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactSupportedOptions>;
 
-    fn options(&self) -> &RedacterOptions;
+    fn options(&self) -> &RedacterBaseOptions;
 }
 
 impl<'a> Redacter for Redacters<'a> {
@@ -175,7 +203,7 @@ impl<'a> Redacter for Redacters<'a> {
         }
     }
 
-    fn options(&self) -> &RedacterOptions {
+    fn options(&self) -> &RedacterBaseOptions {
         match self {
             Redacters::GcpDlp(redacter) => redacter.options(),
             Redacters::AwsComprehendDlp(redacter) => redacter.options(),

@@ -51,12 +51,14 @@ pub async fn command_copy(
     } else {
         bold_style.clone().red().apply_to("✗ No".to_string())
     };
-    let sampling_output =
-        if let Some(ref sampling_size) = redacter_options.as_ref().and_then(|o| o.sampling_size) {
-            Style::new().apply_to(format!("{} bytes.", sampling_size))
-        } else {
-            Style::new().dim().apply_to("-".to_string())
-        };
+    let sampling_output = if let Some(ref sampling_size) = redacter_options
+        .as_ref()
+        .and_then(|o| o.base_options.sampling_size)
+    {
+        Style::new().apply_to(format!("{} bytes.", sampling_size))
+    } else {
+        Style::new().dim().apply_to("-".to_string())
+    };
     term.write_line(
         format!(
             "Copying from {} to {}.\nRedacting: {}.\nSampling: {}\n",

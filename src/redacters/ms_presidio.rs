@@ -5,8 +5,8 @@ use url::Url;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
-    Redacters,
+    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -21,7 +21,7 @@ pub struct MsPresidioRedacterOptions {
 pub struct MsPresidioRedacter<'a> {
     client: reqwest::Client,
     ms_presidio_options: MsPresidioRedacterOptions,
-    redacter_options: RedacterOptions,
+    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
@@ -44,7 +44,7 @@ impl<'a> MsPresidioRedacter<'a> {
     const DISALLOW_ENTITY_TYPES: [&'static str; 1] = ["US_DRIVER_LICENSE"];
 
     pub async fn new(
-        redacter_options: RedacterOptions,
+        base_options: RedacterBaseOptions,
         ms_presidio_options: MsPresidioRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -52,7 +52,7 @@ impl<'a> MsPresidioRedacter<'a> {
         Ok(Self {
             client,
             ms_presidio_options,
-            redacter_options,
+            base_options,
             reporter,
         })
     }
@@ -215,8 +215,8 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
         })
     }
 
-    fn options(&self) -> &RedacterOptions {
-        &self.redacter_options
+    fn options(&self) -> &RedacterBaseOptions {
+        &self.base_options
     }
 }
 
@@ -249,11 +249,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterOptions {
-            provider_options: RedacterProviderOptions::MsPresidio(MsPresidioRedacterOptions {
-                text_analyze_url: Some(test_analyze_url.clone()),
-                image_redact_url: None,
-            }),
+        let redacter_options = RedacterBaseOptions {
             allow_unsupported_copies: false,
             csv_headers_disable: false,
             csv_delimiter: None,

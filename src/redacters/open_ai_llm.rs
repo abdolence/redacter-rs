@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, RedacterOptions,
-    Redacters,
+    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -27,7 +27,7 @@ pub struct OpenAiLlmRedacterOptions {
 pub struct OpenAiLlmRedacter<'a> {
     client: reqwest::Client,
     open_ai_llm_options: OpenAiLlmRedacterOptions,
-    redacter_options: RedacterOptions,
+    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
@@ -57,7 +57,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
     const DEFAULT_MODEL: &'static str = "gpt-4o-mini";
 
     pub async fn new(
-        redacter_options: RedacterOptions,
+        base_options: RedacterBaseOptions,
         open_ai_llm_options: OpenAiLlmRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -65,7 +65,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         Ok(Self {
             client,
             open_ai_llm_options,
-            redacter_options,
+            base_options,
             reporter,
         })
     }
@@ -176,8 +176,8 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
         })
     }
 
-    fn options(&self) -> &RedacterOptions {
-        &self.redacter_options
+    fn options(&self) -> &RedacterBaseOptions {
+        &self.base_options
     }
 }
 
@@ -207,11 +207,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterOptions {
-            provider_options: RedacterProviderOptions::OpenAiLlm(OpenAiLlmRedacterOptions {
-                api_key: test_api_key.clone().into(),
-                model: None,
-            }),
+        let redacter_options = RedacterBaseOptions {
             allow_unsupported_copies: false,
             csv_headers_disable: false,
             csv_delimiter: None,
