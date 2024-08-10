@@ -3,7 +3,9 @@ use crate::filesystems::{
     AbsoluteFilePath, DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection,
     FileSystemRef,
 };
-use crate::redacters::{RedactSupportedOptions, Redacter, RedacterOptions, Redacters};
+use crate::redacters::{
+    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions, Redacters,
+};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::{Style, Term};
@@ -81,7 +83,10 @@ pub async fn command_copy(
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
     let maybe_redacter = match redacter_options {
-        Some(options) => Some(Redacters::new_redacter(options, &app_reporter).await?),
+        Some(options) => Some((
+            options.base_options,
+            Redacters::new_redacter(options.provider_options, &app_reporter).await?,
+        )),
         None => None,
     };
 
@@ -174,7 +179,7 @@ async fn transfer_and_redact_file<
     source_fs: &mut SFS,
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
-    redacter: &Option<impl Redacter>,
+    redacter: &Option<(RedacterBaseOptions, impl Redacter)>,
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -208,7 +213,7 @@ async fn transfer_and_redact_file<
         )
         .as_str(),
     );
-    let transfer_result = if let Some(ref redacter) = redacter {
+    let transfer_result = if let Some(ref redacter_with_options) = redacter {
         redact_upload_file::<SFS, DFS, _>(
             bar,
             destination_fs,
@@ -216,7 +221,7 @@ async fn transfer_and_redact_file<
             source_reader,
             &base_resolved_file_ref,
             file_ref,
-            redacter,
+            redacter_with_options,
         )
         .await?
     } else {
@@ -241,12 +246,14 @@ async fn redact_upload_file<
     source_reader: S,
     base_resolved_file_ref: &AbsoluteFilePath,
     dest_file_ref: &FileSystemRef,
-    redacter: &impl Redacter,
+    redacter_with_options: &(RedacterBaseOptions, impl Redacter),
 ) -> AppResult<crate::commands::copy_command::TransferFileResult> {
+    let (redacter_base_options, redacter) = redacter_with_options;
     let redacter_supported_options = redacter.redact_supported_options(dest_file_ref).await?;
     if redacter_supported_options != RedactSupportedOptions::Unsupported {
         match crate::redacters::redact_stream(
             redacter,
+            redacter_base_options,
             &redacter_supported_options,
             source_reader,
             dest_file_ref,
@@ -273,7 +280,7 @@ async fn redact_upload_file<
                 Ok(TransferFileResult::Skipped)
             }
         }
-    } else if redacter.options().allow_unsupported_copies {
+    } else if redacter_base_options.allow_unsupported_copies {
         bar.println(
             format!(
                 "Still copying {} {} because it is allowed by arguments",

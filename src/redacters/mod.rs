@@ -87,25 +87,24 @@ impl Display for RedacterOptions {
 
 impl<'a> Redacters<'a> {
     pub async fn new_redacter(
-        redacter_options: RedacterOptions,
+        provider_options: RedacterProviderOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
-        match redacter_options.provider_options {
+        match provider_options {
             RedacterProviderOptions::GcpDlp(options) => Ok(Redacters::GcpDlp(
-                GcpDlpRedacter::new(redacter_options.base_options, options, reporter).await?,
+                GcpDlpRedacter::new(options, reporter).await?,
             )),
             RedacterProviderOptions::AwsComprehend(options) => Ok(Redacters::AwsComprehendDlp(
-                AwsComprehendRedacter::new(redacter_options.base_options, options, reporter)
-                    .await?,
+                AwsComprehendRedacter::new(options, reporter).await?,
             )),
             RedacterProviderOptions::MsPresidio(options) => Ok(Redacters::MsPresidio(
-                MsPresidioRedacter::new(redacter_options.base_options, options, reporter).await?,
+                MsPresidioRedacter::new(options, reporter).await?,
             )),
             RedacterProviderOptions::GeminiLlm(options) => Ok(Redacters::GeminiLlm(
-                GeminiLlmRedacter::new(redacter_options.base_options, options, reporter).await?,
+                GeminiLlmRedacter::new(options, reporter).await?,
             )),
             RedacterProviderOptions::OpenAiLlm(options) => Ok(Redacters::OpenAiLlm(
-                OpenAiLlmRedacter::new(redacter_options.base_options, options, reporter).await?,
+                OpenAiLlmRedacter::new(options, reporter).await?,
             )),
         }
     }
@@ -149,8 +148,6 @@ pub trait Redacter {
         &self,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactSupportedOptions>;
-
-    fn options(&self) -> &RedacterBaseOptions;
 }
 
 impl<'a> Redacter for Redacters<'a> {
@@ -178,22 +175,13 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::OpenAiLlm(redacter) => redacter.redact_supported_options(file_ref).await,
         }
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        match self {
-            Redacters::GcpDlp(redacter) => redacter.options(),
-            Redacters::AwsComprehendDlp(redacter) => redacter.options(),
-            Redacters::MsPresidio(redacter) => redacter.options(),
-            Redacters::GeminiLlm(redacter) => redacter.options(),
-            Redacters::OpenAiLlm(redacter) => redacter.options(),
-        }
-    }
 }
 
 pub async fn redact_stream<
     S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
 >(
     redacter: &impl Redacter,
+    redacter_base_options: &RedacterBaseOptions,
     supported_options: &RedactSupportedOptions,
     input: S,
     file_ref: &FileSystemRef,
@@ -210,7 +198,7 @@ pub async fn redact_stream<
                 String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
                     message: format!("Failed to convert bytes to string: {}", e),
                 })?;
-            let content = if let Some(sampling_size) = redacter.options().sampling_size {
+            let content = if let Some(sampling_size) = redacter_base_options.sampling_size {
                 let sampling_size = std::cmp::min(sampling_size, whole_content.len());
                 whole_content
                     .chars()
@@ -240,17 +228,16 @@ pub async fn redact_stream<
                 input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
             );
             let mut reader = csv_async::AsyncReaderBuilder::default()
-                .has_headers(!redacter.options().csv_headers_disable)
+                .has_headers(!redacter_base_options.csv_headers_disable)
                 .delimiter(
-                    redacter
-                        .options()
+                    redacter_base_options
                         .csv_delimiter
                         .as_ref()
                         .cloned()
                         .unwrap_or(b','),
                 )
                 .create_reader(reader);
-            let headers = if !redacter.options().csv_headers_disable {
+            let headers = if !redacter_base_options.csv_headers_disable {
                 reader
                     .headers()
                     .await?

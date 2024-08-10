@@ -2,8 +2,7 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -16,7 +15,6 @@ use rvstruct::ValueStruct;
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
     client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
-    base_options: RedacterBaseOptions,
     gcp_dlp_options: GcpDlpRedacterOptions,
     reporter: &'a AppReporter<'a>,
 }
@@ -50,7 +48,6 @@ impl<'a> GcpDlpRedacter<'a> {
         "ENCRYPTION_KEY",
     ];
     pub async fn new(
-        base_options: RedacterBaseOptions,
         gcp_dlp_options: GcpDlpRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -59,7 +56,6 @@ impl<'a> GcpDlpRedacter<'a> {
                 .await?;
         Ok(GcpDlpRedacter {
             client,
-            base_options,
             gcp_dlp_options,
             reporter,
         })
@@ -230,10 +226,6 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
             },
         )
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        &self.base_options
-    }
 }
 
 impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterDataItemContent {
@@ -402,15 +394,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterBaseOptions {
-            allow_unsupported_copies: false,
-            csv_headers_disable: false,
-            csv_delimiter: None,
-            sampling_size: None,
-        };
-
         let redacter = GcpDlpRedacter::new(
-            redacter_options,
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
             },

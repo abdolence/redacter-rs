@@ -2,8 +2,7 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -24,7 +23,6 @@ pub struct GeminiLlmModelName(String);
 #[derive(Clone)]
 pub struct GeminiLlmRedacter<'a> {
     client: GoogleApi<GenerativeServiceClient<GoogleAuthMiddleware>>,
-    base_options: RedacterBaseOptions,
     gemini_llm_options: crate::redacters::GeminiLlmRedacterOptions,
     reporter: &'a AppReporter<'a>,
 }
@@ -33,7 +31,6 @@ impl<'a> GeminiLlmRedacter<'a> {
     const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-1.5-flash";
 
     pub async fn new(
-        base_options: RedacterBaseOptions,
         gemini_llm_options: GeminiLlmRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -47,7 +44,6 @@ impl<'a> GeminiLlmRedacter<'a> {
             ).await?;
         Ok(GeminiLlmRedacter {
             client,
-            base_options,
             gemini_llm_options,
             reporter,
         })
@@ -198,10 +194,6 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
             _ => RedactSupportedOptions::Unsupported,
         })
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        &self.base_options
-    }
 }
 
 #[allow(unused_imports)]
@@ -228,15 +220,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterBaseOptions {
-            allow_unsupported_copies: false,
-            csv_headers_disable: false,
-            csv_delimiter: None,
-            sampling_size: None,
-        };
-
         let redacter = GeminiLlmRedacter::new(
-            redacter_options,
             GeminiLlmRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gemini_model: None,

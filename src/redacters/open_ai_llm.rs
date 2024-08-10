@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -27,7 +26,6 @@ pub struct OpenAiLlmRedacterOptions {
 pub struct OpenAiLlmRedacter<'a> {
     client: reqwest::Client,
     open_ai_llm_options: OpenAiLlmRedacterOptions,
-    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
@@ -57,7 +55,6 @@ impl<'a> OpenAiLlmRedacter<'a> {
     const DEFAULT_MODEL: &'static str = "gpt-4o-mini";
 
     pub async fn new(
-        base_options: RedacterBaseOptions,
         open_ai_llm_options: OpenAiLlmRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -65,7 +62,6 @@ impl<'a> OpenAiLlmRedacter<'a> {
         Ok(Self {
             client,
             open_ai_llm_options,
-            base_options,
             reporter,
         })
     }
@@ -175,10 +171,6 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
             _ => RedactSupportedOptions::Unsupported,
         })
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        &self.base_options
-    }
 }
 
 #[allow(unused_imports)]
@@ -207,15 +199,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterBaseOptions {
-            allow_unsupported_copies: false,
-            csv_headers_disable: false,
-            csv_delimiter: None,
-            sampling_size: None,
-        };
-
         let redacter = OpenAiLlmRedacter::new(
-            redacter_options,
             OpenAiLlmRedacterOptions {
                 api_key: test_api_key.into(),
                 model: None,

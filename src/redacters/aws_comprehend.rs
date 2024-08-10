@@ -1,8 +1,7 @@
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -17,13 +16,11 @@ pub struct AwsComprehendRedacterOptions {
 #[derive(Clone)]
 pub struct AwsComprehendRedacter<'a> {
     client: aws_sdk_comprehend::Client,
-    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
     pub async fn new(
-        base_options: RedacterBaseOptions,
         aws_dlp_options: AwsComprehendRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -33,11 +30,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         .or_default_provider();
         let shared_config = aws_config::from_env().region(region_provider).load().await;
         let client = aws_sdk_comprehend::Client::new(&shared_config);
-        Ok(Self {
-            client,
-            base_options,
-            reporter,
-        })
+        Ok(Self { client, reporter })
     }
 
     pub async fn redact_text_file(
@@ -113,10 +106,6 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             _ => RedactSupportedOptions::Unsupported,
         })
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        &self.base_options
-    }
 }
 
 #[allow(unused_imports)]
@@ -142,15 +131,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterBaseOptions {
-            allow_unsupported_copies: false,
-            csv_headers_disable: false,
-            csv_delimiter: None,
-            sampling_size: None,
-        };
-
         let redacter = AwsComprehendRedacter::new(
-            redacter_options,
             AwsComprehendRedacterOptions {
                 region: Some(Region::new(test_aws_region)),
             },

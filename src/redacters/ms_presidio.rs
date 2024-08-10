@@ -5,8 +5,7 @@ use url::Url;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -21,7 +20,6 @@ pub struct MsPresidioRedacterOptions {
 pub struct MsPresidioRedacter<'a> {
     client: reqwest::Client,
     ms_presidio_options: MsPresidioRedacterOptions,
-    base_options: RedacterBaseOptions,
     reporter: &'a AppReporter<'a>,
 }
 
@@ -44,7 +42,6 @@ impl<'a> MsPresidioRedacter<'a> {
     const DISALLOW_ENTITY_TYPES: [&'static str; 1] = ["US_DRIVER_LICENSE"];
 
     pub async fn new(
-        base_options: RedacterBaseOptions,
         ms_presidio_options: MsPresidioRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
@@ -52,7 +49,6 @@ impl<'a> MsPresidioRedacter<'a> {
         Ok(Self {
             client,
             ms_presidio_options,
-            base_options,
             reporter,
         })
     }
@@ -214,10 +210,6 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
             _ => RedactSupportedOptions::Unsupported,
         })
     }
-
-    fn options(&self) -> &RedacterBaseOptions {
-        &self.base_options
-    }
 }
 
 #[allow(unused_imports)]
@@ -249,15 +241,7 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter_options = RedacterBaseOptions {
-            allow_unsupported_copies: false,
-            csv_headers_disable: false,
-            csv_delimiter: None,
-            sampling_size: None,
-        };
-
         let redacter = MsPresidioRedacter::new(
-            redacter_options,
             MsPresidioRedacterOptions {
                 text_analyze_url: Some(test_analyze_url),
                 image_redact_url: None,
