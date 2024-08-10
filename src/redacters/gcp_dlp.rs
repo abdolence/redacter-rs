@@ -27,7 +27,7 @@ pub struct GcpDlpRedacterOptions {
 }
 
 impl<'a> GcpDlpRedacter<'a> {
-    pub const INFO_TYPES: [&'static str; 11] = [
+    pub const INFO_TYPES: [&'static str; 20] = [
         "PHONE_NUMBER",
         "EMAIL_ADDRESS",
         "CREDIT_CARD_NUMBER",
@@ -39,6 +39,15 @@ impl<'a> GcpDlpRedacter<'a> {
         "GENDER",
         "IP_ADDRESS",
         "PASSPORT",
+        "AUTH_TOKEN",
+        "AWS_CREDENTIALS",
+        "BASIC_AUTH_HEADER",
+        "VAT_NUMBER",
+        "PASSWORD",
+        "OAUTH_CLIENT_SECRET",
+        "IBAN_CODE",
+        "GCP_API_KEY",
+        "ENCRYPTION_KEY",
     ];
     pub async fn new(
         redacter_options: RedacterOptions,
