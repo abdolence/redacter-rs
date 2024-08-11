@@ -1,7 +1,6 @@
 use crate::errors::AppError;
 use crate::filesystems::{
-    AbsoluteFilePath, DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection,
-    FileSystemRef,
+    DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection, FileSystemRef,
 };
 use crate::redacters::{
     RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions, Redacters,
@@ -205,7 +204,7 @@ async fn transfer_and_redact_file<
     };
     bar.println(
         format!(
-            "Copying {} ({},{}) to {}. Size: {}",
+            "Processing {} ({},{}) to {}. Size: {}",
             bold_style.apply_to(&base_resolved_file_ref.file_path),
             base_resolved_file_ref.scheme,
             file_ref
@@ -224,7 +223,6 @@ async fn transfer_and_redact_file<
             destination_fs,
             bold_style,
             source_reader,
-            &base_resolved_file_ref,
             file_ref,
             redacter_with_options,
         )
@@ -249,7 +247,6 @@ async fn redact_upload_file<
     destination_fs: &mut DFS,
     bold_style: Style,
     source_reader: S,
-    base_resolved_file_ref: &AbsoluteFilePath,
     dest_file_ref: &FileSystemRef,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
 ) -> AppResult<crate::commands::copy_command::TransferFileResult> {
@@ -280,9 +277,8 @@ async fn redact_upload_file<
             Err(ref error) => {
                 bar.println(
                     format!(
-                        "{}. Skipping {} due to: {}\n{:?}\n",
+                        "↲ {}. Skipping due to: {}\n{:?}\n",
                         bold_style.clone().red().apply_to("Error redacting"),
-                        bold_style.apply_to(&base_resolved_file_ref.file_path),
                         bold_style.apply_to(error),
                         error.source()
                     )
@@ -294,8 +290,7 @@ async fn redact_upload_file<
     } else if redacter_base_options.allow_unsupported_copies {
         bar.println(
             format!(
-                "Still copying {} {} because it is allowed by arguments",
-                bold_style.apply_to(&base_resolved_file_ref.file_path),
+                "↳ Still copying {} because it is allowed by arguments",
                 bold_style
                     .clone()
                     .yellow()
@@ -310,8 +305,7 @@ async fn redact_upload_file<
     } else {
         bar.println(
             format!(
-                "Skipping redaction of {} because {} media type is not supported",
-                bold_style.apply_to(&base_resolved_file_ref.file_path),
+                "↲ Skipping redaction because {} media type is not supported",
                 bold_style.apply_to(
                     dest_file_ref
                         .media_type

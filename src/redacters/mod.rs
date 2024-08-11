@@ -6,7 +6,6 @@ use futures::{Stream, TryStreamExt};
 use gcloud_sdk::prost::bytes;
 use indicatif::ProgressBar;
 use mime::Mime;
-use rvstruct::ValueStruct;
 use std::fmt::Display;
 
 mod gcp_dlp;
@@ -300,8 +299,7 @@ pub async fn redact_stream<
     for (redacter, options) in redacters_supported_options {
         if !matches!(options, RedactSupportedOptions::Unsupported) {
             bar.println(format!(
-                "Redacting {} with {} redacter",
-                file_ref.relative_path.value(),
+                "↳ Redacting using {} redacter",
                 redacter.redacter_type()
             ));
             item_to_redact = redacter.redact(item_to_redact).await?;
