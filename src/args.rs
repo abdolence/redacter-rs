@@ -158,7 +158,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
     fn try_into(self) -> Result<RedacterOptions, Self::Error> {
         let mut provider_options =
             Vec::with_capacity(self.redact.as_ref().map(Vec::len).unwrap_or(0));
-        for options in self.redact.unwrap_or_else(|| Vec::new()) {
+        for options in self.redact.unwrap_or_else(Vec::new) {
             let redacter_options = match options {
                 RedacterType::GcpDlp => match self.gcp_project_id {
                     Some(ref project_id) => {

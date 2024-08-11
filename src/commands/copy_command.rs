@@ -72,10 +72,12 @@ pub async fn command_copy(
         .as_str(),
     )?;
     let bar = ProgressBar::new(1);
-    bar.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-        .unwrap()
-        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
-        .progress_chars("◉>◯"));
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>3}/{len:3}",
+        )?
+        .progress_chars("◉>◯"),
+    );
     bar.enable_steady_tick(Duration::from_millis(100));
     let app_reporter = AppReporter::from(&bar);
 
@@ -117,7 +119,7 @@ pub async fn command_copy(
             .as_str(),
         );
 
-        bar.set_length(files_total_size);
+        bar.set_length(files_found as u64);
         let mut total_files_copied = 0;
         let mut total_files_skipped = source_files_result.skipped;
         for source_file in source_files {
@@ -190,7 +192,7 @@ async fn transfer_and_redact_file<
     let base_resolved_file_ref = source_fs.resolve(Some(&base_file_ref));
     match options.file_matcher.matches(&base_file_ref) {
         FileMatcherResult::SkippedDueToSize | FileMatcherResult::SkippedDueToName => {
-            bar.inc(base_file_ref.file_size.unwrap_or(0));
+            bar.inc(1);
             return Ok(TransferFileResult::Skipped);
         }
         FileMatcherResult::Matched => {}
@@ -234,7 +236,7 @@ async fn transfer_and_redact_file<
             .await?;
         TransferFileResult::Copied
     };
-    bar.inc(file_ref.file_size.unwrap_or(0));
+    bar.inc(1);
     Ok(transfer_result)
 }
 

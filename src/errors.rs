@@ -1,4 +1,5 @@
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
+use indicatif::style::TemplateError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -31,6 +32,8 @@ pub enum AppError {
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]
     RedacterConfigError { message: String },
+    #[error("Template error: {0}")]
+    TemplateError(#[from] TemplateError),
     #[error("System error: {message}")]
     SystemError { message: String },
 }

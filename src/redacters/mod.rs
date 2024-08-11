@@ -302,7 +302,7 @@ pub async fn redact_stream<
             bar.println(format!(
                 "Redacting {} with {} redacter",
                 file_ref.relative_path.value(),
-                redacter.redacter_type().to_string()
+                redacter.redacter_type()
             ));
             item_to_redact = redacter.redact(item_to_redact).await?;
         }
