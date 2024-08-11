@@ -399,8 +399,8 @@ mod tests {
         )
         .await?;
 
-        let redacted_content = redacter.redact(input).await?;
-        match redacted_content {
+        let redacted_item = redacter.redact(input).await?;
+        match redacted_item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value, "Hello, [REDACTED]");
             }

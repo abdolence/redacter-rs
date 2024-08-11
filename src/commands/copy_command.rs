@@ -13,7 +13,6 @@ use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
 use std::error::Error;
-use std::fmt::Write;
 use std::time::Duration;
 
 pub struct CopyCommandResult {
