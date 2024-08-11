@@ -95,8 +95,8 @@ impl Display for RedacterType {
 #[derive(Args, Debug, Clone)]
 #[group(required = false)]
 pub struct RedacterArgs {
-    #[arg(short = 'd', long, value_enum, help = "Redacter type")]
-    redact: Option<RedacterType>,
+    #[arg(short = 'd', long, value_enum, help = "List of redacters to use")]
+    redact: Option<Vec<RedacterType>>,
 
     #[arg(
         long,
@@ -156,63 +156,68 @@ impl TryInto<RedacterOptions> for RedacterArgs {
     type Error = AppError;
 
     fn try_into(self) -> Result<RedacterOptions, Self::Error> {
-        let provider_options = match self.redact {
-            Some(RedacterType::GcpDlp) => match self.gcp_project_id {
-                Some(project_id) => Ok(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
-                    project_id,
-                })),
-                None => Err(AppError::RedacterConfigError {
-                    message: "GCP project id is required for GCP DLP redacter".to_string(),
-                }),
-            },
-            Some(RedacterType::AwsComprehend) => Ok(RedacterProviderOptions::AwsComprehend(
-                crate::redacters::AwsComprehendRedacterOptions {
-                    region: self.aws_region.map(aws_config::Region::new),
+        let mut provider_options =
+            Vec::with_capacity(self.redact.as_ref().map(Vec::len).unwrap_or(0));
+        for options in self.redact.unwrap_or_else(|| Vec::new()) {
+            let redacter_options = match options {
+                RedacterType::GcpDlp => match self.gcp_project_id {
+                    Some(ref project_id) => {
+                        Ok(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
+                            project_id: project_id.clone(),
+                        }))
+                    }
+                    None => Err(AppError::RedacterConfigError {
+                        message: "GCP project id is required for GCP DLP redacter".to_string(),
+                    }),
                 },
-            )),
-            Some(RedacterType::MsPresidio) => {
-                if self.ms_presidio_text_analyze_url.is_none()
-                    && self.ms_presidio_image_redact_url.is_none()
-                {
-                    return Err(AppError::RedacterConfigError {
-                        message:
+                RedacterType::AwsComprehend => Ok(RedacterProviderOptions::AwsComprehend(
+                    crate::redacters::AwsComprehendRedacterOptions {
+                        region: self.aws_region.clone().map(aws_config::Region::new),
+                    },
+                )),
+                RedacterType::MsPresidio => {
+                    if self.ms_presidio_text_analyze_url.is_none()
+                        && self.ms_presidio_image_redact_url.is_none()
+                    {
+                        return Err(AppError::RedacterConfigError {
+                            message:
                             "MsPresidio requires text analyze/image URL specified (at least one)"
                                 .to_string(),
-                    });
+                        });
+                    }
+                    Ok(RedacterProviderOptions::MsPresidio(
+                        crate::redacters::MsPresidioRedacterOptions {
+                            text_analyze_url: self.ms_presidio_text_analyze_url.clone(),
+                            image_redact_url: self.ms_presidio_image_redact_url.clone(),
+                        },
+                    ))
                 }
-                Ok(RedacterProviderOptions::MsPresidio(
-                    crate::redacters::MsPresidioRedacterOptions {
-                        text_analyze_url: self.ms_presidio_text_analyze_url,
-                        image_redact_url: self.ms_presidio_image_redact_url,
-                    },
-                ))
-            }
-            Some(RedacterType::GeminiLlm) => Ok(RedacterProviderOptions::GeminiLlm(
-                crate::redacters::GeminiLlmRedacterOptions {
-                    project_id: self.gcp_project_id.ok_or_else(|| {
-                        AppError::RedacterConfigError {
-                            message: "GCP project id is required for Gemini LLM redacter"
-                                .to_string(),
-                        }
-                    })?,
-                    gemini_model: self.gemini_model,
-                },
-            )),
-            Some(RedacterType::OpenAiLlm) => Ok(RedacterProviderOptions::OpenAiLlm(
-                crate::redacters::OpenAiLlmRedacterOptions {
-                    api_key: self
-                        .open_ai_api_key
-                        .ok_or_else(|| AppError::RedacterConfigError {
-                            message: "OpenAI API key is required for OpenAI LLM redacter"
-                                .to_string(),
+                RedacterType::GeminiLlm => Ok(RedacterProviderOptions::GeminiLlm(
+                    crate::redacters::GeminiLlmRedacterOptions {
+                        project_id: self.gcp_project_id.clone().ok_or_else(|| {
+                            AppError::RedacterConfigError {
+                                message: "GCP project id is required for Gemini LLM redacter"
+                                    .to_string(),
+                            }
                         })?,
-                    model: self.open_ai_model,
-                },
-            )),
-            None => Err(AppError::RedacterConfigError {
-                message: "Redacter type is required".to_string(),
-            }),
-        }?;
+                        gemini_model: self.gemini_model.clone(),
+                    },
+                )),
+                RedacterType::OpenAiLlm => Ok(RedacterProviderOptions::OpenAiLlm(
+                    crate::redacters::OpenAiLlmRedacterOptions {
+                        api_key: self.open_ai_api_key.clone().ok_or_else(|| {
+                            AppError::RedacterConfigError {
+                                message: "OpenAI API key is required for OpenAI LLM redacter"
+                                    .to_string(),
+                            }
+                        })?,
+                        model: self.open_ai_model.clone(),
+                    },
+                )),
+            }?;
+            provider_options.push(redacter_options);
+        }
+
         let base_options = RedacterBaseOptions {
             allow_unsupported_copies: self.allow_unsupported_copies,
             csv_headers_disable: self.csv_headers_disable,

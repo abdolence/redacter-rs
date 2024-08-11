@@ -82,11 +82,15 @@ pub async fn command_copy(
     let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
-    let maybe_redacter = match redacter_options {
-        Some(options) => Some((
-            options.base_options,
-            Redacters::new_redacter(options.provider_options, &app_reporter).await?,
-        )),
+    let maybe_redacters = match redacter_options {
+        Some(options) => {
+            let mut redacters = Vec::with_capacity(options.provider_options.len());
+            for provider_options in options.provider_options {
+                let redacter = Redacters::new_redacter(provider_options, &app_reporter).await?;
+                redacters.push(redacter);
+            }
+            Some((options.base_options, redacters))
+        }
         None => None,
     };
 
@@ -123,7 +127,7 @@ pub async fn command_copy(
                 &mut source_fs,
                 &mut destination_fs,
                 &options,
-                &maybe_redacter,
+                &maybe_redacters,
             )
             .await?
             {
@@ -143,7 +147,7 @@ pub async fn command_copy(
                 &mut source_fs,
                 &mut destination_fs,
                 &options,
-                &maybe_redacter,
+                &maybe_redacters,
             )
             .await?
             {
@@ -179,7 +183,7 @@ async fn transfer_and_redact_file<
     source_fs: &mut SFS,
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
-    redacter: &Option<(RedacterBaseOptions, impl Redacter)>,
+    redacter: &Option<(RedacterBaseOptions, Vec<impl Redacter>)>,
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -246,17 +250,23 @@ async fn redact_upload_file<
     source_reader: S,
     base_resolved_file_ref: &AbsoluteFilePath,
     dest_file_ref: &FileSystemRef,
-    redacter_with_options: &(RedacterBaseOptions, impl Redacter),
+    redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
 ) -> AppResult<crate::commands::copy_command::TransferFileResult> {
-    let (redacter_base_options, redacter) = redacter_with_options;
-    let redacter_supported_options = redacter.redact_supported_options(dest_file_ref).await?;
-    if redacter_supported_options != RedactSupportedOptions::Unsupported {
+    let (redacter_base_options, redacters) = redacter_with_options;
+    let mut support_redacters = Vec::new();
+    for redacter in redacters {
+        let redacter_supported_options = redacter.redact_supported_options(dest_file_ref).await?;
+        if redacter_supported_options != RedactSupportedOptions::Unsupported {
+            support_redacters.push(redacter);
+        }
+    }
+    if !support_redacters.is_empty() {
         match crate::redacters::redact_stream(
-            redacter,
+            &support_redacters,
             redacter_base_options,
-            &redacter_supported_options,
             source_reader,
             dest_file_ref,
+            bar,
         )
         .await
         {

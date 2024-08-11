@@ -1,3 +1,4 @@
+use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
@@ -6,7 +7,6 @@ use crate::redacters::{
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_config::Region;
-use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]
 pub struct AwsComprehendRedacterOptions {
@@ -16,6 +16,7 @@ pub struct AwsComprehendRedacterOptions {
 #[derive(Clone)]
 pub struct AwsComprehendRedacter<'a> {
     client: aws_sdk_comprehend::Client,
+    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -33,15 +34,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         Ok(Self { client, reporter })
     }
 
-    pub async fn redact_text_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
-        self.reporter.report(format!(
-            "Redacting a text file: {} ({:?})",
-            input.file_ref.relative_path.value(),
-            input.file_ref.media_type
-        ))?;
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -76,12 +69,15 @@ impl<'a> AwsComprehendRedacter<'a> {
                 }
             })
         });
-        Ok(RedacterDataItemContent::Value(redacted_content))
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(redacted_content),
+        })
     }
 }
 
 impl<'a> Redacter for AwsComprehendRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Image { .. } => {
@@ -105,6 +101,10 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             }
             _ => RedactSupportedOptions::Unsupported,
         })
+    }
+
+    fn redacter_type(&self) -> RedacterType {
+        RedacterType::AwsComprehend
     }
 }
 
