@@ -2,6 +2,7 @@ use rvstruct::ValueStruct;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
@@ -20,6 +21,7 @@ pub struct MsPresidioRedacterOptions {
 pub struct MsPresidioRedacter<'a> {
     client: reqwest::Client,
     ms_presidio_options: MsPresidioRedacterOptions,
+    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -53,15 +55,7 @@ impl<'a> MsPresidioRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
-        self.reporter.report(format!(
-            "Redacting a text file: {} ({:?})",
-            input.file_ref.relative_path.value(),
-            input.file_ref.media_type
-        ))?;
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -119,13 +113,13 @@ impl<'a> MsPresidioRedacter<'a> {
                     _ => acc,
                 }
             });
-        Ok(RedacterDataItemContent::Value(redacted_text_content))
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(redacted_text_content),
+        })
     }
 
-    pub async fn redact_image_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
+    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let redact_url = self.ms_presidio_options.image_redact_url.as_ref().ok_or(
             AppError::RedacterConfigError {
                 message: "Image redact URL is not configured".to_string(),
@@ -161,9 +155,12 @@ impl<'a> MsPresidioRedacter<'a> {
                     });
                 }
                 let redacted_image_bytes = response.bytes().await?;
-                Ok(RedacterDataItemContent::Image {
-                    mime_type,
-                    data: redacted_image_bytes,
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content: RedacterDataItemContent::Image {
+                        mime_type,
+                        data: redacted_image_bytes,
+                    },
                 })
             }
             _ => Err(AppError::SystemError {
@@ -174,7 +171,7 @@ impl<'a> MsPresidioRedacter<'a> {
 }
 
 impl<'a> Redacter for MsPresidioRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
@@ -209,6 +206,10 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
             }
             _ => RedactSupportedOptions::Unsupported,
         })
+    }
+
+    fn redacter_type(&self) -> RedacterType {
+        RedacterType::MsPresidio
     }
 }
 

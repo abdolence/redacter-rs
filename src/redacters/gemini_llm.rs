@@ -1,3 +1,4 @@
+use crate::args::RedacterType;
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
@@ -24,6 +25,7 @@ pub struct GeminiLlmModelName(String);
 pub struct GeminiLlmRedacter<'a> {
     client: GoogleApi<GenerativeServiceClient<GoogleAuthMiddleware>>,
     gemini_llm_options: crate::redacters::GeminiLlmRedacterOptions,
+    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -49,23 +51,13 @@ impl<'a> GeminiLlmRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let model_name = self
             .gemini_llm_options
             .gemini_model
             .as_ref()
             .map(|model_name| model_name.value().to_string())
             .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
-        self.reporter.report(format!(
-            "Redacting a text file: {} ({:?}) using Gemini LLM model: {}",
-            input.file_ref.relative_path.value(),
-            input.file_ref.media_type,
-            model_name
-        ))?;
-
         let mut rand = rand::thread_rng();
         let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
 
@@ -154,7 +146,10 @@ impl<'a> GeminiLlmRedacter<'a> {
                                 _ => acc,
                             });
 
-                    Ok(RedacterDataItemContent::Value(redacted_content_text))
+                    Ok(RedacterDataItem {
+                        file_ref: input.file_ref,
+                        content: RedacterDataItemContent::Value(redacted_content_text),
+                    })
                 } else {
                     Err(AppError::SystemError {
                         message: "No content item in the response".to_string(),
@@ -169,7 +164,7 @@ impl<'a> GeminiLlmRedacter<'a> {
 }
 
 impl<'a> Redacter for GeminiLlmRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Image { .. } => {
@@ -193,6 +188,10 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
             }
             _ => RedactSupportedOptions::Unsupported,
         })
+    }
+
+    fn redacter_type(&self) -> RedacterType {
+        RedacterType::GeminiLlm
     }
 }
 

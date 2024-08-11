@@ -1,3 +1,4 @@
+use crate::args::RedacterType;
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
@@ -16,6 +17,7 @@ use rvstruct::ValueStruct;
 pub struct GcpDlpRedacter<'a> {
     client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
     gcp_dlp_options: GcpDlpRedacterOptions,
+    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -61,15 +63,7 @@ impl<'a> GcpDlpRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
-        self.reporter.report(format!(
-            "Redacting a text file: {} ({:?})",
-            input.file_ref.relative_path.value(),
-            input.file_ref.media_type
-        ))?;
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let mut request = tonic::Request::new(
             gcloud_sdk::google::privacy::dlp::v2::DeidentifyContentRequest {
                 parent: format!(
@@ -91,7 +85,11 @@ impl<'a> GcpDlpRedacter<'a> {
         let response = self.client.get().deidentify_content(request).await?;
 
         if let Some(content_item) = response.into_inner().item {
-            content_item.try_into()
+            let content: RedacterDataItemContent = content_item.try_into()?;
+            Ok(RedacterDataItem {
+                file_ref: input.file_ref,
+                content,
+            })
         } else {
             Err(AppError::SystemError {
                 message: "No content item in the response".to_string(),
@@ -99,18 +97,9 @@ impl<'a> GcpDlpRedacter<'a> {
         }
     }
 
-    pub async fn redact_image_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
+    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
-            RedacterDataItemContent::Image { mime_type, data } => {
-                self.reporter.report(format!(
-                    "Redacting an image file: {} ({:?}). Size: {}",
-                    input.file_ref.relative_path.value(),
-                    &mime_type,
-                    data.len()
-                ))?;
+            RedacterDataItemContent::Image { mime_type, data: _ } => {
                 let output_mime = mime_type.clone();
                 let mut request =
                     tonic::Request::new(gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest {
@@ -130,9 +119,13 @@ impl<'a> GcpDlpRedacter<'a> {
                 );
                 let response = self.client.get().redact_image(request).await?;
 
-                Ok(RedacterDataItemContent::Image {
+                let content = RedacterDataItemContent::Image {
                     mime_type: output_mime,
                     data: response.into_inner().redacted_image.into(),
+                };
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content,
                 })
             }
             _ => Err(AppError::SystemError {
@@ -194,7 +187,7 @@ impl<'a> GcpDlpRedacter<'a> {
 }
 
 impl<'a> Redacter for GcpDlpRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Value(_) => {
                 self.redact_text_file(input).await
@@ -225,6 +218,10 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
                 RedactSupportedOptions::Unsupported
             },
         )
+    }
+
+    fn redacter_type(&self) -> RedacterType {
+        RedacterType::GcpDlp
     }
 }
 

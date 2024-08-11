@@ -2,6 +2,7 @@ use rand::Rng;
 use rvstruct::ValueStruct;
 use serde::{Deserialize, Serialize};
 
+use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::filesystems::FileSystemRef;
 use crate::redacters::{
@@ -26,6 +27,7 @@ pub struct OpenAiLlmRedacterOptions {
 pub struct OpenAiLlmRedacter<'a> {
     client: reqwest::Client,
     open_ai_llm_options: OpenAiLlmRedacterOptions,
+    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -66,15 +68,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItemContent> {
-        self.reporter.report(format!(
-            "Redacting a text file: {} ({:?})",
-            input.file_ref.relative_path.value(),
-            input.file_ref.media_type
-        ))?;
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -136,7 +130,10 @@ impl<'a> OpenAiLlmRedacter<'a> {
         }
         let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
         if let Some(content) = open_ai_response.choices.pop() {
-            Ok(RedacterDataItemContent::Value(content.message.content))
+            Ok(RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(content.message.content),
+            })
         } else {
             Err(AppError::SystemError {
                 message: "No content item in the response".to_string(),
@@ -146,7 +143,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
 }
 
 impl<'a> Redacter for OpenAiLlmRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItemContent> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Table { .. } => {
@@ -170,6 +167,10 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
             }
             _ => RedactSupportedOptions::Unsupported,
         })
+    }
+
+    fn redacter_type(&self) -> RedacterType {
+        RedacterType::OpenAiLlm
     }
 }
 
