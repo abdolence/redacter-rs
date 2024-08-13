@@ -296,10 +296,11 @@ pub async fn redact_stream<
         }),
     }?;
 
-    for (redacter, options) in redacters_supported_options {
+    for (index, (redacter, options)) in redacters_supported_options.iter().enumerate() {
         if !matches!(options, RedactSupportedOptions::Unsupported) {
+            let width = " ".repeat(index);
             bar.println(format!(
-                "↳ Redacting using {} redacter",
+                "{width}↳ Redacting using {} redacter",
                 redacter.redacter_type()
             ));
             item_to_redact = redacter.redact(item_to_redact).await?;

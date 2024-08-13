@@ -248,7 +248,6 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             } else {
                 self.object_name.clone()
             },
-            scheme: "gcs".to_string(),
         }
     }
 }

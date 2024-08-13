@@ -164,7 +164,6 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
             } else {
                 self.root_path.clone()
             },
-            scheme: "file".to_string(),
         }
     }
 }

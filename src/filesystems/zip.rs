@@ -172,7 +172,6 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
                     .map(|fr| format!(":{}", fr.relative_path.value()))
                     .unwrap_or("".to_string())
             ),
-            scheme: "zip".to_string(),
         }
     }
 }

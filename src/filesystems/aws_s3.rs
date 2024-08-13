@@ -245,7 +245,6 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
             } else {
                 self.object_name.clone()
             },
-            scheme: "s3".to_string(),
         }
     }
 }

@@ -7,7 +7,7 @@ use crate::redacters::{
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use console::{Style, Term};
+use console::{pad_str, Alignment, Style, Term};
 use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
@@ -118,12 +118,14 @@ pub async fn command_copy(
         );
 
         bar.set_length(files_found as u64);
+
         let mut total_files_copied = 0;
         let mut total_files_skipped = source_files_result.skipped;
         for source_file in source_files {
             match transfer_and_redact_file(
-                Some(&source_file),
+                term,
                 &bar,
+                Some(&source_file),
                 &mut source_fs,
                 &mut destination_fs,
                 &options,
@@ -142,8 +144,9 @@ pub async fn command_copy(
     } else {
         Ok(
             match transfer_and_redact_file(
-                None,
+                term,
                 &bar,
+                None,
                 &mut source_fs,
                 &mut destination_fs,
                 &options,
@@ -178,8 +181,9 @@ async fn transfer_and_redact_file<
     SFS: FileSystemConnection<'a>,
     DFS: FileSystemConnection<'a>,
 >(
-    source_file_ref: Option<&FileSystemRef>,
+    term: &Term,
     bar: &ProgressBar,
+    source_file_ref: Option<&FileSystemRef>,
     source_fs: &mut SFS,
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
@@ -202,18 +206,44 @@ async fn transfer_and_redact_file<
         media_type: file_ref.media_type.clone(),
         file_size: file_ref.file_size,
     };
+    let max_filename_width = (term.width() as f64 * 0.25) as usize;
     bar.println(
         format!(
-            "Processing {} ({},{}) to {}. Size: {}",
-            bold_style.apply_to(&base_resolved_file_ref.file_path),
-            base_resolved_file_ref.scheme,
-            file_ref
-                .media_type
-                .as_ref()
-                .map(|media_type| media_type.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            bold_style.apply_to(destination_fs.resolve(Some(&dest_file_ref)).file_path),
-            bold_style.apply_to(HumanBytes(file_ref.file_size.unwrap_or(0)))
+            "Processing {} to {} {} Size: {}",
+            bold_style.apply_to(pad_str(
+                &base_resolved_file_ref.file_path,
+                max_filename_width,
+                Alignment::Left,
+                None
+            )),
+            bold_style.apply_to(pad_str(
+                destination_fs
+                    .resolve(Some(&dest_file_ref))
+                    .file_path
+                    .as_str(),
+                max_filename_width,
+                Alignment::Left,
+                None
+            )),
+            pad_str(
+                file_ref
+                    .media_type
+                    .as_ref()
+                    .map(|media_type| media_type.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+                    .as_str(),
+                28,
+                Alignment::Left,
+                None
+            ),
+            bold_style.apply_to(pad_str(
+                HumanBytes(file_ref.file_size.unwrap_or(0))
+                    .to_string()
+                    .as_str(),
+                16,
+                Alignment::Left,
+                None
+            ))
         )
         .as_str(),
     );
@@ -290,7 +320,7 @@ async fn redact_upload_file<
     } else if redacter_base_options.allow_unsupported_copies {
         bar.println(
             format!(
-                "↳ Still copying {} because it is allowed by arguments",
+                "↳ Copying {} because it is explicitly allowed by arguments",
                 bold_style
                     .clone()
                     .yellow()

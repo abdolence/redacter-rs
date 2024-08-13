@@ -35,7 +35,6 @@ impl RelativeFilePath {
 #[derive(Debug, Clone)]
 pub struct AbsoluteFilePath {
     pub file_path: String,
-    pub scheme: String,
 }
 
 #[derive(Debug, Clone)]
