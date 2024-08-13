@@ -132,7 +132,7 @@ You need to provide the URLs for text analysis and image redaction endpoints usi
 
 ### Gemini LLM
 
-To be able to use GCP DLP you need to:
+To be able to use Gemini as DLP/redacter you need to:
 
 - authenticate using `gcloud auth application-default login --client-id-file=<client_secret-file>.json` or provide a
   service account key
