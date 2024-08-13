@@ -69,7 +69,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          Redacter type [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm]
+          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm]
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
@@ -107,7 +107,7 @@ Source/destination can be a local file or directory, or a file in GCS, S3, or a 
 - S3: `s3://bucket/file.txt` or `s3://bucket/test-dir/` for whole directory recursive copy
 - Zip archive: `zip://tmp/archive.zip`
 
-## DLP redacters
+## DLP and redacters
 
 ### Google Cloud Platform DLP
 
@@ -145,6 +145,11 @@ To be able to use GCP DLP you need to:
 
 To be able to use Open AI LLM you need to provide an API key using `--open-ai-api-key` command line option.
 Optionally, you can provide a model name using `--open-ai-model` option. Default is `gpt-4o-mini`.
+
+## Multiple redacters
+
+You can specify multiple redacters using `--redact` option multiple times.
+The tool will apply redaction in the order of the redacters specified.
 
 ## Examples:
 
