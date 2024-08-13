@@ -56,6 +56,9 @@ reqwest = { version = "0.12", default-features = false, features = ["multipart",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+pdfium-render = { version = "0.8", features = ["thread_safe", "image"] }
+image = "0.25"
+bytes = { version = "1" }
 
 
 [dev-dependencies]

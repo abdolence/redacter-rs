@@ -1,9 +1,8 @@
 use std::error::Error;
 
+use args::*;
 use clap::Parser;
 use console::{Style, Term};
-
-use args::*;
 
 use crate::commands::*;
 use crate::errors::AppError;
@@ -22,6 +21,8 @@ mod redacters;
 pub type AppResult<T> = Result<T, AppError>;
 
 mod common_types;
+
+mod file_converters;
 
 pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{}: {}", name, e))

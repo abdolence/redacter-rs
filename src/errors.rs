@@ -34,6 +34,10 @@ pub enum AppError {
     RedacterConfigError { message: String },
     #[error("Template error: {0}")]
     TemplateError(#[from] TemplateError),
+    #[error("PDF conversion error: {0}")]
+    PdfiumError(#[from] pdfium_render::prelude::PdfiumError),
+    #[error("Image conversion error: {0}")]
+    ImageError(#[from] image::ImageError),
     #[error("System error: {message}")]
     SystemError { message: String },
 }

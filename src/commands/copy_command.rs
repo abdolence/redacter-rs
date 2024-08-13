@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use crate::file_converters::FileConverters;
 use crate::filesystems::{
     DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection, FileSystemRef,
 };
@@ -59,16 +60,29 @@ pub async fn command_copy(
     } else {
         Style::new().dim().apply_to("-".to_string())
     };
+
+    let mut file_converters = FileConverters::new();
+    file_converters.init().await?;
+
+    let converter_style = Style::new();
+    let pdf_support_output = if file_converters.pdf_image_converter.is_some() {
+        converter_style.clone().green().apply_to(format!("✓ Yes"))
+    } else {
+        converter_style.clone().dim().apply_to("✗ No".to_string())
+    };
+
     term.write_line(
         format!(
-            "Copying from {} to {}.\nRedacting: {}.\nSampling: {}\n",
+            "Copying from {} to {}.\nRedacting: {}.\nSampling: {}\nPDF to image support: {}\n",
             bold_style.clone().white().apply_to(source),
             bold_style.clone().yellow().apply_to(destination),
             redacted_output,
-            sampling_output
+            sampling_output,
+            pdf_support_output,
         )
         .as_str(),
     )?;
+
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -130,6 +144,7 @@ pub async fn command_copy(
                 &mut destination_fs,
                 &options,
                 &maybe_redacters,
+                &file_converters,
             )
             .await?
             {
@@ -151,6 +166,7 @@ pub async fn command_copy(
                 &mut destination_fs,
                 &options,
                 &maybe_redacters,
+                &file_converters,
             )
             .await?
             {
@@ -188,6 +204,7 @@ async fn transfer_and_redact_file<
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
     redacter: &Option<(RedacterBaseOptions, Vec<impl Redacter>)>,
+    file_converters: &FileConverters,
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -255,6 +272,7 @@ async fn transfer_and_redact_file<
             source_reader,
             file_ref,
             redacter_with_options,
+            file_converters,
         )
         .await?
     } else {
@@ -279,6 +297,7 @@ async fn redact_upload_file<
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
+    file_converters: &FileConverters,
 ) -> AppResult<crate::commands::copy_command::TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let mut support_redacters = Vec::new();
@@ -294,6 +313,7 @@ async fn redact_upload_file<
             redacter_base_options,
             source_reader,
             dest_file_ref,
+            file_converters,
             bar,
         )
         .await
