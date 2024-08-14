@@ -15,13 +15,14 @@ categories = ["command-line-utilities"]
 description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
 
 [features]
-default = []
+default = ["pdf-render"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
 ci-gcp-llm = [] # For testing on CI/GCP with LLM models
 ci-open-ai = [] # For testing on CI/OpenAIP
 ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm", "ci-open-ai"]
+pdf-render = ["pdfium-render"]
 
 
 [dependencies]
@@ -56,7 +57,7 @@ reqwest = { version = "0.12", default-features = false, features = ["multipart",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
-pdfium-render = { version = "0.8", features = ["thread_safe", "image"] }
+pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
 image = "0.25"
 bytes = { version = "1" }
 
