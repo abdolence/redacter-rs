@@ -66,7 +66,10 @@ pub async fn command_copy(
 
     let converter_style = Style::new();
     let pdf_support_output = if file_converters.pdf_image_converter.is_some() {
-        converter_style.clone().green().apply_to(format!("✓ Yes"))
+        converter_style
+            .clone()
+            .green()
+            .apply_to("✓ Yes".to_string())
     } else {
         converter_style.clone().dim().apply_to("✗ No".to_string())
     };
@@ -192,6 +195,7 @@ enum TransferFileResult {
     Skipped,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn transfer_and_redact_file<
     'a,
     SFS: FileSystemConnection<'a>,

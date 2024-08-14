@@ -23,7 +23,7 @@ pub use gemini_llm::*;
 
 mod open_ai_llm;
 use crate::args::RedacterType;
-use crate::file_converters::pdf::{PdfInfo, PdfPageInfo};
+use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 pub use open_ai_llm::*;
 
@@ -242,58 +242,17 @@ pub async fn redact_stream<
             }
             RedactSupportedOptions::SupportedAsImages => {
                 match file_converters.pdf_image_converter {
-                    Some(ref converter) => match redacted.content {
-                        RedacterDataItemContent::Pdf { data } => {
-                            bar.println(format!(
-                                    "{width}↳ Redacting using {} redacter and converting the PDF to images",
-                                    redacter.redacter_type()
-                                ));
-                            let pdf_info = converter.convert_to_images(data)?;
-                            bar.println(format!(
-                                "{width} ↳ Converting {pdf_info_pages} images",
-                                pdf_info_pages = pdf_info.pages.len()
-                            ));
-                            let mut redacted_pages = Vec::with_capacity(pdf_info.pages.len());
-                            for page in pdf_info.pages {
-                                let mut png_image_bytes = std::io::Cursor::new(Vec::new());
-                                page.page_as_images
-                                    .write_to(&mut png_image_bytes, ImageFormat::Png)?;
-                                let image_to_redact = RedacterDataItem {
-                                    content: RedacterDataItemContent::Image {
-                                        mime_type: mime::IMAGE_PNG,
-                                        data: png_image_bytes.into_inner().into(),
-                                    },
-                                    file_ref: file_ref.clone(),
-                                };
-                                let redacted_image = redacter.redact(image_to_redact).await?;
-                                match redacted_image.content {
-                                    RedacterDataItemContent::Image { data, .. } => {
-                                        redacted_pages.push(PdfPageInfo {
-                                            page_as_images: image::load_from_memory_with_format(
-                                                &data,
-                                                ImageFormat::Png,
-                                            )?,
-                                            ..page
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            let redacted_pdf_info = PdfInfo {
-                                pages: redacted_pages,
-                                ..pdf_info
-                            };
-                            let redact_pdf_as_images =
-                                converter.images_to_pdf(redacted_pdf_info)?;
-                            redacted = RedacterDataItem {
-                                content: RedacterDataItemContent::Pdf {
-                                    data: redact_pdf_as_images,
-                                },
-                                file_ref: file_ref.clone(),
-                            }
-                        }
-                        _ => {}
-                    },
+                    Some(ref converter) => {
+                        redacted = redact_pdf_with_images_converter(
+                            file_ref,
+                            bar,
+                            redacted,
+                            *redacter,
+                            &width,
+                            converter.as_ref(),
+                        )
+                        .await?
+                    }
                     None => {
                         bar.println(format!(
                             "{width}↲ Skipping redaction because PDF to image converter is not available",
@@ -470,4 +429,61 @@ async fn stream_to_pdf_redact_item<
         },
         file_ref: file_ref.clone(),
     })
+}
+
+async fn redact_pdf_with_images_converter(
+    file_ref: &FileSystemRef,
+    bar: &ProgressBar,
+    redacted: RedacterDataItem,
+    redacter: &impl Redacter,
+    width: &String,
+    converter: &dyn PdfToImage,
+) -> Result<RedacterDataItem, AppError> {
+    match redacted.content {
+        RedacterDataItemContent::Pdf { data } => {
+            bar.println(format!(
+                "{width}↳ Redacting using {} redacter and converting the PDF to images",
+                redacter.redacter_type()
+            ));
+            let pdf_info = converter.convert_to_images(data)?;
+            bar.println(format!(
+                "{width} ↳ Converting {pdf_info_pages} images",
+                pdf_info_pages = pdf_info.pages.len()
+            ));
+            let mut redacted_pages = Vec::with_capacity(pdf_info.pages.len());
+            for page in pdf_info.pages {
+                let mut png_image_bytes = std::io::Cursor::new(Vec::new());
+                page.page_as_images
+                    .write_to(&mut png_image_bytes, ImageFormat::Png)?;
+                let image_to_redact = RedacterDataItem {
+                    content: RedacterDataItemContent::Image {
+                        mime_type: mime::IMAGE_PNG,
+                        data: png_image_bytes.into_inner().into(),
+                    },
+                    file_ref: file_ref.clone(),
+                };
+                let redacted_image = redacter.redact(image_to_redact).await?;
+                if let RedacterDataItemContent::Image { data, .. } = redacted_image.content {
+                    redacted_pages.push(PdfPageInfo {
+                        page_as_images: image::load_from_memory_with_format(
+                            &data,
+                            ImageFormat::Png,
+                        )?,
+                        ..page
+                    });
+                }
+            }
+            let redacted_pdf_info = PdfInfo {
+                pages: redacted_pages,
+            };
+            let redact_pdf_as_images = converter.images_to_pdf(redacted_pdf_info)?;
+            Ok(RedacterDataItem {
+                content: RedacterDataItemContent::Pdf {
+                    data: redact_pdf_as_images,
+                },
+                file_ref: file_ref.clone(),
+            })
+        }
+        _ => Ok(redacted),
+    }
 }

@@ -45,7 +45,6 @@ impl PdfImageConverter {
             Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
                 &current_dir
                     .parent()
-                    .clone()
                     .map(|p| p.join("lib"))
                     .unwrap_or(current_dir.clone()),
             ))

@@ -26,12 +26,14 @@ Google Cloud Platform's DLP API.
         * text, html, json files
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
+        * PDF files (rendering as images)
     * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
         * text, html, csv, json files
     * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
       install on-prem).
         * text, html, csv, json files
         * images
+        * PDF files (rendering as images)
     * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
         * text, html, csv, json files
     * [Open AI LLM](https://openai.com/) based redaction
@@ -150,6 +152,25 @@ Optionally, you can provide a model name using `--open-ai-model` option. Default
 
 You can specify multiple redacters using `--redact` option multiple times.
 The tool will apply redaction in the order of the redacters specified.
+
+## PDF redaction
+
+PDF redaction is supported by rendering PDF files as images and redacting them.
+To render and convert PDF files the tool uses external library `Pdfium` (the C++ PDF library used by the Google Chromium
+project).
+This library needs to be installed separately on your system.
+
+Installation instructions:
+
+- Download the latest release from, for example,
+  here [Pdfium releases](https://github.com/bblanchon/pdfium-binaries/releases) for your system.
+- Extract the archive and copy library file `libpdfium.so` to the one of the following directory:
+    - The path the redacter tool installed (such as `/usr/local/bin`)
+    - The path that resides with redacter tool `/usr/local/lib/` if you have installed the tool in `/usr/local/bin`
+    - The path specified in the `LD_LIBRARY_PATH` environment variable
+
+If library is detected correctly it will be reported in the tool output as.
+> PDF to image support: ✓ Yes
 
 ## Examples:
 
