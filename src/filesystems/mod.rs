@@ -9,15 +9,19 @@ use gcloud_sdk::prost::bytes::Bytes;
 use mime::Mime;
 use rvstruct::ValueStruct;
 
+mod file_matcher;
+pub use file_matcher::*;
+
+mod file_mime_override;
+pub use file_mime_override::*;
+
 mod aws_s3;
 mod gcs;
 mod local;
 mod zip;
 
-mod file_matcher;
 use crate::filesystems::aws_s3::AwsS3FileSystem;
 use crate::reporter::AppReporter;
-pub use file_matcher::*;
 
 #[derive(Debug, Clone, ValueStruct)]
 pub struct RelativeFilePath(pub String);
