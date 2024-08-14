@@ -39,6 +39,9 @@ pub enum CliCommand {
 
         #[command(flatten)]
         redacter_args: Option<RedacterArgs>,
+
+        #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
+        mime_override: Vec<(mime::Mime, globset::Glob)>,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -55,6 +58,23 @@ pub enum CliCommand {
         )]
         filename_filter: Option<globset::Glob>,
     },
+}
+
+impl CliCommand {
+    fn parse_key_val<T, U>(
+        s: &str,
+    ) -> Result<(T, U), Box<dyn std::error::Error + Send + Sync + 'static>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::error::Error + Send + Sync + 'static,
+        U: std::str::FromStr,
+        U::Err: std::error::Error + Send + Sync + 'static,
+    {
+        let pos = s
+            .find('=')
+            .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
+        Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -118,7 +138,7 @@ pub struct RedacterArgs {
     )]
     pub csv_headers_disable: bool,
 
-    #[arg(long, help = "CSV delimiter (default is ','")]
+    #[arg(long, help = "CSV delimiter (default is ',')")]
     pub csv_delimiter: Option<char>,
 
     #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]

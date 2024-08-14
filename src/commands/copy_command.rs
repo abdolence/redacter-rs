@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::filesystems::{
-    DetectFileSystem, FileMatcher, FileMatcherResult, FileSystemConnection, FileSystemRef,
+    DetectFileSystem, FileMatcher, FileMatcherResult, FileMimeOverride, FileSystemConnection,
+    FileSystemRef,
 };
 use crate::redacters::{
     RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions, Redacters,
@@ -23,15 +24,21 @@ pub struct CopyCommandResult {
 #[derive(Debug, Clone)]
 pub struct CopyCommandOptions {
     pub file_matcher: FileMatcher,
+    pub file_mime_override: FileMimeOverride,
 }
 
 impl CopyCommandOptions {
-    pub fn new(filename_filter: Option<globset::Glob>, max_size_limit: Option<u64>) -> Self {
+    pub fn new(
+        filename_filter: Option<globset::Glob>,
+        max_size_limit: Option<u64>,
+        mime_override: Vec<(mime::Mime, globset::Glob)>,
+    ) -> Self {
         let filename_matcher = filename_filter
             .as_ref()
             .map(|filter| filter.compile_matcher());
         CopyCommandOptions {
             file_matcher: FileMatcher::new(filename_matcher, max_size_limit),
+            file_mime_override: FileMimeOverride::new(mime_override),
         }
     }
 }
@@ -119,7 +126,11 @@ pub async fn command_copy(
         }
         bar.println("Copying directory and listing source files...");
         let source_files_result = source_fs.list_files(Some(&options.file_matcher)).await?;
-        let source_files = source_files_result.files;
+        let source_files: Vec<FileSystemRef> = source_files_result
+            .files
+            .into_iter()
+            .map(|f| options.file_mime_override.override_for_file_ref(f))
+            .collect();
         let files_found = source_files.len();
         let files_total_size: u64 = source_files
             .iter()
@@ -302,7 +313,7 @@ async fn redact_upload_file<
     dest_file_ref: &FileSystemRef,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
     file_converters: &FileConverters,
-) -> AppResult<crate::commands::copy_command::TransferFileResult> {
+) -> AppResult<TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let mut support_redacters = Vec::new();
     for redacter in redacters {

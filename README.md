@@ -79,7 +79,7 @@ Options:
       --csv-headers-disable
           Disable CSV headers (if they are not present)
       --csv-delimiter <CSV_DELIMITER>
-          CSV delimiter (default is ','
+          CSV delimiter (default is ',')
       --aws-region <AWS_REGION>
           AWS region for AWS Comprehend DLP redacter
       --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
@@ -94,6 +94,8 @@ Options:
           API key for OpenAI LLM redacter
       --open-ai-model <OPEN_AI_MODEL>
           Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'
+      --mime-override <MIME_OVERRIDE>
+          Override media type detection using glob patterns such as 'text/plain=*.md'
   -h, --help
           Print help
 ```
@@ -207,6 +209,12 @@ MS Presidio redacter:
 
 ```sh
 redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/analyze --ms-presidio-image-redact-url http://localhost:5003/redact ...
+```
+
+Override media types based on filenames:
+
+```sh
+redacter cp --mime-override "text/plain=*.bin" ...
 ```
 
 ## List (LS) command
