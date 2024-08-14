@@ -94,6 +94,8 @@ Options:
           API key for OpenAI LLM redacter
       --open-ai-model <OPEN_AI_MODEL>
           Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'
+      --mime-override <MIME_OVERRIDE>
+          Filter by name using glob patterns such as *.txt
   -h, --help
           Print help
 ```
