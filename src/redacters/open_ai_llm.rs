@@ -146,11 +146,11 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Table { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported table type".to_string(),
-                })
-            }
+            RedacterDataItemContent::Image { .. }
+            | RedacterDataItemContent::Table { .. }
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::SystemError {
+                message: "Attempt to redact of unsupported table type".to_string(),
+            }),
         }
     }
 

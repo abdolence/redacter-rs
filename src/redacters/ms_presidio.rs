@@ -175,9 +175,11 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
-            RedacterDataItemContent::Table { .. } => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported table type".to_string(),
-            }),
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::SystemError {
+                    message: "Attempt to redact of unsupported table type".to_string(),
+                })
+            }
         }
     }
 
@@ -203,6 +205,12 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
                     && self.ms_presidio_options.image_redact_url.is_some() =>
             {
                 RedactSupportedOptions::Supported
+            }
+            Some(media_type)
+                if Redacters::is_mime_pdf(media_type)
+                    && self.ms_presidio_options.image_redact_url.is_some() =>
+            {
+                RedactSupportedOptions::SupportedAsImages
             }
             _ => RedactSupportedOptions::Unsupported,
         })

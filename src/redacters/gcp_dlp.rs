@@ -12,6 +12,7 @@ use gcloud_sdk::tonic::metadata::MetadataValue;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use mime::Mime;
 use rvstruct::ValueStruct;
+use tokio_util::bytes;
 
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
@@ -97,31 +98,38 @@ impl<'a> GcpDlpRedacter<'a> {
         }
     }
 
+    async fn redact_image_content(
+        &self,
+        input_bytes_content: gcloud_sdk::google::privacy::dlp::v2::ByteContentItem,
+    ) -> AppResult<bytes::Bytes> {
+        let mut request =
+            tonic::Request::new(gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest {
+                parent: format!(
+                    "projects/{}/locations/global",
+                    self.gcp_dlp_options.project_id.value()
+                ),
+                inspect_config: Some(Self::create_inspect_config()),
+                byte_item: Some(input_bytes_content),
+                ..gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest::default()
+            });
+        request.metadata_mut().insert(
+            "x-goog-user-project",
+            MetadataValue::<tonic::metadata::Ascii>::try_from(
+                self.gcp_dlp_options.project_id.value(),
+            )?,
+        );
+        let response = self.client.get().redact_image(request).await?;
+        Ok(response.into_inner().redacted_image.into())
+    }
+
     pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Image { mime_type, data: _ } => {
                 let output_mime = mime_type.clone();
-                let mut request =
-                    tonic::Request::new(gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest {
-                        parent: format!(
-                            "projects/{}/locations/global",
-                            self.gcp_dlp_options.project_id.value()
-                        ),
-                        inspect_config: Some(Self::create_inspect_config()),
-                        byte_item: Some(input.content.try_into()?),
-                        ..gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest::default()
-                    });
-                request.metadata_mut().insert(
-                    "x-goog-user-project",
-                    MetadataValue::<tonic::metadata::Ascii>::try_from(
-                        self.gcp_dlp_options.project_id.value(),
-                    )?,
-                );
-                let response = self.client.get().redact_image(request).await?;
 
                 let content = RedacterDataItemContent::Image {
                     mime_type: output_mime,
-                    data: response.into_inner().redacted_image.into(),
+                    data: self.redact_image_content(input.content.try_into()?).await?,
                 };
                 Ok(RedacterDataItem {
                     file_ref: input.file_ref,
@@ -197,9 +205,11 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
             {
                 self.redact_image_file(input).await
             }
-            RedacterDataItemContent::Image { .. } => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported image type".to_string(),
-            }),
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::SystemError {
+                    message: "Attempt to redact of unsupported type".to_string(),
+                })
+            }
         }
     }
 
@@ -207,17 +217,21 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
         &self,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactSupportedOptions> {
-        Ok(
-            if file_ref.media_type.as_ref().iter().all(|media_type| {
-                Redacters::is_mime_text(media_type)
-                    || Redacters::is_mime_table(media_type)
-                    || Self::check_supported_image_type(media_type)
-            }) {
+        Ok(match file_ref.media_type.as_ref() {
+            Some(media_type) if Redacters::is_mime_text(media_type) => {
                 RedactSupportedOptions::Supported
-            } else {
-                RedactSupportedOptions::Unsupported
-            },
-        )
+            }
+            Some(media_type) if Redacters::is_mime_table(media_type) => {
+                RedactSupportedOptions::Supported
+            }
+            Some(media_type) if Self::check_supported_image_type(media_type) => {
+                RedactSupportedOptions::Supported
+            }
+            Some(media_type) if Redacters::is_mime_pdf(media_type) => {
+                RedactSupportedOptions::SupportedAsImages
+            }
+            _ => RedactSupportedOptions::Unsupported,
+        })
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -277,9 +291,11 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
                     ),
                 })
             }
-            RedacterDataItemContent::Image { .. } => Err(AppError::SystemError {
-                message: "Attempt to convert image content to ContentItem".to_string(),
-            }),
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::SystemError {
+                    message: "Attempt to convert image content to ContentItem".to_string(),
+                })
+            }
         }
     }
 }

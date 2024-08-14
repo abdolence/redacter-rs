@@ -80,11 +80,11 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
-            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Image { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
-            }
+            RedacterDataItemContent::Table { .. }
+            | RedacterDataItemContent::Image { .. }
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::SystemError {
+                message: "Attempt to redact of unsupported type".to_string(),
+            }),
         }
     }
 
