@@ -20,7 +20,10 @@ mod gcs;
 mod local;
 mod zip;
 
+mod clipboard;
+
 use crate::filesystems::aws_s3::AwsS3FileSystem;
+use crate::filesystems::clipboard::ClipboardFileSystem;
 use crate::reporter::AppReporter;
 
 #[derive(Debug, Clone, ValueStruct)]
@@ -95,6 +98,7 @@ pub enum DetectFileSystem<'a> {
     GoogleCloudStorage(GoogleCloudStorageFileSystem<'a>),
     AwsS3(AwsS3FileSystem<'a>),
     ZipFile(ZipFileSystem<'a>),
+    Clipboard(ClipboardFileSystem<'a>),
 }
 
 impl<'a> DetectFileSystem<'a> {
@@ -118,6 +122,10 @@ impl<'a> DetectFileSystem<'a> {
             return Ok(DetectFileSystem::ZipFile(
                 ZipFileSystem::new(file_path, reporter).await?,
             ));
+        } else if file_path.starts_with("clipboard://") {
+            return Ok(DetectFileSystem::Clipboard(
+                ClipboardFileSystem::new(file_path, reporter).await?,
+            ));
         } else {
             Err(AppError::UnknownFileSystem {
                 file_path: file_path.to_string(),
@@ -139,6 +147,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.download(file_ref).await,
             DetectFileSystem::AwsS3(fs) => fs.download(file_ref).await,
             DetectFileSystem::ZipFile(fs) => fs.download(file_ref).await,
+            DetectFileSystem::Clipboard(fs) => fs.download(file_ref).await,
         }
     }
 
@@ -152,6 +161,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.upload(input, file_ref).await,
             DetectFileSystem::AwsS3(fs) => fs.upload(input, file_ref).await,
             DetectFileSystem::ZipFile(fs) => fs.upload(input, file_ref).await,
+            DetectFileSystem::Clipboard(fs) => fs.upload(input, file_ref).await,
         }
     }
 
@@ -164,6 +174,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.list_files(file_matcher).await,
             DetectFileSystem::AwsS3(fs) => fs.list_files(file_matcher).await,
             DetectFileSystem::ZipFile(fs) => fs.list_files(file_matcher).await,
+            DetectFileSystem::Clipboard(fs) => fs.list_files(file_matcher).await,
         }
     }
 
@@ -173,6 +184,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.close().await,
             DetectFileSystem::AwsS3(fs) => fs.close().await,
             DetectFileSystem::ZipFile(fs) => fs.close().await,
+            DetectFileSystem::Clipboard(fs) => fs.close().await,
         }
     }
 
@@ -182,6 +194,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.has_multiple_files().await,
             DetectFileSystem::AwsS3(fs) => fs.has_multiple_files().await,
             DetectFileSystem::ZipFile(fs) => fs.has_multiple_files().await,
+            DetectFileSystem::Clipboard(fs) => fs.has_multiple_files().await,
         }
     }
 
@@ -191,6 +204,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.accepts_multiple_files().await,
             DetectFileSystem::AwsS3(fs) => fs.accepts_multiple_files().await,
             DetectFileSystem::ZipFile(fs) => fs.accepts_multiple_files().await,
+            DetectFileSystem::Clipboard(fs) => fs.accepts_multiple_files().await,
         }
     }
 
@@ -200,6 +214,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.resolve(file_ref),
             DetectFileSystem::AwsS3(fs) => fs.resolve(file_ref),
             DetectFileSystem::ZipFile(fs) => fs.resolve(file_ref),
+            DetectFileSystem::Clipboard(fs) => fs.resolve(file_ref),
         }
     }
 }

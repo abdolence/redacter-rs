@@ -1,5 +1,6 @@
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use indicatif::style::TemplateError;
+use std::time::SystemTimeError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -38,6 +39,10 @@ pub enum AppError {
     PdfiumError(#[from] pdfium_render::prelude::PdfiumError),
     #[error("Image conversion error: {0}")]
     ImageError(#[from] image::ImageError),
+    #[error("Clipboard error: {0}")]
+    ClipboardError(#[from] arboard::Error),
+    #[error("SystemTimeError: {0}")]
+    SystemTimeError(#[from] SystemTimeError),
     #[error("System error: {message}")]
     SystemError { message: String },
 }

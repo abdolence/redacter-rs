@@ -20,6 +20,7 @@ Google Cloud Platform's DLP API.
     * Google Cloud Storage (GCS)
     * Amazon Simple Storage Service (S3)
     * Zip files
+    * Clipboard (text content and images)
 * **DLP Integration:**
     * [Google Cloud Platform DLP](https://cloud.google.com/security/products/dlp?hl=en) for accurate and customizable
       redaction for:
@@ -215,6 +216,12 @@ Override media types based on filenames:
 
 ```sh
 redacter cp --mime-override "text/plain=*.bin" ...
+```
+
+Redact an image from clipboard:
+
+```sh
+redacter cp clipboard:// tmp/image/ ...
 ```
 
 ## List (LS) command
