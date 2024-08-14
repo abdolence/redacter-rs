@@ -302,7 +302,7 @@ async fn redact_upload_file<
     dest_file_ref: &FileSystemRef,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
     file_converters: &FileConverters,
-) -> AppResult<crate::commands::copy_command::TransferFileResult> {
+) -> AppResult<TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let mut support_redacters = Vec::new();
     for redacter in redacters {
