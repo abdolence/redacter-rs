@@ -60,6 +60,7 @@ rand = "0.8"
 pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
 image = "0.25"
 bytes = { version = "1" }
+arboard = { version = "3", features = ["image"] }
 
 
 [dev-dependencies]
