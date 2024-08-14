@@ -42,15 +42,9 @@ jobs:
             name: redacter-Linux-aarch64.tar.gz
           - os_name: Linux-arm
             os: ubuntu-20.04
-            target: arm-unknown-linux-gnu
+            target: arm-unknown-linux-musleabi
             bin: redacter
-            name: redacter-Linux-arm.tar.gz
-          - os_name: Linux-i686
-            os: ubuntu-20.04
-            target: i686-unknown-linux-gnu
-            bin: redacter
-            name: redacter-Linux-i686.tar.gz
-            skip_tests: true
+            name: redacter-Linux-arm-musl.tar.gz
           - os_name: Windows-aarch64
             os: windows-latest
             target: aarch64-pc-windows-msvc
