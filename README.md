@@ -105,12 +105,15 @@ DLP is optional and should be enabled with `--redact` (`-d`) option.
 Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
 
-Source/destination can be a local file or directory, or a file in GCS, S3, or a zip archive:
+## Source and destinations
+
+Source/destination can be a local file or directory, or a file in GCS, S3, and others:
 
 - Local file: `/tmp/file.txt` or `/tmp` for whole directory recursive copy
 - GCS: `gs://bucket/file.txt` or `gs://bucket/test-dir/` for whole directory recursive copy
 - S3: `s3://bucket/file.txt` or `s3://bucket/test-dir/` for whole directory recursive copy
 - Zip archive: `zip://tmp/archive.zip`
+- Clipboard: `clipboard://`
 
 ## DLP and redacters
 
