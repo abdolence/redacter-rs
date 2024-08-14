@@ -40,7 +40,7 @@ pub enum CliCommand {
         #[command(flatten)]
         redacter_args: Option<RedacterArgs>,
 
-        #[arg(long, help = "Filter by name using glob patterns such as *.txt", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
+        #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
         mime_override: Vec<(mime::Mime, globset::Glob)>,
     },
     #[command(about = "List files in the source")]
@@ -138,7 +138,7 @@ pub struct RedacterArgs {
     )]
     pub csv_headers_disable: bool,
 
-    #[arg(long, help = "CSV delimiter (default is ','")]
+    #[arg(long, help = "CSV delimiter (default is ',')")]
     pub csv_delimiter: Option<char>,
 
     #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]
