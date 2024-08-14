@@ -47,9 +47,7 @@ impl PdfToImage for PdfImageConverter {
             .set_target_width(2000)
             .set_maximum_height(2000)
             .rotate_if_landscape(PdfPageRenderRotation::Degrees90, true);
-        let document = self
-            .pdfium
-            .load_pdf_from_byte_vec(pdf_bytes.to_vec(), None)?;
+        let document = self.pdfium.load_pdf_from_byte_vec(pdf_bytes.into(), None)?;
         let mut pdf_info = PdfInfo { pages: Vec::new() };
         for page in document.pages().iter() {
             let image = page.render_with_config(&render_config)?.as_image();
