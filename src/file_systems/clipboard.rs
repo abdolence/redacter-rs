@@ -175,6 +175,7 @@ mod tests {
     use image::RgbaImage;
 
     #[tokio::test]
+    #[cfg_attr(not(feature = "ci-clibpoard"), ignore)]
     async fn upload_download_text_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
@@ -208,6 +209,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(not(feature = "ci-clibpoard"), ignore)]
     async fn upload_download_image_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
