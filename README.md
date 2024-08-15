@@ -179,7 +179,7 @@ Installation instructions:
 - Extract the archive and copy library file `libpdfium.so` to the one of the following directory:
     - The path the redacter tool installed (such as `/usr/local/bin`)
     - The path that resides with redacter tool `/usr/local/lib/` if you have installed the tool in `/usr/local/bin`
-    - The path specified in the `LD_LIBRARY_PATH` environment variable
+    - The path with system libs like `/usr/lib/`.
 
 If library is detected correctly it will be reported in the tool output as.
 > PDF to image support: ✓ Yes
