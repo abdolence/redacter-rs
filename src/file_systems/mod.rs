@@ -1,19 +1,13 @@
 use crate::errors::AppError;
-use crate::filesystems::gcs::GoogleCloudStorageFileSystem;
-use crate::filesystems::local::LocalFileSystem;
-use crate::filesystems::zip::ZipFileSystem;
+use crate::file_systems::gcs::GoogleCloudStorageFileSystem;
+use crate::file_systems::local::LocalFileSystem;
+use crate::file_systems::zip::ZipFileSystem;
 use crate::AppResult;
 use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::prost::bytes::Bytes;
 use mime::Mime;
 use rvstruct::ValueStruct;
-
-mod file_matcher;
-pub use file_matcher::*;
-
-mod file_mime_override;
-pub use file_mime_override::*;
 
 mod aws_s3;
 mod gcs;
@@ -22,8 +16,9 @@ mod zip;
 
 mod clipboard;
 
-use crate::filesystems::aws_s3::AwsS3FileSystem;
-use crate::filesystems::clipboard::ClipboardFileSystem;
+use crate::file_systems::aws_s3::AwsS3FileSystem;
+use crate::file_systems::clipboard::ClipboardFileSystem;
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 
 #[derive(Debug, Clone, ValueStruct)]

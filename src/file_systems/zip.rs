@@ -1,8 +1,7 @@
 use crate::errors::AppError;
-use crate::filesystems::local::LocalFileSystem;
-use crate::filesystems::{
-    AbsoluteFilePath, FileMatcher, FileSystemConnection, FileSystemRef, ListFilesResult,
-};
+use crate::file_systems::local::LocalFileSystem;
+use crate::file_systems::{AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult};
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};

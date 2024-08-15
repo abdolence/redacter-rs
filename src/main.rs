@@ -10,7 +10,8 @@ use crate::errors::AppError;
 mod args;
 mod reporter;
 
-mod filesystems;
+mod file_systems;
+mod file_tools;
 
 mod errors;
 

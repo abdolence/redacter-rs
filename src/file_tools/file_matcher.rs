@@ -1,4 +1,4 @@
-use crate::filesystems::FileSystemRef;
+use crate::file_systems::FileSystemRef;
 use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ impl FileMatcher {
 #[allow(unused_imports)]
 mod tests {
     use super::*;
-    use crate::filesystems::*;
+    use crate::file_systems::*;
     use mime::Mime;
     use std::str::FromStr;
 

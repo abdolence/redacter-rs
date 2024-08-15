@@ -1,9 +1,7 @@
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
-use crate::filesystems::{
-    DetectFileSystem, FileMatcher, FileMatcherResult, FileMimeOverride, FileSystemConnection,
-    FileSystemRef,
-};
+use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
+use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
     RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions, Redacters,
 };

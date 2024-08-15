@@ -1,5 +1,6 @@
-use crate::filesystems::FileSystemConnection;
-use crate::filesystems::{DetectFileSystem, FileMatcher};
+use crate::file_systems::DetectFileSystem;
+use crate::file_systems::FileSystemConnection;
+use crate::file_tools::FileMatcher;
 use crate::AppResult;
 use console::{pad_str, Alignment, Style, Term};
 use indicatif::{HumanBytes, TermLike};

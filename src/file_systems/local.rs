@@ -1,8 +1,6 @@
 use crate::errors::AppError;
-use crate::filesystems::{
-    AbsoluteFilePath, FileMatcher, FileMatcherResult, FileSystemConnection, FileSystemRef,
-    ListFilesResult,
-};
+use crate::file_systems::{AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult};
+use crate::file_tools::{FileMatcher, FileMatcherResult};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
@@ -171,7 +169,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
 #[allow(unused_imports)]
 mod tests {
     use super::*;
-    use crate::filesystems::DetectFileSystem;
+    use crate::file_systems::DetectFileSystem;
     use console::Term;
 
     #[tokio::test]

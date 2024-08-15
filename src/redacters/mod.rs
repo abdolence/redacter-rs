@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::filesystems::FileSystemRef;
+use crate::file_systems::FileSystemRef;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};

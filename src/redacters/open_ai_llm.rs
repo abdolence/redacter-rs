@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
-use crate::filesystems::FileSystemRef;
+use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };

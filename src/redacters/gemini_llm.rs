@@ -1,7 +1,7 @@
 use crate::args::RedacterType;
 use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
-use crate::filesystems::FileSystemRef;
+use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };

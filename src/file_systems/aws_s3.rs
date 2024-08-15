@@ -1,91 +1,103 @@
-use crate::filesystems::{
-    AbsoluteFilePath, FileMatcher, FileMatcherResult, FileSystemConnection, FileSystemRef,
-    ListFilesResult, RelativeFilePath,
+use crate::errors::AppError;
+use crate::file_systems::{
+    AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult, RelativeFilePath,
 };
+use crate::file_tools::{FileMatcher, FileMatcherResult};
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use futures::{Stream, TryStreamExt};
-use gcloud_sdk::prost::bytes;
+use futures::Stream;
+use futures::TryStreamExt;
+use gcloud_sdk::prost::bytes::Bytes;
 use rvstruct::ValueStruct;
-use std::default::Default;
 
-pub struct GoogleCloudStorageFileSystem<'a> {
-    google_rest_client: gcloud_sdk::GoogleRestApi,
+pub struct AwsS3FileSystem<'a> {
     bucket_name: String,
     object_name: String,
+    client: aws_sdk_s3::Client,
     is_dir: bool,
     reporter: &'a AppReporter<'a>,
 }
 
-impl<'a> GoogleCloudStorageFileSystem<'a> {
+impl<'a> AwsS3FileSystem<'a> {
     pub async fn new(path: &str, reporter: &'a AppReporter<'a>) -> AppResult<Self> {
-        let google_rest_client = gcloud_sdk::GoogleRestApi::new().await?;
-        let (bucket_name, object_name) = GoogleCloudStorageFileSystem::parse_gcs_path(path);
+        let shared_config = aws_config::load_from_env().await;
+        let (bucket_name, object_name) = Self::parse_s3_path(path)?;
         let is_dir = object_name.ends_with('/');
-        Ok(GoogleCloudStorageFileSystem {
-            google_rest_client,
+        let client = aws_sdk_s3::Client::new(&shared_config);
+
+        Ok(AwsS3FileSystem {
             bucket_name,
             object_name,
+            client,
             is_dir,
             reporter,
         })
     }
 
-    fn parse_gcs_path(path: &str) -> (String, String) {
-        let path = path.trim_start_matches("gs://");
-        let parts: Vec<&str> = path.split('/').collect();
-        let bucket = parts[0];
-        if parts.len() == 1 || (parts.len() == 2 && parts[1].is_empty()) {
-            (bucket.to_string(), "/".to_string())
+    fn parse_s3_path(path: &str) -> AppResult<(String, String)> {
+        let path_parts: Vec<&str> = path.trim_start_matches("s3://").split('/').collect();
+        if path_parts.len() < 2 {
+            return Err(AppError::SystemError {
+                message: format!("Invalid S3 path: {}", path),
+            });
+        }
+        if path_parts[1].is_empty() {
+            Ok((path_parts[0].to_string(), "/".to_string()))
         } else {
-            let object = parts[1..].join("/");
-            (bucket.to_string(), object.to_string())
+            Ok((path_parts[0].to_string(), path_parts[1..].join("/")))
         }
     }
 
     #[async_recursion::async_recursion]
-    async fn list_files_with_token(
+    async fn list_files_recursively(
         &self,
         prefix: Option<String>,
-        page_token: Option<String>,
+        continuation_token: Option<String>,
         file_matcher: &Option<&FileMatcher>,
     ) -> AppResult<ListFilesResult> {
-        let config = self
-            .google_rest_client
-            .create_google_storage_v1_config()
-            .await?;
-        let list_params = gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodListParams {
-            bucket: self.bucket_name.clone(),
-            prefix,
-            page_token,
-            ..gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodListParams::default()
-        };
-        let list = gcloud_sdk::google_rest_apis::storage_v1::objects_api::storage_objects_list(
-            &config,
-            list_params,
-        )
-        .await?;
+        let list_req = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket_name)
+            .set_prefix(prefix)
+            .set_continuation_token(continuation_token.clone());
+        let list_resp = list_req.send().await?;
 
-        match list.items {
-            Some(items) => Ok({
-                let all_found: Vec<FileSystemRef> = items
+        match list_resp.contents {
+            Some(contents) => {
+                let all_found: Vec<FileSystemRef> = contents
                     .into_iter()
-                    .filter(|item| item.name.iter().all(|key| !key.ends_with('/')))
+                    .filter(|item| item.key.iter().all(|key| !key.ends_with('/')))
                     .filter_map(|item| {
-                        item.name.map(|name| FileSystemRef {
-                            relative_path: name.trim_start_matches(&self.object_name).into(),
-                            media_type: item.content_type.and_then(|v| v.parse().ok()),
-                            file_size: item.size.and_then(|v| v.parse::<u64>().ok()),
+                        item.key.map(|name| {
+                            let relative_path: RelativeFilePath =
+                                name.trim_start_matches(&self.object_name).into();
+                            let media_type = mime_guess::from_path(&name).first();
+                            FileSystemRef {
+                                relative_path,
+                                media_type,
+                                file_size: item.size.map(|v| v as u64),
+                            }
                         })
                     })
                     .collect();
-                let next_list_result =
-                    if list.next_page_token.as_ref().iter().any(|v| !v.is_empty()) {
-                        self.list_files_with_token(None, list.next_page_token, file_matcher)
-                            .await?
-                    } else {
-                        ListFilesResult::EMPTY
-                    };
+
+                let next_list_result = if list_resp
+                    .next_continuation_token
+                    .as_ref()
+                    .iter()
+                    .any(|v| !v.is_empty())
+                {
+                    self.list_files_recursively(
+                        None,
+                        list_resp.next_continuation_token,
+                        file_matcher,
+                    )
+                    .await?
+                } else {
+                    ListFilesResult::EMPTY
+                };
+
                 let all_found_len = all_found.len();
                 let filtered_files: Vec<FileSystemRef> = all_found
                     .into_iter()
@@ -96,40 +108,26 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
                     })
                     .collect();
                 let skipped = all_found_len - filtered_files.len();
-                ListFilesResult {
+
+                Ok(ListFilesResult {
                     files: [filtered_files, next_list_result.files].concat(),
                     skipped: next_list_result.skipped + skipped,
-                }
-            }),
+                })
+            }
             None => Ok(ListFilesResult::EMPTY),
         }
     }
 }
 
-impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
+impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
     async fn download(
         &mut self,
         file_ref: Option<&FileSystemRef>,
     ) -> AppResult<(
         FileSystemRef,
-        Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>,
+        Box<dyn Stream<Item = AppResult<Bytes>> + Send + Sync + Unpin + 'static>,
     )> {
-        let config = self
-            .google_rest_client
-            .create_google_storage_v1_config()
-            .await?;
-
         let object_name = self.resolve(file_ref).file_path;
-
-        let object = gcloud_sdk::google_rest_apis::storage_v1::objects_api::storage_objects_get(
-            &config,
-            gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodGetParams {
-                bucket: self.bucket_name.clone(),
-                object: object_name.clone(),
-                ..gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodGetParams::default()
-            },
-        ).await?;
-
         let relative_path: RelativeFilePath = if self.is_dir {
             object_name
                 .clone()
@@ -144,6 +142,14 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
                 .into()
         };
 
+        let object = self
+            .client
+            .get_object()
+            .bucket(&self.bucket_name)
+            .key(&object_name)
+            .send()
+            .await?;
+
         let found_file_ref = FileSystemRef {
             relative_path: relative_path.clone(),
             media_type: object
@@ -151,49 +157,37 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
                 .map(|v| v.parse())
                 .transpose()?
                 .or_else(|| mime_guess::from_path(relative_path.value()).first()),
-            file_size: object.size.and_then(|v| v.parse::<u64>().ok()),
+            file_size: object.content_length.map(|v| v as u64),
         };
 
-        let stream = gcloud_sdk::google_rest_apis::storage_v1::objects_api::storage_objects_get_stream(
-            &config,
-            gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodGetParams {
-                bucket: self.bucket_name.clone(),
-                object: object_name.clone(),
-                ..gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodGetParams::default()
-            }
-        ).await?;
-        Ok((
-            found_file_ref,
-            Box::new(stream.map_err(|err| gcloud_sdk::error::Error::from(err).into())),
-        ))
+        let reader = object.body.into_async_read();
+        let stream = tokio_util::io::ReaderStream::new(reader).map_err(AppError::from);
+
+        Ok((found_file_ref, Box::new(stream)))
     }
 
-    async fn upload<S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static>(
+    async fn upload<S: Stream<Item = AppResult<Bytes>> + Send + Unpin + Sync + 'static>(
         &mut self,
         input: S,
         file_ref: Option<&FileSystemRef>,
     ) -> AppResult<()> {
         let object_name = self.resolve(file_ref).file_path;
-
-        let config = self
-            .google_rest_client
-            .create_google_storage_v1_config()
-            .await?;
         let content_type = file_ref
             .and_then(|fr| fr.media_type.as_ref())
             .map(|v| v.to_string());
-        let reader = sync_wrapper::SyncStream::new(input);
-        let params =gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodInsertParams {
-            bucket: self.bucket_name.clone(),
-            name: Some(object_name),
-            ..gcloud_sdk::google_rest_apis::storage_v1::objects_api::StoragePeriodObjectsPeriodInsertParams::default()
-        };
-        let _ = gcloud_sdk::google_rest_apis::storage_v1::objects_api::storage_objects_insert_ext_stream(
-            &config,
-            params,
-            content_type,
-            reader
-        ).await?;
+        let body_bytes: Vec<Bytes> = input.try_collect().await?;
+        let all_bytes = body_bytes.concat();
+        let body = aws_sdk_s3::primitives::ByteStream::from(all_bytes);
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket_name)
+            .key(&object_name)
+            .set_content_type(content_type)
+            .body(body)
+            .send()
+            .await?;
+
         Ok(())
     }
 
@@ -206,13 +200,16 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             self.bucket_name, self.object_name
         ))?;
         if self.object_name.ends_with('/') {
-            let prefix = if self.object_name != "/" {
-                Some(self.object_name.clone())
-            } else {
-                None
-            };
-            self.list_files_with_token(prefix, None, &file_matcher)
-                .await
+            self.list_files_recursively(
+                if self.object_name == "/" {
+                    None
+                } else {
+                    Some(self.object_name.clone())
+                },
+                None,
+                &file_matcher,
+            )
+            .await
         } else {
             Ok(ListFilesResult::EMPTY)
         }
@@ -256,17 +253,19 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
 mod tests {
     use super::*;
     use crate::reporter::AppReporter;
+    use rvstruct::ValueStruct;
+    use tokio_util::bytes;
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
     async fn upload_download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let test_gcp_bucket_name =
-            std::env::var("TEST_GCS_BUCKET_NAME").expect("TEST_GCS_BUCKET_NAME required");
+            std::env::var("TEST_AWS_BUCKET_NAME").expect("TEST_AWS_BUCKET_NAME required");
 
-        let mut fs = GoogleCloudStorageFileSystem::new(
-            &format!("gs://{}/redacter/test-upload/", test_gcp_bucket_name),
+        let mut fs = AwsS3FileSystem::new(
+            &format!("s3://{}/redacter/test-upload/", test_gcp_bucket_name),
             &reporter,
         )
         .await?;
@@ -306,15 +305,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
     async fn list_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let test_gcp_bucket_name =
-            std::env::var("TEST_GCS_BUCKET_NAME").expect("TEST_GCS_BUCKET_NAME required");
+            std::env::var("TEST_AWS_BUCKET_NAME").expect("TEST_AWS_BUCKET_NAME required");
 
-        let mut fs = GoogleCloudStorageFileSystem::new(
-            &format!("gs://{}/redacter/test-list/", test_gcp_bucket_name),
+        let mut fs = AwsS3FileSystem::new(
+            &format!("s3://{}/redacter/test-list/", test_gcp_bucket_name),
             &reporter,
         )
         .await?;

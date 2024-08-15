@@ -1,7 +1,6 @@
 use crate::errors::AppError;
-use crate::filesystems::{
-    AbsoluteFilePath, FileMatcher, FileSystemConnection, FileSystemRef, ListFilesResult,
-};
+use crate::file_systems::{AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult};
+use crate::file_tools::FileMatcher;
 use crate::redacters::Redacters;
 use crate::reporter::AppReporter;
 use crate::AppResult;
