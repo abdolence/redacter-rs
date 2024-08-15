@@ -73,10 +73,14 @@ Options:
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
           List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm]
-      --gcp-project-id <GCP_PROJECT_ID>
-          GCP project id that will be used to redact and bill API calls
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
+      --gcp-project-id <GCP_PROJECT_ID>
+          GCP project id that will be used to redact and bill API calls
+      --gcp-dlp-built-in-info-type <GCP_DLP_BUILT_IN_INFO_TYPE>
+          Additional GCP DLP built in info types for redaction
+      --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
+          Additional GCP DLP user defined stored info types for redaction
       --csv-headers-disable
           Disable CSV headers (if they are not present)
       --csv-delimiter <CSV_DELIMITER>
