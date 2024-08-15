@@ -62,8 +62,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
-    let bold_style = Style::new().bold();
-
     match cli.command {
         CliCommand::Cp {
             source,
@@ -87,8 +85,8 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                     "{} -> {}\n{} files processed.\n{} files skipped.",
                     source,
                     destination,
-                    bold_style
-                        .clone()
+                    Style::new()
+                        .bold()
                         .green()
                         .apply_to(copy_result.files_copied),
                     Style::new().yellow().apply_to(copy_result.files_skipped),
