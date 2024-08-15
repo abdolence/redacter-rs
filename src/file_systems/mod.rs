@@ -105,27 +105,27 @@ impl<'a> DetectFileSystem<'a> {
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<impl FileSystemConnection<'a>> {
         if file_path.starts_with("file://") || !file_path.contains("://") {
-            return Ok(DetectFileSystem::Local(
+            Ok(DetectFileSystem::Local(
                 LocalFileSystem::new(file_path, reporter).await?,
-            ));
+            ))
         } else if file_path.starts_with("gs://") {
-            return Ok(DetectFileSystem::GoogleCloudStorage(
+            Ok(DetectFileSystem::GoogleCloudStorage(
                 GoogleCloudStorageFileSystem::new(file_path, reporter).await?,
-            ));
+            ))
         } else if file_path.starts_with("s3://") {
-            return Ok(DetectFileSystem::AwsS3(
+            Ok(DetectFileSystem::AwsS3(
                 AwsS3FileSystem::new(file_path, reporter).await?,
-            ));
+            ))
         } else if file_path.starts_with("zip://") {
-            return Ok(DetectFileSystem::ZipFile(
+            Ok(DetectFileSystem::ZipFile(
                 ZipFileSystem::new(file_path, reporter).await?,
-            ));
+            ))
         } else if file_path.starts_with("clipboard://") {
             #[cfg(feature = "clipboard")]
             {
-                return Ok(DetectFileSystem::Clipboard(
+                Ok(DetectFileSystem::Clipboard(
                     clipboard::ClipboardFileSystem::new(file_path, reporter).await?,
-                ));
+                ))
             }
             #[cfg(not(feature = "clipboard"))]
             {
