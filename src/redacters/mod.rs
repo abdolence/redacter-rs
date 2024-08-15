@@ -88,7 +88,7 @@ impl Display for RedacterOptions {
             .iter()
             .map(|o| match o {
                 RedacterProviderOptions::GcpDlp(_) => "gcp-dlp".to_string(),
-                RedacterProviderOptions::AwsComprehend(_) => "aws-comprehend-dlp".to_string(),
+                RedacterProviderOptions::AwsComprehend(_) => "aws-comprehend".to_string(),
                 RedacterProviderOptions::MsPresidio(_) => "ms-presidio".to_string(),
                 RedacterProviderOptions::GeminiLlm(_) => "gemini-llm".to_string(),
                 RedacterProviderOptions::OpenAiLlm(_) => "openai-llm".to_string(),
