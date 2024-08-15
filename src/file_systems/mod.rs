@@ -16,6 +16,8 @@ mod zip;
 
 mod clipboard;
 
+mod noop;
+
 use crate::file_systems::aws_s3::AwsS3FileSystem;
 use crate::file_systems::clipboard::ClipboardFileSystem;
 use crate::file_tools::FileMatcher;
