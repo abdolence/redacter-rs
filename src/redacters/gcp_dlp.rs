@@ -12,6 +12,7 @@ use gcloud_sdk::tonic::metadata::MetadataValue;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use mime::Mime;
 use rvstruct::ValueStruct;
+use std::collections::HashSet;
 use tokio_util::bytes;
 
 #[derive(Clone)]
@@ -25,6 +26,8 @@ pub struct GcpDlpRedacter<'a> {
 #[derive(Debug, Clone)]
 pub struct GcpDlpRedacterOptions {
     pub project_id: GcpProjectId,
+    pub user_defined_built_in_info_types: Vec<String>,
+    pub user_defined_stored_info_types: Vec<String>,
 }
 
 impl<'a> GcpDlpRedacter<'a> {
@@ -71,8 +74,8 @@ impl<'a> GcpDlpRedacter<'a> {
                     "projects/{}/locations/global",
                     self.gcp_dlp_options.project_id.value()
                 ),
-                inspect_config: Some(Self::create_inspect_config()),
-                deidentify_config: Some(Self::create_deidentify_config()),
+                inspect_config: Some(self.create_inspect_config()),
+                deidentify_config: Some(self.create_deidentify_config()),
                 item: Some(input.content.try_into()?),
                 ..gcloud_sdk::google::privacy::dlp::v2::DeidentifyContentRequest::default()
             },
@@ -108,7 +111,7 @@ impl<'a> GcpDlpRedacter<'a> {
                     "projects/{}/locations/global",
                     self.gcp_dlp_options.project_id.value()
                 ),
-                inspect_config: Some(Self::create_inspect_config()),
+                inspect_config: Some(self.create_inspect_config()),
                 byte_item: Some(input_bytes_content),
                 ..gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest::default()
             });
@@ -142,26 +145,63 @@ impl<'a> GcpDlpRedacter<'a> {
         }
     }
 
-    fn create_inspect_config() -> gcloud_sdk::google::privacy::dlp::v2::InspectConfig {
+    fn create_inspect_config(&self) -> gcloud_sdk::google::privacy::dlp::v2::InspectConfig {
         gcloud_sdk::google::privacy::dlp::v2::InspectConfig {
-            info_types: Self::INFO_TYPES
+            info_types: self
+                .create_built_in_info_types()
                 .iter()
                 .map(|v| gcloud_sdk::google::privacy::dlp::v2::InfoType {
                     name: v.to_string(),
                     ..gcloud_sdk::google::privacy::dlp::v2::InfoType::default()
                 })
                 .collect(),
+            custom_info_types: self
+                .gcp_dlp_options
+                .user_defined_stored_info_types
+                .iter()
+                .map(
+                    |stored_info_type_name| {
+                        gcloud_sdk::google::privacy::dlp::v2::CustomInfoType {
+                info_type: Some(gcloud_sdk::google::privacy::dlp::v2::InfoType {
+                    name: stored_info_type_name.clone(),
+                    ..gcloud_sdk::google::privacy::dlp::v2::InfoType::default()
+                }),
+                r#type: Some(
+                    gcloud_sdk::google::privacy::dlp::v2::custom_info_type::Type::StoredType(
+                        gcloud_sdk::google::privacy::dlp::v2::StoredType {
+                            name: format!(
+                                "projects/{}/storedInfoTypes/{}",
+                                self.gcp_dlp_options.project_id.value(),
+                                stored_info_type_name
+                            ),
+                            ..gcloud_sdk::google::privacy::dlp::v2::StoredType::default()
+                        },
+                    ),
+                ),
+                ..gcloud_sdk::google::privacy::dlp::v2::CustomInfoType::default()
+            }
+                    },
+                )
+                .collect(),
             ..gcloud_sdk::google::privacy::dlp::v2::InspectConfig::default()
         }
     }
 
-    fn create_deidentify_config() -> gcloud_sdk::google::privacy::dlp::v2::DeidentifyConfig {
+    fn create_deidentify_config(&self) -> gcloud_sdk::google::privacy::dlp::v2::DeidentifyConfig {
+        let user_stored_info_types_set: HashSet<&str> = self
+            .gcp_dlp_options
+            .user_defined_stored_info_types
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         gcloud_sdk::google::privacy::dlp::v2::DeidentifyConfig {
             transformation: Some(gcloud_sdk::google::privacy::dlp::v2::deidentify_config::Transformation::InfoTypeTransformations(
                 gcloud_sdk::google::privacy::dlp::v2::InfoTypeTransformations {
                     transformations: vec![
                         gcloud_sdk::google::privacy::dlp::v2::info_type_transformations::InfoTypeTransformation {
-                            info_types: Self::INFO_TYPES.iter().map(|v| gcloud_sdk::google::privacy::dlp::v2::InfoType {
+                            info_types: self.create_built_in_info_types().union(
+                                &user_stored_info_types_set
+                            ).collect::<Vec<_>>().iter().map(|v| gcloud_sdk::google::privacy::dlp::v2::InfoType {
                                 name: v.to_string(),
                                 ..gcloud_sdk::google::privacy::dlp::v2::InfoType::default()
                             }).collect(),
@@ -181,6 +221,20 @@ impl<'a> GcpDlpRedacter<'a> {
                 })),
             ..gcloud_sdk::google::privacy::dlp::v2::DeidentifyConfig::default()
         }
+    }
+
+    fn create_built_in_info_types(&self) -> HashSet<&str> {
+        [
+            Self::INFO_TYPES.to_vec(),
+            self.gcp_dlp_options
+                .user_defined_built_in_info_types
+                .iter()
+                .map(|v| v.as_str())
+                .collect(),
+        ]
+        .concat()
+        .into_iter()
+        .collect()
     }
 
     fn check_supported_image_type(mime_type: &Mime) -> bool {
@@ -410,6 +464,8 @@ mod tests {
         let redacter = GcpDlpRedacter::new(
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
+                user_defined_built_in_info_types: vec![],
+                user_defined_stored_info_types: vec![],
             },
             &reporter,
         )
