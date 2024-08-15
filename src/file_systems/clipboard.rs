@@ -57,7 +57,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                     Ok((
                         FileSystemRef {
                             relative_path: format!("{}.png", filename).into(),
-                            media_type: Some(mime::TEXT_PLAIN),
+                            media_type: Some(mime::IMAGE_PNG),
                             file_size: Some(png_image_bytes.len() as u64),
                         },
                         Box::new(futures::stream::iter(vec![Ok(bytes::Bytes::from(
@@ -164,5 +164,85 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                     .unwrap_or("".to_string())
             ),
         }
+    }
+}
+
+#[allow(unused_imports)]
+mod tests {
+    use super::*;
+    use crate::file_systems::DetectFileSystem;
+    use console::Term;
+    use image::RgbaImage;
+
+    #[tokio::test]
+    async fn upload_download_text_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+
+        let mut fs = DetectFileSystem::open(&format!("clipboard://"), &reporter).await?;
+
+        let test_content = "Test content";
+
+        fs.upload(
+            futures::stream::iter(vec![Ok(bytes::Bytes::from(test_content))]),
+            Some(&FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(13),
+            }),
+        )
+        .await?;
+
+        let (file_ref, stream) = fs.download(None).await?;
+
+        let downloaded_bytes: Vec<bytes::Bytes> = stream.try_collect().await?;
+        let flattened_bytes = downloaded_bytes.concat();
+        let downloaded_content = std::str::from_utf8(&flattened_bytes)?;
+        assert_eq!(downloaded_content, test_content);
+        assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
+        assert_eq!(file_ref.file_size, Some(test_content.len() as u64));
+
+        fs.close().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_download_image_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+
+        let mut fs = DetectFileSystem::open(&format!("clipboard://"), &reporter).await?;
+
+        let test_content: image::RgbaImage = RgbaImage::new(100, 100);
+        let mut writer = std::io::Cursor::new(Vec::new());
+        test_content.write_to(&mut writer, ImageFormat::Png)?;
+        let png_image_bytes = writer.into_inner();
+        let png_images_bytes_len = png_image_bytes.len() as u64;
+
+        fs.upload(
+            futures::stream::iter(vec![Ok(bytes::Bytes::from(png_image_bytes))]),
+            Some(&FileSystemRef {
+                relative_path: "temp_file.png".into(),
+                media_type: Some(mime::IMAGE_PNG),
+                file_size: Some(png_images_bytes_len),
+            }),
+        )
+        .await?;
+
+        let (file_ref, stream) = fs.download(None).await?;
+
+        let downloaded_bytes: Vec<bytes::Bytes> = stream.try_collect().await?;
+        let flattened_bytes = downloaded_bytes.concat();
+        let downloaded_content =
+            image::load_from_memory_with_format(&flattened_bytes, ImageFormat::Png)?;
+        assert_eq!(downloaded_content.width(), 100);
+        assert_eq!(downloaded_content.height(), 100);
+        assert_eq!(file_ref.media_type, Some(mime::IMAGE_PNG));
+        assert_eq!(file_ref.file_size, Some(png_images_bytes_len));
+
+        fs.close().await?;
+
+        Ok(())
     }
 }
