@@ -93,7 +93,6 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
                 message: "Filename is empty".to_string(),
             })?
             .to_string_lossy()
-            .replace(self.root_path.as_str(), "")
             .to_string();
         let file_metadata = tokio::fs::metadata(&file_path).await?;
         let file_ref = FileSystemRef {

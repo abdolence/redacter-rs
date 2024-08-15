@@ -124,11 +124,7 @@ pub async fn command_copy(
         }
         bar.println("Copying directory and listing source files...");
         let source_files_result = source_fs.list_files(Some(&options.file_matcher)).await?;
-        let source_files: Vec<FileSystemRef> = source_files_result
-            .files
-            .into_iter()
-            .map(|f| options.file_mime_override.override_for_file_ref(f))
-            .collect();
+        let source_files: Vec<FileSystemRef> = source_files_result.files;
         let files_found = source_files.len();
         let files_total_size: u64 = source_files
             .iter()
@@ -221,6 +217,7 @@ async fn transfer_and_redact_file<
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
+
     let base_resolved_file_ref = source_fs.resolve(Some(&base_file_ref));
     match options.file_matcher.matches(&base_file_ref) {
         FileMatcherResult::SkippedDueToSize | FileMatcherResult::SkippedDueToName => {
@@ -231,6 +228,7 @@ async fn transfer_and_redact_file<
     }
 
     let file_ref = source_file_ref.unwrap_or(&base_file_ref);
+
     let dest_file_ref = FileSystemRef {
         relative_path: file_ref.relative_path.clone(),
         media_type: file_ref.media_type.clone(),
@@ -284,6 +282,7 @@ async fn transfer_and_redact_file<
             bold_style,
             source_reader,
             file_ref,
+            options,
             redacter_with_options,
             file_converters,
         )
@@ -298,6 +297,7 @@ async fn transfer_and_redact_file<
     Ok(transfer_result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn redact_upload_file<
     'a,
     SFS: FileSystemConnection<'a>,
@@ -309,13 +309,19 @@ async fn redact_upload_file<
     bold_style: Style,
     source_reader: S,
     dest_file_ref: &FileSystemRef,
+    options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
     file_converters: &FileConverters,
 ) -> AppResult<TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let mut support_redacters = Vec::new();
+    let dest_file_ref_overridden = options
+        .file_mime_override
+        .override_for_file_ref(dest_file_ref.clone());
     for redacter in redacters {
-        let redacter_supported_options = redacter.redact_supported_options(dest_file_ref).await?;
+        let redacter_supported_options = redacter
+            .redact_supported_options(&dest_file_ref_overridden)
+            .await?;
         if redacter_supported_options != RedactSupportedOptions::Unsupported {
             support_redacters.push(redacter);
         }
@@ -325,7 +331,7 @@ async fn redact_upload_file<
             &support_redacters,
             redacter_base_options,
             source_reader,
-            dest_file_ref,
+            &dest_file_ref_overridden,
             file_converters,
             bar,
         )
