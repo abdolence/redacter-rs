@@ -120,16 +120,25 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "GCP project id that will be used to redact and bill API calls"
-    )]
-    pub gcp_project_id: Option<GcpProjectId>,
-
-    #[arg(
-        long,
         help = "Allow unsupported types to be copied without redaction",
         default_value = "false"
     )]
     pub allow_unsupported_copies: bool,
+
+    #[arg(
+        long,
+        help = "GCP project id that will be used to redact and bill API calls"
+    )]
+    pub gcp_project_id: Option<GcpProjectId>,
+
+    #[arg(long, help = "Additional GCP DLP built in info types for redaction")]
+    pub gcp_dlp_built_in_info_type: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        help = "Additional GCP DLP user defined stored info types for redaction"
+    )]
+    pub gcp_dlp_stored_info_type: Option<Vec<String>>,
 
     #[arg(
         long,
@@ -184,6 +193,14 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     Some(ref project_id) => {
                         Ok(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
                             project_id: project_id.clone(),
+                            user_defined_built_in_info_types: self
+                                .gcp_dlp_built_in_info_type
+                                .clone()
+                                .unwrap_or_default(),
+                            user_defined_stored_info_types: self
+                                .gcp_dlp_stored_info_type
+                                .clone()
+                                .unwrap_or_default(),
                         }))
                     }
                     None => Err(AppError::RedacterConfigError {
