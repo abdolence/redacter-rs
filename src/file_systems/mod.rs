@@ -20,7 +20,6 @@ mod clipboard;
 mod noop;
 
 use crate::file_systems::aws_s3::AwsS3FileSystem;
-use crate::file_systems::clipboard::ClipboardFileSystem;
 use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 
@@ -97,7 +96,7 @@ pub enum DetectFileSystem<'a> {
     AwsS3(AwsS3FileSystem<'a>),
     ZipFile(ZipFileSystem<'a>),
     #[cfg(feature = "clipboard")]
-    Clipboard(ClipboardFileSystem<'a>),
+    Clipboard(clipboard::ClipboardFileSystem<'a>),
 }
 
 impl<'a> DetectFileSystem<'a> {
@@ -125,7 +124,7 @@ impl<'a> DetectFileSystem<'a> {
             #[cfg(feature = "clipboard")]
             {
                 return Ok(DetectFileSystem::Clipboard(
-                    ClipboardFileSystem::new(file_path, reporter).await?,
+                    clipboard::ClipboardFileSystem::new(file_path, reporter).await?,
                 ));
             }
             #[cfg(not(feature = "clipboard"))]
@@ -155,6 +154,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.download(file_ref).await,
             DetectFileSystem::AwsS3(fs) => fs.download(file_ref).await,
             DetectFileSystem::ZipFile(fs) => fs.download(file_ref).await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.download(file_ref).await,
         }
     }
@@ -169,6 +169,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.upload(input, file_ref).await,
             DetectFileSystem::AwsS3(fs) => fs.upload(input, file_ref).await,
             DetectFileSystem::ZipFile(fs) => fs.upload(input, file_ref).await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.upload(input, file_ref).await,
         }
     }
@@ -182,6 +183,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.list_files(file_matcher).await,
             DetectFileSystem::AwsS3(fs) => fs.list_files(file_matcher).await,
             DetectFileSystem::ZipFile(fs) => fs.list_files(file_matcher).await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.list_files(file_matcher).await,
         }
     }
@@ -192,6 +194,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.close().await,
             DetectFileSystem::AwsS3(fs) => fs.close().await,
             DetectFileSystem::ZipFile(fs) => fs.close().await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.close().await,
         }
     }
@@ -202,6 +205,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.has_multiple_files().await,
             DetectFileSystem::AwsS3(fs) => fs.has_multiple_files().await,
             DetectFileSystem::ZipFile(fs) => fs.has_multiple_files().await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.has_multiple_files().await,
         }
     }
@@ -212,6 +216,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.accepts_multiple_files().await,
             DetectFileSystem::AwsS3(fs) => fs.accepts_multiple_files().await,
             DetectFileSystem::ZipFile(fs) => fs.accepts_multiple_files().await,
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.accepts_multiple_files().await,
         }
     }
@@ -222,6 +227,7 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::GoogleCloudStorage(fs) => fs.resolve(file_ref),
             DetectFileSystem::AwsS3(fs) => fs.resolve(file_ref),
             DetectFileSystem::ZipFile(fs) => fs.resolve(file_ref),
+            #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.resolve(file_ref),
         }
     }

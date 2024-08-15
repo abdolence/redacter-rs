@@ -39,6 +39,7 @@ pub enum AppError {
     PdfiumError(#[from] pdfium_render::prelude::PdfiumError),
     #[error("Image conversion error: {0}")]
     ImageError(#[from] image::ImageError),
+    #[cfg(feature = "clipboard")]
     #[error("Clipboard error: {0}")]
     ClipboardError(#[from] arboard::Error),
     #[error("SystemTimeError: {0}")]
