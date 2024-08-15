@@ -43,10 +43,7 @@ impl PdfImageConverter {
 
 impl PdfToImage for PdfImageConverter {
     fn convert_to_images(&self, pdf_bytes: Bytes) -> AppResult<PdfInfo> {
-        let render_config = PdfRenderConfig::new()
-            .set_target_width(2000)
-            .set_maximum_height(2000)
-            .rotate_if_landscape(PdfPageRenderRotation::Degrees90, true);
+        let render_config = PdfRenderConfig::default();
         let document = self.pdfium.load_pdf_from_byte_vec(pdf_bytes.into(), None)?;
         let mut pdf_info = PdfInfo { pages: Vec::new() };
         for page in document.pages().iter() {
@@ -63,7 +60,7 @@ impl PdfToImage for PdfImageConverter {
 
     fn images_to_pdf(&self, pdf_info: PdfInfo) -> AppResult<Bytes> {
         let mut document = self.pdfium.create_new_pdf()?;
-        for src_page in pdf_info.pages {
+        for src_page in pdf_info.pages.iter().rev() {
             let mut page =
                 document
                     .pages_mut()
