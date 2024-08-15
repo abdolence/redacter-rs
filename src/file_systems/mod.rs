@@ -14,6 +14,7 @@ mod gcs;
 mod local;
 mod zip;
 
+#[cfg(feature = "clipboard")]
 mod clipboard;
 
 mod noop;
@@ -95,6 +96,7 @@ pub enum DetectFileSystem<'a> {
     GoogleCloudStorage(GoogleCloudStorageFileSystem<'a>),
     AwsS3(AwsS3FileSystem<'a>),
     ZipFile(ZipFileSystem<'a>),
+    #[cfg(feature = "clipboard")]
     Clipboard(ClipboardFileSystem<'a>),
 }
 
@@ -120,9 +122,18 @@ impl<'a> DetectFileSystem<'a> {
                 ZipFileSystem::new(file_path, reporter).await?,
             ));
         } else if file_path.starts_with("clipboard://") {
-            return Ok(DetectFileSystem::Clipboard(
-                ClipboardFileSystem::new(file_path, reporter).await?,
-            ));
+            #[cfg(feature = "clipboard")]
+            {
+                return Ok(DetectFileSystem::Clipboard(
+                    ClipboardFileSystem::new(file_path, reporter).await?,
+                ));
+            }
+            #[cfg(not(feature = "clipboard"))]
+            {
+                return Err(AppError::UnknownFileSystem {
+                    file_path: file_path.to_string(),
+                });
+            }
         } else {
             Err(AppError::UnknownFileSystem {
                 file_path: file_path.to_string(),
