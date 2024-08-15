@@ -129,6 +129,8 @@ To be able to use GCP DLP you need to:
   using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 - provide a GCP project id using `--gcp-project-id` option.
 
+Additionally you can provide the list of user defined info types using `--gcp-dlp-stored-info-type` option.
+
 ### AWS Comprehend
 
 To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
