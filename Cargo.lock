@@ -3098,6 +3098,7 @@ dependencies = [
  "rsb_derive",
  "rvstruct",
  "serde",
+ "serde_json",
  "sha2",
  "sync_wrapper 1.0.1",
  "tempfile",

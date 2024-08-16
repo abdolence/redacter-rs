@@ -63,6 +63,7 @@ pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional
 image = "0.25"
 bytes = { version = "1" }
 arboard = { version = "3", features = ["image"], optional = true }
+serde_json = "1"
 
 
 [dev-dependencies]

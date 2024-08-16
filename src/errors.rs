@@ -44,6 +44,8 @@ pub enum AppError {
     ClipboardError(#[from] arboard::Error),
     #[error("SystemTimeError: {0}")]
     SystemTimeError(#[from] SystemTimeError),
+    #[error("JSON serialization error: {0}")]
+    JsonSerializeError(#[from] serde_json::Error),
     #[error("System error: {message}")]
     SystemError { message: String },
 }

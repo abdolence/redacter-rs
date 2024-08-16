@@ -3,7 +3,8 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions, Redacters,
+    redact_stream, RedactSupportedOptions, Redacter, RedacterBaseOptions, RedacterOptions,
+    Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -327,7 +328,7 @@ async fn redact_upload_file<
         }
     }
     if !support_redacters.is_empty() {
-        match crate::redacters::redact_stream(
+        match redact_stream(
             &support_redacters,
             redacter_base_options,
             source_reader,
