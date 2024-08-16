@@ -337,11 +337,24 @@ async fn redact_upload_file<
         )
         .await
         {
-            Ok(redacted_reader) => {
+            Ok(redacted_result)
+                if redacted_result.number_of_redactions > 0
+                    || redacter_base_options.allow_unsupported_copies =>
+            {
                 destination_fs
-                    .upload(redacted_reader, Some(dest_file_ref))
+                    .upload(redacted_result.stream, Some(dest_file_ref))
                     .await?;
                 Ok(TransferFileResult::Copied)
+            }
+            Ok(_) => {
+                bar.println(
+                    format!(
+                        "↲ Skipping redaction because {} redactions were applied",
+                        bold_style.yellow().apply_to("no suitable".to_string())
+                    )
+                    .as_str(),
+                );
+                Ok(TransferFileResult::Skipped)
             }
             Err(ref error) => {
                 bar.println(
