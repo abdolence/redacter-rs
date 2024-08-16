@@ -180,11 +180,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                         }
                     })?;
                 let image = image::load_from_memory_with_format(&data, image_format)?;
-                let resized_image = image.resize(
-                    image.width().min(1024),
-                    image.height().min(1024),
-                    image::imageops::FilterType::Gaussian,
-                );
+                let resized_image = image.resize(1024, 1024, image::imageops::FilterType::Gaussian);
                 let mut resized_image_bytes = std::io::Cursor::new(Vec::new());
                 resized_image.write_to(&mut resized_image_bytes, image_format)?;
                 let resized_image_data = resized_image_bytes.into_inner();
