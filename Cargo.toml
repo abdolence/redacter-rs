@@ -15,16 +15,18 @@ categories = ["command-line-utilities"]
 description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
 
 [features]
-default = ["pdf-render", "clipboard"]
+default = ["pdf-render", "clipboard", "ocr"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
 ci-gcp-llm = [] # For testing on CI/GCP with LLM models
 ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clibpoard = [] # For testing on CI/Clipboard
+ci-ocr = [] # For testing on CI/OCR
 ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm", "ci-open-ai", "ci-clibpoard"]
 pdf-render = ["pdfium-render"]
 clipboard = ["arboard"]
+ocr = ["ocrs", "rten", "rten-imageproc"]
 
 
 [dependencies]
@@ -43,6 +45,7 @@ sha2 = "0.10"
 async-trait = "0.1"
 hex = "0.4"
 thiserror = "1"
+anyhow = "1"
 sync_wrapper = { version = "1", features = ["futures"] }
 async-recursion = "1"
 mime = "0.3"
@@ -62,8 +65,13 @@ rand = "0.8"
 pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
 image = "0.25"
 bytes = { version = "1" }
-arboard = { version = "3", features = ["image"], optional = true }
 serde_json = "1"
+arboard = { version = "3", features = ["image"], optional = true }
+ocrs = { version = "0.8", optional = true }
+rten = { version = "0.10", optional = true }
+rten-imageproc = { version = "0.10", optional = true }
+dirs = "5.0.1"
+
 
 
 [dev-dependencies]

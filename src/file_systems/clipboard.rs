@@ -180,7 +180,7 @@ mod tests {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
 
-        let mut fs = DetectFileSystem::open(&format!("clipboard://"), &reporter).await?;
+        let mut fs = DetectFileSystem::open("clipboard://", &reporter).await?;
 
         let test_content = "Test content";
 
@@ -214,7 +214,7 @@ mod tests {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
 
-        let mut fs = DetectFileSystem::open(&format!("clipboard://"), &reporter).await?;
+        let mut fs = DetectFileSystem::open("clipboard://", &reporter).await?;
 
         let test_content: image::RgbaImage = RgbaImage::new(100, 100);
         let mut writer = std::io::Cursor::new(Vec::new());

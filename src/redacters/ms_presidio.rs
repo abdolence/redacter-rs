@@ -195,22 +195,10 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
                 RedactSupportedOptions::Supported
             }
             Some(media_type)
-                if Redacters::is_mime_table(media_type)
-                    && self.ms_presidio_options.text_analyze_url.is_some() =>
-            {
-                RedactSupportedOptions::SupportedAsText
-            }
-            Some(media_type)
                 if Redacters::is_mime_image(media_type)
                     && self.ms_presidio_options.image_redact_url.is_some() =>
             {
                 RedactSupportedOptions::Supported
-            }
-            Some(media_type)
-                if Redacters::is_mime_pdf(media_type)
-                    && self.ms_presidio_options.image_redact_url.is_some() =>
-            {
-                RedactSupportedOptions::SupportedAsImages
             }
             _ => RedactSupportedOptions::Unsupported,
         })
