@@ -45,7 +45,7 @@ pub struct AbsoluteFilePath {
 pub struct FileSystemRef {
     pub relative_path: RelativeFilePath,
     pub media_type: Option<Mime>,
-    pub file_size: Option<u64>,
+    pub file_size: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +79,7 @@ pub trait FileSystemConnection<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult>;
 
     async fn close(self) -> AppResult<()>;
@@ -177,14 +178,17 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         match self {
-            DetectFileSystem::Local(fs) => fs.list_files(file_matcher).await,
-            DetectFileSystem::GoogleCloudStorage(fs) => fs.list_files(file_matcher).await,
-            DetectFileSystem::AwsS3(fs) => fs.list_files(file_matcher).await,
-            DetectFileSystem::ZipFile(fs) => fs.list_files(file_matcher).await,
+            DetectFileSystem::Local(fs) => fs.list_files(file_matcher, max_files_limit).await,
+            DetectFileSystem::GoogleCloudStorage(fs) => {
+                fs.list_files(file_matcher, max_files_limit).await
+            }
+            DetectFileSystem::AwsS3(fs) => fs.list_files(file_matcher, max_files_limit).await,
+            DetectFileSystem::ZipFile(fs) => fs.list_files(file_matcher, max_files_limit).await,
             #[cfg(feature = "clipboard")]
-            DetectFileSystem::Clipboard(fs) => fs.list_files(file_matcher).await,
+            DetectFileSystem::Clipboard(fs) => fs.list_files(file_matcher, max_files_limit).await,
         }
     }
 

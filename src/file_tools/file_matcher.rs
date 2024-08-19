@@ -4,7 +4,7 @@ use rvstruct::ValueStruct;
 #[derive(Debug, Clone)]
 pub struct FileMatcher {
     pub filename_matcher: Option<globset::GlobMatcher>,
-    pub max_size_limit: Option<u64>,
+    pub max_size_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +17,7 @@ pub enum FileMatcherResult {
 impl FileMatcher {
     pub fn new(
         filename_matcher: Option<globset::GlobMatcher>,
-        max_size_limit: Option<u64>,
+        max_size_limit: Option<usize>,
     ) -> Self {
         FileMatcher {
             filename_matcher,

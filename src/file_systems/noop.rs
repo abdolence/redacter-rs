@@ -44,6 +44,7 @@ impl<'a> FileSystemConnection<'a> for NoopFileSystem<'a> {
     async fn list_files(
         &mut self,
         _file_matcher: Option<&FileMatcher>,
+        _max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter
             .report("NoopFileSystem does not support list_files")?;

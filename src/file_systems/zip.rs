@@ -133,13 +133,18 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.extract_zip_for_read().await?;
         match self.mode {
             Some(ZipFileSystemMode::Read {
                 _temp_dir: _,
                 ref mut temp_file_system,
-            }) => temp_file_system.list_files(file_matcher).await,
+            }) => {
+                temp_file_system
+                    .list_files(file_matcher, max_files_limit)
+                    .await
+            }
             _ => Err(AppError::SystemError {
                 message: "ZipFileSystem is not in read mode".into(),
             }),
@@ -213,7 +218,7 @@ mod tests {
         assert_eq!(downloaded_content, std::str::from_utf8(test_content)?);
         assert_eq!(file_ref.relative_path.value(), "file1.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_content.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_content.len()));
 
         fs.close().await?;
 
@@ -274,7 +279,7 @@ mod tests {
             &reporter,
         )
         .await?;
-        let list_files_result = fs.list_files(None).await?;
+        let list_files_result = fs.list_files(None, None).await?;
         assert_eq!(list_files_result.files.len(), 2);
         assert_eq!(list_files_result.skipped, 0);
 

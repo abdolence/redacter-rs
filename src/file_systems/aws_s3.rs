@@ -54,7 +54,12 @@ impl<'a> AwsS3FileSystem<'a> {
         prefix: Option<String>,
         continuation_token: Option<String>,
         file_matcher: &Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
+        if max_files_limit.iter().any(|v| *v == 0) {
+            return Ok(ListFilesResult::EMPTY);
+        }
+
         let list_req = self
             .client
             .list_objects_v2()
@@ -76,27 +81,12 @@ impl<'a> AwsS3FileSystem<'a> {
                             FileSystemRef {
                                 relative_path,
                                 media_type,
-                                file_size: item.size.map(|v| v as u64),
+                                file_size: item.size.map(|v| v as usize),
                             }
                         })
                     })
+                    .take(max_files_limit.unwrap_or(usize::MAX))
                     .collect();
-
-                let next_list_result = if list_resp
-                    .next_continuation_token
-                    .as_ref()
-                    .iter()
-                    .any(|v| !v.is_empty())
-                {
-                    self.list_files_recursively(
-                        None,
-                        list_resp.next_continuation_token,
-                        file_matcher,
-                    )
-                    .await?
-                } else {
-                    ListFilesResult::EMPTY
-                };
 
                 let all_found_len = all_found.len();
                 let filtered_files: Vec<FileSystemRef> = all_found
@@ -108,6 +98,26 @@ impl<'a> AwsS3FileSystem<'a> {
                     })
                     .collect();
                 let skipped = all_found_len - filtered_files.len();
+
+                let new_max_files_limit =
+                    max_files_limit.map(|v| v.saturating_sub(filtered_files.len()));
+
+                let next_list_result = if list_resp
+                    .next_continuation_token
+                    .as_ref()
+                    .iter()
+                    .any(|v| !v.is_empty())
+                {
+                    self.list_files_recursively(
+                        None,
+                        list_resp.next_continuation_token,
+                        file_matcher,
+                        new_max_files_limit,
+                    )
+                    .await?
+                } else {
+                    ListFilesResult::EMPTY
+                };
 
                 Ok(ListFilesResult {
                     files: [filtered_files, next_list_result.files].concat(),
@@ -157,7 +167,7 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
                 .map(|v| v.parse())
                 .transpose()?
                 .or_else(|| mime_guess::from_path(relative_path.value()).first()),
-            file_size: object.content_length.map(|v| v as u64),
+            file_size: object.content_length.map(|v| v as usize),
         };
 
         let reader = object.body.into_async_read();
@@ -194,6 +204,7 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter.report(format!(
             "Listing files in bucket: {} with prefix: {}",
@@ -208,6 +219,7 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
                 },
                 None,
                 &file_matcher,
+                max_files_limit,
             )
             .await
         } else {
@@ -277,7 +289,7 @@ mod tests {
             Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }),
         )
         .await?;
@@ -286,7 +298,7 @@ mod tests {
             .download(Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }))
             .await?;
 
@@ -297,7 +309,7 @@ mod tests {
 
         assert_eq!(file_ref.relative_path.value(), "test-upload.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_data.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_data.len()));
 
         fs.close().await?;
 
@@ -325,17 +337,17 @@ mod tests {
             Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }),
         )
         .await?;
 
-        let list_result = fs.list_files(None).await?;
+        let list_result = fs.list_files(None, None).await?;
         assert_eq!(list_result.files.len(), 1);
         let file_ref = &list_result.files[0];
         assert_eq!(file_ref.relative_path.value(), "test-upload.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_data.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_data.len()));
 
         fs.close().await?;
 

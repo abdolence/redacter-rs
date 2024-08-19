@@ -49,7 +49,12 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
         prefix: Option<String>,
         page_token: Option<String>,
         file_matcher: &Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
+        if max_files_limit.iter().any(|v| *v == 0) {
+            return Ok(ListFilesResult::EMPTY);
+        }
+
         let config = self
             .google_rest_client
             .create_google_storage_v1_config()
@@ -75,17 +80,11 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
                         item.name.map(|name| FileSystemRef {
                             relative_path: name.trim_start_matches(&self.object_name).into(),
                             media_type: item.content_type.and_then(|v| v.parse().ok()),
-                            file_size: item.size.and_then(|v| v.parse::<u64>().ok()),
+                            file_size: item.size.and_then(|v| v.parse::<usize>().ok()),
                         })
                     })
                     .collect();
-                let next_list_result =
-                    if list.next_page_token.as_ref().iter().any(|v| !v.is_empty()) {
-                        self.list_files_with_token(None, list.next_page_token, file_matcher)
-                            .await?
-                    } else {
-                        ListFilesResult::EMPTY
-                    };
+
                 let all_found_len = all_found.len();
                 let filtered_files: Vec<FileSystemRef> = all_found
                     .into_iter()
@@ -94,8 +93,26 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
                             matches!(matcher.matches(file_ref), FileMatcherResult::Matched)
                         })
                     })
+                    .take(max_files_limit.unwrap_or(usize::MAX))
                     .collect();
                 let skipped = all_found_len - filtered_files.len();
+
+                let new_max_files_limit =
+                    max_files_limit.map(|v| v.saturating_sub(filtered_files.len()));
+
+                let next_list_result =
+                    if list.next_page_token.as_ref().iter().any(|v| !v.is_empty()) {
+                        self.list_files_with_token(
+                            None,
+                            list.next_page_token,
+                            file_matcher,
+                            new_max_files_limit,
+                        )
+                        .await?
+                    } else {
+                        ListFilesResult::EMPTY
+                    };
+
                 ListFilesResult {
                     files: [filtered_files, next_list_result.files].concat(),
                     skipped: next_list_result.skipped + skipped,
@@ -151,7 +168,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
                 .map(|v| v.parse())
                 .transpose()?
                 .or_else(|| mime_guess::from_path(relative_path.value()).first()),
-            file_size: object.size.and_then(|v| v.parse::<u64>().ok()),
+            file_size: object.size.and_then(|v| v.parse::<usize>().ok()),
         };
 
         let stream = gcloud_sdk::google_rest_apis::storage_v1::objects_api::storage_objects_get_stream(
@@ -200,6 +217,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter.report(format!(
             "Listing files in bucket: {} with prefix: {}",
@@ -211,7 +229,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             } else {
                 None
             };
-            self.list_files_with_token(prefix, None, &file_matcher)
+            self.list_files_with_token(prefix, None, &file_matcher, max_files_limit)
                 .await
         } else {
             Ok(ListFilesResult::EMPTY)
@@ -278,7 +296,7 @@ mod tests {
             Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }),
         )
         .await?;
@@ -287,7 +305,7 @@ mod tests {
             .download(Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }))
             .await?;
 
@@ -298,7 +316,7 @@ mod tests {
 
         assert_eq!(file_ref.relative_path.value(), "test-upload.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_data.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_data.len()));
 
         fs.close().await?;
 
@@ -326,17 +344,17 @@ mod tests {
             Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
-                file_size: Some(test_data.len() as u64),
+                file_size: Some(test_data.len()),
             }),
         )
         .await?;
 
-        let list_result = fs.list_files(None).await?;
+        let list_result = fs.list_files(None, None).await?;
         assert_eq!(list_result.files.len(), 1);
         let file_ref = &list_result.files[0];
         assert_eq!(file_ref.relative_path.value(), "test-upload.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_data.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_data.len()));
 
         fs.close().await?;
 

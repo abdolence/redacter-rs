@@ -378,7 +378,7 @@ mod tests {
         let file_ref = FileSystemRef {
             relative_path: "temp_file.txt".into(),
             media_type: Some(mime::TEXT_PLAIN),
-            file_size: Some(test_content.len() as u64),
+            file_size: Some(test_content.len()),
         };
 
         let content = RedacterDataItemContent::Value(test_content.to_string());
