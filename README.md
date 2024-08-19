@@ -170,6 +170,9 @@ Optionally, you can provide a model name using `--open-ai-model` option. Default
 
 You can specify multiple redacters using `--redact` option multiple times.
 The tool will apply redaction in the order of the redacters specified.
+When multiple redacters are specified, the tool first tries to redact the file using the redacters that support input
+files natively.
+Only if such redacters are not available, the tool will try to redact the file using the redacters using conversions.
 
 ## PDF redaction
 
