@@ -155,7 +155,7 @@ impl<'a> Redacters<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RedactSupportedOptions {
+pub enum RedactSupport {
     Supported,
     Unsupported,
 }
@@ -163,10 +163,7 @@ pub enum RedactSupportedOptions {
 pub trait Redacter {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem>;
 
-    async fn redact_supported_options(
-        &self,
-        file_ref: &FileSystemRef,
-    ) -> AppResult<RedactSupportedOptions>;
+    async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport>;
 
     fn redacter_type(&self) -> RedacterType;
 }
@@ -182,16 +179,13 @@ impl<'a> Redacter for Redacters<'a> {
         }
     }
 
-    async fn redact_supported_options(
-        &self,
-        file_ref: &FileSystemRef,
-    ) -> AppResult<RedactSupportedOptions> {
+    async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
         match self {
-            Redacters::GcpDlp(redacter) => redacter.redact_supported_options(file_ref).await,
-            Redacters::AwsComprehend(redacter) => redacter.redact_supported_options(file_ref).await,
-            Redacters::MsPresidio(redacter) => redacter.redact_supported_options(file_ref).await,
-            Redacters::GeminiLlm(redacter) => redacter.redact_supported_options(file_ref).await,
-            Redacters::OpenAiLlm(redacter) => redacter.redact_supported_options(file_ref).await,
+            Redacters::GcpDlp(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::AwsComprehend(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::MsPresidio(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::GeminiLlm(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::OpenAiLlm(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 

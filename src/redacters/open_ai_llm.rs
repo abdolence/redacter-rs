@@ -6,7 +6,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    RedactSupportedOptions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -154,15 +154,10 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
         }
     }
 
-    async fn redact_supported_options(
-        &self,
-        file_ref: &FileSystemRef,
-    ) -> AppResult<RedactSupportedOptions> {
+    async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
         Ok(match file_ref.media_type.as_ref() {
-            Some(media_type) if Redacters::is_mime_text(media_type) => {
-                RedactSupportedOptions::Supported
-            }
-            _ => RedactSupportedOptions::Unsupported,
+            Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
+            _ => RedactSupport::Unsupported,
         })
     }
 

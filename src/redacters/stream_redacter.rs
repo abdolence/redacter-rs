@@ -4,8 +4,8 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_rgba_image_at_coords, RedactSupportedOptions, Redacter, RedacterBaseOptions,
-    RedacterDataItem, RedacterDataItemContent, Redacters,
+    redact_rgba_image_at_coords, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters,
 };
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
@@ -56,8 +56,8 @@ impl<'a> StreamRedacter<'a> {
         // Supports natively
         let mut supported_redacters = Vec::new();
         for redacter in redacters {
-            let supported_options = redacter.redact_supported_options(file_ref).await?;
-            if supported_options == RedactSupportedOptions::Supported {
+            let supported_options = redacter.redact_support(file_ref).await?;
+            if supported_options == RedactSupport::Supported {
                 supported_redacters.push(redacter);
             }
         }
@@ -69,12 +69,12 @@ impl<'a> StreamRedacter<'a> {
                     if Redacters::is_mime_table(file_ref_media) {
                         for redacter in redacters {
                             let supported_options = redacter
-                                .redact_supported_options(&FileSystemRef {
+                                .redact_support(&FileSystemRef {
                                     media_type: Some(mime::TEXT_PLAIN),
                                     ..file_ref.clone()
                                 })
                                 .await?;
-                            if supported_options == RedactSupportedOptions::Supported {
+                            if supported_options == RedactSupport::Supported {
                                 supported_redacters.push(redacter);
                             }
                         }
@@ -86,12 +86,12 @@ impl<'a> StreamRedacter<'a> {
                     {
                         for redacter in redacters {
                             let supported_options = redacter
-                                .redact_supported_options(&FileSystemRef {
+                                .redact_support(&FileSystemRef {
                                     media_type: Some(mime::IMAGE_PNG),
                                     ..file_ref.clone()
                                 })
                                 .await?;
-                            if supported_options == RedactSupportedOptions::Supported {
+                            if supported_options == RedactSupport::Supported {
                                 supported_redacters.push(redacter);
                             }
                         }
@@ -103,12 +103,12 @@ impl<'a> StreamRedacter<'a> {
                         if supported_redacters.is_empty() && self.file_converters.ocr.is_some() {
                             for redacter in redacters {
                                 let supported_options = redacter
-                                    .redact_supported_options(&FileSystemRef {
+                                    .redact_support(&FileSystemRef {
                                         media_type: Some(mime::TEXT_PLAIN),
                                         ..file_ref.clone()
                                     })
                                     .await?;
-                                if supported_options == RedactSupportedOptions::Supported {
+                                if supported_options == RedactSupport::Supported {
                                     supported_redacters.push(redacter);
                                 }
                             }
@@ -122,12 +122,12 @@ impl<'a> StreamRedacter<'a> {
                     {
                         for redacter in redacters {
                             let supported_options = redacter
-                                .redact_supported_options(&FileSystemRef {
+                                .redact_support(&FileSystemRef {
                                     media_type: Some(mime::TEXT_PLAIN),
                                     ..file_ref.clone()
                                 })
                                 .await?;
-                            if supported_options == RedactSupportedOptions::Supported {
+                            if supported_options == RedactSupport::Supported {
                                 supported_redacters.push(redacter);
                             }
                         }
