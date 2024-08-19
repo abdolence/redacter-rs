@@ -21,12 +21,14 @@ pub struct CopyCommandResult {
 pub struct CopyCommandOptions {
     pub file_matcher: FileMatcher,
     pub file_mime_override: FileMimeOverride,
+    pub max_files_limit: Option<usize>,
 }
 
 impl CopyCommandOptions {
     pub fn new(
         filename_filter: Option<globset::Glob>,
-        max_size_limit: Option<u64>,
+        max_size_limit: Option<usize>,
+        max_files_limit: Option<usize>,
         mime_override: Vec<(mime::Mime, globset::Glob)>,
     ) -> Self {
         let filename_matcher = filename_filter
@@ -35,6 +37,7 @@ impl CopyCommandOptions {
         CopyCommandOptions {
             file_matcher: FileMatcher::new(filename_matcher, max_size_limit),
             file_mime_override: FileMimeOverride::new(mime_override),
+            max_files_limit,
         }
     }
 }
@@ -90,10 +93,12 @@ pub async fn command_copy(
             });
         }
         bar.println("Copying directory and listing source files...");
-        let source_files_result = source_fs.list_files(Some(&options.file_matcher)).await?;
+        let source_files_result = source_fs
+            .list_files(Some(&options.file_matcher), options.max_files_limit)
+            .await?;
         let source_files: Vec<FileSystemRef> = source_files_result.files;
         let files_found = source_files.len();
-        let files_total_size: u64 = source_files
+        let files_total_size: usize = source_files
             .iter()
             .map(|file| file.file_size.unwrap_or(0))
             .sum();
@@ -102,7 +107,7 @@ pub async fn command_copy(
             format!(
                 "Found {} files. Total size: {}",
                 bold_style.apply_to(files_found),
-                bold_style.apply_to(HumanBytes(files_total_size))
+                bold_style.apply_to(HumanBytes(files_total_size as u64))
             )
             .as_str(),
         );
@@ -292,7 +297,7 @@ async fn transfer_and_redact_file<
                 None
             ),
             bold_style.apply_to(pad_str(
-                HumanBytes(file_ref.file_size.unwrap_or(0))
+                HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
                     .to_string()
                     .as_str(),
                 16,

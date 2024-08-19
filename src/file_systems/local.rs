@@ -37,7 +37,12 @@ impl<'a> LocalFileSystem<'a> {
         &self,
         dir_path: String,
         file_matcher: &Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
+        if max_files_limit.iter().any(|v| *v == 0) {
+            return Ok(ListFilesResult::EMPTY);
+        }
+
         let mut entries = tokio::fs::read_dir(dir_path).await?;
         let mut files = Vec::new();
         let mut skipped: usize = 0;
@@ -52,7 +57,7 @@ impl<'a> LocalFileSystem<'a> {
                         .replace(self.root_path.as_str(), "")
                         .into(),
                     media_type: mime_guess::from_path(entry.path()).first(),
-                    file_size: Some(entry.metadata().await?.len()),
+                    file_size: Some(entry.metadata().await?.len() as usize),
                 };
                 if file_matcher
                     .iter()
@@ -63,11 +68,22 @@ impl<'a> LocalFileSystem<'a> {
                     skipped += 1;
                 }
             } else if file_type.is_dir() {
+                let new_max_files_limit = max_files_limit.map(|v| v.saturating_sub(files.len()));
                 let dir_files = self
-                    .list_files_recursive(entry.path().to_string_lossy().to_string(), file_matcher)
+                    .list_files_recursive(
+                        entry.path().to_string_lossy().to_string(),
+                        file_matcher,
+                        new_max_files_limit,
+                    )
                     .await?;
                 skipped += dir_files.skipped;
                 files.extend(dir_files.files);
+            }
+
+            if let Some(limit) = max_files_limit {
+                if files.len() >= limit {
+                    break;
+                }
             }
         }
         Ok(ListFilesResult { files, skipped })
@@ -98,7 +114,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         let file_ref = FileSystemRef {
             relative_path: relative_file_path.into(),
             media_type: mime_guess::from_path(&file_path).first(),
-            file_size: Some(file_metadata.len()),
+            file_size: Some(file_metadata.len() as usize),
         };
         Ok((file_ref, Box::new(stream)))
     }
@@ -127,12 +143,13 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
     async fn list_files(
         &mut self,
         file_matcher: Option<&FileMatcher>,
+        max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter
             .report(format!("Listing files in dir: {}", self.root_path.as_str()))?;
         let source = PathBuf::from(self.root_path.as_str());
         let source_str = source.to_string_lossy().to_string();
-        self.list_files_recursive(source_str.clone(), &file_matcher)
+        self.list_files_recursive(source_str.clone(), &file_matcher, max_files_limit)
             .await
     }
 
@@ -203,7 +220,7 @@ mod tests {
         assert_eq!(downloaded_content, temp_content);
         assert_eq!(file_ref.relative_path.value(), "temp_file.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(temp_content.len() as u64));
+        assert_eq!(file_ref.file_size, Some(temp_content.len()));
 
         fs.close().await?;
 
@@ -271,7 +288,7 @@ mod tests {
         )
         .await?;
 
-        let list_files_result = fs.list_files(None).await?;
+        let list_files_result = fs.list_files(None, None).await?;
         assert_eq!(list_files_result.files.len(), 1);
         assert_eq!(
             list_files_result.files[0].relative_path.value(),

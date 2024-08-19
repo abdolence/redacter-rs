@@ -58,7 +58,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                         FileSystemRef {
                             relative_path: format!("{}.png", filename).into(),
                             media_type: Some(mime::IMAGE_PNG),
-                            file_size: Some(png_image_bytes.len() as u64),
+                            file_size: Some(png_image_bytes.len()),
                         },
                         Box::new(futures::stream::iter(vec![Ok(bytes::Bytes::from(
                             png_image_bytes,
@@ -77,7 +77,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                     FileSystemRef {
                         relative_path: format!("{}.txt", filename).into(),
                         media_type: Some(mime::TEXT_PLAIN),
-                        file_size: Some(text.len() as u64),
+                        file_size: Some(text.len()),
                     },
                     Box::new(futures::stream::iter(vec![Ok(bytes::Bytes::from(text))])),
                 ))
@@ -137,6 +137,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
     async fn list_files(
         &mut self,
         _file_matcher: Option<&FileMatcher>,
+        _max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter
             .report("Listing in clipboard is not supported")?;
@@ -201,7 +202,7 @@ mod tests {
         let downloaded_content = std::str::from_utf8(&flattened_bytes)?;
         assert_eq!(downloaded_content, test_content);
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
-        assert_eq!(file_ref.file_size, Some(test_content.len() as u64));
+        assert_eq!(file_ref.file_size, Some(test_content.len()));
 
         fs.close().await?;
 
@@ -220,7 +221,7 @@ mod tests {
         let mut writer = std::io::Cursor::new(Vec::new());
         test_content.write_to(&mut writer, ImageFormat::Png)?;
         let png_image_bytes = writer.into_inner();
-        let png_images_bytes_len = png_image_bytes.len() as u64;
+        let png_images_bytes_len = png_image_bytes.len();
 
         fs.upload(
             futures::stream::iter(vec![Ok(bytes::Bytes::from(png_image_bytes))]),

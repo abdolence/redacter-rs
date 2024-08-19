@@ -12,7 +12,7 @@ pub struct LsCommandOptions {
 }
 
 impl LsCommandOptions {
-    pub fn new(filename_filter: Option<globset::Glob>, max_size_limit: Option<u64>) -> Self {
+    pub fn new(filename_filter: Option<globset::Glob>, max_size_limit: Option<usize>) -> Self {
         let filename_matcher = filename_filter
             .as_ref()
             .map(|filter| filter.compile_matcher());
@@ -29,8 +29,10 @@ pub async fn command_ls(term: &Term, source: &str, options: LsCommandOptions) ->
     term.write_line(format!("Listing files in {}.", bold_style.apply_to(source)).as_str())?;
     let app_reporter = crate::reporter::AppReporter::from(term);
     let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
-    let list_files_result = source_fs.list_files(Some(&options.file_matcher)).await?;
-    let total_size: u64 = list_files_result
+    let list_files_result = source_fs
+        .list_files(Some(&options.file_matcher), None)
+        .await?;
+    let total_size: usize = list_files_result
         .files
         .iter()
         .map(|f| f.file_size.unwrap_or(0))
@@ -83,7 +85,11 @@ pub async fn command_ls(term: &Term, source: &str, options: LsCommandOptions) ->
                         None
                     ),
                     highlighted.apply_to(pad_str(
-                        format!("{}", HumanBytes(file.file_size.unwrap_or(0))).as_str(),
+                        format!(
+                            "{}",
+                            HumanBytes(file.file_size.map(|sz| sz as u64).unwrap_or(0))
+                        )
+                        .as_str(),
                         16,
                         Alignment::Left,
                         None
@@ -98,7 +104,7 @@ pub async fn command_ls(term: &Term, source: &str, options: LsCommandOptions) ->
         format!(
             "{} files found. Total size: {}",
             highlighted.apply_to(list_files_result.files.len()),
-            highlighted.apply_to(HumanBytes(total_size))
+            highlighted.apply_to(HumanBytes(total_size as u64))
         )
         .as_str(),
     )?;

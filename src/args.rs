@@ -28,8 +28,17 @@ pub enum CliCommand {
             help = "Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
         )]
         destination: String,
+
         #[arg(short = 'm', long, help = "Maximum size of files to copy in bytes")]
-        max_size_limit: Option<u64>,
+        max_size_limit: Option<usize>,
+
+        #[arg(
+            short = 'n',
+            long,
+            help = "Maximum number of files to copy. Sort order is not guaranteed and depends on the provider"
+        )]
+        max_files_limit: Option<usize>,
+
         #[arg(
             short = 'f',
             long,
@@ -50,7 +59,7 @@ pub enum CliCommand {
         )]
         source: String,
         #[arg(short = 'm', long, help = "Maximum size of files to copy in bytes")]
-        max_size_limit: Option<u64>,
+        max_size_limit: Option<usize>,
         #[arg(
             short = 'f',
             long,

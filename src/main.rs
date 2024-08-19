@@ -67,11 +67,17 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
             source,
             destination,
             max_size_limit,
+            max_files_limit,
             filename_filter,
             redacter_args,
             mime_override,
         } => {
-            let options = CopyCommandOptions::new(filename_filter, max_size_limit, mime_override);
+            let options = CopyCommandOptions::new(
+                filename_filter,
+                max_size_limit,
+                max_files_limit,
+                mime_override,
+            );
             let copy_result = command_copy(
                 term,
                 &source,
