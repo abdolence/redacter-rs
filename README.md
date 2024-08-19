@@ -30,6 +30,8 @@ Google Cloud Platform's DLP API.
         * PDF files (rendering as images)
     * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
         * text, html, csv, json files
+        * images through text extraction using OCR
+        * PDF files (rendering as images from OCR)
     * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
       install on-prem).
         * text, html, csv, json files
@@ -37,8 +39,12 @@ Google Cloud Platform's DLP API.
         * PDF files (rendering as images)
     * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
         * text, html, csv, json files
+        * images that are supported by the models
+        * PDF files (rendering as images)
     * [Open AI LLM](https://openai.com/) based redaction
         * text, html, csv, json files
+        * images that are supported by the models
+        * PDF files (rendering as images)
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -184,6 +190,16 @@ Installation instructions:
 If library is detected correctly it will be reported in the tool output as.
 > PDF to image support: ✓ Yes
 
+## OCR
+
+The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
+To enable OCR you need to download the OCR models:
+
+- https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten
+- https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten
+
+and copy those files to the `~/.cache/ocrs` directory.
+
 ## Examples:
 
 ```sh
@@ -265,6 +281,14 @@ redacter ls gs://my-little-bucket/my-big-files/
   HTML/XML/JSON
   may be corrupted after redaction since they treated as text.
 - Use it at your own risk. The author is not responsible for any data loss or security breaches.
+
+## Recommended DLP providers
+
+Google Cloud Platform DLP is recommended for accurate and customizable redaction, since it is one of the most advanced
+DLP on the market.
+Image redaction in LLM models right now results in not very accurate redaction, however text redaction is quite good.
+
+For the most protection, you can use multiple DLP providers in the order of the most accurate to the least accurate.
 
 ## Licence
 
