@@ -205,6 +205,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                             gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::Text(
                                                 format!("Find anything in the attached image that look like personal information. \
                                                 Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
+                                                The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
                                                 The image width is: {}. The image height is: {}.", resized_image.width(), resized_image.height()),
                                             ),
                                         ),
@@ -327,7 +328,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                 }
             }
             _ => Err(AppError::SystemError {
-                message: "Unsupported item for text redacting".to_string(),
+                message: "Unsupported item for image redacting".to_string(),
             }),
         }
     }

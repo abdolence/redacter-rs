@@ -3157,6 +3157,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-comprehend",
  "aws-sdk-s3",
+ "base64 0.22.1",
  "bytes",
  "cargo-husky",
  "chrono",

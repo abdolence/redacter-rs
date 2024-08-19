@@ -71,6 +71,7 @@ ocrs = { version = "0.8", optional = true }
 rten = { version = "0.10", optional = true }
 rten-imageproc = { version = "0.10", optional = true }
 dirs = "5.0.1"
+base64 = "0.22"
 
 
 
