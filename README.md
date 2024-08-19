@@ -61,6 +61,11 @@ Download the latest release from [the GitHub releases](https://github.com/abdole
 cargo install redacter
 ```
 
+### Optional capabilities installation
+
+If you are planning to use PDF redaction, OCR capabilities, please follow additional steps in
+the [PDF redaction](#pdf-redaction) and [OCR](#ocr) instructions.
+
 ## Command line options
 
 Copy and redact files from a source to a destination.
