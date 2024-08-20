@@ -64,9 +64,9 @@ pub async fn command_copy(
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>3}/{len:3}",
+            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.green/dim.blue}] {pos:>3}/{len:3}",
         )?
-        .progress_chars("◉>◯"),
+        .progress_chars("━>━"),
     );
     bar.enable_steady_tick(Duration::from_millis(100));
     let app_reporter = AppReporter::from(&bar);
