@@ -124,6 +124,8 @@ Options:
           API key for OpenAI LLM redacter
       --open-ai-model <OPEN_AI_MODEL>
           Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'
+      --limit-dlp-requests <LIMIT_DLP_REQUESTS>
+          Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled
       --mime-override <MIME_OVERRIDE>
           Override media type detection using glob patterns such as 'text/plain=*.md'
   -h, --help
