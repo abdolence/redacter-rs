@@ -369,6 +369,7 @@ async fn redact_upload_file<
 
     if !supported_redacters.is_empty() {
         if let Some(ref mut throttler) = redacter_throttler {
+            *throttler = throttler.update(Instant::now());
             let delay = throttler.delay();
             if delay.as_millis() > 0 {
                 bar.println(
@@ -383,7 +384,6 @@ async fn redact_upload_file<
                 );
                 tokio::time::sleep(*delay).await;
             }
-            *throttler = throttler.update(Instant::now());
         }
         match stream_redacter
             .redact_stream(
