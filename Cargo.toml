@@ -23,6 +23,7 @@ ci-gcp-llm = [] # For testing on CI/GCP with LLM models
 ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clibpoard = [] # For testing on CI/Clipboard
 ci-ocr = [] # For testing on CI/OCR
+ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
 ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm", "ci-open-ai", "ci-clibpoard"]
 pdf-render = ["pdfium-render"]
 clipboard = ["arboard"]
@@ -39,7 +40,7 @@ indicatif = { version = "0.17" }
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.25.5", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta"] }
+gcloud-sdk = { version = "0.25.5", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta", "google-cloud-aiplatform-v1beta1"] }
 futures = "0.3"
 sha2 = "0.10"
 async-trait = "0.1"

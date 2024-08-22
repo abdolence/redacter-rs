@@ -28,14 +28,14 @@ Google Cloud Platform's DLP API.
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
         * PDF files (rendering as images)
-    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
-        * text, html, csv, json files
-        * images through text extraction using OCR
-        * PDF files (rendering as images from OCR)
     * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
       install on-prem).
         * text, html, csv, json files
         * images
+        * PDF files (rendering as images)
+    * [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs) based redaction
+        * text, html, csv, json files
+        * images that are supported by the models
         * PDF files (rendering as images)
     * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
         * text, html, csv, json files
@@ -45,6 +45,10 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images that are supported by the models
         * PDF files (rendering as images)
+    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
+        * text, html, csv, json files
+        * images through text extraction using OCR
+        * PDF files (rendering as images from OCR)
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -80,10 +84,12 @@ Arguments:
 Options:
   -m, --max-size-limit <MAX_SIZE_LIMIT>
           Maximum size of files to copy in bytes
+  -n, --max-files-limit <MAX_FILES_LIMIT>
+          Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm]
+          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai]
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
       --gcp-project-id <GCP_PROJECT_ID>
@@ -92,6 +98,14 @@ Options:
           Additional GCP DLP built in info types for redaction
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
+      --gcp-region <GCP_REGION>
+          GCP region that will be used to redact and bill API calls for Vertex AI
+      --gcp-vertex-ai-native-image-support
+          Vertex AI model supports image editing natively. Default is false.
+      --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
+          Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'
+      --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
+          Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'
       --csv-headers-disable
           Disable CSV headers (if they are not present)
       --csv-delimiter <CSV_DELIMITER>
@@ -142,12 +156,6 @@ To be able to use GCP DLP you need to:
 
 Additionally you can provide the list of user defined info types using `--gcp-dlp-stored-info-type` option.
 
-### AWS Comprehend
-
-To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
-To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
-AWS Comprehend DLP is only available for unstructured text files.
-
 ### Microsoft Presidio
 
 To be able to use Microsoft Presidio DLP you need to have a running instance of the Presidio API.
@@ -155,7 +163,28 @@ You can use Docker to run it locally or deploy it to your infrastructure.
 You need to provide the URLs for text analysis and image redaction endpoints using `--ms-presidio-text-analyze-url` and
 `--ms-presidio-image-redact-url` options.
 
+### GCP Vertex AI
+
+To be able to use GCP Vertex AI you need to:
+
+- authenticate using `gcloud auth application-default login` or provide a service account key
+  using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
+- provide a GCP project id using `--gcp-project-id` option.
+- provide a GCP region using `--gcp-region` option.
+
+You can specify different models using `--gcp-vertex-ai-text-model` and `--gcp-vertex-ai-image-model` options.
+By default, they are set to:
+
+- `publishers/google/models/gemini-1.5-flash-001` for text model
+- `publishers/google/models/gemini-1.5-pro-001` for image model
+
+In case you have access to native image editing models such as Google Imagen 3, you can enable those capabilities using
+`--gcp-vertex-ai-native-image-support` option.
+Without native image support, the tool will use LLM output and editing images by coordinates.
+
 ### Gemini LLM
+
+Consider using Vertex AI redacter for more flexibility instead of Gemini LLM.
 
 To be able to use Gemini as DLP/redacter you need to:
 
@@ -170,6 +199,12 @@ To be able to use Gemini as DLP/redacter you need to:
 
 To be able to use Open AI LLM you need to provide an API key using `--open-ai-api-key` command line option.
 Optionally, you can provide a model name using `--open-ai-model` option. Default is `gpt-4o-mini`.
+
+### AWS Comprehend
+
+To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
+To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
+AWS Comprehend DLP is only available for unstructured text files.
 
 ## Multiple redacters
 

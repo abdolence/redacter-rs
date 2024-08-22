@@ -117,7 +117,6 @@ impl<'a> GeminiLlmRedacter<'a> {
                             gcloud_sdk::google::ai::generativelanguage::v1beta::GenerationConfig {
                                 candidate_count: Some(1),
                                 temperature: Some(0.2),
-                                stop_sequences: vec![generate_random_text_separator.clone()],
                                 ..std::default::Default::default()
                             },
                         ),
