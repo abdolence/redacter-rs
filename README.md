@@ -280,6 +280,12 @@ MS Presidio redacter:
 redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/analyze --ms-presidio-image-redact-url http://localhost:5003/redact ...
 ```
 
+Vertex AI redacter:
+
+```sh
+redacter cp -d gcp-vertex-ai --gcp-project-id my-little-project --gcp-region europe-north1 tmp/source/ tmp/redacted/
+```
+
 Override media types based on filenames:
 
 ```sh
