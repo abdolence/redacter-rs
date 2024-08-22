@@ -2,7 +2,9 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
-use crate::redacters::{Redacter, RedacterBaseOptions, RedacterOptions, Redacters, StreamRedacter};
+use crate::redacters::{
+    Redacter, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::{pad_str, Alignment, Style, Term};
@@ -10,7 +12,7 @@ use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct CopyCommandResult {
     pub files_copied: usize,
@@ -73,6 +75,10 @@ pub async fn command_copy(
 
     let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
+    let mut redacter_throttler = redacter_options
+        .as_ref()
+        .and_then(|o| o.base_options.limit_dlp_requests.clone())
+        .map(|limit| limit.to_throttling_counter());
 
     let maybe_redacters = match redacter_options {
         Some(options) => {
@@ -126,6 +132,7 @@ pub async fn command_copy(
                 &options,
                 &maybe_redacters,
                 &file_converters,
+                &mut redacter_throttler,
             )
             .await?
             {
@@ -148,6 +155,7 @@ pub async fn command_copy(
                 &options,
                 &maybe_redacters,
                 &file_converters,
+                &mut redacter_throttler,
             )
             .await?
             {
@@ -246,6 +254,7 @@ async fn transfer_and_redact_file<
     options: &CopyCommandOptions,
     redacter: &Option<(RedacterBaseOptions, Vec<impl Redacter>)>,
     file_converters: &FileConverters<'a>,
+    redacter_throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<TransferFileResult> {
     let bold_style = Style::new().bold().white();
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -317,6 +326,7 @@ async fn transfer_and_redact_file<
             options,
             redacter_with_options,
             file_converters,
+            redacter_throttler,
         )
         .await?
     } else {
@@ -344,6 +354,7 @@ async fn redact_upload_file<
     options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
     file_converters: &FileConverters<'a>,
+    redacter_throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<TransferFileResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters, bar);
@@ -357,6 +368,23 @@ async fn redact_upload_file<
         .await?;
 
     if !supported_redacters.is_empty() {
+        if let Some(ref mut throttler) = redacter_throttler {
+            let delay = throttler.delay();
+            if delay.as_millis() > 0 {
+                bar.println(
+                    format!(
+                        "⧗ Delaying redaction for {} seconds",
+                        bold_style
+                            .clone()
+                            .yellow()
+                            .apply_to(throttler.delay().as_secs().to_string())
+                    )
+                    .as_str(),
+                );
+                tokio::time::sleep(*delay).await;
+            }
+            *throttler = throttler.update(Instant::now());
+        }
         match stream_redacter
             .redact_stream(
                 source_reader,

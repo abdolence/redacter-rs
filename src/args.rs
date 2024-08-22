@@ -1,4 +1,4 @@
-use crate::common_types::{GcpProjectId, GcpRegion};
+use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
     GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, OpenAiLlmApiKey,
@@ -214,6 +214,12 @@ pub struct RedacterArgs {
         help = "Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'"
     )]
     pub open_ai_model: Option<OpenAiModelName>,
+
+    #[arg(
+        long,
+        help = "Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled"
+    )]
+    pub limit_dlp_requests: Option<DlpRequestLimit>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -314,6 +320,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             csv_headers_disable: self.csv_headers_disable,
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
+            limit_dlp_requests: self.limit_dlp_requests,
         };
         Ok(RedacterOptions {
             provider_options,

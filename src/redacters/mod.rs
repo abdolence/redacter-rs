@@ -28,7 +28,11 @@ pub use simple_image_redacter::*;
 mod stream_redacter;
 pub use stream_redacter::*;
 
+mod redacter_throttler;
+pub use redacter_throttler::*;
+
 use crate::args::RedacterType;
+use crate::common_types::DlpRequestLimit;
 
 #[derive(Debug, Clone)]
 pub struct RedacterDataItem {
@@ -74,6 +78,7 @@ pub struct RedacterBaseOptions {
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
+    pub limit_dlp_requests: Option<DlpRequestLimit>,
 }
 
 #[derive(Debug, Clone)]
