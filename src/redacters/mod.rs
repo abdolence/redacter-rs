@@ -8,6 +8,9 @@ use std::fmt::Display;
 mod gcp_dlp;
 pub use gcp_dlp::*;
 
+mod gcp_vertex_ai;
+pub use gcp_vertex_ai::*;
+
 mod aws_comprehend;
 pub use aws_comprehend::*;
 
@@ -56,6 +59,7 @@ pub enum Redacters<'a> {
     MsPresidio(MsPresidioRedacter<'a>),
     GeminiLlm(GeminiLlmRedacter<'a>),
     OpenAiLlm(OpenAiLlmRedacter<'a>),
+    GcpVertexAi(GcpVertexAiRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +83,7 @@ pub enum RedacterProviderOptions {
     MsPresidio(MsPresidioRedacterOptions),
     GeminiLlm(GeminiLlmRedacterOptions),
     OpenAiLlm(OpenAiLlmRedacterOptions),
+    GcpVertexAi(GcpVertexAiRedacterOptions),
 }
 
 impl Display for RedacterOptions {
@@ -92,6 +97,7 @@ impl Display for RedacterOptions {
                 RedacterProviderOptions::MsPresidio(_) => "ms-presidio".to_string(),
                 RedacterProviderOptions::GeminiLlm(_) => "gemini-llm".to_string(),
                 RedacterProviderOptions::OpenAiLlm(_) => "openai-llm".to_string(),
+                RedacterProviderOptions::GcpVertexAi(_) => "gcp-vertex-ai".to_string(),
             })
             .collect::<Vec<String>>()
             .join(", ");
@@ -119,6 +125,9 @@ impl<'a> Redacters<'a> {
             )),
             RedacterProviderOptions::OpenAiLlm(options) => Ok(Redacters::OpenAiLlm(
                 OpenAiLlmRedacter::new(options, reporter).await?,
+            )),
+            RedacterProviderOptions::GcpVertexAi(options) => Ok(Redacters::GcpVertexAi(
+                GcpVertexAiRedacter::new(options, reporter).await?,
             )),
         }
     }
@@ -176,6 +185,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::MsPresidio(redacter) => redacter.redact(input).await,
             Redacters::GeminiLlm(redacter) => redacter.redact(input).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact(input).await,
+            Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -186,6 +196,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::MsPresidio(redacter) => redacter.redact_support(file_ref).await,
             Redacters::GeminiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -196,6 +207,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::MsPresidio(_) => RedacterType::MsPresidio,
             Redacters::GeminiLlm(_) => RedacterType::GeminiLlm,
             Redacters::OpenAiLlm(_) => RedacterType::OpenAiLlm,
+            Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
         }
     }
 }

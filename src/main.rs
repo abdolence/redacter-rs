@@ -1,11 +1,10 @@
 use std::error::Error;
 
+use crate::commands::*;
+use crate::errors::AppError;
 use args::*;
 use clap::Parser;
 use console::{Style, Term};
-
-use crate::commands::*;
-use crate::errors::AppError;
 
 mod args;
 mod reporter;

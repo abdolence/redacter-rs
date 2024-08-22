@@ -1,8 +1,8 @@
-use crate::common_types::GcpProjectId;
+use crate::common_types::{GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GeminiLlmModelName, OpenAiLlmApiKey, OpenAiModelName,
-    RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
+    GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, OpenAiLlmApiKey,
+    OpenAiModelName, RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
@@ -93,6 +93,7 @@ pub enum RedacterType {
     MsPresidio,
     GeminiLlm,
     OpenAiLlm,
+    GcpVertexAi,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -117,6 +118,7 @@ impl Display for RedacterType {
             RedacterType::MsPresidio => write!(f, "ms-presidio"),
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
             RedacterType::OpenAiLlm => write!(f, "openai-llm"),
+            RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
         }
     }
 }
@@ -148,6 +150,30 @@ pub struct RedacterArgs {
         help = "Additional GCP DLP user defined stored info types for redaction"
     )]
     pub gcp_dlp_stored_info_type: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        help = "GCP region that will be used to redact and bill API calls for Vertex AI"
+    )]
+    pub gcp_region: Option<GcpRegion>,
+
+    #[arg(
+        long,
+        help = "Vertex AI model supports image editing natively. Default is false."
+    )]
+    pub gcp_vertex_ai_native_image_support: bool,
+
+    #[arg(
+        long,
+        help = "Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'"
+    )]
+    pub gcp_vertex_ai_text_model: Option<GcpVertexAiModelName>,
+
+    #[arg(
+        long,
+        help = "Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'"
+    )]
+    pub gcp_vertex_ai_image_model: Option<GcpVertexAiModelName>,
 
     #[arg(
         long,
@@ -258,6 +284,25 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             }
                         })?,
                         model: self.open_ai_model.clone(),
+                    },
+                )),
+                RedacterType::GcpVertexAi => Ok(RedacterProviderOptions::GcpVertexAi(
+                    crate::redacters::GcpVertexAiRedacterOptions {
+                        project_id: self.gcp_project_id.clone().ok_or_else(|| {
+                            AppError::RedacterConfigError {
+                                message: "GCP project id is required for GCP Vertex AI redacter"
+                                    .to_string(),
+                            }
+                        })?,
+                        gcp_region: self.gcp_region.clone().ok_or_else(|| {
+                            AppError::RedacterConfigError {
+                                message: "GCP region is required for GCP Vertex AI redacter"
+                                    .to_string(),
+                            }
+                        })?,
+                        native_image_support: self.gcp_vertex_ai_native_image_support,
+                        text_model: self.gcp_vertex_ai_text_model.clone(),
+                        image_model: self.gcp_vertex_ai_image_model.clone(),
                     },
                 )),
             }?;
