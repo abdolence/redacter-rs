@@ -60,7 +60,6 @@ impl FromStr for DlpRequestLimit {
         let max_ops_in_units = number
             .parse::<usize>()
             .map_err(|e| format!("Failed to parse number in DlpRequestLimit: {}", e))?;
-        println!("max_ops_in_units: {}", max_ops_in_units);
         match unit {
             "rps" => Ok(DlpRequestLimit::new(
                 max_ops_in_units,
