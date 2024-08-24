@@ -2,7 +2,7 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::AppResult;
 use bytes::Bytes;
-use image::{ImageFormat, RgbaImage};
+use image::{ImageFormat, RgbImage};
 use mime::Mime;
 
 pub fn redact_image_at_coords(
@@ -15,7 +15,7 @@ pub fn redact_image_at_coords(
         message: format!("Unsupported image mime type: {}", mime),
     })?;
     let image = image::load_from_memory_with_format(&data, image_format)?;
-    let mut image = image.to_rgba8();
+    let mut image = image.to_rgb8();
     redact_rgba_image_at_coords(&mut image, &pii_coords, approximation_factor);
     let mut output = std::io::Cursor::new(Vec::new());
     image.write_to(&mut output, image_format)?;
@@ -23,7 +23,7 @@ pub fn redact_image_at_coords(
 }
 
 pub fn redact_rgba_image_at_coords(
-    image: &mut RgbaImage,
+    image: &mut RgbImage,
     pii_coords: &Vec<TextImageCoords>,
     approximation_factor: f32,
 ) {
@@ -36,7 +36,7 @@ pub fn redact_rgba_image_at_coords(
             {
                 let safe_x = x.min(image.width() - 1).max(0);
                 let safe_y = y.min(image.height() - 1).max(0);
-                image.put_pixel(safe_x, safe_y, image::Rgba([0, 0, 0, 255]));
+                image.put_pixel(safe_x, safe_y, image::Rgb([0, 0, 0]));
             }
         }
     }

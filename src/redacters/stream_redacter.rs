@@ -515,7 +515,7 @@ impl<'a> StreamRedacter<'a> {
                             RedacterDataItemContent::Value(content) => {
                                 let words_set: HashSet<&str> =
                                     HashSet::from_iter(content.split(" ").collect::<Vec<_>>());
-                                let mut redacted_image = image.to_rgba8();
+                                let mut redacted_image = image.to_rgb8();
                                 for text_coord in text_coords {
                                     if let Some(text) = &text_coord.text {
                                         if !words_set.contains(text.as_str()) {

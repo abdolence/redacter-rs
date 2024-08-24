@@ -177,6 +177,13 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
+        help = "Block none harmful content threshold for Vertex AI redacter. Default is BlockOnlyHigh since BlockNone is required a special billing settings.",
+        default_value = "false"
+    )]
+    pub gcp_vertex_ai_block_none_harmful: bool,
+
+    #[arg(
+        long,
         help = "Disable CSV headers (if they are not present)",
         default_value = "false"
     )]
@@ -309,6 +316,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         native_image_support: self.gcp_vertex_ai_native_image_support,
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),
+                        block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
                     },
                 )),
             }?;

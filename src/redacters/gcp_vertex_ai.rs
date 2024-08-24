@@ -19,6 +19,7 @@ pub struct GcpVertexAiRedacterOptions {
     pub native_image_support: bool,
     pub text_model: Option<GcpVertexAiModelName>,
     pub image_model: Option<GcpVertexAiModelName>,
+    pub block_none_harmful: bool,
 }
 
 #[derive(Debug, Clone, ValueStruct)]
@@ -30,6 +31,7 @@ pub struct GcpVertexAiRedacter<'a> {
     options: GcpVertexAiRedacterOptions,
     #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
+    safety_setting: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold
 }
 
 impl<'a> GcpVertexAiRedacter<'a> {
@@ -46,10 +48,18 @@ impl<'a> GcpVertexAiRedacter<'a> {
                 format!("https://{}-aiplatform.googleapis.com",options.gcp_region.value()),
                 None,
             ).await?;
+
+        let safety_setting = if options.block_none_harmful {
+            gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold::BlockNone
+        } else {
+            gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold::BlockOnlyHigh
+        };
+
         Ok(GcpVertexAiRedacter {
             client,
             options,
             reporter,
+            safety_setting,
         })
     }
 
@@ -82,7 +92,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::Harassment,
                             ].into_iter().map(|category| gcloud_sdk::google::cloud::aiplatform::v1beta1::SafetySetting {
                                 category: category.into(),
-                                threshold: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold::BlockNone.into(),
+                                threshold: self.safety_setting.into(),
                                 method: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockMethod::Unspecified.into(),
                             }).collect(),
                         contents: vec![
@@ -216,7 +226,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::Harassment,
                         ].into_iter().map(|category| gcloud_sdk::google::cloud::aiplatform::v1beta1::SafetySetting {
                             category: category.into(),
-                            threshold: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold::BlockNone.into(),
+                            threshold: self.safety_setting.into(),
                             method: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockMethod::Unspecified.into(),
                         }).collect(),
                         contents: vec![
@@ -334,7 +344,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::Harassment,
                         ].into_iter().map(|category| gcloud_sdk::google::cloud::aiplatform::v1beta1::SafetySetting {
                             category: category.into(),
-                            threshold: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold::BlockNone.into(),
+                            threshold: self.safety_setting.into(),
                             method: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockMethod::Unspecified.into(),
                         }).collect(),
                         contents: vec![
@@ -537,6 +547,7 @@ mod tests {
                 native_image_support: false,
                 text_model: None,
                 image_model: None,
+                block_none_harmful: false,
             },
             &reporter,
         )
