@@ -33,11 +33,8 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images
         * PDF files (rendering as images)
-    * [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs) based redaction
-        * text, html, csv, json files
-        * images that are supported by the models
-        * PDF files (rendering as images)
-    * [Gemini LLM](https://ai.google.dev/gemini-api/docs) based redaction
+    * [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs) based redaction using any available models such as
+      Gemini, Claude, etc.:
         * text, html, csv, json files
         * images that are supported by the models
         * PDF files (rendering as images)
@@ -167,6 +164,15 @@ You need to provide the URLs for text analysis and image redaction endpoints usi
 
 ### GCP Vertex AI
 
+Vertex AI redacter supports any available models etc on GCP Vertex AI Models Garden, such as:
+
+- Google Gemini
+- Claude
+- Google Imagen 3
+- etc.
+
+Default models are set to Gemini models.
+
 To be able to use GCP Vertex AI you need to:
 
 - authenticate using `gcloud auth application-default login` or provide a service account key
@@ -183,19 +189,6 @@ By default, they are set to:
 In case you have access to native image editing models such as Google Imagen 3, you can enable those capabilities using
 `--gcp-vertex-ai-native-image-support` option.
 Without native image support, the tool will use LLM output and editing images by coordinates.
-
-### Gemini LLM
-
-Consider using Vertex AI redacter for more flexibility instead of Gemini LLM.
-
-To be able to use Gemini as DLP/redacter you need to:
-
-- authenticate using `gcloud auth application-default login --client-id-file=<client_secret-file>.json` or provide a
-  service account key
-  using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
-  Please note that you need to also configure OAuth setup following the
-  official [instructions](https://ai.google.dev/gemini-api/docs/oauth#set-cloud).
-- provide a GCP project id using `--gcp-project-id` option.
 
 ### Open AI LLM
 
