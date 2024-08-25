@@ -103,6 +103,8 @@ Options:
           Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
           Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'
+      --gcp-vertex-ai-block-none-harmful
+          Block none harmful content threshold for Vertex AI redacter. Default is BlockOnlyHigh since BlockNone is required a special billing settings.
       --csv-headers-disable
           Disable CSV headers (if they are not present)
       --csv-delimiter <CSV_DELIMITER>
