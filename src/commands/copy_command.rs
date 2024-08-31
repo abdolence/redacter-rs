@@ -3,7 +3,7 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    Redacter, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+    RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -252,7 +252,7 @@ async fn transfer_and_redact_file<
     source_fs: &mut SFS,
     destination_fs: &mut DFS,
     options: &CopyCommandOptions,
-    redacter: &Option<(RedacterBaseOptions, Vec<impl Redacter>)>,
+    redacter: &Option<(RedacterBaseOptions, Vec<Redacters<'a>>)>,
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<TransferFileResult> {
@@ -352,7 +352,7 @@ async fn redact_upload_file<
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,
-    redacter_with_options: &(RedacterBaseOptions, Vec<impl Redacter>),
+    redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<TransferFileResult> {
@@ -363,11 +363,11 @@ async fn redact_upload_file<
         .file_mime_override
         .override_for_file_ref(dest_file_ref.clone());
 
-    let (redact_plan, supported_redacters) = stream_redacter
+    let redact_plan = stream_redacter
         .create_redact_plan(redacters, &dest_file_ref_overridden)
         .await?;
 
-    if !supported_redacters.is_empty() {
+    if !redact_plan.supported_redacters.is_empty() {
         if let Some(ref mut throttler) = redacter_throttler {
             *throttler = throttler.update(Instant::now());
             let delay = throttler.delay();
@@ -386,12 +386,7 @@ async fn redact_upload_file<
             }
         }
         match stream_redacter
-            .redact_stream(
-                source_reader,
-                redact_plan,
-                &supported_redacters,
-                &dest_file_ref_overridden,
-            )
+            .redact_stream(source_reader, redact_plan, &dest_file_ref_overridden)
             .await
         {
             Ok(redacted_result)

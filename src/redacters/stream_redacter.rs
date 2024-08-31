@@ -24,10 +24,11 @@ pub struct StreamRedacter<'a> {
     bar: &'a ProgressBar,
 }
 
-pub struct StreamRedactPlan {
+pub struct StreamRedactPlan<'a> {
     pub apply_pdf_image_converter: bool,
     pub apply_ocr: bool,
     pub leave_data_table_as_text: bool,
+    pub supported_redacters: Vec<&'a Redacters<'a>>,
 }
 
 impl<'a> StreamRedacter<'a> {
@@ -45,24 +46,24 @@ impl<'a> StreamRedacter<'a> {
 
     pub async fn create_redact_plan(
         &'a self,
-        redacters: &'a Vec<impl Redacter>,
+        redacters: &'a Vec<Redacters<'a>>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<(StreamRedactPlan, Vec<&'a impl Redacter>)> {
+    ) -> AppResult<StreamRedactPlan> {
         let mut stream_redact_plan = StreamRedactPlan {
             apply_pdf_image_converter: false,
             apply_ocr: false,
             leave_data_table_as_text: false,
+            supported_redacters: vec![],
         };
         // Supports natively
-        let mut supported_redacters = Vec::new();
         for redacter in redacters {
             let supported_options = redacter.redact_support(file_ref).await?;
             if supported_options == RedactSupport::Supported {
-                supported_redacters.push(redacter);
+                stream_redact_plan.supported_redacters.push(redacter);
             }
         }
 
-        if supported_redacters.is_empty() {
+        if stream_redact_plan.supported_redacters.is_empty() {
             match &file_ref.media_type {
                 Some(file_ref_media) => {
                     // Supports with conversion
@@ -75,10 +76,10 @@ impl<'a> StreamRedacter<'a> {
                                 })
                                 .await?;
                             if supported_options == RedactSupport::Supported {
-                                supported_redacters.push(redacter);
+                                stream_redact_plan.supported_redacters.push(redacter);
                             }
                         }
-                        if !supported_redacters.is_empty() {
+                        if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.leave_data_table_as_text = true;
                         }
                     } else if self.file_converters.pdf_image_converter.is_some()
@@ -92,15 +93,17 @@ impl<'a> StreamRedacter<'a> {
                                 })
                                 .await?;
                             if supported_options == RedactSupport::Supported {
-                                supported_redacters.push(redacter);
+                                stream_redact_plan.supported_redacters.push(redacter);
                             }
                         }
 
-                        if !supported_redacters.is_empty() {
+                        if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_pdf_image_converter = true;
                         }
 
-                        if supported_redacters.is_empty() && self.file_converters.ocr.is_some() {
+                        if stream_redact_plan.supported_redacters.is_empty()
+                            && self.file_converters.ocr.is_some()
+                        {
                             for redacter in redacters {
                                 let supported_options = redacter
                                     .redact_support(&FileSystemRef {
@@ -109,10 +112,10 @@ impl<'a> StreamRedacter<'a> {
                                     })
                                     .await?;
                                 if supported_options == RedactSupport::Supported {
-                                    supported_redacters.push(redacter);
+                                    stream_redact_plan.supported_redacters.push(redacter);
                                 }
                             }
-                            if !supported_redacters.is_empty() {
+                            if !stream_redact_plan.supported_redacters.is_empty() {
                                 stream_redact_plan.apply_pdf_image_converter = true;
                                 stream_redact_plan.apply_ocr = true;
                             }
@@ -128,10 +131,10 @@ impl<'a> StreamRedacter<'a> {
                                 })
                                 .await?;
                             if supported_options == RedactSupport::Supported {
-                                supported_redacters.push(redacter);
+                                stream_redact_plan.supported_redacters.push(redacter);
                             }
                         }
-                        if !supported_redacters.is_empty() {
+                        if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_ocr = true;
                         }
                     }
@@ -140,7 +143,7 @@ impl<'a> StreamRedacter<'a> {
             }
         }
 
-        Ok((stream_redact_plan, supported_redacters))
+        Ok(stream_redact_plan)
     }
 
     pub async fn redact_stream<
@@ -148,8 +151,7 @@ impl<'a> StreamRedacter<'a> {
     >(
         &'a self,
         input: S,
-        redact_plan: StreamRedactPlan,
-        redacters: &[&'a impl Redacter],
+        redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult> {
         let mut redacted = self
@@ -157,7 +159,7 @@ impl<'a> StreamRedacter<'a> {
             .await?;
         let mut number_of_redactions = 0;
 
-        for (index, redacter) in redacters.iter().enumerate() {
+        for (index, redacter) in redact_plan.supported_redacters.iter().enumerate() {
             let width = " ".repeat(index);
             if redact_plan.apply_pdf_image_converter {
                 match (
@@ -272,7 +274,7 @@ impl<'a> StreamRedacter<'a> {
         redacter_base_options: &RedacterBaseOptions,
         input: S,
         file_ref: &FileSystemRef,
-        redact_plan: &StreamRedactPlan,
+        redact_plan: &StreamRedactPlan<'a>,
     ) -> AppResult<RedacterDataItem> {
         match file_ref.media_type {
             Some(ref mime)
