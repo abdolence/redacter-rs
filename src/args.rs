@@ -6,6 +6,7 @@ use crate::redacters::{
 };
 use clap::*;
 use std::fmt::Display;
+use std::path::PathBuf;
 use url::Url;
 
 #[derive(Parser, Debug)]
@@ -51,6 +52,12 @@ pub enum CliCommand {
 
         #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
         mime_override: Vec<(mime::Mime, globset::Glob)>,
+
+        #[arg(
+            long,
+            help = "Save redacted results in JSON format to the specified file"
+        )]
+        save_json_results: Option<PathBuf>,
     },
     #[command(about = "List files in the source")]
     Ls {

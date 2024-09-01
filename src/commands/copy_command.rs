@@ -11,11 +11,14 @@ use console::{pad_str, Alignment, Style, Term};
 use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
+use serde::Serialize;
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Serialize)]
 pub struct CopyCommandResult {
     pub files_copied: usize,
+    pub files_redacted: usize,
     pub files_skipped: usize,
 }
 
@@ -121,6 +124,7 @@ pub async fn command_copy(
         bar.set_length(files_found as u64);
 
         let mut total_files_copied = 0;
+        let mut total_files_redacted = 0;
         let mut total_files_skipped = source_files_result.skipped;
         for source_file in source_files {
             match transfer_and_redact_file(
@@ -137,11 +141,16 @@ pub async fn command_copy(
             .await?
             {
                 TransferFileResult::Copied => total_files_copied += 1,
+                TransferFileResult::RedactedAndCopied => {
+                    total_files_redacted += 1;
+                    total_files_copied += 1;
+                }
                 TransferFileResult::Skipped => total_files_skipped += 1,
             }
         }
         Ok(CopyCommandResult {
             files_copied: total_files_copied,
+            files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
         })
     } else {
@@ -161,10 +170,17 @@ pub async fn command_copy(
             {
                 TransferFileResult::Copied => CopyCommandResult {
                     files_copied: 1,
+                    files_redacted: 0,
+                    files_skipped: 0,
+                },
+                TransferFileResult::RedactedAndCopied => CopyCommandResult {
+                    files_copied: 1,
+                    files_redacted: 1,
                     files_skipped: 0,
                 },
                 TransferFileResult::Skipped => CopyCommandResult {
                     files_copied: 0,
+                    files_redacted: 0,
                     files_skipped: 1,
                 },
             },
@@ -237,6 +253,7 @@ async fn report_copy_info(
 
 enum TransferFileResult {
     Copied,
+    RedactedAndCopied,
     Skipped,
 }
 
@@ -396,7 +413,11 @@ async fn redact_upload_file<
                 destination_fs
                     .upload(redacted_result.stream, Some(dest_file_ref))
                     .await?;
-                Ok(TransferFileResult::Copied)
+                if redacted_result.number_of_redactions > 0 {
+                    Ok(TransferFileResult::RedactedAndCopied)
+                } else {
+                    Ok(TransferFileResult::Copied)
+                }
             }
             Ok(_) => {
                 bar.println(
