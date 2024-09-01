@@ -86,23 +86,6 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 redacter_args.map(|args| args.try_into()).transpose()?,
             )
             .await?;
-            term.write_line(
-                format!(
-                    "\n{} -> {}: {} files copied ({} redacted). {} files skipped.",
-                    source,
-                    destination,
-                    Style::new()
-                        .bold()
-                        .green()
-                        .apply_to(copy_result.files_copied),
-                    Style::new()
-                        .green()
-                        .dim()
-                        .apply_to(copy_result.files_redacted),
-                    Style::new().yellow().apply_to(copy_result.files_skipped),
-                )
-                .as_str(),
-            )?;
             if let Some(json_path) = save_json_results {
                 let json_result = serde_json::to_string_pretty(&copy_result)?;
                 let mut file = tokio::fs::File::create(&json_path).await?;
@@ -115,6 +98,23 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                     .as_str(),
                 )?;
             }
+            term.write_line(
+                format!(
+                    "Finished: {} -> {}\nCopied: {}. Redacted: {}. Skipped: {}.",
+                    Style::new().bold().apply_to(source),
+                    Style::new().green().apply_to(destination),
+                    Style::new()
+                        .bold()
+                        .green()
+                        .apply_to(copy_result.files_copied),
+                    Style::new()
+                        .bold()
+                        .green()
+                        .apply_to(copy_result.files_redacted),
+                    Style::new().yellow().apply_to(copy_result.files_skipped),
+                )
+                .as_str(),
+            )?;
         }
         CliCommand::Ls {
             source,
