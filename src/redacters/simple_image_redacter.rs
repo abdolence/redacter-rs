@@ -34,8 +34,8 @@ pub fn redact_rgba_image_at_coords(
             for y in
                 ((y1 - y1 * approximation_factor) as u32)..((y2 + y2 * approximation_factor) as u32)
             {
-                let safe_x = x.min(image.width() - 1).max(0);
-                let safe_y = y.min(image.height() - 1).max(0);
+                let safe_x = x.min(image.width() - 1);
+                let safe_y = y.min(image.height() - 1);
                 image.put_pixel(safe_x, safe_y, image::Rgb([0, 0, 0]));
             }
         }
