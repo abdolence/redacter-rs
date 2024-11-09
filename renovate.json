@@ -5,7 +5,7 @@
   ],
   "ignoreDeps": [
     "rten",
-    "orcs",
+    "ocrs",
     "rten-imageproc"
   ]
 }
