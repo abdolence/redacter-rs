@@ -68,9 +68,9 @@ image = "0.25"
 bytes = { version = "1" }
 serde_json = "1"
 arboard = { version = "3", features = ["image"], optional = true }
-ocrs = { version = "0.8", optional = true }
-rten = { version = "0.13", optional = true }
-rten-imageproc = { version = "0.13", optional = true }
+ocrs = { version = "0.9", optional = true }
+rten = { version = "0.14", optional = true }
+rten-imageproc = { version = "0.14", optional = true }
 dirs = "5.0.1"
 base64 = "0.22"
 
