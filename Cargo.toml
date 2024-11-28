@@ -58,6 +58,7 @@ csv-async = { version = "1", default-features = false, features = ["tokio", "tok
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
+aws-sdk-bedrockruntime = { version = "1" }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
 tracing = "0.1"
