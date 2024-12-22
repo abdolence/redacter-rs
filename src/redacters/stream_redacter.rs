@@ -48,7 +48,7 @@ impl<'a> StreamRedacter<'a> {
         &'a self,
         redacters: &'a Vec<Redacters<'a>>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<StreamRedactPlan> {
+    ) -> AppResult<StreamRedactPlan<'a>> {
         let mut stream_redact_plan = StreamRedactPlan {
             apply_pdf_image_converter: false,
             apply_ocr: false,
