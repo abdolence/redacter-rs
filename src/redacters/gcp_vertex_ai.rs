@@ -240,6 +240,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             ),
                                         ),
                                         metadata: None,
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
@@ -251,6 +252,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             ),
                                         ),
                                         metadata: None,
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
@@ -360,6 +362,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             ),
                                         ),
                                         metadata: None,
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
@@ -371,6 +374,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             ),
                                         ),
                                         metadata: None,
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
