@@ -100,9 +100,9 @@ Options:
       --gcp-vertex-ai-native-image-support
           Vertex AI model supports image editing natively. Default is false.
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
-          Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'
+          Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash'
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
-          Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'
+          Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro'
       --gcp-vertex-ai-block-none-harmful
           Block none harmful content threshold for Vertex AI redacter. Default is BlockOnlyHigh since BlockNone is required a special billing settings.
       --csv-headers-disable
