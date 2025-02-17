@@ -62,7 +62,7 @@ url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rand = "0.8"
+rand = "0.9"
 pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
 image = "0.25"
 bytes = { version = "1" }
@@ -71,7 +71,7 @@ arboard = { version = "3", features = ["image"], optional = true }
 ocrs = { version = "0.8", optional = true }
 rten = { version = "0.13", optional = true }
 rten-imageproc = { version = "0.13", optional = true }
-dirs = "6.0.0"
+dirs = "5.0.1"
 base64 = "0.22"
 
 
