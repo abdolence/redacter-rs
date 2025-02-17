@@ -77,8 +77,8 @@ impl<'a> GcpVertexAiRedacter<'a> {
             model_name
         );
 
-        let mut rand = rand::thread_rng();
-        let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
+        let mut rand = rand::rng();
+        let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {

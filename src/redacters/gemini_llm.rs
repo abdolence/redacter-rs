@@ -59,8 +59,8 @@ impl<'a> GeminiLlmRedacter<'a> {
             .as_ref()
             .map(|model_name| model_name.value().to_string())
             .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
-        let mut rand = rand::thread_rng();
-        let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
+        let mut rand = rand::rng();
+        let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {

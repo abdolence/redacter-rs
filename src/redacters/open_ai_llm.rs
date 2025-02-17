@@ -121,8 +121,8 @@ impl<'a> OpenAiLlmRedacter<'a> {
             }),
         }?;
 
-        let mut rand = rand::thread_rng();
-        let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
+        let mut rand = rand::rng();
+        let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
             model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
