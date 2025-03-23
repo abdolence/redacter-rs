@@ -1,3 +1,5 @@
+#![allow(clippy::needless_lifetimes)]
+
 use std::error::Error;
 
 use crate::commands::*;
