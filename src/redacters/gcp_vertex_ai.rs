@@ -35,8 +35,8 @@ pub struct GcpVertexAiRedacter<'a> {
 }
 
 impl<'a> GcpVertexAiRedacter<'a> {
-    const DEFAULT_TEXT_MODEL: &'static str = "publishers/google/models/gemini-1.5-flash";
-    const DEFAULT_IMAGE_MODEL: &'static str = "publishers/google/models/gemini-1.5-pro"; // "publishers/google/models/imagegeneration";
+    const DEFAULT_TEXT_MODEL: &'static str = "publishers/google/models/gemini-2.0-flash";
+    const DEFAULT_IMAGE_MODEL: &'static str = "publishers/google/models/gemini-2.0-flash"; // "publishers/google/models/imagegeneration";
 
     pub async fn new(
         options: GcpVertexAiRedacterOptions,
