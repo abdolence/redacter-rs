@@ -520,16 +520,30 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
 }
 
 #[allow(unused_imports)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::redacters::RedacterProviderOptions;
     use console::Term;
+
+    use std::sync::Once;
+
+    static _INIT_CRYPTO: Once = Once::new();
+
+    fn initialize_crypto() {
+        _INIT_CRYPTO.call_once(|| {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .expect("Failed to install rustls crypto provider");
+        });
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
+        initialize_crypto();
         let test_gcp_project_id =
             std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
         let test_gcp_region = std::env::var("TEST_GCP_REGION").expect("TEST_GCP_REGION required");
