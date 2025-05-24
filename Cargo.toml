@@ -40,7 +40,7 @@ indicatif = { version = "0.17" }
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.26", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta", "google-cloud-aiplatform-v1beta1"] }
+gcloud-sdk = { version = "0.27", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta", "google-cloud-aiplatform-v1beta1"] }
 futures = "0.3"
 sha2 = "0.10"
 async-trait = "0.1"
