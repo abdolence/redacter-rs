@@ -1,4 +1,6 @@
 #![allow(clippy::needless_lifetimes)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::large_enum_variant)]
 
 use std::error::Error;
 

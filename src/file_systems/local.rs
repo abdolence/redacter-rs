@@ -133,9 +133,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         }
 
         let mut file = File::create(file_path).await?;
-        let mut reader = tokio_util::io::StreamReader::new(
-            input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
-        );
+        let mut reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
         tokio::io::copy(&mut reader, &mut file).await?;
         Ok(())
     }

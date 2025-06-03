@@ -146,7 +146,7 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
         } else {
             object_name
                 .split('/')
-                .last()
+                .next_back()
                 .map(|file_name| file_name.to_string())
                 .unwrap_or_else(|| object_name.clone())
                 .into()

@@ -335,9 +335,7 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
-        let reader = tokio_util::io::StreamReader::new(
-            input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
-        );
+        let reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
         let mut reader = csv_async::AsyncReaderBuilder::default()
             .has_headers(!redacter_base_options.csv_headers_disable)
             .delimiter(

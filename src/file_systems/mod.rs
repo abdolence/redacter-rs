@@ -30,7 +30,7 @@ impl RelativeFilePath {
     pub fn filename(&self) -> String {
         self.value()
             .split('/')
-            .last()
+            .next_back()
             .map(|s| s.to_string())
             .unwrap_or_default()
     }
