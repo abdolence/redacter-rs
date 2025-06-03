@@ -1643,9 +1643,9 @@ dependencies = [
 
 [[package]]
 name = "gcloud-sdk"
-version = "0.27.1"
+version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44163d7c0d0bc470caa43766beda779e584034abd6b681319d8f9be2fc194eba"
+checksum = "a3ec9c312db09dc0dac684dda2f18d76e9ce00effdd27fcaaa90fa811691cd6d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2439,7 +2439,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
