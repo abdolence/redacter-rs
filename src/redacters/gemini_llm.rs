@@ -87,6 +87,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 ),
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -94,6 +95,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 format!("{}\n",&generate_random_text_separator)
                                             )
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -101,6 +103,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 input_content,
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -108,6 +111,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 format!("{}\n",&generate_random_text_separator)
                                             )
                                         ),
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
@@ -208,6 +212,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 The image width is: {}. The image height is: {}.", resized_image.width(), resized_image.height()),
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -218,6 +223,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 }
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
