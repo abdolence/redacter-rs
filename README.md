@@ -321,7 +321,7 @@ redacter ls gs://my-little-bucket/my-big-files/
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
-- The tool was mostly design to redact files internally. Not recommended use it in public environments without proper
+- The tool was mostly designed to redact files internally. Not recommended to use it in public environments without proper
   security measures and manual review.
 - Integrity of the files is not guaranteed due to DLP implementation specifics. Some of the formats such as
   HTML/XML/JSON
