@@ -89,8 +89,7 @@ impl<'a> MsPresidioRedacter<'a> {
             let response_text = response.text().await.unwrap_or_default();
             return Err(AppError::SystemError {
                 message: format!(
-                    "Failed to analyze text: {}. HTTP status: {}.",
-                    response_text, response_status
+                    "Failed to analyze text: {response_text}. HTTP status: {response_status}."
                 ),
             });
         }
@@ -149,8 +148,7 @@ impl<'a> MsPresidioRedacter<'a> {
                     let response_text = response.text().await.unwrap_or_default();
                     return Err(AppError::SystemError {
                         message: format!(
-                            "Failed to redact image: {}. HTTP status: {}.",
-                            response_text, response_status
+                            "Failed to redact image: {response_text}. HTTP status: {response_status}."
                         ),
                     });
                 }

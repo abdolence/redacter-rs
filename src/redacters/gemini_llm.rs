@@ -179,7 +179,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                 let image_format =
                     image::ImageFormat::from_mime_type(&mime_type).ok_or_else(|| {
                         AppError::SystemError {
-                            message: format!("Unsupported image mime type: {}", mime_type),
+                            message: format!("Unsupported image mime type: {mime_type}"),
                         }
                     })?;
                 let image = image::load_from_memory_with_format(&data, image_format)?;

@@ -292,7 +292,7 @@ impl<'a> StreamRedacter<'a> {
                 self.stream_to_pdf_redact_item(input, file_ref).await
             }
             Some(ref mime) => Err(AppError::SystemError {
-                message: format!("Media type {} is not supported for redaction", mime),
+                message: format!("Media type {mime} is not supported for redaction"),
             }),
             None => Err(AppError::SystemError {
                 message: "Media type is not provided to redact".to_string(),
@@ -310,7 +310,7 @@ impl<'a> StreamRedacter<'a> {
         let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
         let all_bytes = all_chunks.concat();
         let whole_content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
-            message: format!("Failed to convert bytes to string: {}", e),
+            message: format!("Failed to convert bytes to string: {e}"),
         })?;
         let content = if let Some(sampling_size) = self.redacter_base_options.sampling_size {
             let sampling_size = std::cmp::min(sampling_size, whole_content.len());
@@ -442,7 +442,7 @@ impl<'a> StreamRedacter<'a> {
                             file_ref,
                             image_to_redact,
                             redacter,
-                            &format!("  {}", width),
+                            &format!("  {width}"),
                             ocr_engine,
                         )
                         .await?

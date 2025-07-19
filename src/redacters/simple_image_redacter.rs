@@ -12,7 +12,7 @@ pub fn redact_image_at_coords(
     approximation_factor: f32,
 ) -> AppResult<Bytes> {
     let image_format = ImageFormat::from_mime_type(&mime).ok_or_else(|| AppError::SystemError {
-        message: format!("Unsupported image mime type: {}", mime),
+        message: format!("Unsupported image mime type: {mime}"),
     })?;
     let image = image::load_from_memory_with_format(&data, image_format)?;
     let mut image = image.to_rgb8();

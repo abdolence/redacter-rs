@@ -59,7 +59,7 @@ impl FromStr for DlpRequestLimit {
         let (number, unit) = s.split_at(index);
         let max_ops_in_units = number
             .parse::<usize>()
-            .map_err(|e| format!("Failed to parse number in DlpRequestLimit: {}", e))?;
+            .map_err(|e| format!("Failed to parse number in DlpRequestLimit: {e}"))?;
         match unit {
             "rps" => Ok(DlpRequestLimit::new(
                 max_ops_in_units,
@@ -69,7 +69,7 @@ impl FromStr for DlpRequestLimit {
                 max_ops_in_units,
                 std::time::Duration::from_secs(60),
             )),
-            unknown => Err(format!("Unknown unit specified: {}", unknown)),
+            unknown => Err(format!("Unknown unit specified: {unknown}")),
         }
     }
 }

@@ -54,7 +54,7 @@ impl<'a> ZipFileSystem<'a> {
             archive.extract(temp_dir.path())?;
             let temp_dir_str = temp_dir.path().to_string_lossy();
             self.reporter
-                .report(format!("Extracting files to temp dir: {}", temp_dir_str))?;
+                .report(format!("Extracting files to temp dir: {temp_dir_str}"))?;
             let temp_file_system =
                 LocalFileSystem::new(temp_dir_str.as_ref(), self.reporter).await?;
             self.mode = Some(ZipFileSystemMode::Read {

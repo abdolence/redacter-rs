@@ -106,7 +106,7 @@ impl Display for RedacterOptions {
             })
             .collect::<Vec<String>>()
             .join(", ");
-        write!(f, "{}", to_display)
+        write!(f, "{to_display}")
     }
 }
 

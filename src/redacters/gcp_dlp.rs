@@ -300,7 +300,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
                     rows.first().map_or(vec![], |row| {
                         (0..row.len())
                             .map(|i| gcloud_sdk::google::privacy::dlp::v2::FieldId {
-                                name: format!("Column {}", i),
+                                name: format!("Column {i}"),
                             })
                             .collect()
                     })

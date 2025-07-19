@@ -112,7 +112,7 @@ impl std::str::FromStr for RedacterType {
             "aws-comprehend" => Ok(RedacterType::AwsComprehend),
             "ms-presidio" => Ok(RedacterType::MsPresidio),
             "gemini-llm" => Ok(RedacterType::GeminiLlm),
-            _ => Err(format!("Unknown redacter type: {}", s)),
+            _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
 }

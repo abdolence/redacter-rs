@@ -21,7 +21,7 @@ impl<'a> LocalFileSystem<'a> {
         let root_path_path = PathBuf::from(&root_path_base_str);
         let is_dir = root_path.ends_with('/') || root_path_path.is_dir();
         let root_path_str = if is_dir && !root_path_base_str.ends_with('/') {
-            format!("{}/", root_path_base_str)
+            format!("{root_path_base_str}/")
         } else {
             root_path_base_str
         };

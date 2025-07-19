@@ -38,7 +38,7 @@ impl<'a> AwsS3FileSystem<'a> {
         let path_parts: Vec<&str> = path.trim_start_matches("s3://").split('/').collect();
         if path_parts.len() < 2 {
             return Err(AppError::SystemError {
-                message: format!("Invalid S3 path: {}", path),
+                message: format!("Invalid S3 path: {path}"),
             });
         }
         if path_parts[1].is_empty() {
@@ -277,7 +277,7 @@ mod tests {
             std::env::var("TEST_AWS_BUCKET_NAME").expect("TEST_AWS_BUCKET_NAME required");
 
         let mut fs = AwsS3FileSystem::new(
-            &format!("s3://{}/redacter/test-upload/", test_gcp_bucket_name),
+            &format!("s3://{test_gcp_bucket_name}/redacter/test-upload/"),
             &reporter,
         )
         .await?;
@@ -325,7 +325,7 @@ mod tests {
             std::env::var("TEST_AWS_BUCKET_NAME").expect("TEST_AWS_BUCKET_NAME required");
 
         let mut fs = AwsS3FileSystem::new(
-            &format!("s3://{}/redacter/test-list/", test_gcp_bucket_name),
+            &format!("s3://{test_gcp_bucket_name}/redacter/test-list/"),
             &reporter,
         )
         .await?;

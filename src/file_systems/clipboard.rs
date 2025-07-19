@@ -56,7 +56,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                     let png_image_bytes = writer.into_inner();
                     Ok((
                         FileSystemRef {
-                            relative_path: format!("{}.png", filename).into(),
+                            relative_path: format!("{filename}.png").into(),
                             media_type: Some(mime::IMAGE_PNG),
                             file_size: Some(png_image_bytes.len()),
                         },
@@ -75,7 +75,7 @@ impl<'a> FileSystemConnection<'a> for ClipboardFileSystem<'a> {
                 let text = self.clipboard.get().text()?;
                 Ok((
                     FileSystemRef {
-                        relative_path: format!("{}.txt", filename).into(),
+                        relative_path: format!("{filename}.txt").into(),
                         media_type: Some(mime::TEXT_PLAIN),
                         file_size: Some(text.len()),
                     },

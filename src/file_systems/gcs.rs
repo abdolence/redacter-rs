@@ -284,7 +284,7 @@ mod tests {
             std::env::var("TEST_GCS_BUCKET_NAME").expect("TEST_GCS_BUCKET_NAME required");
 
         let mut fs = GoogleCloudStorageFileSystem::new(
-            &format!("gs://{}/redacter/test-upload/", test_gcp_bucket_name),
+            &format!("gs://{test_gcp_bucket_name}/redacter/test-upload/"),
             &reporter,
         )
         .await?;
@@ -332,7 +332,7 @@ mod tests {
             std::env::var("TEST_GCS_BUCKET_NAME").expect("TEST_GCS_BUCKET_NAME required");
 
         let mut fs = GoogleCloudStorageFileSystem::new(
-            &format!("gs://{}/redacter/test-list/", test_gcp_bucket_name),
+            &format!("gs://{test_gcp_bucket_name}/redacter/test-list/"),
             &reporter,
         )
         .await?;
