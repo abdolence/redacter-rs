@@ -101,6 +101,7 @@ pub enum RedacterType {
     GeminiLlm,
     OpenAiLlm,
     GcpVertexAi,
+    AwsBedrock,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -126,6 +127,7 @@ impl Display for RedacterType {
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
             RedacterType::OpenAiLlm => write!(f, "openai-llm"),
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
+            RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
         }
     }
 }
@@ -324,6 +326,13 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
+                    },
+                )),
+                RedacterType::AwsBedrock => Ok(RedacterProviderOptions::AwsBedrock(
+                    crate::redacters::AwsBedrockRedacterOptions {
+                        region: self.aws_region.clone().map(aws_config::Region::new),
+                        text_model: None,
+                        image_model: None,
                     },
                 )),
             }?;
