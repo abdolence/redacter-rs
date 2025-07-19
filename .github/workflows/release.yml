@@ -51,12 +51,6 @@ jobs:
             bin: redacter.exe
             name: redacter-Windows-aarch64.zip
             skip_tests: true
-          - os_name: Windows-i686
-            os: windows-latest
-            target: i686-pc-windows-msvc
-            bin: redacter.exe
-            name: redacter-Windows-i686.zip
-            skip_tests: true
           - os_name: Windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -83,7 +77,7 @@ jobs:
         run: sudo apt-get update --yes && sudo apt-get install --yes musl-tools openssl
         if: contains(matrix.platform.name, 'musl')
       - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           command: "build"
           target: ${{ matrix.platform.target }}
@@ -91,7 +85,7 @@ jobs:
           args: "--locked --release"
           strip: true
       - name: Run tests
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           command: "test"
           target: ${{ matrix.platform.target }}
