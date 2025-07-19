@@ -35,8 +35,8 @@ rsb_derive = "0.5"
 rvstruct = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-console = { version = "0.15" }
-indicatif = { version = "0.17" }
+console = { version = "0.16" }
+indicatif = { version = "0.18" }
 clap = { version = "4.1", features = ["derive"] }
 tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
