@@ -25,23 +25,23 @@ jobs:
       matrix:
         platform:
           - os_name: FreeBSD-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-24.04
             target: x86_64-unknown-freebsd
             bin: redacter
             name: redacter-FreeBSD-x86_64.tar.gz
             skip_tests: true
           - os_name: Linux-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bin: redacter
             name: redacter-Linux-x86_64.tar.gz
           - os_name: Linux-aarch64
-            os: ubuntu-20.04
+            os: ubuntu-24.04
             target: aarch64-unknown-linux-gnu
             bin: redacter
             name: redacter-Linux-aarch64.tar.gz
           - os_name: Linux-arm
-            os: ubuntu-20.04
+            os: ubuntu-24.04
             target: arm-unknown-linux-musleabi
             bin: redacter
             name: redacter-Linux-arm-musl.tar.gz
