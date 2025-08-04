@@ -24,11 +24,17 @@ ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clipboard = [] # For testing on CI/Clipboard
 ci-ocr = [] # For testing on CI/OCR
 ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
-ci = ["ci-gcp", "ci-aws", "ci-ms-presidio", "ci-gcp-llm", "ci-open-ai", "ci-clipboard"]
+ci = [
+    "ci-gcp",
+    "ci-aws",
+    "ci-ms-presidio",
+    "ci-gcp-llm",
+    "ci-open-ai",
+    "ci-clipboard",
+]
 pdf-render = ["pdfium-render"]
 clipboard = ["arboard"]
 ocr = ["ocrs", "rten", "rten-imageproc"]
-
 
 [dependencies]
 rsb_derive = "0.5"
@@ -38,9 +44,20 @@ serde = { version = "1.0", features = ["derive"] }
 console = { version = "0.16" }
 indicatif = { version = "0.18" }
 clap = { version = "4.1", features = ["derive"] }
-tokio = { version = "1.14", features = ["fs", "rt-multi-thread", "sync", "rt", "macros"] }
+tokio = { version = "1.14", features = [
+    "fs",
+    "rt-multi-thread",
+    "sync",
+    "rt",
+    "macros",
+] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.27", features = ["google-privacy-dlp-v2", "google-rest-storage-v1", "google-ai-generativelanguage-v1beta", "google-cloud-aiplatform-v1beta1"] }
+gcloud-sdk = { version = "0.27", features = [
+    "google-privacy-dlp-v2",
+    "google-rest-storage-v1",
+    "google-ai-generativelanguage-v1beta",
+    "google-cloud-aiplatform-v1beta1",
+] }
 futures = "0.3"
 sha2 = "0.10"
 async-trait = "0.1"
@@ -54,16 +71,25 @@ mime_guess = "2"
 zip = "4"
 globset = "0.4"
 tempfile = "3"
-csv-async = { version = "1", default-features = false, features = ["tokio", "tokio-stream"] }
+csv-async = { version = "1", default-features = false, features = [
+    "tokio",
+    "tokio-stream",
+] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "multipart",
+    "rustls-tls",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
-pdfium-render = { version = "0.8", features = ["thread_safe", "image"], optional = true }
+pdfium-render = { version = "0.8", features = [
+    "thread_safe",
+    "image",
+], optional = true }
 image = "0.25"
 bytes = { version = "1" }
 serde_json = "1"
@@ -76,6 +102,9 @@ base64 = "0.22"
 rustls = { version = "0.23" }
 
 
-
 [dev-dependencies]
-cargo-husky = { version = "1.5", default-features = false, features = ["run-for-all", "prepush-hook", "run-cargo-fmt"] }
+cargo-husky = { version = "1.5", default-features = false, features = [
+    "run-for-all",
+    "prepush-hook",
+    "run-cargo-fmt",
+] }
