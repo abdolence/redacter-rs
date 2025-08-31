@@ -235,8 +235,8 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
                                             gcloud_sdk::google::cloud::aiplatform::v1beta1::part::Data::Text(
-                                                format!("Find and replace in the attached image everything that look like personal information. \
-                                                The image width is: {}. The image height is: {}.", resized_image.width(), resized_image.height()),
+                                                format!("Find and replace in the attached image everything that look like personal information. Generate a new image with the sensitive information redacted using black boxes. \
+                                                The source image width is: {}. The source image height is: {}.", resized_image.width(), resized_image.height()),
                                             ),
                                         ),
                                         metadata: None,
@@ -268,8 +268,6 @@ impl<'a> GcpVertexAiRedacter<'a> {
                     )?,
                 );
                 let response = self.client.get().generate_content(request).await?;
-
-                println!("Response: {:?}", response);
 
                 let mut inner = response.into_inner();
                 if let Some(content) = inner.candidates.pop().and_then(|c| c.content) {
@@ -473,7 +471,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                 mime_type.clone(),
                                 resized_image_data.into(),
                                 pii_image_coords,
-                                0.25,
+                                0.20,
                             )?,
                         },
                     })
