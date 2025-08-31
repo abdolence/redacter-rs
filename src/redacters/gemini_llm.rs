@@ -31,7 +31,7 @@ pub struct GeminiLlmRedacter<'a> {
 }
 
 impl<'a> GeminiLlmRedacter<'a> {
-    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-1.5-flash";
+    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-2.5-flash";
 
     pub async fn new(
         gemini_llm_options: GeminiLlmRedacterOptions,

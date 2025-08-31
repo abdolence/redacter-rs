@@ -185,8 +185,8 @@ To be able to use GCP Vertex AI you need to:
 You can specify different models using `--gcp-vertex-ai-text-model` and `--gcp-vertex-ai-image-model` options.
 By default, they are set to:
 
-- `publishers/google/models/gemini-1.5-flash-001` for text model
-- `publishers/google/models/gemini-1.5-pro-001` for image model
+- `publishers/google/models/gemini-2.5-flash-001` for text model
+- `publishers/google/models/gemini-2.5-pro-001` for image model
 
 In case you have access to native image editing models such as Google Imagen 3, you can enable those capabilities using
 `--gcp-vertex-ai-native-image-support` option.
@@ -321,11 +321,10 @@ redacter ls gs://my-little-bucket/my-big-files/
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
-- The tool was mostly designed to redact files internally. Not recommended to use it in public environments without proper
-  security measures and manual review.
-- Integrity of the files is not guaranteed due to DLP implementation specifics. Some of the formats such as
-  HTML/XML/JSON
-  may be corrupted after redaction since they treated as text.
+- The tool was mostly designed to redact files internally. Not recommended to use it in public environments without
+  apropriate security measures and manual review.
+- Integrity of the files is not guaranteed due to DLP implementation specifics. Some formats such as
+  HTML/XML/JSON may be corrupted after redaction since they treated as text.
 - Use it at your own risk. The author is not responsible for any data loss or security breaches.
 
 ## Recommended DLP providers
