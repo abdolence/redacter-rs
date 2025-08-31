@@ -52,7 +52,7 @@ tokio = { version = "1.14", features = [
     "macros",
 ] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.27", features = [
+gcloud-sdk = { version = "0.28", features = [
     "google-privacy-dlp-v2",
     "google-rest-storage-v1",
     "google-ai-generativelanguage-v1beta",
