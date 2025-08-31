@@ -60,7 +60,6 @@ gcloud-sdk = { version = "0.27", features = [
 ] }
 futures = "0.3"
 sha2 = "0.10"
-async-trait = "0.1"
 hex = "0.4"
 thiserror = "2"
 anyhow = "1"

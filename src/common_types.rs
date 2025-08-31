@@ -9,9 +9,6 @@ pub struct GcpProjectId(String);
 #[derive(Debug, Clone, ValueStruct)]
 pub struct GcpRegion(String);
 
-#[derive(Debug, Clone, ValueStruct)]
-pub struct AwsAccountId(String);
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TextImageCoords {
     pub x1: f32,
