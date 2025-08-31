@@ -31,7 +31,7 @@ pub struct GcpVertexAiRedacter<'a> {
     options: GcpVertexAiRedacterOptions,
     #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
-    safety_setting: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold
+    safety_setting: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockThreshold,
 }
 
 impl<'a> GcpVertexAiRedacter<'a> {
@@ -45,7 +45,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
         let client =
             GoogleApi::from_function(
                 gcloud_sdk::google::cloud::aiplatform::v1beta1::prediction_service_client::PredictionServiceClient::new,
-                format!("https://{}-aiplatform.googleapis.com",options.gcp_region.value()),
+                format!("https://{}-aiplatform.googleapis.com", options.gcp_region.value()),
                 None,
             ).await?;
 
@@ -90,11 +90,11 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::SexuallyExplicit,
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::DangerousContent,
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::HarmCategory::Harassment,
-                            ].into_iter().map(|category| gcloud_sdk::google::cloud::aiplatform::v1beta1::SafetySetting {
-                                category: category.into(),
-                                threshold: self.safety_setting.into(),
-                                method: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockMethod::Unspecified.into(),
-                            }).collect(),
+                        ].into_iter().map(|category| gcloud_sdk::google::cloud::aiplatform::v1beta1::SafetySetting {
+                            category: category.into(),
+                            threshold: self.safety_setting.into(),
+                            method: gcloud_sdk::google::cloud::aiplatform::v1beta1::safety_setting::HarmBlockMethod::Unspecified.into(),
+                        }).collect(),
                         contents: vec![
                             gcloud_sdk::google::cloud::aiplatform::v1beta1::Content {
                                 parts: vec![
@@ -106,15 +106,15 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                                 ),
                                             ),
                                         ),
-                                        .. std::default::Default::default()
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
                                             gcloud_sdk::google::cloud::aiplatform::v1beta1::part::Data::Text(
-                                                format!("{}\n",&generate_random_text_separator)
+                                                format!("{}\n", &generate_random_text_separator)
                                             )
                                         ),
-                                        .. std::default::Default::default()
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
@@ -122,15 +122,15 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                                 input_content,
                                             ),
                                         ),
-                                        .. std::default::Default::default()
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::cloud::aiplatform::v1beta1::Part {
                                         data: Some(
                                             gcloud_sdk::google::cloud::aiplatform::v1beta1::part::Data::Text(
-                                                format!("{}\n",&generate_random_text_separator)
+                                                format!("{}\n", &generate_random_text_separator)
                                             )
                                         ),
-                                        .. std::default::Default::default()
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
@@ -258,6 +258,16 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                 role: "user".to_string(),
                             },
                         ],
+                        generation_config: Some(
+                            gcloud_sdk::google::cloud::aiplatform::v1beta1::GenerationConfig {
+                                candidate_count: Some(1),
+                                temperature: Some(1.0),
+                                response_modalities: vec![
+                                    gcloud_sdk::google::cloud::aiplatform::v1beta1::Modality::Image.into()
+                                ],
+                                ..std::default::Default::default()
+                            },
+                        ),
                         ..std::default::Default::default()
                     },
                 );
@@ -267,10 +277,15 @@ impl<'a> GcpVertexAiRedacter<'a> {
                         self.options.project_id.as_ref(),
                     )?,
                 );
+
                 let response = self.client.get().generate_content(request).await?;
 
-                let mut inner = response.into_inner();
-                if let Some(content) = inner.candidates.pop().and_then(|c| c.content) {
+                if let Some(content) = response
+                    .into_inner()
+                    .candidates
+                    .pop()
+                    .and_then(|c| c.content)
+                {
                     match content.parts.into_iter().filter_map(|part| {
                         match part.data {
                             Some(gcloud_sdk::google::cloud::aiplatform::v1beta1::part::Data::InlineData(blob)) => {
