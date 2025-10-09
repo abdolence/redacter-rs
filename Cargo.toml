@@ -67,7 +67,7 @@ sync_wrapper = { version = "1", features = ["futures"] }
 async-recursion = "1"
 mime = "0.3"
 mime_guess = "2"
-zip = "5"
+zip = "6"
 globset = "0.4"
 tempfile = "3"
 csv-async = { version = "1", default-features = false, features = [
