@@ -66,8 +66,7 @@ cargo install redacter
 
 - If you are planning to use PDF redaction, please follow additional steps in
 the [PDF redaction](#pdf-redaction)
-- For OCR capabilities for only the DLP that can't support images, please follow additional steps in
-the [PDF redaction](#pdf-redaction) and [OCR](#ocr) instructions.
+- For OCR capabilities for only the DLP that can't support images, please follow additional steps in the [OCR](#ocr) instructions.
 
 ## Command line options
 
