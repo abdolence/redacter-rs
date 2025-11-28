@@ -2512,7 +2512,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.3",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -2981,9 +2981,9 @@ dependencies = [
 
 [[package]]
 name = "pdfium-render"
-version = "0.8.36"
+version = "0.8.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c8bfacaecc7ff9bcc2f23fed64336830f823b13548a20083f3d0b0164537d2c"
+checksum = "6553f6604a52b3203db7b4e9d51eb4dd193cf455af9e56d40cab6575b547b679"
 dependencies = [
  "bitflags 2.9.3",
  "bytemuck",
@@ -2992,7 +2992,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "image",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "js-sys",
  "libloading",
  "log",
@@ -3179,7 +3179,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.106",
