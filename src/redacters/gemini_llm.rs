@@ -10,7 +10,7 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 use gcloud_sdk::google::ai::generativelanguage::v1beta::generative_service_client::GenerativeServiceClient;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
-use rand::Rng;
+use rand::RngExt;
 use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]

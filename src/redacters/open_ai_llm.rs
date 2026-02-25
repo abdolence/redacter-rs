@@ -1,5 +1,5 @@
 use base64::Engine;
-use rand::Rng;
+use rand::RngExt;
 use rvstruct::ValueStruct;
 use serde::{Deserialize, Serialize};
 

@@ -56,7 +56,7 @@ gcloud-sdk = { version = "0.28", features = [
     "google-privacy-dlp-v2",
     "google-rest-storage-v1",
     "google-ai-generativelanguage-v1beta",
-    "google-cloud-aiplatform-v1beta1",
+    "google-cloud-aiplatform-v1",
 ] }
 futures = "0.3"
 sha2 = "0.10"
@@ -80,7 +80,8 @@ aws-sdk-comprehend = { version = "1" }
 url = "2"
 reqwest = { version = "0.13", default-features = false, features = [
     "multipart",
-    "rustls-tls",
+    "rustls",
+    "json"
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
