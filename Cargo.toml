@@ -78,13 +78,13 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "multipart",
     "rustls-tls",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rand = "0.9"
+rand = "0.10"
 pdfium-render = { version = "0.8", features = [
     "thread_safe",
     "image",
