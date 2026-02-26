@@ -436,6 +436,10 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("Failed to install rustls crypto provider");
+
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let test_gcp_project_id =
