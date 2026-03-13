@@ -14,6 +14,9 @@ pub use gcp_vertex_ai::*;
 mod aws_comprehend;
 pub use aws_comprehend::*;
 
+mod aws_bedrock;
+pub use aws_bedrock::*;
+
 mod ms_presidio;
 pub use ms_presidio::*;
 
@@ -64,6 +67,7 @@ pub enum Redacters<'a> {
     GeminiLlm(GeminiLlmRedacter<'a>),
     OpenAiLlm(OpenAiLlmRedacter<'a>),
     GcpVertexAi(GcpVertexAiRedacter<'a>),
+    AwsBedrock(AwsBedrockRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +93,7 @@ pub enum RedacterProviderOptions {
     GeminiLlm(GeminiLlmRedacterOptions),
     OpenAiLlm(OpenAiLlmRedacterOptions),
     GcpVertexAi(GcpVertexAiRedacterOptions),
+    AwsBedrock(AwsBedrockRedacterOptions),
 }
 
 impl Display for RedacterOptions {
@@ -103,6 +108,7 @@ impl Display for RedacterOptions {
                 RedacterProviderOptions::GeminiLlm(_) => "gemini-llm".to_string(),
                 RedacterProviderOptions::OpenAiLlm(_) => "openai-llm".to_string(),
                 RedacterProviderOptions::GcpVertexAi(_) => "gcp-vertex-ai".to_string(),
+                RedacterProviderOptions::AwsBedrock(_) => "aws-bedrock".to_string(),
             })
             .collect::<Vec<String>>()
             .join(", ");
@@ -133,6 +139,9 @@ impl<'a> Redacters<'a> {
             )),
             RedacterProviderOptions::GcpVertexAi(options) => Ok(Redacters::GcpVertexAi(
                 GcpVertexAiRedacter::new(options, reporter).await?,
+            )),
+            RedacterProviderOptions::AwsBedrock(options) => Ok(Redacters::AwsBedrock(
+                AwsBedrockRedacter::new(options, reporter).await?,
             )),
         }
     }
@@ -191,6 +200,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(redacter) => redacter.redact(input).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact(input).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
+            Redacters::AwsBedrock(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -202,6 +212,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::AwsBedrock(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -213,6 +224,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(_) => RedacterType::GeminiLlm,
             Redacters::OpenAiLlm(_) => RedacterType::OpenAiLlm,
             Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
+            Redacters::AwsBedrock(_) => RedacterType::AwsBedrock,
         }
     }
 }

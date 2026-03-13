@@ -77,6 +77,7 @@ csv-async = { version = "1", default-features = false, features = [
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1" }
 aws-sdk-comprehend = { version = "1" }
+aws-sdk-bedrockruntime = { version = "1" }
 url = "2"
 reqwest = { version = "0.13", features = [
     "multipart",
