@@ -25,23 +25,23 @@ jobs:
       matrix:
         platform:
           - os_name: FreeBSD-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: x86_64-unknown-freebsd
             bin: redacter
             name: redacter-FreeBSD-x86_64.tar.gz
             skip_tests: true
           - os_name: Linux-x86_64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: redacter
             name: redacter-Linux-x86_64.tar.gz
           - os_name: Linux-aarch64
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             bin: redacter
             name: redacter-Linux-aarch64.tar.gz
           - os_name: Linux-arm
-            os: ubuntu-20.04
+            os: ubuntu-latest
             target: arm-unknown-linux-musleabi
             bin: redacter
             name: redacter-Linux-arm-musl.tar.gz
@@ -50,12 +50,6 @@ jobs:
             target: aarch64-pc-windows-msvc
             bin: redacter.exe
             name: redacter-Windows-aarch64.zip
-            skip_tests: true
-          - os_name: Windows-i686
-            os: windows-latest
-            target: i686-pc-windows-msvc
-            bin: redacter.exe
-            name: redacter-Windows-i686.zip
             skip_tests: true
           - os_name: Windows-x86_64
             os: windows-latest
@@ -76,14 +70,12 @@ jobs:
         toolchain:
           - stable
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache cargo & target directories
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v6
       - name: Install musl-tools on Linux
         run: sudo apt-get update --yes && sudo apt-get install --yes musl-tools openssl
         if: contains(matrix.platform.name, 'musl')
       - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           command: "build"
           target: ${{ matrix.platform.target }}
@@ -91,7 +83,7 @@ jobs:
           args: "--locked --release"
           strip: true
       - name: Run tests
-        uses: houseabsolute/actions-rust-cross@v0
+        uses: houseabsolute/actions-rust-cross@v1
         with:
           command: "test"
           target: ${{ matrix.platform.target }}
@@ -113,7 +105,7 @@ jobs:
           ( startsWith( github.ref, 'refs/tags/v' ) ||
             github.ref == 'refs/tags/test-release' )
       - name: Publish release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: redacter-${{ matrix.platform.os_name }}
           path: "redacter-*"

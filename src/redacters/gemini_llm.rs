@@ -10,7 +10,7 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 use gcloud_sdk::google::ai::generativelanguage::v1beta::generative_service_client::GenerativeServiceClient;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
-use rand::Rng;
+use rand::RngExt;
 use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ pub struct GeminiLlmRedacter<'a> {
 }
 
 impl<'a> GeminiLlmRedacter<'a> {
-    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-1.5-flash";
+    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-2.5-flash";
 
     pub async fn new(
         gemini_llm_options: GeminiLlmRedacterOptions,
@@ -59,8 +59,8 @@ impl<'a> GeminiLlmRedacter<'a> {
             .as_ref()
             .map(|model_name| model_name.value().to_string())
             .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
-        let mut rand = rand::thread_rng();
-        let generate_random_text_separator = format!("---{}", rand.gen::<u64>());
+        let mut rand = rand::rng();
+        let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {
@@ -87,6 +87,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 ),
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -94,6 +95,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 format!("{}\n",&generate_random_text_separator)
                                             )
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -101,6 +103,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 input_content,
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -108,6 +111,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 format!("{}\n",&generate_random_text_separator)
                                             )
                                         ),
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),
@@ -175,7 +179,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                 let image_format =
                     image::ImageFormat::from_mime_type(&mime_type).ok_or_else(|| {
                         AppError::SystemError {
-                            message: format!("Unsupported image mime type: {}", mime_type),
+                            message: format!("Unsupported image mime type: {mime_type}"),
                         }
                     })?;
                 let image = image::load_from_memory_with_format(&data, image_format)?;
@@ -208,6 +212,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 The image width is: {}. The image height is: {}.", resized_image.width(), resized_image.height()),
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     },
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
@@ -218,6 +223,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 }
                                             ),
                                         ),
+                                        ..std::default::Default::default()
                                     }
                                 ],
                                 role: "user".to_string(),

@@ -48,7 +48,7 @@ impl<'a> StreamRedacter<'a> {
         &'a self,
         redacters: &'a Vec<Redacters<'a>>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<StreamRedactPlan> {
+    ) -> AppResult<StreamRedactPlan<'a>> {
         let mut stream_redact_plan = StreamRedactPlan {
             apply_pdf_image_converter: false,
             apply_ocr: false,
@@ -64,10 +64,45 @@ impl<'a> StreamRedacter<'a> {
         }
 
         if stream_redact_plan.supported_redacters.is_empty() {
-            match &file_ref.media_type {
-                Some(file_ref_media) => {
-                    // Supports with conversion
-                    if Redacters::is_mime_table(file_ref_media) {
+            if let Some(file_ref_media) = &file_ref.media_type {
+                // Supports with conversion
+                if Redacters::is_mime_table(file_ref_media) {
+                    for redacter in redacters {
+                        let supported_options = redacter
+                            .redact_support(&FileSystemRef {
+                                media_type: Some(mime::TEXT_PLAIN),
+                                ..file_ref.clone()
+                            })
+                            .await?;
+                        if supported_options == RedactSupport::Supported {
+                            stream_redact_plan.supported_redacters.push(redacter);
+                        }
+                    }
+                    if !stream_redact_plan.supported_redacters.is_empty() {
+                        stream_redact_plan.leave_data_table_as_text = true;
+                    }
+                } else if self.file_converters.pdf_image_converter.is_some()
+                    && Redacters::is_mime_pdf(file_ref_media)
+                {
+                    for redacter in redacters {
+                        let supported_options = redacter
+                            .redact_support(&FileSystemRef {
+                                media_type: Some(mime::IMAGE_PNG),
+                                ..file_ref.clone()
+                            })
+                            .await?;
+                        if supported_options == RedactSupport::Supported {
+                            stream_redact_plan.supported_redacters.push(redacter);
+                        }
+                    }
+
+                    if !stream_redact_plan.supported_redacters.is_empty() {
+                        stream_redact_plan.apply_pdf_image_converter = true;
+                    }
+
+                    if stream_redact_plan.supported_redacters.is_empty()
+                        && self.file_converters.ocr.is_some()
+                    {
                         for redacter in redacters {
                             let supported_options = redacter
                                 .redact_support(&FileSystemRef {
@@ -79,67 +114,29 @@ impl<'a> StreamRedacter<'a> {
                                 stream_redact_plan.supported_redacters.push(redacter);
                             }
                         }
-                        if !stream_redact_plan.supported_redacters.is_empty() {
-                            stream_redact_plan.leave_data_table_as_text = true;
-                        }
-                    } else if self.file_converters.pdf_image_converter.is_some()
-                        && Redacters::is_mime_pdf(file_ref_media)
-                    {
-                        for redacter in redacters {
-                            let supported_options = redacter
-                                .redact_support(&FileSystemRef {
-                                    media_type: Some(mime::IMAGE_PNG),
-                                    ..file_ref.clone()
-                                })
-                                .await?;
-                            if supported_options == RedactSupport::Supported {
-                                stream_redact_plan.supported_redacters.push(redacter);
-                            }
-                        }
-
                         if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_pdf_image_converter = true;
-                        }
-
-                        if stream_redact_plan.supported_redacters.is_empty()
-                            && self.file_converters.ocr.is_some()
-                        {
-                            for redacter in redacters {
-                                let supported_options = redacter
-                                    .redact_support(&FileSystemRef {
-                                        media_type: Some(mime::TEXT_PLAIN),
-                                        ..file_ref.clone()
-                                    })
-                                    .await?;
-                                if supported_options == RedactSupport::Supported {
-                                    stream_redact_plan.supported_redacters.push(redacter);
-                                }
-                            }
-                            if !stream_redact_plan.supported_redacters.is_empty() {
-                                stream_redact_plan.apply_pdf_image_converter = true;
-                                stream_redact_plan.apply_ocr = true;
-                            }
-                        }
-                    } else if self.file_converters.ocr.is_some()
-                        && Redacters::is_mime_image(file_ref_media)
-                    {
-                        for redacter in redacters {
-                            let supported_options = redacter
-                                .redact_support(&FileSystemRef {
-                                    media_type: Some(mime::TEXT_PLAIN),
-                                    ..file_ref.clone()
-                                })
-                                .await?;
-                            if supported_options == RedactSupport::Supported {
-                                stream_redact_plan.supported_redacters.push(redacter);
-                            }
-                        }
-                        if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_ocr = true;
                         }
                     }
+                } else if self.file_converters.ocr.is_some()
+                    && Redacters::is_mime_image(file_ref_media)
+                {
+                    for redacter in redacters {
+                        let supported_options = redacter
+                            .redact_support(&FileSystemRef {
+                                media_type: Some(mime::TEXT_PLAIN),
+                                ..file_ref.clone()
+                            })
+                            .await?;
+                        if supported_options == RedactSupport::Supported {
+                            stream_redact_plan.supported_redacters.push(redacter);
+                        }
+                    }
+                    if !stream_redact_plan.supported_redacters.is_empty() {
+                        stream_redact_plan.apply_ocr = true;
+                    }
                 }
-                None => {}
             }
         }
 
@@ -295,7 +292,7 @@ impl<'a> StreamRedacter<'a> {
                 self.stream_to_pdf_redact_item(input, file_ref).await
             }
             Some(ref mime) => Err(AppError::SystemError {
-                message: format!("Media type {} is not supported for redaction", mime),
+                message: format!("Media type {mime} is not supported for redaction"),
             }),
             None => Err(AppError::SystemError {
                 message: "Media type is not provided to redact".to_string(),
@@ -313,7 +310,7 @@ impl<'a> StreamRedacter<'a> {
         let all_chunks: Vec<bytes::Bytes> = input.try_collect().await?;
         let all_bytes = all_chunks.concat();
         let whole_content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
-            message: format!("Failed to convert bytes to string: {}", e),
+            message: format!("Failed to convert bytes to string: {e}"),
         })?;
         let content = if let Some(sampling_size) = self.redacter_base_options.sampling_size {
             let sampling_size = std::cmp::min(sampling_size, whole_content.len());
@@ -338,9 +335,7 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
-        let reader = tokio_util::io::StreamReader::new(
-            input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
-        );
+        let reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
         let mut reader = csv_async::AsyncReaderBuilder::default()
             .has_headers(!redacter_base_options.csv_headers_disable)
             .delimiter(
@@ -447,7 +442,7 @@ impl<'a> StreamRedacter<'a> {
                             file_ref,
                             image_to_redact,
                             redacter,
-                            &format!("  {}", width),
+                            &format!("  {width}"),
                             ocr_engine,
                         )
                         .await?

@@ -57,7 +57,7 @@ impl<'a> Ocrs<'a> {
     }
 }
 
-impl<'a> Ocr for Ocrs<'a> {
+impl Ocr for Ocrs<'_> {
     fn image_to_text(&self, image: image::DynamicImage) -> AppResult<Vec<TextImageCoords>> {
         let rgb_image = image.to_rgb8();
         let image_source = ImageSource::from_bytes(rgb_image.as_raw(), rgb_image.dimensions())?;

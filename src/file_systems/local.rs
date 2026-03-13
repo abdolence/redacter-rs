@@ -21,7 +21,7 @@ impl<'a> LocalFileSystem<'a> {
         let root_path_path = PathBuf::from(&root_path_base_str);
         let is_dir = root_path.ends_with('/') || root_path_path.is_dir();
         let root_path_str = if is_dir && !root_path_base_str.ends_with('/') {
-            format!("{}/", root_path_base_str)
+            format!("{root_path_base_str}/")
         } else {
             root_path_base_str
         };
@@ -133,9 +133,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         }
 
         let mut file = File::create(file_path).await?;
-        let mut reader = tokio_util::io::StreamReader::new(
-            input.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
-        );
+        let mut reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
         tokio::io::copy(&mut reader, &mut file).await?;
         Ok(())
     }

@@ -1,3 +1,7 @@
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::large_enum_variant)]
+
 use std::error::Error;
 
 use crate::commands::*;
@@ -25,7 +29,7 @@ mod common_types;
 mod file_converters;
 
 pub fn config_env_var(name: &str) -> Result<String, String> {
-    std::env::var(name).map_err(|e| format!("{}: {}", name, e))
+    std::env::var(name).map_err(|e| format!("{name}: {e}"))
 }
 
 #[tokio::main]
@@ -41,6 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .as_str(),
     )?;
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
     let cli = CliArgs::parse();
     match handle_args(cli, &term).await {

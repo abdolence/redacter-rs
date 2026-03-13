@@ -212,7 +212,7 @@ async fn report_copy_info(
         .as_ref()
         .and_then(|o| o.base_options.sampling_size)
     {
-        Style::new().apply_to(format!("{} bytes.", sampling_size))
+        Style::new().apply_to(format!("{sampling_size} bytes."))
     } else {
         Style::new().dim().apply_to("-".to_string())
     };
