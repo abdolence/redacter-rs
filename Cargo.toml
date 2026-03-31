@@ -59,7 +59,7 @@ gcloud-sdk = { version = "0.29", features = [
     "google-cloud-aiplatform-v1",
 ] }
 futures = "0.3"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 thiserror = "2"
 anyhow = "1"
@@ -85,7 +85,7 @@ reqwest = { version = "0.13", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.10"
-pdfium-render = { version = "0.8", features = [
+pdfium-render = { version = "0.9", features = [
     "thread_safe",
     "image",
 ], optional = true }
