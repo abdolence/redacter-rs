@@ -142,6 +142,18 @@ fn strip_answer_fence(answer: &str, original_starts_with_fence: bool) -> String 
     }
 }
 
+/// Removes the random input separator when the model echoes it around its answer, which
+/// Nova does about one run in eight despite being told not to. An answer without the
+/// separator is returned untouched, whitespace included; an echo is trimmed because the
+/// whitespace around it belongs to the echo, not to the document.
+fn strip_echoed_separator(answer: &str, separator: &str) -> String {
+    if answer.contains(separator) {
+        answer.replace(separator, "").trim().to_string()
+    } else {
+        answer.to_string()
+    }
+}
+
 /// Converts one Nova-style normalized bounding box (`[x1, y1, x2, y2]`, each in 0..=1000) to
 /// pixel coordinates, reusing [`normalized_box_to_image_coords`]'s clamping and ordering by
 /// translating Nova's corner order into the `[ymin, xmin, ymax, xmax]` order that function
@@ -423,7 +435,7 @@ impl<'a> AwsBedrockRedacter<'a> {
             Some(redacted_content) => Ok(RedacterDataItem {
                 file_ref: input.file_ref,
                 content: RedacterDataItemContent::Value(strip_answer_fence(
-                    &redacted_content,
+                    &strip_echoed_separator(&redacted_content, &generate_random_text_separator),
                     input_starts_with_fence,
                 )),
             }),
@@ -737,6 +749,26 @@ mod tests {
     fn strip_answer_fence_keeps_a_fenced_answer_when_the_original_input_was_itself_fenced() {
         let answer = "```text\nHello, [REDACTED]\n```";
         assert_eq!(strip_answer_fence(answer, true), answer);
+    }
+
+    #[test]
+    fn strip_echoed_separator_removes_a_separator_echoed_around_the_answer() {
+        assert_eq!(
+            strip_echoed_separator("---1234 Hello, [REDACTED] ---1234", "---1234"),
+            "Hello, [REDACTED]"
+        );
+        assert_eq!(
+            strip_echoed_separator("---1234\nHello, [REDACTED]\n---1234\n", "---1234"),
+            "Hello, [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn strip_echoed_separator_leaves_an_answer_without_the_separator_untouched() {
+        assert_eq!(
+            strip_echoed_separator("  Hello, [REDACTED]\n", "---1234"),
+            "  Hello, [REDACTED]\n"
+        );
     }
 
     #[test]
