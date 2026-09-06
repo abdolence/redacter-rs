@@ -474,3 +474,215 @@ async fn redact_upload_file<
         Ok(TransferFileResult::Skipped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common_types::{GcpProjectId, GcpRegion};
+    use crate::redacters::test_support::{
+        initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,
+        TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
+    };
+    use crate::redacters::{
+        GcpDlpRedacterOptions, GcpVertexAiRedacterOptions, LlmImageMode, RedacterProviderOptions,
+    };
+    use tempfile::TempDir;
+
+    const SAMPLE_DOCUMENTS_DIR: &str = TEST_DOCUMENTS_DIR;
+    const SAMPLE_FILE_NAMES: [&str; 5] = TEST_DOCUMENT_NAMES;
+    const SAMPLE_EMAIL: &str = TEST_DOCUMENT_SAMPLE_EMAIL;
+    const SAMPLE_PHONE: &str = TEST_DOCUMENT_SAMPLE_PHONE;
+
+    fn base_redacter_options(provider_options: RedacterProviderOptions) -> RedacterOptions {
+        RedacterOptions {
+            provider_options: vec![provider_options],
+            base_options: RedacterBaseOptions {
+                allow_unsupported_copies: false,
+                csv_headers_disable: false,
+                csv_delimiter: None,
+                sampling_size: None,
+                limit_dlp_requests: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn copies_sample_documents_without_redaction_byte_identical_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // `command_copy` binds pdfium unconditionally (to detect PDF support), so this
+        // races with any other test doing the same. See `pdfium_test_lock`'s doc comment.
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let term = Term::stdout();
+        let temp_dir = TempDir::with_prefix("copy_command_tests_no_redaction")?;
+
+        let result = command_copy(
+            &term,
+            SAMPLE_DOCUMENTS_DIR,
+            &temp_dir.path().to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![]),
+            None,
+        )
+        .await?;
+
+        assert_eq!(result.files_copied, SAMPLE_FILE_NAMES.len());
+        assert_eq!(result.files_redacted, 0);
+        assert_eq!(result.files_skipped, 0);
+
+        for name in SAMPLE_FILE_NAMES {
+            let original = std::fs::read(std::path::Path::new(SAMPLE_DOCUMENTS_DIR).join(name))?;
+            let copied = std::fs::read(temp_dir.path().join(name))?;
+            assert_eq!(original, copied, "{name} should be copied byte-identical");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn command_copy_gcp_dlp_redacts_sample_documents_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        initialize_crypto();
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let term = Term::stdout();
+        let test_gcp_project_id =
+            std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
+        let temp_dir = TempDir::with_prefix("copy_command_tests_gcp_dlp")?;
+
+        let redacter_options =
+            base_redacter_options(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
+                project_id: GcpProjectId::new(test_gcp_project_id),
+                user_defined_built_in_info_types: vec![],
+                user_defined_stored_info_types: vec![],
+            }));
+
+        command_copy(
+            &term,
+            SAMPLE_DOCUMENTS_DIR,
+            &temp_dir.path().to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![]),
+            Some(redacter_options),
+        )
+        .await?;
+
+        for name in [
+            "customer-note.txt",
+            "customers.csv",
+            "customer.json",
+            "customer-profile.html",
+        ] {
+            let content = tokio::fs::read_to_string(temp_dir.path().join(name)).await?;
+            assert!(
+                !content.contains(SAMPLE_EMAIL),
+                "{name} should have its email redacted"
+            );
+            assert!(
+                !content.contains(SAMPLE_PHONE),
+                "{name} should have its phone number redacted"
+            );
+        }
+
+        let pdf_path = temp_dir.path().join("customer-form.pdf");
+        if pdf_path.exists() {
+            let pdf_bytes = tokio::fs::read(&pdf_path).await?;
+            assert!(
+                !pdf_bytes.is_empty(),
+                "the redacted PDF should not be empty"
+            );
+        } else {
+            println!(
+                "Skipping PDF assertion in command_copy_gcp_dlp_redacts_sample_documents_test: \
+                 pdfium is not available, so the PDF was skipped rather than redacted"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
+    async fn command_copy_gcp_vertex_ai_redacts_note_and_form_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        initialize_crypto();
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let term = Term::stdout();
+        let test_gcp_project_id =
+            std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
+        let test_gcp_region =
+            std::env::var("TEST_GCP_REGION").unwrap_or_else(|_| "global".to_string());
+        let temp_dir = TempDir::with_prefix("copy_command_tests_gcp_vertex_ai")?;
+
+        let vertex_ai_options = || {
+            base_redacter_options(RedacterProviderOptions::GcpVertexAi(
+                GcpVertexAiRedacterOptions {
+                    project_id: GcpProjectId::new(test_gcp_project_id.clone()),
+                    gcp_region: GcpRegion::new(test_gcp_region.clone()),
+                    image_mode: LlmImageMode::Auto,
+                    text_model: None,
+                    image_model: None,
+                    block_none_harmful: false,
+                },
+            ))
+        };
+
+        // The PDF copy goes first: it is the only one of the two that needs pdfium, and
+        // pdfium has been observed to bind successfully only once per process (a second
+        // `PdfImageConverter::new()` call in the same process fails even after the first
+        // instance was dropped). Running it first gives it the best chance of a live bind
+        // when this test is the first thing in the process to touch pdfium.
+        let pdf_destination = temp_dir.path().join("customer-form.pdf");
+        command_copy(
+            &term,
+            "test-fixtures/documents/customer-form.pdf",
+            &pdf_destination.to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![]),
+            Some(vertex_ai_options()),
+        )
+        .await?;
+
+        let note_destination = temp_dir.path().join("customer-note.txt");
+        command_copy(
+            &term,
+            "test-fixtures/documents/customer-note.txt",
+            &note_destination.to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![]),
+            Some(vertex_ai_options()),
+        )
+        .await?;
+        let note_content = tokio::fs::read_to_string(&note_destination).await?;
+        assert!(
+            !note_content.contains(SAMPLE_EMAIL),
+            "the redacted note should have its email redacted"
+        );
+        assert!(
+            !note_content.contains(SAMPLE_PHONE),
+            "the redacted note should have its phone number redacted"
+        );
+
+        if pdf_destination.exists() {
+            let pdf_bytes = tokio::fs::read(&pdf_destination).await?;
+            assert!(
+                !pdf_bytes.is_empty(),
+                "the redacted PDF should not be empty"
+            );
+            let output_dir = std::env::var("TEST_REDACTED_OUTPUT_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let saved_path = output_dir.join("vertex-ai-redacted-form.pdf");
+            std::fs::copy(&pdf_destination, &saved_path)?;
+            term.write_line(&format!("Redacted PDF written to {}", saved_path.display()))?;
+        } else {
+            println!(
+                "Skipping PDF assertion in command_copy_gcp_vertex_ai_redacts_note_and_form_test: \
+                 pdfium is not available, so the PDF was skipped rather than redacted"
+            );
+        }
+
+        Ok(())
+    }
+}

@@ -415,6 +415,32 @@ pub mod test_support {
         });
     }
 
+    /// Sample fixtures under `test-fixtures/documents/`, each carrying fake personal
+    /// information, that exercise a text, table, structured and PDF media type.
+    pub const TEST_DOCUMENTS_DIR: &str = "test-fixtures/documents/";
+    pub const TEST_DOCUMENT_NAMES: [&str; 5] = [
+        "customer-note.txt",
+        "customers.csv",
+        "customer.json",
+        "customer-profile.html",
+        "customer-form.pdf",
+    ];
+    pub const TEST_DOCUMENT_SAMPLE_EMAIL: &str = "john.smith@example.com";
+    pub const TEST_DOCUMENT_SAMPLE_PHONE: &str = "+1 (555) 123-4567";
+
+    /// Serializes any test that binds the pdfium library, directly or through
+    /// `command_copy`. Pdfium is a C library with process-wide global state: binding it
+    /// concurrently from two test threads has been observed to crash the whole test
+    /// process (SIGTRAP/SIGSEGV) rather than fail just the offending test.
+    ///
+    /// A `tokio::sync::Mutex` rather than a `std` one, so async tests can hold the guard
+    /// across `.await` points without tripping `clippy::await_holding_lock`. Synchronous
+    /// tests take it with `blocking_lock` instead.
+    pub fn pdfium_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// A 1000x720 PNG of a filled-in form carrying fake personal information.
     pub const TEST_IMAGE_FIXTURE: &str = "test-fixtures/media/form-example.png";
 
