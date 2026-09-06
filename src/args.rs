@@ -1,8 +1,9 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey,
-    OpenAiModelName, RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
+    AwsBedrockModelName, GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName,
+    LlmImageMode, OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
+    RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
@@ -104,6 +105,7 @@ pub enum RedacterType {
     GeminiLlm,
     OpenAiLlm,
     GcpVertexAi,
+    AwsBedrock,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -117,6 +119,7 @@ impl std::str::FromStr for RedacterType {
             "gemini-llm" => Ok(RedacterType::GeminiLlm),
             "open-ai-llm" => Ok(RedacterType::OpenAiLlm),
             "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
+            "aws-bedrock" => Ok(RedacterType::AwsBedrock),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -131,6 +134,7 @@ impl Display for RedacterType {
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
             RedacterType::OpenAiLlm => write!(f, "open-ai-llm"),
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
+            RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
         }
     }
 }
@@ -206,8 +210,23 @@ pub struct RedacterArgs {
     #[arg(long, help = "CSV delimiter (default is ',')")]
     pub csv_delimiter: Option<char>,
 
-    #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]
+    #[arg(
+        long,
+        help = "AWS region for the AWS Comprehend and AWS Bedrock redacters"
+    )]
     pub aws_region: Option<String>,
+
+    #[arg(
+        long,
+        help = "Bedrock model id for text redaction, also used to locate PII coordinates in images. Default is 'amazon.nova-2-lite-v1:0' with the cross-region inference profile prefix of the selected region"
+    )]
+    pub aws_bedrock_text_model: Option<AwsBedrockModelName>,
+
+    #[arg(
+        long,
+        help = "Bedrock model id for native image editing. Default is 'amazon.nova-canvas-v1:0'"
+    )]
+    pub aws_bedrock_image_model: Option<AwsBedrockModelName>,
 
     #[arg(long, help = "URL for text analyze endpoint for MsPresidio redacter")]
     pub ms_presidio_text_analyze_url: Option<Url>,
@@ -346,6 +365,14 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
                     },
                 )),
+                RedacterType::AwsBedrock => Ok(RedacterProviderOptions::AwsBedrock(
+                    crate::redacters::AwsBedrockRedacterOptions {
+                        region: self.aws_region.clone().map(aws_config::Region::new),
+                        text_model: self.aws_bedrock_text_model.clone(),
+                        image_model: self.aws_bedrock_image_model.clone(),
+                        image_mode: self.llm_image_mode,
+                    },
+                )),
             }?;
             provider_options.push(redacter_options);
         }
@@ -377,6 +404,7 @@ mod tests {
             RedacterType::GeminiLlm,
             RedacterType::OpenAiLlm,
             RedacterType::GcpVertexAi,
+            RedacterType::AwsBedrock,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)

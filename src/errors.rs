@@ -21,6 +21,8 @@ pub enum AppError {
     GoogleCloudInvalidMetadataValue(#[from] InvalidMetadataValue),
     #[error("AWS SDK error occurred")]
     AwsSdkError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
+    #[error("AWS Bedrock error: {message}")]
+    AwsBedrockError { message: String },
     #[error("MIME error:\n{0}")]
     MimeError(#[from] mime::FromStrError),
     #[error("HTTP client error:\n{0}")]

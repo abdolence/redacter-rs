@@ -50,6 +50,10 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
+    * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova models
+        * text, html, csv, json files
+        * images, redacted by the model itself or by blacking out the coordinates it reports
+        * PDF files (rendering as images)
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -91,7 +95,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai]
+          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock]
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
       --gcp-project-id <GCP_PROJECT_ID>
@@ -115,7 +119,11 @@ Options:
       --csv-delimiter <CSV_DELIMITER>
           CSV delimiter (default is ',')
       --aws-region <AWS_REGION>
-          AWS region for AWS Comprehend DLP redacter
+          AWS region for the AWS Comprehend and AWS Bedrock redacters
+      --aws-bedrock-text-model <AWS_BEDROCK_TEXT_MODEL>
+          Bedrock model id for text redaction, also used to locate PII coordinates in images. Default is 'amazon.nova-2-lite-v1:0' with the cross-region inference profile prefix of the selected region
+      --aws-bedrock-image-model <AWS_BEDROCK_IMAGE_MODEL>
+          Bedrock model id for native image editing. Default is 'amazon.nova-canvas-v1:0'
       --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
           URL for text analyze endpoint for MsPresidio redacter
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
@@ -214,7 +222,7 @@ Optionally, you can provide model names using `--open-ai-model` (default `gpt-5.
 
 ### Image redaction with LLM redacters
 
-All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in one of two ways, selected with
+All four LLM redacters (GCP Vertex AI, Gemini API, Open AI and AWS Bedrock) redact images in one of two ways, selected with
 `--llm-image-mode`:
 
 - `native` (the image model edits the image and returns it with the personal information covered by black boxes);
@@ -228,6 +236,21 @@ All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in
 To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
 To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
 AWS Comprehend DLP is only available for unstructured text files.
+
+### AWS Bedrock
+
+To be able to use AWS Bedrock you need to authenticate using `aws configure` or provide a service account, and
+have model access enabled for the models you use in the Bedrock console.
+To provide an AWS region use `--aws-region` option.
+
+Models are selected with `--aws-bedrock-text-model` and `--aws-bedrock-image-model` options. By default, they are
+set to:
+
+- `amazon.nova-2-lite-v1:0` for the text model. Amazon Nova is served through cross-region inference profiles, so
+  the default id is prefixed with the geography of the selected region (`us.`, `eu.` or `apac.`). Regions outside
+  those geographies need an explicit model id.
+- `amazon.nova-canvas-v1:0` for the image model. Nova Canvas takes images with sides between 320 and 4096 pixels
+  and at most 4.19 megapixels; in `auto` mode other images are redacted by the coordinate path instead.
 
 ## Multiple redacters
 
@@ -307,6 +330,12 @@ Vertex AI redacter:
 
 ```sh
 redacter cp -d gcp-vertex-ai --gcp-project-id my-little-project tmp/source/ tmp/redacted/
+```
+
+AWS Bedrock redacter:
+
+```sh
+redacter cp -d aws-bedrock --aws-region us-east-1 tmp/source/ tmp/redacted/
 ```
 
 Override media types based on filenames:

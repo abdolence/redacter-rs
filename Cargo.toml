@@ -82,6 +82,11 @@ aws-sdk-comprehend = { version = "1", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
+aws-smithy-types = { version = "1" }
 url = "2"
 reqwest = { version = "0.13", features = [
     "multipart",
