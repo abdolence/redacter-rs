@@ -92,6 +92,10 @@ jobs:
         uses: houseabsolute/actions-rust-cross@v1
         with:
           command: "test"
+          # The action restores its cargo cache on every invocation, and the cached target
+          # directory does not carry the workspace binary, so a second restore here wiped the
+          # binary built by the previous step before it could be packaged.
+          use-rust-cache: false
           target: ${{ matrix.platform.target }}
           toolchain: ${{ matrix.toolchain }}
           args: "--locked --release"
