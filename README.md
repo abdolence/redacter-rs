@@ -239,8 +239,8 @@ AWS Comprehend DLP is only available for unstructured text files.
 
 ### AWS Bedrock
 
-To be able to use AWS Bedrock you need to authenticate using `aws configure` or provide a service account, and
-have model access enabled for the models you use in the Bedrock console.
+To be able to use AWS Bedrock you need to authenticate using `aws login`, `aws configure` or a service account,
+and have model access enabled for the models you use in the Bedrock console.
 To provide an AWS region use `--aws-region` option.
 
 Models are selected with `--aws-bedrock-text-model` and `--aws-bedrock-image-model` options. By default, they are
@@ -249,8 +249,9 @@ set to:
 - `amazon.nova-2-lite-v1:0` for the text model. Amazon Nova is served through cross-region inference profiles, so
   the default id is prefixed with the geography of the selected region (`us.`, `eu.` or `apac.`). Regions outside
   those geographies need an explicit model id.
-- `amazon.nova-canvas-v1:0` for the image model. Nova Canvas takes images with sides between 320 and 4096 pixels
-  and at most 4.19 megapixels; in `auto` mode other images are redacted by the coordinate path instead.
+- `amazon.nova-canvas-v1:0` for the image model. Nova Canvas is served only in a few regions such as `us-east-1`
+  and `eu-west-1`, and takes images with sides between 320 and 4096 pixels and at most 4.19 megapixels. In `auto`
+  mode images it cannot take, and regions where it is not served, are redacted by the coordinate path instead.
 
 ## Multiple redacters
 

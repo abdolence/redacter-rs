@@ -71,7 +71,7 @@ csv-async = { version = "1", default-features = false, features = [
     "tokio",
     "tokio-stream",
 ] }
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-config = { version = "1", features = ["behavior-version-latest", "credentials-login"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
