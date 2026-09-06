@@ -1,0 +1,45 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 672 >>
+stream
+BT
+/F1 20 Tf 1 0 0 1 60 760 Tm (Customer Registration Form) Tj
+/F1 12 Tf 1 0 0 1 60 710 Tm (Full name: John Michael Smith) Tj
+/F1 12 Tf 1 0 0 1 60 685 Tm (Email: john.smith@example.com) Tj
+/F1 12 Tf 1 0 0 1 60 660 Tm (Phone: +1 \(555\) 123-4567) Tj
+/F1 12 Tf 1 0 0 1 60 635 Tm (Date of birth: 14 March 1985) Tj
+/F1 12 Tf 1 0 0 1 60 610 Tm (Address: 221B Baker Street, London NW1 6XE) Tj
+/F1 12 Tf 1 0 0 1 60 585 Tm (Passport no.: X1234567) Tj
+/F1 12 Tf 1 0 0 1 60 560 Tm (Credit card: 4111 1111 1111 1111) Tj
+/F1 12 Tf 1 0 0 1 60 535 Tm (Notes: Prefers contact by email in the evening.) Tj
+/F1 12 Tf 1 0 0 1 60 490 Tm (Signature: J. M. Smith) Tj
+ET
+1 w 40 40 532 760 re S
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000969 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1039
+%%EOF

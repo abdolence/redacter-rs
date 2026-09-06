@@ -1,0 +1,19 @@
+{
+  "customer": {
+    "id": 1,
+    "full_name": "John Michael Smith",
+    "email": "john.smith@example.com",
+    "phone": "+1 (555) 123-4567",
+    "date_of_birth": "1985-03-14",
+    "address": {
+      "street": "221B Baker Street",
+      "city": "London",
+      "postcode": "NW1 6XE"
+    },
+    "payment": {
+      "card_number": "4111 1111 1111 1111",
+      "expires": "12/28"
+    }
+  },
+  "notes": "Prefers contact by email in the evening."
+}
