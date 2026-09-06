@@ -52,7 +52,7 @@ Google Cloud Platform's DLP API.
         * PDF files (rendering as images from OCR)
     * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova models
         * text, html, csv, json files
-        * images, redacted by the model itself or by blacking out the coordinates it reports
+        * images, redacted by blacking out the coordinates the model reports
         * PDF files (rendering as images)
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
@@ -121,9 +121,7 @@ Options:
       --aws-region <AWS_REGION>
           AWS region for the AWS Comprehend and AWS Bedrock redacters
       --aws-bedrock-text-model <AWS_BEDROCK_TEXT_MODEL>
-          Bedrock model id for text redaction, also used to locate PII coordinates in images. Default is 'amazon.nova-2-lite-v1:0' with the cross-region inference profile prefix of the selected region
-      --aws-bedrock-image-model <AWS_BEDROCK_IMAGE_MODEL>
-          Bedrock model id for native image editing. Default is 'amazon.nova-canvas-v1:0'
+          Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere
       --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
           URL for text analyze endpoint for MsPresidio redacter
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
@@ -222,8 +220,9 @@ Optionally, you can provide model names using `--open-ai-model` (default `gpt-5.
 
 ### Image redaction with LLM redacters
 
-All four LLM redacters (GCP Vertex AI, Gemini API, Open AI and AWS Bedrock) redact images in one of two ways, selected with
-`--llm-image-mode`:
+GCP Vertex AI, Gemini API and Open AI redact images in one of two ways, selected with
+`--llm-image-mode`; AWS Bedrock has no active image editing model and always redacts images by
+coordinates, so `--llm-image-mode native` is rejected for it:
 
 - `native` (the image model edits the image and returns it with the personal information covered by black boxes);
 - `coords` (the text model reports the coordinates of the personal information and the tool blacks them out locally);
@@ -243,18 +242,14 @@ To be able to use AWS Bedrock you need to authenticate using `aws login`, `aws c
 and have model access enabled for the models you use in the Bedrock console.
 To provide an AWS region use `--aws-region` option.
 
-Models are selected with `--aws-bedrock-text-model` and `--aws-bedrock-image-model` options. By default, they are
-set to:
-
-- `amazon.nova-2-lite-v1:0` for the text model. Amazon Nova is served through cross-region inference profiles, so
-  the default id is prefixed with the geography of the selected region (`us.`, `eu.` or `apac.`). Regions outside
-  those geographies need an explicit model id.
-- `amazon.nova-canvas-v1:0` for the image model. Nova Canvas is served only in a few regions such as `us-east-1`
-  and `eu-west-1`, and takes images with sides between 320 and 4096 pixels and at most 4.19 megapixels. In `auto`
-  mode images it cannot take, and regions where it is not served, are redacted by the coordinate path instead.
-  AWS also marks `amazon.nova-canvas-v1:0` as a legacy model, and refuses it for accounts that have not used it
-  recently; `auto` mode falls back to the coordinate path in that case too, or use `--llm-image-mode coords` or
-  point `--aws-bedrock-image-model` at another image model.
+The text model is used for text redaction and to locate PII coordinates in images; AWS Bedrock has no active
+image editing model, so images are always redacted by that coordinate path (`--llm-image-mode native` is
+rejected for this redacter). Select the model with `--aws-bedrock-text-model`; by default it is
+`amazon.nova-2-lite-v1:0`. Amazon Nova 2 Lite has no in-region endpoint and is served only through Geo
+inference profiles, so the default id is prefixed with the geography of the selected region (`us.`, `eu.`, or
+`jp.` for `ap-northeast-1`/`ap-northeast-3`). Outside the US, EU and Japan the default falls back to the
+`global.` profile, which may route the request to another geography; pass an explicit id to
+`--aws-bedrock-text-model` to override it.
 
 ## Multiple redacters
 

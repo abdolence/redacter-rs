@@ -218,15 +218,9 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Bedrock model id for text redaction, also used to locate PII coordinates in images. Default is 'amazon.nova-2-lite-v1:0' with the cross-region inference profile prefix of the selected region"
+        help = "Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere"
     )]
     pub aws_bedrock_text_model: Option<AwsBedrockModelName>,
-
-    #[arg(
-        long,
-        help = "Bedrock model id for native image editing. Default is 'amazon.nova-canvas-v1:0'"
-    )]
-    pub aws_bedrock_image_model: Option<AwsBedrockModelName>,
 
     #[arg(long, help = "URL for text analyze endpoint for MsPresidio redacter")]
     pub ms_presidio_text_analyze_url: Option<Url>,
@@ -369,7 +363,6 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     crate::redacters::AwsBedrockRedacterOptions {
                         region: self.aws_region.clone().map(aws_config::Region::new),
                         text_model: self.aws_bedrock_text_model.clone(),
-                        image_model: self.aws_bedrock_image_model.clone(),
                         image_mode: self.llm_image_mode,
                     },
                 )),
