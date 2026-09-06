@@ -150,8 +150,6 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 
 - Local file: `/tmp/file.txt` or `/tmp` for whole directory recursive copy
 - GCS: `gs://bucket/file.txt` or `gs://bucket/test-dir/` for whole directory recursive copy
-  (uses the gRPC Storage v2 API on `storage.googleapis.com`, which needs the `storage.objects.*` IAM permissions
-  and the `cloud-platform` OAuth scope)
 - S3: `s3://bucket/file.txt` or `s3://bucket/test-dir/` for whole directory recursive copy
 - Zip archive: `zip://tmp/archive.zip`
 - Clipboard: `clipboard://`
