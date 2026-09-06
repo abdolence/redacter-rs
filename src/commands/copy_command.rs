@@ -257,6 +257,111 @@ enum TransferFileResult {
     Skipped,
 }
 
+const PROCESSING_MEDIA_TYPE_WIDTH: usize = 28;
+const PROCESSING_MIN_PATH_WIDTH: usize = 8;
+const PROCESSING_FALLBACK_WIDTH: usize = 80;
+
+/// Truncates `s` to at most `width` display columns, keeping a prefix and a
+/// (slightly longer) suffix joined by a single `…`, so the most identifying
+/// part of a path (its file name) tends to survive. Widths are measured with
+/// `console::measure_text_width` so multi-byte and wide characters are
+/// accounted for rather than counted as one byte each.
+fn truncate_middle(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if console::measure_text_width(s) <= width {
+        return s.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let budget = width - 1; // reserve one column for the ellipsis
+    let head_budget = budget / 2;
+    let tail_budget = budget - head_budget;
+
+    let chars: Vec<char> = s.chars().collect();
+
+    let mut head = String::new();
+    let mut used = 0;
+    for &c in &chars {
+        let w = console::measure_text_width(&c.to_string());
+        if used + w > head_budget {
+            break;
+        }
+        head.push(c);
+        used += w;
+    }
+
+    let mut tail = String::new();
+    used = 0;
+    for &c in chars.iter().rev() {
+        let w = console::measure_text_width(&c.to_string());
+        if used + w > tail_budget {
+            break;
+        }
+        tail.insert(0, c);
+        used += w;
+    }
+
+    format!("{head}…{tail}")
+}
+
+/// Fits `s` into exactly `width` display columns: pads short values on the
+/// right, and middle-truncates values that overflow.
+fn fit_column(s: &str, width: usize) -> String {
+    if console::measure_text_width(s) <= width {
+        pad_str(s, width, Alignment::Left, None).to_string()
+    } else {
+        truncate_middle(s, width)
+    }
+}
+
+/// Builds the "Processing ... to ... Size: ..." progress line so it fits
+/// within `width` display columns instead of wrapping on its own padding.
+/// The two path columns share whatever room is left after the literal text,
+/// the fixed media-type column and the (unpadded) size column, split evenly
+/// with a sane minimum so narrow terminals degrade to truncated names rather
+/// than zero-width columns.
+fn format_processing_line(
+    width: usize,
+    source_path: &str,
+    destination_path: &str,
+    media_type: &str,
+    size: &str,
+    bold_style: &Style,
+) -> String {
+    let width = if width == 0 {
+        PROCESSING_FALLBACK_WIDTH
+    } else {
+        width
+    };
+
+    let literal_width = console::measure_text_width("Processing ")
+        + console::measure_text_width(" to ")
+        + console::measure_text_width(" ")
+        + console::measure_text_width(" Size: ");
+    let size_width = console::measure_text_width(size);
+
+    let available_for_paths = width
+        .saturating_sub(literal_width)
+        .saturating_sub(PROCESSING_MEDIA_TYPE_WIDTH)
+        .saturating_sub(size_width);
+    let path_width = (available_for_paths / 2).max(PROCESSING_MIN_PATH_WIDTH);
+
+    let source_display = fit_column(source_path, path_width);
+    let destination_display = fit_column(destination_path, path_width);
+    let media_type_display = fit_column(media_type, PROCESSING_MEDIA_TYPE_WIDTH);
+
+    format!(
+        "Processing {} to {} {} Size: {}",
+        bold_style.apply_to(source_display),
+        bold_style.apply_to(destination_display),
+        media_type_display,
+        bold_style.apply_to(size)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transfer_and_redact_file<
     'a,
@@ -292,44 +397,24 @@ async fn transfer_and_redact_file<
         media_type: file_ref.media_type.clone(),
         file_size: file_ref.file_size,
     };
-    let max_filename_width = (term.width() as f64 * 0.25) as usize;
     bar.println(
-        format!(
-            "Processing {} to {} {} Size: {}",
-            bold_style.apply_to(pad_str(
-                &base_resolved_file_ref.file_path,
-                max_filename_width,
-                Alignment::Left,
-                None
-            )),
-            bold_style.apply_to(pad_str(
-                destination_fs
-                    .resolve(Some(&dest_file_ref))
-                    .file_path
-                    .as_str(),
-                max_filename_width,
-                Alignment::Left,
-                None
-            )),
-            pad_str(
-                file_ref
-                    .media_type
-                    .as_ref()
-                    .map(|media_type| media_type.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-                    .as_str(),
-                28,
-                Alignment::Left,
-                None
-            ),
-            bold_style.apply_to(pad_str(
-                HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
-                    .to_string()
-                    .as_str(),
-                16,
-                Alignment::Left,
-                None
-            ))
+        format_processing_line(
+            term.width() as usize,
+            &base_resolved_file_ref.file_path,
+            destination_fs
+                .resolve(Some(&dest_file_ref))
+                .file_path
+                .as_str(),
+            file_ref
+                .media_type
+                .as_ref()
+                .map(|media_type| media_type.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+                .as_str(),
+            HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
+                .to_string()
+                .as_str(),
+            &bold_style,
         )
         .as_str(),
     );
@@ -492,6 +577,130 @@ mod tests {
     const SAMPLE_FILE_NAMES: [&str; 5] = TEST_DOCUMENT_NAMES;
     const SAMPLE_EMAIL: &str = TEST_DOCUMENT_SAMPLE_EMAIL;
     const SAMPLE_PHONE: &str = TEST_DOCUMENT_SAMPLE_PHONE;
+
+    fn plain_style() -> Style {
+        Style::new()
+    }
+
+    #[test]
+    fn processing_line_fits_within_width_with_long_destination() {
+        let destination = "redacted/redacted.zip:documents/customer-profile.html";
+        assert_eq!(console::measure_text_width(destination), 53);
+
+        let line = format_processing_line(
+            150,
+            "documents/customer-profile.html",
+            destination,
+            "text/html",
+            "12.34 KiB",
+            &plain_style(),
+        );
+
+        assert!(
+            console::measure_text_width(&line) <= 150,
+            "line was {} columns wide: {:?}",
+            console::measure_text_width(&line),
+            line
+        );
+        assert!(line.ends_with("12.34 KiB"), "line was: {line:?}");
+        assert_eq!(
+            line,
+            line.trim_end(),
+            "line has trailing whitespace: {line:?}"
+        );
+    }
+
+    #[test]
+    fn processing_line_middle_truncates_long_paths_at_narrow_width() {
+        let source = "documents/very-long-nested-directory-path/a.txt";
+        let destination = "redacted/very-long-nested-directory-path/a.txt";
+
+        let line = format_processing_line(
+            80,
+            source,
+            destination,
+            "text/plain",
+            "1.00 KiB",
+            &plain_style(),
+        );
+
+        assert!(
+            console::measure_text_width(&line) <= 80,
+            "line was {} columns wide: {:?}",
+            console::measure_text_width(&line),
+            line
+        );
+        assert!(line.contains('…'), "line was: {line:?}");
+        // The tail (file name) must survive truncation.
+        assert!(line.contains("a.txt"), "line was: {line:?}");
+    }
+
+    #[test]
+    fn fit_column_pads_short_values_without_truncating() {
+        let result = fit_column("a.txt", 20);
+        assert!(!result.contains('…'), "result was: {result:?}");
+        assert_eq!(console::measure_text_width(&result), 20);
+        assert!(result.starts_with("a.txt"));
+    }
+
+    #[test]
+    fn processing_line_falls_back_to_80_columns_when_width_is_zero() {
+        // Short enough that whether the path column is computed from a
+        // width of 0 or of 80 changes how much padding trails it, so a
+        // missing width == 0 fallback shows up as a mismatch here.
+        let line_zero = format_processing_line(
+            0,
+            "src.txt",
+            "dst.txt",
+            "text/plain",
+            "1.00 KiB",
+            &plain_style(),
+        );
+        let line_eighty = format_processing_line(
+            80,
+            "src.txt",
+            "dst.txt",
+            "text/plain",
+            "1.00 KiB",
+            &plain_style(),
+        );
+        assert_eq!(line_zero, line_eighty);
+    }
+
+    #[test]
+    fn truncate_middle_measures_multibyte_characters_by_display_width() {
+        let source = "documents/café-résumé-naïve-longer-file-name.txt";
+        // Every character in this path is 1 display column wide (no CJK),
+        // so display width differs from byte length but not from char count.
+        assert!(source.len() > source.chars().count());
+
+        let truncated = truncate_middle(source, 20);
+        assert_eq!(console::measure_text_width(&truncated), 20);
+        assert!(truncated.contains('…'));
+
+        let wide = "文档/非常长的中文文件名称示例说明.txt";
+        let truncated_wide = truncate_middle(wide, 20);
+        assert!(console::measure_text_width(&truncated_wide) <= 20);
+        assert!(truncated_wide.contains('…'));
+    }
+
+    #[test]
+    fn processing_line_truncates_media_type_longer_than_28_columns() {
+        let media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        assert!(console::measure_text_width(media_type) > 28);
+
+        let line = format_processing_line(
+            150,
+            "documents/source.txt",
+            "redacted/destination.txt",
+            media_type,
+            "1.00 KiB",
+            &plain_style(),
+        );
+
+        assert!(line.contains('…'), "line was: {line:?}");
+        assert!(!line.contains(media_type), "line was: {line:?}");
+    }
 
     fn base_redacter_options(provider_options: RedacterProviderOptions) -> RedacterOptions {
         RedacterOptions {
