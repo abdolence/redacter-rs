@@ -35,7 +35,7 @@ mod redacter_throttler;
 pub use redacter_throttler::*;
 
 use crate::args::RedacterType;
-use crate::common_types::DlpRequestLimit;
+use crate::common_types::{DlpRequestLimit, TextImageCoords};
 
 /// Longest edge, in pixels, an image is scaled down to before it is sent to an LLM.
 pub const LLM_MAX_IMAGE_DIMENSION: u32 = 1024;
@@ -184,6 +184,57 @@ pub fn prepare_image_for_llm(mime_type: &Mime, data: &bytes::Bytes) -> AppResult
         width: resized.width(),
         height: resized.height(),
     })
+}
+
+/// Instruction given to a Gemini model on the coordinate-based image redaction path.
+///
+/// Gemini's vision models answer bounding-box questions in a normalized 0-1000 coordinate
+/// space as `box_2d: [ymin, xmin, ymax, xmax]`, regardless of how the prompt is worded, so
+/// the prompt asks for that convention explicitly instead of pixel coordinates. The caller
+/// converts the normalized boxes to pixel coordinates locally with
+/// [`normalized_box_to_image_coords`], using the dimensions of the image the model actually
+/// saw (from [`prepare_image_for_llm`]).
+pub const GEMINI_COORDS_REDACTION_PROMPT: &str =
+    "Detect all personal information in the image. Return a JSON array of objects \
+     {box_2d, text} where box_2d is [ymin, xmin, ymax, xmax] normalized to 0-1000.";
+
+/// One detection from the Gemini coordinate redaction path: a bounding box normalized to
+/// 0-1000 as `[ymin, xmin, ymax, xmax]`, per Gemini's bounding-box convention, together with
+/// the detected text.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NormalizedPiiBox {
+    pub box_2d: Vec<f32>,
+    pub text: Option<String>,
+}
+
+/// Converts one Gemini-style normalized bounding box (`[ymin, xmin, ymax, xmax]`, each in
+/// 0..=1000) to pixel coordinates within an image of the given size.
+///
+/// Out-of-range inputs are clamped to the normalized 0..=1000 range before scaling, and the
+/// resulting pixel coordinates are ordered (`x1 <= x2`, `y1 <= y2`) so a degenerate or
+/// reversed box still produces a well-formed rectangle instead of one with negative width or
+/// height.
+pub fn normalized_box_to_image_coords(
+    box_2d: [f32; 4],
+    width: u32,
+    height: u32,
+    text: Option<String>,
+) -> TextImageCoords {
+    let [ymin, xmin, ymax, xmax] = box_2d;
+    let clamp_normalized = |v: f32| v.clamp(0.0, 1000.0);
+    let to_x = |v: f32| clamp_normalized(v) / 1000.0 * width as f32;
+    let to_y = |v: f32| clamp_normalized(v) / 1000.0 * height as f32;
+
+    let (raw_x1, raw_x2) = (to_x(xmin), to_x(xmax));
+    let (raw_y1, raw_y2) = (to_y(ymin), to_y(ymax));
+
+    TextImageCoords {
+        x1: raw_x1.min(raw_x2),
+        y1: raw_y1.min(raw_y2),
+        x2: raw_x1.max(raw_x2),
+        y2: raw_y1.max(raw_y2),
+        text,
+    }
 }
 
 /// Redacts an image with the native editing path, the coordinate path, or both,
@@ -692,5 +743,43 @@ mod tests {
             NativeImageEditError::no_image_in_response().failure,
             NativeImageEditFailure::Unsupported
         );
+    }
+
+    #[test]
+    fn normalized_box_converts_to_pixel_coordinates() {
+        let coords = normalized_box_to_image_coords([233.0, 98.0, 248.0, 345.0], 740, 1018, None);
+        assert!((coords.x1 - 72.5).abs() < 0.5, "x1 = {}", coords.x1);
+        assert!((coords.y1 - 237.2).abs() < 0.5, "y1 = {}", coords.y1);
+        assert!((coords.x2 - 255.3).abs() < 0.5, "x2 = {}", coords.x2);
+        assert!((coords.y2 - 252.5).abs() < 0.5, "y2 = {}", coords.y2);
+    }
+
+    #[test]
+    fn normalized_box_clamps_out_of_range_values() {
+        let coords = normalized_box_to_image_coords([-50.0, -10.0, 2000.0, 1500.0], 100, 200, None);
+        assert_eq!(coords.x1, 0.0);
+        assert_eq!(coords.y1, 0.0);
+        assert_eq!(coords.x2, 100.0);
+        assert_eq!(coords.y2, 200.0);
+    }
+
+    #[test]
+    fn normalized_box_keeps_degenerate_boxes_ordered() {
+        // ymax/xmax reversed with ymin/xmin: the box is degenerate, but the pixel
+        // coordinates it produces must still be ordered (x1 <= x2, y1 <= y2).
+        let coords = normalized_box_to_image_coords([500.0, 500.0, 100.0, 100.0], 1000, 1000, None);
+        assert!(coords.x1 <= coords.x2);
+        assert!(coords.y1 <= coords.y2);
+    }
+
+    #[test]
+    fn normalized_box_carries_the_detected_text_through() {
+        let coords = normalized_box_to_image_coords(
+            [0.0, 0.0, 1000.0, 1000.0],
+            10,
+            10,
+            Some("14 March 1985".to_string()),
+        );
+        assert_eq!(coords.text.as_deref(), Some("14 March 1985"));
     }
 }

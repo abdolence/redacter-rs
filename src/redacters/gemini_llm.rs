@@ -3,9 +3,10 @@ use crate::common_types::{GcpProjectId, TextImageCoords};
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, LlmImageMode,
-    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
+    normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
+    redact_image_with_mode, LlmImageMode, NativeImageEditError, NormalizedPiiBox, RedactSupport,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, GEMINI_COORDS_REDACTION_PROMPT,
+    NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -205,10 +206,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                     gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
                                         data: Some(
                                             gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::Text(
-                                                format!("Find anything in the attached image that look like personal information. \
-                                                Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
-                                                The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
-                                                The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height),
+                                                GEMINI_COORDS_REDACTION_PROMPT.to_string(),
                                             ),
                                         ),
                                         ..std::default::Default::default()
@@ -241,30 +239,16 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                 r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Object.into(),
                                                 properties: vec![
                                                     (
-                                                        "x1".to_string(),
+                                                        "box_2d".to_string(),
                                                         gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Number.into(),
-                                                            ..std::default::Default::default()
-                                                        },
-                                                    ),
-                                                    (
-                                                        "y1".to_string(),
-                                                        gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Number.into(),
-                                                            ..std::default::Default::default()
-                                                        },
-                                                    ),
-                                                    (
-                                                        "x2".to_string(),
-                                                        gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Number.into(),
-                                                            ..std::default::Default::default()
-                                                        },
-                                                    ),
-                                                    (
-                                                        "y2".to_string(),
-                                                        gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Number.into(),
+                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Array.into(),
+                                                            min_items: 4,
+                                                            items: Some(Box::new(
+                                                                gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
+                                                                    r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Integer.into(),
+                                                                    ..std::default::Default::default()
+                                                                }
+                                                            )),
                                                             ..std::default::Default::default()
                                                         },
                                                     ),
@@ -276,7 +260,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                                                         },
                                                     ),
                                                 ].into_iter().collect(),
-                                                required: vec!["x1".to_string(), "y1".to_string(), "x2".to_string(), "y2".to_string()],
+                                                required: vec!["box_2d".to_string(), "text".to_string()],
                                                 ..std::default::Default::default()
                                             }
                                         )),
@@ -311,8 +295,19 @@ impl<'a> GeminiLlmRedacter<'a> {
                                 ) => acc + text,
                                 _ => acc,
                             });
-                    let pii_image_coords: Vec<TextImageCoords> =
-                        serde_json::from_str(&content_json)?;
+                    let detections: Vec<NormalizedPiiBox> = serde_json::from_str(&content_json)?;
+                    let pii_image_coords: Vec<TextImageCoords> = detections
+                        .into_iter()
+                        .filter_map(|detection| {
+                            let box_2d: [f32; 4] = detection.box_2d.get(..4)?.try_into().ok()?;
+                            Some(normalized_box_to_image_coords(
+                                box_2d,
+                                prepared_image.width,
+                                prepared_image.height,
+                                detection.text,
+                            ))
+                        })
+                        .collect();
                     Ok(RedacterDataItem {
                         file_ref: input.file_ref,
                         content: RedacterDataItemContent::Image {
