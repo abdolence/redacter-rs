@@ -257,8 +257,9 @@ inference profiles, so the default id is prefixed with the geography of the sele
 `global.` profile, which may route the request to another geography; pass an explicit id to
 `--aws-bedrock-text-model` to override it.
 
-Text redaction works with any Converse-capable model id, but the image coordinate pass is tuned for Amazon
-Nova's bounding box convention and other model families are not verified for images.
+Text redaction works with any Converse-capable model id. Images are redacted with Amazon Nova (the default) or
+Anthropic Claude models, detected from the model id; any other model family is rejected for image redaction
+with an error rather than risking misplaced boxes.
 
 ### AWS Bedrock Guardrails
 
