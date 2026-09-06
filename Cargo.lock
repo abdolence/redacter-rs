@@ -3758,7 +3758,6 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "aws-sdk-comprehend",
  "aws-sdk-s3",
- "aws-smithy-types",
  "base64 0.23.1",
  "bytes",
  "cargo-husky",

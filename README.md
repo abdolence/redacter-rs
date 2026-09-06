@@ -252,6 +252,9 @@ set to:
 - `amazon.nova-canvas-v1:0` for the image model. Nova Canvas is served only in a few regions such as `us-east-1`
   and `eu-west-1`, and takes images with sides between 320 and 4096 pixels and at most 4.19 megapixels. In `auto`
   mode images it cannot take, and regions where it is not served, are redacted by the coordinate path instead.
+  AWS also marks `amazon.nova-canvas-v1:0` as a legacy model, and refuses it for accounts that have not used it
+  recently; `auto` mode falls back to the coordinate path in that case too, or use `--llm-image-mode coords` or
+  point `--aws-bedrock-image-model` at another image model.
 
 ## Multiple redacters
 
