@@ -1,8 +1,9 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey,
-    OpenAiModelName, RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
+    AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
+    GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey, OpenAiModelName,
+    RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
@@ -11,6 +12,9 @@ use url::Url;
 
 /// Vertex AI location used when `--gcp-region` is not given.
 const DEFAULT_GCP_VERTEX_AI_REGION: &str = "global";
+
+/// Guardrail version used when `--aws-bedrock-guardrail-version` is not given.
+const DEFAULT_AWS_BEDROCK_GUARDRAIL_VERSION: &str = "DRAFT";
 
 #[derive(Parser, Debug)]
 #[command(author, about)]
@@ -104,6 +108,8 @@ pub enum RedacterType {
     GeminiLlm,
     OpenAiLlm,
     GcpVertexAi,
+    AwsBedrock,
+    AwsBedrockGuardrails,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -117,6 +123,8 @@ impl std::str::FromStr for RedacterType {
             "gemini-llm" => Ok(RedacterType::GeminiLlm),
             "open-ai-llm" => Ok(RedacterType::OpenAiLlm),
             "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
+            "aws-bedrock" => Ok(RedacterType::AwsBedrock),
+            "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -131,6 +139,8 @@ impl Display for RedacterType {
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
             RedacterType::OpenAiLlm => write!(f, "open-ai-llm"),
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
+            RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
+            RedacterType::AwsBedrockGuardrails => write!(f, "aws-bedrock-guardrails"),
         }
     }
 }
@@ -206,8 +216,26 @@ pub struct RedacterArgs {
     #[arg(long, help = "CSV delimiter (default is ',')")]
     pub csv_delimiter: Option<char>,
 
-    #[arg(long, help = "AWS region for AWS Comprehend DLP redacter")]
+    #[arg(
+        long,
+        help = "AWS region for the AWS Comprehend and AWS Bedrock redacters"
+    )]
     pub aws_region: Option<String>,
+
+    #[arg(
+        long,
+        help = "Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere"
+    )]
+    pub aws_bedrock_text_model: Option<AwsBedrockModelName>,
+
+    #[arg(long, help = "Guardrail id for the AWS Bedrock Guardrails redacter")]
+    pub aws_bedrock_guardrail_id: Option<AwsBedrockGuardrailId>,
+
+    #[arg(
+        long,
+        help = "Guardrail version for the AWS Bedrock Guardrails redacter. Default is 'DRAFT'"
+    )]
+    pub aws_bedrock_guardrail_version: Option<AwsBedrockGuardrailVersion>,
 
     #[arg(long, help = "URL for text analyze endpoint for MsPresidio redacter")]
     pub ms_presidio_text_analyze_url: Option<Url>,
@@ -346,6 +374,35 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
                     },
                 )),
+                RedacterType::AwsBedrock => Ok(RedacterProviderOptions::AwsBedrock(
+                    crate::redacters::AwsBedrockRedacterOptions {
+                        region: self.aws_region.clone().map(aws_config::Region::new),
+                        text_model: self.aws_bedrock_text_model.clone(),
+                        image_mode: self.llm_image_mode,
+                    },
+                )),
+                RedacterType::AwsBedrockGuardrails => {
+                    Ok(RedacterProviderOptions::AwsBedrockGuardrails(
+                        crate::redacters::AwsBedrockGuardrailsRedacterOptions {
+                            region: self.aws_region.clone().map(aws_config::Region::new),
+                            guardrail_id: self.aws_bedrock_guardrail_id.clone().ok_or_else(
+                                || AppError::RedacterConfigError {
+                                    message: "Guardrail id is required for the AWS Bedrock \
+                                              Guardrails redacter"
+                                        .to_string(),
+                                },
+                            )?,
+                            guardrail_version: self
+                                .aws_bedrock_guardrail_version
+                                .clone()
+                                .unwrap_or_else(|| {
+                                    AwsBedrockGuardrailVersion::new(
+                                        DEFAULT_AWS_BEDROCK_GUARDRAIL_VERSION.to_string(),
+                                    )
+                                }),
+                        },
+                    ))
+                }
             }?;
             provider_options.push(redacter_options);
         }
@@ -377,6 +434,8 @@ mod tests {
             RedacterType::GeminiLlm,
             RedacterType::OpenAiLlm,
             RedacterType::GcpVertexAi,
+            RedacterType::AwsBedrock,
+            RedacterType::AwsBedrockGuardrails,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)

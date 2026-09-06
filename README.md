@@ -50,6 +50,12 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
+    * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova models
+        * text, html, csv, json files
+        * images, redacted by blacking out the coordinates the model reports
+        * PDF files (rendering as images)
+    * [AWS Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/) based redaction
+        * text, html, csv, json files
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
@@ -91,7 +97,7 @@ Options:
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
   -d, --redact <REDACT>
-          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai]
+          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails]
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
       --gcp-project-id <GCP_PROJECT_ID>
@@ -115,7 +121,13 @@ Options:
       --csv-delimiter <CSV_DELIMITER>
           CSV delimiter (default is ',')
       --aws-region <AWS_REGION>
-          AWS region for AWS Comprehend DLP redacter
+          AWS region for the AWS Comprehend and AWS Bedrock redacters
+      --aws-bedrock-text-model <AWS_BEDROCK_TEXT_MODEL>
+          Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere
+      --aws-bedrock-guardrail-id <AWS_BEDROCK_GUARDRAIL_ID>
+          Guardrail id for the AWS Bedrock Guardrails redacter
+      --aws-bedrock-guardrail-version <AWS_BEDROCK_GUARDRAIL_VERSION>
+          Guardrail version for the AWS Bedrock Guardrails redacter. Default is 'DRAFT'
       --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
           URL for text analyze endpoint for MsPresidio redacter
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
@@ -214,8 +226,9 @@ Optionally, you can provide model names using `--open-ai-model` (default `gpt-5.
 
 ### Image redaction with LLM redacters
 
-All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in one of two ways, selected with
-`--llm-image-mode`:
+GCP Vertex AI, Gemini API and Open AI redact images in one of two ways, selected with
+`--llm-image-mode`; AWS Bedrock has no active image editing model and always redacts images by
+coordinates, so `--llm-image-mode native` is rejected for it:
 
 - `native` (the image model edits the image and returns it with the personal information covered by black boxes);
 - `coords` (the text model reports the coordinates of the personal information and the tool blacks them out locally);
@@ -228,6 +241,61 @@ All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in
 To be able to use AWS Comprehend DLP you need to authenticate using `aws configure` or provide a service account.
 To provide an AWS region use `--aws-region` option since AWS Comprehend may not be available in all regions.
 AWS Comprehend DLP is only available for unstructured text files.
+
+### AWS Bedrock
+
+To be able to use AWS Bedrock you need to authenticate using `aws login`, `aws configure` or a service account,
+and have model access enabled for the models you use in the Bedrock console.
+To provide an AWS region use `--aws-region` option.
+
+The text model is used for text redaction and to locate PII coordinates in images; AWS Bedrock has no active
+image editing model, so images are always redacted by that coordinate path (`--llm-image-mode native` is
+rejected for this redacter). Select the model with `--aws-bedrock-text-model`; by default it is
+`amazon.nova-2-lite-v1:0`. Amazon Nova 2 Lite has no in-region endpoint and is served only through Geo
+inference profiles, so the default id is prefixed with the geography of the selected region (`us.`, `eu.`, or
+`jp.` for `ap-northeast-1`/`ap-northeast-3`). Outside the US, EU and Japan the default falls back to the
+`global.` profile, which may route the request to another geography; pass an explicit id to
+`--aws-bedrock-text-model` to override it.
+
+### AWS Bedrock Guardrails
+
+This redacter sends text to the [`ApplyGuardrail`](https://aws.amazon.com/bedrock/guardrails/) API of a guardrail
+you own, and returns the anonymized text the service produces. Placeholders such as `{NAME}`, `{EMAIL}` or
+`{PHONE}` that the guardrail inserts in place of the sensitive values are kept as-is in the output. Only text-based
+formats are supported (text, html, csv, json); images and PDFs are not.
+
+To be able to use it you need to authenticate the same way as for AWS Bedrock (`aws login`, `aws configure` or a
+service account), provide an AWS region using `--aws-region`, and pass the id of a guardrail you own using
+`--aws-bedrock-guardrail-id`. Use `--aws-bedrock-guardrail-version` to pick a specific published version; the
+default is `DRAFT`.
+
+The guardrail's sensitive information filters must be configured with the action **Anonymize**. If a filter is
+instead configured to **Block**, the service returns the guardrail's blocked message instead of redacted text, and
+the tool rejects the response rather than returning that message as if it were redacted content.
+
+You can create a guardrail with its PII filters set to anonymize using the AWS CLI. For example, with a
+`guardrail-pii.json` file such as:
+
+```json
+{
+  "piiEntitiesConfig": [
+    {"type": "NAME", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "EMAIL", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "PHONE", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "ADDRESS", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "CREDIT_DEBIT_CARD_NUMBER", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true}
+  ]
+}
+```
+
+(see the [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-sensitive-filters.html)
+for the full list of supported PII entity types), create the guardrail with:
+
+```sh
+aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
+  --blocked-input-messaging "Blocked by guardrail" --blocked-outputs-messaging "Blocked by guardrail" \
+  --sensitive-information-policy-config file://guardrail-pii.json
+```
 
 ## Multiple redacters
 
@@ -307,6 +375,18 @@ Vertex AI redacter:
 
 ```sh
 redacter cp -d gcp-vertex-ai --gcp-project-id my-little-project tmp/source/ tmp/redacted/
+```
+
+AWS Bedrock redacter:
+
+```sh
+redacter cp -d aws-bedrock --aws-region us-east-1 tmp/source/ tmp/redacted/
+```
+
+AWS Bedrock Guardrails redacter:
+
+```sh
+redacter cp -d aws-bedrock-guardrails --aws-region eu-north-1 --aws-bedrock-guardrail-id <id> tmp/source/ tmp/redacted/
 ```
 
 Override media types based on filenames:

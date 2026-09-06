@@ -2,6 +2,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::reporter::AppReporter;
 use crate::AppResult;
+use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::tonic;
 use mime::Mime;
@@ -16,6 +17,12 @@ pub use gcp_vertex_ai::*;
 
 mod aws_comprehend;
 pub use aws_comprehend::*;
+
+mod aws_bedrock;
+pub use aws_bedrock::*;
+
+mod aws_bedrock_guardrails;
+pub use aws_bedrock_guardrails::*;
 
 mod ms_presidio;
 pub use ms_presidio::*;
@@ -39,6 +46,21 @@ use crate::common_types::{DlpRequestLimit, TextImageCoords};
 
 /// Longest edge, in pixels, an image is scaled down to before it is sent to an LLM.
 pub const LLM_MAX_IMAGE_DIMENSION: u32 = 1024;
+
+/// Formats a Bedrock SDK failure, keeping the service error code and message when the call
+/// reached the service and the whole source chain when it did not.
+pub(crate) fn bedrock_error<E, R>(context: &str, err: &SdkError<E, R>) -> AppError
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+    R: std::fmt::Debug,
+{
+    let message = match (err.code(), err.message()) {
+        (Some(code), Some(message)) => format!("{context}: {code}: {message}"),
+        (Some(code), None) => format!("{context}: {code}"),
+        (None, _) => format!("{context}: {}", DisplayErrorContext(err)),
+    };
+    AppError::AwsBedrockError { message }
+}
 
 /// Instruction given to an image editing model on the native redaction path.
 pub const NATIVE_IMAGE_REDACTION_PROMPT: &str =
@@ -310,6 +332,8 @@ pub enum Redacters<'a> {
     GeminiLlm(GeminiLlmRedacter<'a>),
     OpenAiLlm(OpenAiLlmRedacter<'a>),
     GcpVertexAi(GcpVertexAiRedacter<'a>),
+    AwsBedrock(AwsBedrockRedacter<'a>),
+    AwsBedrockGuardrails(AwsBedrockGuardrailsRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +359,8 @@ pub enum RedacterProviderOptions {
     GeminiLlm(GeminiLlmRedacterOptions),
     OpenAiLlm(OpenAiLlmRedacterOptions),
     GcpVertexAi(GcpVertexAiRedacterOptions),
+    AwsBedrock(AwsBedrockRedacterOptions),
+    AwsBedrockGuardrails(AwsBedrockGuardrailsRedacterOptions),
 }
 
 impl Display for RedacterOptions {
@@ -349,6 +375,10 @@ impl Display for RedacterOptions {
                 RedacterProviderOptions::GeminiLlm(_) => "gemini-llm".to_string(),
                 RedacterProviderOptions::OpenAiLlm(_) => "open-ai-llm".to_string(),
                 RedacterProviderOptions::GcpVertexAi(_) => "gcp-vertex-ai".to_string(),
+                RedacterProviderOptions::AwsBedrock(_) => "aws-bedrock".to_string(),
+                RedacterProviderOptions::AwsBedrockGuardrails(_) => {
+                    "aws-bedrock-guardrails".to_string()
+                }
             })
             .collect::<Vec<String>>()
             .join(", ");
@@ -380,6 +410,14 @@ impl<'a> Redacters<'a> {
             RedacterProviderOptions::GcpVertexAi(options) => Ok(Redacters::GcpVertexAi(
                 GcpVertexAiRedacter::new(options, reporter).await?,
             )),
+            RedacterProviderOptions::AwsBedrock(options) => Ok(Redacters::AwsBedrock(
+                AwsBedrockRedacter::new(options, reporter).await?,
+            )),
+            RedacterProviderOptions::AwsBedrockGuardrails(options) => {
+                Ok(Redacters::AwsBedrockGuardrails(
+                    AwsBedrockGuardrailsRedacter::new(options, reporter).await?,
+                ))
+            }
         }
     }
 
@@ -437,6 +475,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(redacter) => redacter.redact(input).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact(input).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
+            Redacters::AwsBedrock(redacter) => redacter.redact(input).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -448,6 +488,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::AwsBedrock(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -459,6 +501,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GeminiLlm(_) => RedacterType::GeminiLlm,
             Redacters::OpenAiLlm(_) => RedacterType::OpenAiLlm,
             Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
+            Redacters::AwsBedrock(_) => RedacterType::AwsBedrock,
+            Redacters::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
         }
     }
 }
