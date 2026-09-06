@@ -50,7 +50,7 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
-    * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova models
+    * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
         * text, html, csv, json files
         * images, redacted by blacking out the coordinates the model reports
         * PDF files (rendering as images)
@@ -256,6 +256,9 @@ inference profiles, so the default id is prefixed with the geography of the sele
 `jp.` for `ap-northeast-1`/`ap-northeast-3`). Outside the US, EU and Japan the default falls back to the
 `global.` profile, which may route the request to another geography; pass an explicit id to
 `--aws-bedrock-text-model` to override it.
+
+Text redaction works with any Converse-capable model id, but the image coordinate pass is tuned for Amazon
+Nova's bounding box convention and other model families are not verified for images.
 
 ### AWS Bedrock Guardrails
 
