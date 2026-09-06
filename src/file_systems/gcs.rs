@@ -354,10 +354,10 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
         file_matcher: Option<&FileMatcher>,
         max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
-        self.reporter.report(format!(
+        self.reporter.report_debug(format!(
             "Listing files in bucket: {} with prefix: {}",
             self.bucket_resource_name, self.object_name
-        ))?;
+        ));
         if self.object_name.ends_with('/') {
             let prefix = if self.object_name != "/" {
                 Some(self.object_name.clone())

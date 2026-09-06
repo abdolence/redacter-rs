@@ -8,6 +8,16 @@ pub struct AppReporter<'a> {
 }
 
 impl<'a> AppReporter<'a> {
+    /// Reports internal progress detail that is not part of the command's output: it
+    /// goes to `tracing` (`RUST_LOG=debug`) instead of the terminal, so it never lands
+    /// in the middle of the table a command is printing.
+    pub fn report_debug<S>(&'a self, message: S)
+    where
+        S: AsRef<str>,
+    {
+        tracing::debug!("{}", message.as_ref());
+    }
+
     pub fn report<S>(&'a self, message: S) -> AppResult<()>
     where
         S: AsRef<str>,

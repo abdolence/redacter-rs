@@ -32,8 +32,20 @@ pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{name}: {e}"))
 }
 
+/// Sends the internal progress detail to `tracing`, off unless `RUST_LOG` asks for it
+/// (`RUST_LOG=debug` shows what the command is doing behind its table).
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
     let term = Term::stdout();
     let bold_style = Style::new().bold();
 
@@ -105,23 +117,6 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                     .as_str(),
                 )?;
             }
-            term.write_line(
-                format!(
-                    "Finished: {} -> {}\nCopied: {}. Redacted: {}. Skipped: {}.",
-                    Style::new().bold().apply_to(source),
-                    Style::new().green().apply_to(destination),
-                    Style::new()
-                        .bold()
-                        .green()
-                        .apply_to(copy_result.files_copied),
-                    Style::new()
-                        .bold()
-                        .green()
-                        .apply_to(copy_result.files_redacted),
-                    Style::new().yellow().apply_to(copy_result.files_skipped),
-                )
-                .as_str(),
-            )?;
         }
         CliCommand::Ls {
             source,

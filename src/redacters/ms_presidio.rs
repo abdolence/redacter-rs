@@ -127,11 +127,11 @@ impl<'a> MsPresidioRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                self.reporter.report(format!(
+                self.reporter.report_debug(format!(
                     "Redacting an image file: {} ({:?})",
                     input.file_ref.relative_path.value(),
                     input.file_ref.media_type
-                ))?;
+                ));
                 let file_part = reqwest::multipart::Part::bytes(data.to_vec())
                     .file_name(input.file_ref.relative_path.filename())
                     .mime_str(mime_type.as_ref())

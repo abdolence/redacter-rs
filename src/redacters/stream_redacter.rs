@@ -1,3 +1,4 @@
+use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_converters::ocr::Ocr;
 use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
@@ -10,18 +11,58 @@ use crate::redacters::{
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
 use image::ImageFormat;
-use indicatif::ProgressBar;
+use rvstruct::ValueStruct;
 use std::collections::HashSet;
 
+/// The conversion the content went through before it was redacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionConversion {
+    /// The PDF was rendered to `pages` images, optionally read back with OCR.
+    PdfToImages { pages: usize, ocr: bool },
+    /// The image was read with the OCR engine.
+    Ocr,
+}
+
+/// Why the redaction pipeline did not redact the content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionBlocked {
+    /// The file is a PDF and no PDF renderer is available in this build.
+    PdfRendererUnavailable,
+    /// Redaction needs the OCR engine and it is not available in this build.
+    OcrUnavailable,
+    /// The OCR engine cannot read the image format of the file.
+    OcrImageFormatNotSupported,
+}
+
+/// What the pipeline actually did to a file, so the caller can report it once the
+/// transfer has finished rather than the pipeline announcing steps as it goes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RedactionSummary {
+    /// The redacters that redacted the content, in the order they ran.
+    pub applied: Vec<RedacterType>,
+    /// The conversion applied before redaction, if any.
+    pub conversion: Option<RedactionConversion>,
+    /// Why nothing was redacted, when `applied` is empty.
+    pub blocked: Option<RedactionBlocked>,
+}
+
 pub struct RedactStreamResult {
+    /// How many redaction steps ran. This still counts a step that turned out to be a
+    /// no-op (see `summary`), because it decides whether the file is uploaded.
     pub number_of_redactions: usize,
+    pub summary: RedactionSummary,
     pub stream: Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>,
+}
+
+/// The result of running one OCR conversion step.
+enum OcrStepResult {
+    Redacted,
+    ImageFormatNotSupported,
 }
 
 pub struct StreamRedacter<'a> {
     redacter_base_options: &'a RedacterBaseOptions,
     file_converters: &'a FileConverters<'a>,
-    bar: &'a ProgressBar,
 }
 
 pub struct StreamRedactPlan<'a> {
@@ -35,12 +76,10 @@ impl<'a> StreamRedacter<'a> {
     pub fn new(
         redacter_base_options: &'a RedacterBaseOptions,
         file_converters: &'a FileConverters<'a>,
-        bar: &'a ProgressBar,
     ) -> Self {
         Self {
             redacter_base_options,
             file_converters,
-            bar,
         }
     }
 
@@ -155,83 +194,83 @@ impl<'a> StreamRedacter<'a> {
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
             .await?;
         let mut number_of_redactions = 0;
+        let mut summary = RedactionSummary::default();
 
-        for (index, redacter) in redact_plan.supported_redacters.iter().enumerate() {
-            let width = " ".repeat(index);
+        for redacter in redact_plan.supported_redacters.iter() {
             if redact_plan.apply_pdf_image_converter {
                 match (
                     &self.file_converters.pdf_image_converter,
                     &self.file_converters.ocr,
                 ) {
                     (Some(ref pdf_to_image), _) if !redact_plan.apply_ocr => {
-                        redacted = self
+                        let (item, conversion) = self
                             .redact_pdf_with_images_converter(
                                 file_ref,
                                 redacted,
                                 *redacter,
-                                &width,
                                 pdf_to_image.as_ref(),
                                 None,
                             )
                             .await?;
+                        redacted = item;
                         number_of_redactions += 1;
+                        summary.applied.push(redacter.redacter_type());
+                        summary.conversion = conversion.or(summary.conversion);
                     }
                     (Some(ref pdf_to_image), Some(ref ocr)) => {
-                        redacted = self
+                        let (item, conversion) = self
                             .redact_pdf_with_images_converter(
                                 file_ref,
                                 redacted,
                                 *redacter,
-                                &width,
                                 pdf_to_image.as_ref(),
                                 Some(ocr.as_ref()),
                             )
                             .await?;
+                        redacted = item;
                         number_of_redactions += 1;
+                        summary.applied.push(redacter.redacter_type());
+                        summary.conversion = conversion.or(summary.conversion);
                     }
-                    (None, Some(_)) => {
-                        self.bar.println(format!(
-                            "{width}↲ Skipping redaction because PDF to image converter is not available",
-                        ));
+                    (None, Some(_)) | (None, None) => {
+                        summary.blocked = Some(RedactionBlocked::PdfRendererUnavailable);
                     }
                     (Some(_), None) => {
-                        self.bar.println(format!(
-                            "{width}↲ Skipping redaction because OCR is not available",
-                        ));
-                    }
-                    (None, None) => {
-                        self.bar.println(format!(
-                            "{width}↲ Skipping redaction because PDF/OCR are not available",
-                        ));
+                        summary.blocked = Some(RedactionBlocked::OcrUnavailable);
                     }
                 }
             } else if redact_plan.apply_ocr {
                 match self.file_converters.ocr {
                     Some(ref ocr) => {
-                        redacted = self
-                            .redact_with_ocr_converter(
-                                file_ref,
-                                redacted,
-                                *redacter,
-                                &width,
-                                ocr.as_ref(),
-                            )
+                        let (item, step) = self
+                            .redact_with_ocr_converter(file_ref, redacted, *redacter, ocr.as_ref())
                             .await?;
+                        redacted = item;
                         number_of_redactions += 1;
+                        match step {
+                            OcrStepResult::Redacted => {
+                                summary.applied.push(redacter.redacter_type());
+                                summary.conversion = Some(RedactionConversion::Ocr);
+                            }
+                            OcrStepResult::ImageFormatNotSupported => {
+                                summary.blocked =
+                                    Some(RedactionBlocked::OcrImageFormatNotSupported);
+                            }
+                        }
                     }
                     None => {
-                        self.bar.println(format!(
-                            "{width}↲ Skipping redaction because OCR is not available",
-                        ));
+                        summary.blocked = Some(RedactionBlocked::OcrUnavailable);
                     }
                 }
             } else {
-                self.bar.println(format!(
-                    "{width}↳ Redacting using {} redacter",
-                    redacter.redacter_type()
-                ));
+                tracing::debug!(
+                    redacter = %redacter.redacter_type(),
+                    file = %file_ref.relative_path.value(),
+                    "redacting"
+                );
                 redacted = redacter.redact(redacted).await?;
                 number_of_redactions += 1;
+                summary.applied.push(redacter.redacter_type());
             }
         }
 
@@ -260,6 +299,7 @@ impl<'a> StreamRedacter<'a> {
 
         Ok(RedactStreamResult {
             number_of_redactions,
+            summary,
             stream: output_stream,
         })
     }
@@ -410,21 +450,19 @@ impl<'a> StreamRedacter<'a> {
         file_ref: &FileSystemRef,
         redacted: RedacterDataItem,
         redacter: &impl Redacter,
-        width: &String,
         converter: &dyn PdfToImage,
         ocr: Option<&dyn Ocr>,
-    ) -> Result<RedacterDataItem, AppError> {
+    ) -> Result<(RedacterDataItem, Option<RedactionConversion>), AppError> {
         match redacted.content {
             RedacterDataItemContent::Pdf { data } => {
-                self.bar.println(format!(
-                    "{width}↳ Redacting using {} redacter and converting the PDF to images",
-                    redacter.redacter_type()
-                ));
+                tracing::debug!(
+                    redacter = %redacter.redacter_type(),
+                    file = %file_ref.relative_path.value(),
+                    "redacting the PDF as images"
+                );
                 let pdf_info = converter.convert_to_images(data)?;
-                self.bar.println(format!(
-                    "{width} ↳ Converting {pdf_info_pages} images",
-                    pdf_info_pages = pdf_info.pages.len()
-                ));
+                let pages = pdf_info.pages.len();
+                tracing::debug!(pages, "converting the PDF pages to images");
                 let mut redacted_pages = Vec::with_capacity(pdf_info.pages.len());
                 for page in pdf_info.pages {
                     let mut png_image_bytes = std::io::Cursor::new(Vec::new());
@@ -442,10 +480,10 @@ impl<'a> StreamRedacter<'a> {
                             file_ref,
                             image_to_redact,
                             redacter,
-                            &format!("  {width}"),
                             ocr_engine,
                         )
                         .await?
+                        .0
                     } else {
                         redacter.redact(image_to_redact).await?
                     };
@@ -463,14 +501,20 @@ impl<'a> StreamRedacter<'a> {
                     pages: redacted_pages,
                 };
                 let redact_pdf_as_images = converter.images_to_pdf(redacted_pdf_info)?;
-                Ok(RedacterDataItem {
-                    content: RedacterDataItemContent::Pdf {
-                        data: redact_pdf_as_images,
+                Ok((
+                    RedacterDataItem {
+                        content: RedacterDataItemContent::Pdf {
+                            data: redact_pdf_as_images,
+                        },
+                        file_ref: file_ref.clone(),
                     },
-                    file_ref: file_ref.clone(),
-                })
+                    Some(RedactionConversion::PdfToImages {
+                        pages,
+                        ocr: ocr.is_some(),
+                    }),
+                ))
             }
-            _ => Ok(redacted),
+            _ => Ok((redacted, None)),
         }
     }
 
@@ -479,17 +523,17 @@ impl<'a> StreamRedacter<'a> {
         file_ref: &FileSystemRef,
         redacted: RedacterDataItem,
         redacter: &impl Redacter,
-        width: &String,
         ocr: &dyn Ocr,
-    ) -> Result<RedacterDataItem, AppError> {
+    ) -> Result<(RedacterDataItem, OcrStepResult), AppError> {
         match &redacted.content {
             RedacterDataItemContent::Image { data, mime_type } => {
                 match ImageFormat::from_mime_type(mime_type) {
                     Some(image_format) => {
-                        self.bar.println(format!(
-                            "{width}↳ Redacting using {} redacter and converting the image to text using OCR engine",
-                            redacter.redacter_type()
-                        ));
+                        tracing::debug!(
+                            redacter = %redacter.redacter_type(),
+                            file = %file_ref.relative_path.value(),
+                            "redacting the image with the OCR engine"
+                        );
                         let image = image::load_from_memory_with_format(data, image_format)?;
                         let text_coords = ocr.image_to_text(image.clone())?;
                         let text = text_coords
@@ -526,13 +570,16 @@ impl<'a> StreamRedacter<'a> {
                                 }
                                 let mut output = std::io::Cursor::new(Vec::new());
                                 redacted_image.write_to(&mut output, image_format)?;
-                                Ok(RedacterDataItem {
-                                    file_ref: file_ref.clone(),
-                                    content: RedacterDataItemContent::Image {
-                                        mime_type: mime_type.clone(),
-                                        data: output.into_inner().into(),
+                                Ok((
+                                    RedacterDataItem {
+                                        file_ref: file_ref.clone(),
+                                        content: RedacterDataItemContent::Image {
+                                            mime_type: mime_type.clone(),
+                                            data: output.into_inner().into(),
+                                        },
                                     },
-                                })
+                                    OcrStepResult::Redacted,
+                                ))
                             }
                             _ => Err(AppError::SystemError {
                                 message: "Redacted text is not returned as text".to_string(),
@@ -540,14 +587,16 @@ impl<'a> StreamRedacter<'a> {
                         }
                     }
                     None => {
-                        self.bar.println(format!(
-                            "{width}↲ Skipping redaction through OCR because image format is not supported",
-                        ));
-                        Ok(redacted)
+                        tracing::debug!(
+                            media_type = %mime_type,
+                            file = %file_ref.relative_path.value(),
+                            "skipping OCR because the image format is not supported"
+                        );
+                        Ok((redacted, OcrStepResult::ImageFormatNotSupported))
                     }
                 }
             }
-            _ => Ok(redacted),
+            _ => Ok((redacted, OcrStepResult::Redacted)),
         }
     }
 }

@@ -290,10 +290,10 @@ where
             match native(input).await {
                 Ok(redacted) => coords(redacted).await,
                 Err(err) if should_fall_back_to_coords(mode, err.failure) => {
-                    reporter.report(format!(
+                    reporter.report_debug(format!(
                         "Native image redaction is not available ({}). Falling back to redacting by coordinates.",
                         err.error
-                    ))?;
+                    ));
                     coords(fallback_input).await
                 }
                 Err(err) => Err(err.error),
@@ -363,23 +363,28 @@ pub enum RedacterProviderOptions {
     AwsBedrockGuardrails(AwsBedrockGuardrailsRedacterOptions),
 }
 
+impl RedacterProviderOptions {
+    /// The redacter these options configure, so the type is named in exactly one place.
+    pub fn redacter_type(&self) -> RedacterType {
+        match self {
+            RedacterProviderOptions::GcpDlp(_) => RedacterType::GcpDlp,
+            RedacterProviderOptions::AwsComprehend(_) => RedacterType::AwsComprehend,
+            RedacterProviderOptions::MsPresidio(_) => RedacterType::MsPresidio,
+            RedacterProviderOptions::GeminiLlm(_) => RedacterType::GeminiLlm,
+            RedacterProviderOptions::OpenAiLlm(_) => RedacterType::OpenAiLlm,
+            RedacterProviderOptions::GcpVertexAi(_) => RedacterType::GcpVertexAi,
+            RedacterProviderOptions::AwsBedrock(_) => RedacterType::AwsBedrock,
+            RedacterProviderOptions::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
+        }
+    }
+}
+
 impl Display for RedacterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let to_display = self
             .provider_options
             .iter()
-            .map(|o| match o {
-                RedacterProviderOptions::GcpDlp(_) => "gcp-dlp".to_string(),
-                RedacterProviderOptions::AwsComprehend(_) => "aws-comprehend".to_string(),
-                RedacterProviderOptions::MsPresidio(_) => "ms-presidio".to_string(),
-                RedacterProviderOptions::GeminiLlm(_) => "gemini-llm".to_string(),
-                RedacterProviderOptions::OpenAiLlm(_) => "open-ai-llm".to_string(),
-                RedacterProviderOptions::GcpVertexAi(_) => "gcp-vertex-ai".to_string(),
-                RedacterProviderOptions::AwsBedrock(_) => "aws-bedrock".to_string(),
-                RedacterProviderOptions::AwsBedrockGuardrails(_) => {
-                    "aws-bedrock-guardrails".to_string()
-                }
-            })
+            .map(|o| o.redacter_type().to_string())
             .collect::<Vec<String>>()
             .join(", ");
         write!(f, "{to_display}")
