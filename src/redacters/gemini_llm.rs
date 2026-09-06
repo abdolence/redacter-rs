@@ -17,6 +17,7 @@ use rvstruct::ValueStruct;
 pub struct GeminiLlmRedacterOptions {
     pub project_id: GcpProjectId,
     pub gemini_model: Option<GeminiLlmModelName>,
+    pub gemini_image_model: Option<GeminiLlmModelName>,
 }
 
 #[derive(Debug, Clone, ValueStruct)]
@@ -31,7 +32,10 @@ pub struct GeminiLlmRedacter<'a> {
 }
 
 impl<'a> GeminiLlmRedacter<'a> {
-    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-2.5-flash";
+    /// Text model, also used to locate PII coordinates in images.
+    const DEFAULT_GEMINI_MODEL: &'static str = "models/gemini-3.8-flash";
+    /// Image editing model, used for the native image redaction path.
+    const DEFAULT_GEMINI_IMAGE_MODEL: &'static str = "models/gemini-3.1-flash-image";
 
     pub async fn new(
         gemini_llm_options: GeminiLlmRedacterOptions,
@@ -393,6 +397,7 @@ mod tests {
             GeminiLlmRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gemini_model: None,
+                gemini_image_model: None,
             },
             &reporter,
         )

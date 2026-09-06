@@ -175,13 +175,13 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'"
+        help = "Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'"
     )]
     pub gcp_vertex_ai_text_model: Option<GcpVertexAiModelName>,
 
     #[arg(
         long,
-        help = "Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'"
+        help = "Model name for native image editing in Vertex AI. Default is 'publishers/google/models/gemini-3.1-flash-image'"
     )]
     pub gcp_vertex_ai_image_model: Option<GcpVertexAiModelName>,
 
@@ -213,9 +213,15 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'"
+        help = "Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'"
     )]
     pub gemini_model: Option<GeminiLlmModelName>,
+
+    #[arg(
+        long,
+        help = "Gemini model name for native image editing. Default is 'models/gemini-3.1-flash-image'"
+    )]
+    pub gemini_image_model: Option<GeminiLlmModelName>,
 
     #[arg(
         long,
@@ -228,9 +234,15 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'"
+        help = "Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'"
     )]
     pub open_ai_model: Option<OpenAiModelName>,
+
+    #[arg(
+        long,
+        help = "Open AI model name for native image editing. Default is 'gpt-image-2'"
+    )]
+    pub open_ai_image_model: Option<OpenAiModelName>,
 
     #[arg(
         long,
@@ -296,6 +308,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             }
                         })?,
                         gemini_model: self.gemini_model.clone(),
+                        gemini_image_model: self.gemini_image_model.clone(),
                     },
                 )),
                 RedacterType::OpenAiLlm => Ok(RedacterProviderOptions::OpenAiLlm(
@@ -307,6 +320,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             }
                         })?,
                         model: self.open_ai_model.clone(),
+                        image_model: self.open_ai_image_model.clone(),
                     },
                 )),
                 RedacterType::GcpVertexAi => Ok(RedacterProviderOptions::GcpVertexAi(

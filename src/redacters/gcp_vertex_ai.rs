@@ -47,8 +47,10 @@ pub fn vertex_ai_endpoint(region: &GcpRegion) -> String {
 }
 
 impl<'a> GcpVertexAiRedacter<'a> {
-    const DEFAULT_TEXT_MODEL: &'static str = "publishers/google/models/gemini-2.5-flash";
-    const DEFAULT_IMAGE_MODEL: &'static str = "publishers/google/models/gemini-2.5-flash"; // "publishers/google/models/imagegeneration";
+    /// Text model, also used to locate PII coordinates in images.
+    const DEFAULT_TEXT_MODEL: &'static str = "publishers/google/models/gemini-3.8-flash";
+    /// Image editing model, used for the native image redaction path.
+    const DEFAULT_IMAGE_MODEL: &'static str = "publishers/google/models/gemini-3.1-flash-image";
 
     pub async fn new(
         options: GcpVertexAiRedacterOptions,
@@ -341,7 +343,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
     ) -> AppResult<RedacterDataItem> {
         let model_name = self
             .options
-            .image_model
+            .text_model
             .as_ref()
             .map(|model_name| model_name.value().to_string())
             .unwrap_or_else(|| Self::DEFAULT_IMAGE_MODEL.to_string());

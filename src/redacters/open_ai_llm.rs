@@ -24,6 +24,7 @@ pub struct OpenAiModelName(String);
 pub struct OpenAiLlmRedacterOptions {
     pub api_key: OpenAiLlmApiKey,
     pub model: Option<OpenAiModelName>,
+    pub image_model: Option<OpenAiModelName>,
 }
 
 #[derive(Clone)]
@@ -99,7 +100,10 @@ struct OpenAiLlmTextCoordsResponse {
 }
 
 impl<'a> OpenAiLlmRedacter<'a> {
-    const DEFAULT_MODEL: &'static str = "gpt-4o-mini";
+    /// Chat model, also used to locate PII coordinates in images.
+    const DEFAULT_MODEL: &'static str = "gpt-5.6-luna";
+    /// Image editing model, used for the native image redaction path.
+    const DEFAULT_IMAGE_MODEL: &'static str = "gpt-image-2";
 
     pub async fn new(
         open_ai_llm_options: OpenAiLlmRedacterOptions,
@@ -367,6 +371,7 @@ mod tests {
             OpenAiLlmRedacterOptions {
                 api_key: test_api_key.into(),
                 model: None,
+                image_model: None,
             },
             &reporter,
         )

@@ -101,9 +101,9 @@ Options:
       --gcp-vertex-ai-native-image-support
           Vertex AI model supports image editing natively. Default is false.
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
-          Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash'
+          Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
-          Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro'
+          Model name for native image editing in Vertex AI. Default is 'publishers/google/models/gemini-3.1-flash-image'
       --gcp-vertex-ai-block-none-harmful
           Block none harmful content threshold for Vertex AI redacter. Default is BlockOnlyHigh since BlockNone is required a special billing settings.
       --csv-headers-disable
@@ -117,13 +117,17 @@ Options:
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
           URL for image redact endpoint for MsPresidio redacter
       --gemini-model <GEMINI_MODEL>
-          Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'
+          Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'
+      --gemini-image-model <GEMINI_IMAGE_MODEL>
+          Gemini model name for native image editing. Default is 'models/gemini-3.1-flash-image'
       --sampling-size <SAMPLING_SIZE>
           Sampling size in bytes before redacting files. Disabled by default
       --open-ai-api-key <OPEN_AI_API_KEY>
           API key for OpenAI LLM redacter
       --open-ai-model <OPEN_AI_MODEL>
-          Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'
+          Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'
+      --open-ai-image-model <OPEN_AI_IMAGE_MODEL>
+          Open AI model name for native image editing. Default is 'gpt-image-2'
       --limit-dlp-requests <LIMIT_DLP_REQUESTS>
           Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled
       --mime-override <MIME_OVERRIDE>
@@ -167,11 +171,10 @@ You need to provide the URLs for text analysis and image redaction endpoints usi
 
 ### GCP Vertex AI
 
-Vertex AI redacter supports any available models etc on GCP Vertex AI Models Garden, such as:
+Vertex AI redacter supports any available models on GCP Vertex AI Models Garden, such as:
 
 - Google Gemini
 - Claude
-- Google Imagen 3
 - etc.
 
 Default models are set to Gemini models.
@@ -189,17 +192,25 @@ served only on `global`, `us` and `eu`.
 You can specify different models using `--gcp-vertex-ai-text-model` and `--gcp-vertex-ai-image-model` options.
 By default, they are set to:
 
-- `publishers/google/models/gemini-2.5-flash-001` for text model
-- `publishers/google/models/gemini-2.5-pro-001` for image model
+- `publishers/google/models/gemini-3.8-flash` for the text model
+- `publishers/google/models/gemini-3.1-flash-image` for the image model
 
 In case you have access to native image editing models such as Google Imagen 3, you can enable those capabilities using
 `--gcp-vertex-ai-native-image-support` option.
 Without native image support, the tool will use LLM output and editing images by coordinates.
 
+### Google Gemini API
+
+To be able to use the Gemini API redacter you need to authenticate with credentials that carry the
+`https://www.googleapis.com/auth/generative-language` scope and provide a GCP project id using `--gcp-project-id`.
+Models are selected with `--gemini-model` (default `models/gemini-3.8-flash`) and `--gemini-image-model`
+(default `models/gemini-3.1-flash-image`).
+
 ### Open AI LLM
 
 To be able to use Open AI LLM you need to provide an API key using `--open-ai-api-key` command line option.
-Optionally, you can provide a model name using `--open-ai-model` option. Default is `gpt-4o-mini`.
+Optionally, you can provide model names using `--open-ai-model` (default `gpt-5.6-luna`) and
+`--open-ai-image-model` (default `gpt-image-2`) options.
 
 ### AWS Comprehend
 
