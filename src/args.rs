@@ -167,7 +167,7 @@ pub struct RedacterArgs {
         long,
         value_enum,
         default_value = "auto",
-        help = "How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' tries native first and falls back to coordinates"
+        help = "How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images"
     )]
     pub llm_image_mode: LlmImageMode,
 

@@ -101,7 +101,7 @@ Options:
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
       --llm-image-mode <LLM_IMAGE_MODE>
-          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' tries native first and falls back to coordinates [default: auto] [possible values: auto, native, coords]
+          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images [default: auto] [possible values: auto, native, coords]
       --gcp-region <GCP_REGION>
           GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
@@ -221,8 +221,9 @@ All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in
 
 - `native` (the image model edits the image and returns it with the personal information covered by black boxes);
 - `coords` (the text model reports the coordinates of the personal information and the tool blacks them out locally);
-- `auto` (the default): the native path is tried first and the tool falls back to coordinates when the model
-  cannot edit images. Authentication, permission and quota errors are never retried.
+- `auto` (the default): the native path is tried first and its result is then verified by running the coordinate
+  path over the edited image, blacking out anything the model left legible; the tool falls back to coordinates
+  entirely when the model cannot edit images. Authentication, permission and quota errors are never retried.
 
 ### AWS Comprehend
 

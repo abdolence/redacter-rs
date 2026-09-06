@@ -52,7 +52,8 @@ pub const NATIVE_IMAGE_REDACTION_PROMPT: &str =
 /// How the LLM redacters redact images.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum LlmImageMode {
-    /// Edit the image with the model and fall back to coordinates when it cannot.
+    /// Edit the image with the model, verify the edit with the coordinate pass, and fall
+    /// back to coordinates entirely when the model cannot edit images.
     #[default]
     Auto,
     /// Always edit the image with the model, failing when it cannot.
@@ -185,8 +186,16 @@ pub fn prepare_image_for_llm(mime_type: &Mime, data: &bytes::Bytes) -> AppResult
     })
 }
 
-/// Redacts an image with the native editing path, the coordinate path, or the first
-/// falling back to the second, according to `mode`.
+/// Redacts an image with the native editing path, the coordinate path, or both,
+/// according to `mode`.
+///
+/// In `Auto` mode a successful native edit is not trusted on its own: the model can draw
+/// the black boxes but still write the personal information back inside or beside them.
+/// The edited image is passed through the coordinate path as a verification step, and any
+/// PII the coordinate path still finds gets blacked out. A failure of that verification
+/// pass is propagated as an error rather than returning the unverified native result. When
+/// the native edit itself fails in a way that means the model cannot edit images at all,
+/// the coordinate path is used as a full fallback instead.
 pub async fn redact_image_with_mode<'a, NativeFn, NativeFut, CoordsFn, CoordsFut>(
     mode: LlmImageMode,
     input: RedacterDataItem,
@@ -202,10 +211,11 @@ where
 {
     match mode {
         LlmImageMode::Coords => coords(input).await,
-        LlmImageMode::Auto | LlmImageMode::Native => {
+        LlmImageMode::Native => native(input).await.map_err(|err| err.error),
+        LlmImageMode::Auto => {
             let fallback_input = input.clone();
             match native(input).await {
-                Ok(redacted) => Ok(redacted),
+                Ok(redacted) => coords(redacted).await,
                 Err(err) if should_fall_back_to_coords(mode, err.failure) => {
                     reporter.report(format!(
                         "Native image redaction is not available ({}). Falling back to redacting by coordinates.",
@@ -498,6 +508,111 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_systems::FileSystemRef;
+
+    /// A minimal in-memory image item tagged with a string, so a test can trace which
+    /// closure produced which item without touching a real image file.
+    fn dummy_image_item(tag: &str) -> RedacterDataItem {
+        RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "image.png".into(),
+                media_type: Some(mime::IMAGE_PNG),
+                file_size: Some(tag.len()),
+            },
+            content: RedacterDataItemContent::Image {
+                mime_type: mime::IMAGE_PNG,
+                data: tag.as_bytes().to_vec().into(),
+            },
+        }
+    }
+
+    fn image_tag(item: &RedacterDataItem) -> &str {
+        match &item.content {
+            RedacterDataItemContent::Image { data, .. } => {
+                std::str::from_utf8(data).expect("the test tag is valid utf8")
+            }
+            other => panic!("expected an image item, got {other:?}"),
+        }
+    }
+
+    fn test_reporter(term: &console::Term) -> AppReporter<'_> {
+        AppReporter::from(term)
+    }
+
+    #[tokio::test]
+    async fn auto_mode_verifies_a_successful_native_edit_with_coords() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let coords_saw = std::cell::RefCell::new(None);
+
+        let result = redact_image_with_mode(
+            LlmImageMode::Auto,
+            dummy_image_item("input"),
+            &reporter,
+            |item| async move { Ok(dummy_image_item(&format!("{}-native", image_tag(&item)))) },
+            |item| {
+                let tag = image_tag(&item).to_string();
+                *coords_saw.borrow_mut() = Some(tag.clone());
+                async move { Ok(dummy_image_item(&format!("{tag}-coords"))) }
+            },
+        )
+        .await
+        .expect("the verification pass succeeds");
+
+        assert_eq!(
+            coords_saw.into_inner().as_deref(),
+            Some("input-native"),
+            "coords must verify the native output, not the original input"
+        );
+        assert_eq!(image_tag(&result), "input-native-coords");
+    }
+
+    #[tokio::test]
+    async fn auto_mode_propagates_a_failed_verification_pass() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+
+        let result = redact_image_with_mode(
+            LlmImageMode::Auto,
+            dummy_image_item("input"),
+            &reporter,
+            |item| async move { Ok(item) },
+            |_item| async move {
+                Err(AppError::SystemError {
+                    message: "still legible".to_string(),
+                })
+            },
+        )
+        .await;
+
+        match result {
+            Err(AppError::SystemError { message }) => assert_eq!(message, "still legible"),
+            other => panic!("expected the verification failure to propagate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_mode_never_calls_coords() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let coords_called = std::cell::Cell::new(false);
+
+        let result = redact_image_with_mode(
+            LlmImageMode::Native,
+            dummy_image_item("input"),
+            &reporter,
+            |item| async move { Ok(dummy_image_item(&format!("{}-native", image_tag(&item)))) },
+            |item| {
+                coords_called.set(true);
+                async move { Ok(item) }
+            },
+        )
+        .await
+        .expect("the native edit succeeds");
+
+        assert!(!coords_called.get(), "coords must not run in native mode");
+        assert_eq!(image_tag(&result), "input-native");
+    }
 
     #[test]
     fn auto_mode_falls_back_only_when_the_model_cannot_edit_images() {
