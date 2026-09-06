@@ -98,17 +98,48 @@ pub fn default_bedrock_text_model(region: &str) -> String {
     format!("{prefix}{BEDROCK_BASE_TEXT_MODEL}")
 }
 
+/// Strips an outer ``` code fence, with or without a language tag, leaving the inner text.
+///
+/// The opening line must be ``` optionally followed immediately by a language tag with no
+/// whitespace (`json`, `text`, `markdown`, ...) and a newline; the closing ``` must be the
+/// last non-whitespace content. Text without such a fence, or whose closing fence cannot be
+/// matched, is returned unchanged (trimmed of leading/trailing whitespace only). The inner
+/// text itself is returned as-is, with none of its own whitespace trimmed away.
+fn strip_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(newline) = after_open.find('\n') else {
+        return trimmed;
+    };
+    let (tag, rest) = after_open.split_at(newline);
+    if tag.contains(char::is_whitespace) {
+        return trimmed;
+    }
+    // `rest` still starts with the newline that ends the opening fence line.
+    let body = &rest[1..];
+    body.strip_suffix("```").unwrap_or(trimmed)
+}
+
 /// Strips a ```json ... ``` (or bare ``` ... ```) fence Nova sometimes wraps its JSON answer
 /// in, leaving bare JSON either way.
 fn strip_json_fence(text: &str) -> &str {
-    let trimmed = text.trim();
-    let Some(rest) = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-    else {
-        return trimmed;
-    };
-    rest.strip_suffix("```").unwrap_or(rest).trim()
+    strip_code_fence(text).trim()
+}
+
+/// The text handed back for a redacted-text answer.
+///
+/// Nova sometimes wraps its whole answer in a ``` code fence carrying an arbitrary language
+/// tag (`text`, `plain`, ...). That wrapper is stripped unless the original document itself
+/// already started with a fence, in which case stripping would corrupt content the caller
+/// wanted preserved verbatim.
+fn strip_answer_fence(answer: &str, original_starts_with_fence: bool) -> String {
+    if original_starts_with_fence {
+        answer.to_string()
+    } else {
+        strip_code_fence(answer).to_string()
+    }
 }
 
 /// Converts one Nova-style normalized bounding box (`[x1, y1, x2, y2]`, each in 0..=1000) to
@@ -359,6 +390,7 @@ impl<'a> AwsBedrockRedacter<'a> {
 
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
+        let input_starts_with_fence = input_content.trim_start().starts_with("```");
 
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -390,7 +422,10 @@ impl<'a> AwsBedrockRedacter<'a> {
         match converse_response_text(response.output.as_ref()) {
             Some(redacted_content) => Ok(RedacterDataItem {
                 file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(redacted_content),
+                content: RedacterDataItemContent::Value(strip_answer_fence(
+                    &redacted_content,
+                    input_starts_with_fence,
+                )),
             }),
             None => Err(AppError::AwsBedrockError {
                 message: "No content item in the response".to_string(),
@@ -654,6 +689,54 @@ mod tests {
         assert!(nova_text_answer_to_image_coords("not json at all", 1000, 720).is_empty());
         assert!(nova_text_answer_to_image_coords("[]", 1000, 720).is_empty());
         assert!(nova_text_answer_to_image_coords("{\"other\": true}", 1000, 720).is_empty());
+    }
+
+    #[test]
+    fn strip_code_fence_removes_a_fence_tagged_text() {
+        assert_eq!(
+            strip_code_fence("```text\nHello, [REDACTED]\n```"),
+            "Hello, [REDACTED]\n"
+        );
+    }
+
+    #[test]
+    fn strip_code_fence_removes_a_fence_tagged_json() {
+        assert_eq!(strip_code_fence("```json\n[1, 2]\n```"), "[1, 2]\n");
+    }
+
+    #[test]
+    fn strip_code_fence_removes_a_bare_fence() {
+        assert_eq!(
+            strip_code_fence("```\nHello, [REDACTED]\n```"),
+            "Hello, [REDACTED]\n"
+        );
+    }
+
+    #[test]
+    fn strip_code_fence_leaves_unfenced_text_unchanged() {
+        assert_eq!(strip_code_fence("Hello, [REDACTED]"), "Hello, [REDACTED]");
+    }
+
+    #[test]
+    fn strip_code_fence_tolerates_a_trailing_newline_after_the_closing_fence() {
+        assert_eq!(
+            strip_code_fence("```text\nHello, [REDACTED]\n```\n"),
+            "Hello, [REDACTED]\n"
+        );
+    }
+
+    #[test]
+    fn strip_answer_fence_strips_when_the_original_input_was_not_fenced() {
+        assert_eq!(
+            strip_answer_fence("```text\nHello, [REDACTED]\n```", false),
+            "Hello, [REDACTED]\n"
+        );
+    }
+
+    #[test]
+    fn strip_answer_fence_keeps_a_fenced_answer_when_the_original_input_was_itself_fenced() {
+        let answer = "```text\nHello, [REDACTED]\n```";
+        assert_eq!(strip_answer_fence(answer, true), answer);
     }
 
     #[test]
