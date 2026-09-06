@@ -38,6 +38,68 @@ const NOVA_COORDS_REDACTION_PROMPT: &str =
      array of objects with keys 'bbox' as [x1, y1, x2, y2] normalized to 0-1000 (top-left \
      and bottom-right corners of the text) and 'text'. Return only JSON.";
 
+/// Builds the instruction given to Claude on the coordinate-based image redaction path.
+///
+/// Measured against `eu.anthropic.claude-haiku-4-5-20251001-v1:0` with the checked-in
+/// fixture: unlike Nova, Claude answers with pixel coordinates of the image it was actually
+/// sent rather than a normalized 0-1000 space, so the prompt states the prepared image's
+/// exact pixel dimensions and asks for that convention explicitly. The answer comes back as
+/// a JSON array wrapped in a ```json fence.
+fn claude_coords_redaction_prompt(width: u32, height: u32) -> String {
+    format!(
+        "Find every piece of personal information in the attached image. Return a JSON \
+         array of objects with keys 'bbox' as [x1, y1, x2, y2] in pixel coordinates of the \
+         {width}x{height} image (top-left and bottom-right corners of the text) and 'text'. \
+         Return only JSON."
+    )
+}
+
+/// Bedrock model family, detected from the model id, that determines which bounding-box
+/// convention and prompt the image coordinate path uses.
+///
+/// Model ids on Bedrock carry the family as a substring: `amazon.nova-...`,
+/// `anthropic.claude-...`, optionally behind a cross-region inference profile prefix
+/// (`us.`, `eu.`, `jp.`, `apac.`, `global.`) or inside an inference-profile ARN that still
+/// contains the same substring. Amazon Nova and Anthropic Claude are the only families this
+/// redacter's image coordinate path is verified against (see
+/// [`nova_text_answer_to_image_coords`] and [`claude_text_answer_to_image_coords`]); every
+/// other family is rejected rather than risked, since a model that does not follow either
+/// convention has been observed to fabricate a fixed grid of coordinates instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwsBedrockModelFamily {
+    Nova,
+    Claude,
+    Other,
+}
+
+impl AwsBedrockModelFamily {
+    pub fn detect(model_id: &str) -> Self {
+        let lowercase = model_id.to_lowercase();
+        if lowercase.contains("nova") {
+            AwsBedrockModelFamily::Nova
+        } else if lowercase.contains("claude") {
+            AwsBedrockModelFamily::Claude
+        } else {
+            AwsBedrockModelFamily::Other
+        }
+    }
+}
+
+/// Checks that `model_id` belongs to a family the image coordinate path is verified
+/// against, without making any network call, so an unsupported model is rejected before the
+/// image is even prepared or sent.
+fn require_supported_family(model_id: &str) -> AppResult<AwsBedrockModelFamily> {
+    match AwsBedrockModelFamily::detect(model_id) {
+        AwsBedrockModelFamily::Other => Err(AppError::AwsBedrockError {
+            message: format!(
+                "Image redaction on AWS Bedrock is verified only with Amazon Nova and \
+                 Anthropic Claude models; '{model_id}' is neither."
+            ),
+        }),
+        family => Ok(family),
+    }
+}
+
 #[derive(Debug, Clone, ValueStruct)]
 pub struct AwsBedrockModelName(String);
 
@@ -148,18 +210,39 @@ fn nova_box_to_image_coords(
     normalized_box_to_image_coords([y1, x1, y2, x2], width, height, text)
 }
 
-/// Reads the PII bounding boxes out of Nova's text answer to
-/// [`NOVA_COORDS_REDACTION_PROMPT`].
+/// Converts one Claude-style bounding box already in pixel coordinates of the prepared image
+/// (`[x1, y1, x2, y2]`) to image coordinates, clamping each value to the image bounds and
+/// ordering the corners so a reversed box still produces a well-formed rectangle instead of
+/// one with negative width or height.
+fn claude_box_to_image_coords(
+    bbox: [f32; 4],
+    width: u32,
+    height: u32,
+    text: Option<String>,
+) -> TextImageCoords {
+    let [x1, y1, x2, y2] = bbox;
+    let clamp_x = |v: f32| v.clamp(0.0, width as f32);
+    let clamp_y = |v: f32| v.clamp(0.0, height as f32);
+    let (clamped_x1, clamped_x2) = (clamp_x(x1), clamp_x(x2));
+    let (clamped_y1, clamped_y2) = (clamp_y(y1), clamp_y(y2));
+    TextImageCoords {
+        x1: clamped_x1.min(clamped_x2),
+        y1: clamped_y1.min(clamped_y2),
+        x2: clamped_x1.max(clamped_x2),
+        y2: clamped_y1.max(clamped_y2),
+        text,
+    }
+}
+
+/// Reads the raw `{bbox: [n, n, n, n], text}` detections out of a model's text answer to a
+/// coordinate redaction prompt, shared by both the Nova and Claude paths regardless of which
+/// coordinate space the numbers turn out to be in.
 ///
 /// The answer is a JSON array, optionally wrapped in a ```json fence. Entries that are not
 /// objects, are missing `bbox`, or carry a `bbox` with fewer than 4 numeric entries are
 /// dropped individually rather than failing the whole pass; an answer that is not valid JSON
-/// at all yields no coordinates.
-pub fn nova_text_answer_to_image_coords(
-    text: &str,
-    width: u32,
-    height: u32,
-) -> Vec<TextImageCoords> {
+/// at all yields no detections.
+fn parse_bbox_detections(text: &str) -> Vec<([f32; 4], Option<String>)> {
     let Ok(detections) = serde_json::from_str::<Vec<serde_json::Value>>(strip_json_fence(text))
     else {
         return Vec::new();
@@ -180,8 +263,34 @@ pub fn nova_text_answer_to_image_coords(
                 .get("text")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            Some(nova_box_to_image_coords(bbox, width, height, text))
+            Some((bbox, text))
         })
+        .collect()
+}
+
+/// Reads the PII bounding boxes out of Nova's text answer to
+/// [`NOVA_COORDS_REDACTION_PROMPT`].
+pub fn nova_text_answer_to_image_coords(
+    text: &str,
+    width: u32,
+    height: u32,
+) -> Vec<TextImageCoords> {
+    parse_bbox_detections(text)
+        .into_iter()
+        .map(|(bbox, text)| nova_box_to_image_coords(bbox, width, height, text))
+        .collect()
+}
+
+/// Reads the PII bounding boxes out of Claude's text answer to
+/// [`claude_coords_redaction_prompt`].
+pub fn claude_text_answer_to_image_coords(
+    text: &str,
+    width: u32,
+    height: u32,
+) -> Vec<TextImageCoords> {
+    parse_bbox_detections(text)
+        .into_iter()
+        .map(|(bbox, text)| claude_box_to_image_coords(bbox, width, height, text))
         .collect()
 }
 
@@ -309,11 +418,22 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: "Unsupported item for image redacting".to_string(),
             });
         };
+        let model_id = self.text_model_id();
+        let family = require_supported_family(&model_id)?;
         let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
+        let prompt = match family {
+            AwsBedrockModelFamily::Nova => NOVA_COORDS_REDACTION_PROMPT.to_string(),
+            AwsBedrockModelFamily::Claude => {
+                claude_coords_redaction_prompt(prepared_image.width, prepared_image.height)
+            }
+            AwsBedrockModelFamily::Other => {
+                unreachable!("require_supported_family already rejected the Other family")
+            }
+        };
 
         let message = Message::builder()
             .role(ConversationRole::User)
-            .content(ContentBlock::Text(NOVA_COORDS_REDACTION_PROMPT.to_string()))
+            .content(ContentBlock::Text(prompt))
             .content(ContentBlock::Image(
                 ImageBlock::builder()
                     .format(bedrock_image_format(prepared_image.format)?)
@@ -331,7 +451,7 @@ impl<'a> AwsBedrockRedacter<'a> {
         let response = self
             .client
             .converse()
-            .model_id(self.text_model_id())
+            .model_id(model_id)
             .messages(message)
             .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
             .send()
@@ -346,6 +466,22 @@ impl<'a> AwsBedrockRedacter<'a> {
             });
         };
 
+        let coords = match family {
+            AwsBedrockModelFamily::Nova => nova_text_answer_to_image_coords(
+                &answer,
+                prepared_image.width,
+                prepared_image.height,
+            ),
+            AwsBedrockModelFamily::Claude => claude_text_answer_to_image_coords(
+                &answer,
+                prepared_image.width,
+                prepared_image.height,
+            ),
+            AwsBedrockModelFamily::Other => {
+                unreachable!("require_supported_family already rejected the Other family")
+            }
+        };
+
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Image {
@@ -353,11 +489,7 @@ impl<'a> AwsBedrockRedacter<'a> {
                 data: redact_image_at_coords(
                     mime_type.clone(),
                     prepared_image.data.clone(),
-                    nova_text_answer_to_image_coords(
-                        &answer,
-                        prepared_image.width,
-                        prepared_image.height,
-                    ),
+                    coords,
                     0.25,
                 )?,
             },
@@ -554,6 +686,124 @@ mod tests {
     }
 
     #[test]
+    fn model_family_detects_nova_bare_prefixed_and_by_arn() {
+        assert_eq!(
+            AwsBedrockModelFamily::detect("amazon.nova-2-lite-v1:0"),
+            AwsBedrockModelFamily::Nova
+        );
+        assert_eq!(
+            AwsBedrockModelFamily::detect("eu.amazon.nova-pro-v1:0"),
+            AwsBedrockModelFamily::Nova
+        );
+        assert_eq!(
+            AwsBedrockModelFamily::detect(
+                "arn:aws:bedrock:eu-north-1:123456789012:inference-profile/eu.amazon.nova-2-lite-v1:0"
+            ),
+            AwsBedrockModelFamily::Nova
+        );
+    }
+
+    #[test]
+    fn model_family_detects_claude_bare_prefixed_and_by_arn() {
+        assert_eq!(
+            AwsBedrockModelFamily::detect("anthropic.claude-haiku-4-5-20251001-v1:0"),
+            AwsBedrockModelFamily::Claude
+        );
+        assert_eq!(
+            AwsBedrockModelFamily::detect("eu.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            AwsBedrockModelFamily::Claude
+        );
+        assert_eq!(
+            AwsBedrockModelFamily::detect(
+                "arn:aws:bedrock:eu-north-1:123456789012:inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+            ),
+            AwsBedrockModelFamily::Claude
+        );
+    }
+
+    #[test]
+    fn model_family_detects_other_for_an_unrecognized_model() {
+        assert_eq!(
+            AwsBedrockModelFamily::detect("eu.mistral.pixtral-large-2502-v1:0"),
+            AwsBedrockModelFamily::Other
+        );
+    }
+
+    #[test]
+    fn require_supported_family_accepts_nova_and_claude() {
+        assert_eq!(
+            require_supported_family("amazon.nova-2-lite-v1:0").expect("Nova is supported"),
+            AwsBedrockModelFamily::Nova
+        );
+        assert_eq!(
+            require_supported_family("eu.anthropic.claude-haiku-4-5-20251001-v1:0")
+                .expect("Claude is supported"),
+            AwsBedrockModelFamily::Claude
+        );
+    }
+
+    #[test]
+    fn require_supported_family_rejects_an_unrecognized_model_naming_it_in_the_error() {
+        let err = require_supported_family("eu.mistral.pixtral-large-2502-v1:0")
+            .expect_err("Mistral Pixtral is not a verified family");
+        match err {
+            AppError::AwsBedrockError { message } => {
+                assert!(message.contains("eu.mistral.pixtral-large-2502-v1:0"));
+            }
+            other => panic!("expected AwsBedrockError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_text_answer_converts_pixel_bbox_for_a_1000x720_image() {
+        let answer =
+            "```json\n[{\"bbox\": [300, 110, 950, 160], \"text\": \"John Michael Smith\"}]\n```";
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
+        assert_eq!(coords[0].x1, 300.0);
+        assert_eq!(coords[0].y1, 110.0);
+        assert_eq!(coords[0].x2, 950.0);
+        assert_eq!(coords[0].y2, 160.0);
+    }
+
+    #[test]
+    fn claude_text_answer_clamps_out_of_range_pixel_values() {
+        let answer = "[{\"bbox\": [-5, -5, 1200, 1200], \"text\": \"x\"}]";
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords[0].x1, 0.0);
+        assert_eq!(coords[0].y1, 0.0);
+        assert_eq!(coords[0].x2, 1000.0);
+        assert_eq!(coords[0].y2, 720.0);
+    }
+
+    #[test]
+    fn claude_text_answer_orders_a_reversed_box() {
+        let answer = "[{\"bbox\": [950, 160, 300, 110], \"text\": \"x\"}]";
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        assert_eq!(coords.len(), 1);
+        assert!(coords[0].x1 <= coords[0].x2);
+        assert!(coords[0].y1 <= coords[0].y2);
+    }
+
+    #[test]
+    fn claude_text_answer_drops_malformed_detections_without_losing_the_others() {
+        let answer = serde_json::json!([
+            // A 3-element bbox.
+            { "bbox": [1, 2, 3], "text": "too short" },
+            // A non-numeric value in the bbox.
+            { "bbox": [1, 2, "x", 4], "text": "not numeric" },
+            // The only well-formed one.
+            { "bbox": [300, 110, 950, 160], "text": "John Michael Smith" },
+        ])
+        .to_string();
+        let coords = claude_text_answer_to_image_coords(&answer, 1000, 720);
+        assert_eq!(coords.len(), 1, "only the well-formed detection survives");
+        assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
+    }
+
+    #[test]
     fn strip_code_fence_removes_a_fence_tagged_text() {
         assert_eq!(
             strip_code_fence("```text\nHello, [REDACTED]\n```"),
@@ -659,6 +909,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redact_image_file_using_coords_rejects_an_unsupported_model_family_without_a_network_call(
+    ) {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let redacter = AwsBedrockRedacter::new(
+            AwsBedrockRedacterOptions {
+                region: Some(Region::new("eu-north-1")),
+                text_model: Some(AwsBedrockModelName::from(
+                    "eu.mistral.pixtral-large-2502-v1:0".to_string(),
+                )),
+                image_mode: LlmImageMode::Coords,
+            },
+            &reporter,
+        )
+        .await
+        .expect("client construction does not call AWS");
+
+        let err = redacter
+            .redact_image_file_using_coords(test_image_item())
+            .await
+            .expect_err("Mistral Pixtral is not a verified family for image redaction");
+        match err {
+            AppError::AwsBedrockError { message } => {
+                assert!(message.contains("eu.mistral.pixtral-large-2502-v1:0"));
+            }
+            other => panic!("expected AwsBedrockError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     #[cfg_attr(not(feature = "ci-aws"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
@@ -740,5 +1020,48 @@ mod tests {
     async fn redact_image_file_coords_mode_test(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         redact_image_file_test_with_mode(LlmImageMode::Coords, "aws-bedrock-coords.png").await
+    }
+
+    /// Exercises the coordinate path against a live Anthropic Claude model, given one via
+    /// `TEST_AWS_BEDROCK_CLAUDE_MODEL` (e.g. `eu.anthropic.claude-haiku-4-5-20251001-v1:0`).
+    /// Skips with a printed note rather than failing when the variable is unset, since no
+    /// Claude model is enabled for image redaction by default.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn redact_image_file_coords_mode_with_claude_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Ok(claude_model) = std::env::var("TEST_AWS_BEDROCK_CLAUDE_MODEL") else {
+            println!(
+                "Skipping redact_image_file_coords_mode_with_claude_test: \
+                 TEST_AWS_BEDROCK_CLAUDE_MODEL is not set"
+            );
+            return Ok(());
+        };
+
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        initialize_crypto();
+        let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+
+        let input = test_image_item();
+        let redacter = AwsBedrockRedacter::new(
+            AwsBedrockRedacterOptions {
+                region: Some(Region::new(test_aws_region)),
+                text_model: Some(AwsBedrockModelName::from(claude_model)),
+                image_mode: LlmImageMode::Coords,
+            },
+            &reporter,
+        )
+        .await?;
+
+        let redacted_item = redacter.redact(input.clone()).await?;
+        let output_path =
+            check_and_save_redacted_image(&input, &redacted_item, "aws-bedrock-claude-coords.png");
+        term.write_line(&format!(
+            "Redacted image written to {}",
+            output_path.display()
+        ))?;
+
+        Ok(())
     }
 }
