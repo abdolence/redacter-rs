@@ -54,14 +54,13 @@ tokio = { version = "1.14", features = [
 tokio-util = { version = "0.7", features = ["compat"] }
 gcloud-sdk = { version = "0.31", features = [
     "google-privacy-dlp-v2",
-    "google-rest-storage-v1",
+    "google-storage-v2",
     "google-ai-generativelanguage-v1beta",
     "google-cloud-aiplatform-v1",
 ] }
 futures = "0.3"
 thiserror = "2"
 anyhow = "1"
-sync_wrapper = { version = "1", features = ["futures"] }
 async-recursion = "1"
 mime = "0.3"
 mime_guess = "2"
