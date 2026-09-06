@@ -1,3 +1,8 @@
+use crate::commands::copy_output::{
+    format_capabilities_line, format_file_row, format_legend, format_summary_line,
+    CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
+    SkipReason,
+};
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
@@ -7,10 +12,11 @@ use crate::redacters::{
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use console::{pad_str, Alignment, Style, Term};
+use console::{Style, Term};
 use futures::Stream;
 use gcloud_sdk::prost::bytes;
 use indicatif::*;
+use rvstruct::ValueStruct;
 use serde::Serialize;
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -47,6 +53,14 @@ impl CopyCommandOptions {
     }
 }
 
+/// What one file's transfer produced: the counters it feeds, the outcome its row
+/// shows, and its size for the closing summary.
+struct TransferReport {
+    result: TransferFileResult,
+    outcome: CopyFileOutcome,
+    file_size: Option<usize>,
+}
+
 pub async fn command_copy(
     term: &Term,
     source: &str,
@@ -56,6 +70,7 @@ pub async fn command_copy(
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
     let file_converters = FileConverters::new().init(&term_reporter).await?;
+    let styles = CopyOutputStyles::new();
 
     report_copy_info(
         term,
@@ -63,8 +78,8 @@ pub async fn command_copy(
         destination,
         &redacter_options,
         &file_converters,
-    )
-    .await?;
+        &styles,
+    )?;
 
     let bar = ProgressBar::new(1);
     bar.set_style(
@@ -95,13 +110,14 @@ pub async fn command_copy(
         None => None,
     };
 
+    let mut summary = CopySummary::default();
     let copy_result: AppResult<CopyCommandResult> = if source_fs.has_multiple_files().await? {
         if !destination_fs.accepts_multiple_files().await? {
             return Err(AppError::DestinationDoesNotSupportMultipleFiles {
                 destination: destination.to_string(),
             });
         }
-        bar.println("Copying directory and listing source files...");
+        tracing::debug!(source, "copying a directory and listing the source files");
         let source_files_result = source_fs
             .list_files(Some(&options.file_matcher), options.max_files_limit)
             .await?;
@@ -111,23 +127,29 @@ pub async fn command_copy(
             .iter()
             .map(|file| file.file_size.unwrap_or(0))
             .sum();
-        let bold_style = Style::new().bold();
         bar.println(
             format!(
                 "Found {} files. Total size: {}",
-                bold_style.apply_to(files_found),
-                bold_style.apply_to(HumanBytes(files_total_size as u64))
+                styles.highlighted.apply_to(files_found),
+                styles
+                    .highlighted
+                    .apply_to(HumanBytes(files_total_size as u64))
             )
             .as_str(),
         );
+        if files_found > 0 {
+            bar.println(format_legend(&styles));
+        }
 
         bar.set_length(files_found as u64);
 
         let mut total_files_copied = 0;
         let mut total_files_redacted = 0;
         let mut total_files_skipped = source_files_result.skipped;
+        summary.skipped = source_files_result.skipped;
+        summary.total_size = files_total_size as u64;
         for source_file in source_files {
-            match transfer_and_redact_file(
+            let report = transfer_and_redact_file(
                 term,
                 &bar,
                 Some(&source_file),
@@ -137,9 +159,10 @@ pub async fn command_copy(
                 &maybe_redacters,
                 &file_converters,
                 &mut redacter_throttler,
+                &styles,
             )
-            .await?
-            {
+            .await?;
+            match report.result {
                 TransferFileResult::Copied => total_files_copied += 1,
                 TransferFileResult::RedactedAndCopied => {
                     total_files_redacted += 1;
@@ -147,6 +170,7 @@ pub async fn command_copy(
                 }
                 TransferFileResult::Skipped => total_files_skipped += 1,
             }
+            summary.count(&report.outcome);
         }
         Ok(CopyCommandResult {
             files_copied: total_files_copied,
@@ -154,100 +178,99 @@ pub async fn command_copy(
             files_skipped: total_files_skipped,
         })
     } else {
-        Ok(
-            match transfer_and_redact_file(
-                term,
-                &bar,
-                None,
-                &mut source_fs,
-                &mut destination_fs,
-                &options,
-                &maybe_redacters,
-                &file_converters,
-                &mut redacter_throttler,
-            )
-            .await?
-            {
-                TransferFileResult::Copied => CopyCommandResult {
-                    files_copied: 1,
-                    files_redacted: 0,
-                    files_skipped: 0,
-                },
-                TransferFileResult::RedactedAndCopied => CopyCommandResult {
-                    files_copied: 1,
-                    files_redacted: 1,
-                    files_skipped: 0,
-                },
-                TransferFileResult::Skipped => CopyCommandResult {
-                    files_copied: 0,
-                    files_redacted: 0,
-                    files_skipped: 1,
-                },
-            },
+        bar.println(format_legend(&styles));
+        let report = transfer_and_redact_file(
+            term,
+            &bar,
+            None,
+            &mut source_fs,
+            &mut destination_fs,
+            &options,
+            &maybe_redacters,
+            &file_converters,
+            &mut redacter_throttler,
+            &styles,
         )
+        .await?;
+        summary.count(&report.outcome);
+        summary.total_size = report.file_size.unwrap_or(0) as u64;
+        Ok(match report.result {
+            TransferFileResult::Copied => CopyCommandResult {
+                files_copied: 1,
+                files_redacted: 0,
+                files_skipped: 0,
+            },
+            TransferFileResult::RedactedAndCopied => CopyCommandResult {
+                files_copied: 1,
+                files_redacted: 1,
+                files_skipped: 0,
+            },
+            TransferFileResult::Skipped => CopyCommandResult {
+                files_copied: 0,
+                files_redacted: 0,
+                files_skipped: 1,
+            },
+        })
     };
 
     destination_fs.close().await?;
     source_fs.close().await?;
+    bar.finish_and_clear();
+    term.write_line("")?;
+    term.write_line(format_summary_line(&summary, &styles).as_str())?;
     copy_result
 }
 
-async fn report_copy_info(
+impl CopySummary {
+    /// Adds one file's outcome to the counts shown in the summary.
+    fn count(&mut self, outcome: &CopyFileOutcome) {
+        match outcome {
+            CopyFileOutcome::Redacted { .. } => self.redacted += 1,
+            CopyFileOutcome::Copied | CopyFileOutcome::CopiedUnredacted { .. } => {
+                self.copied_as_is += 1
+            }
+            CopyFileOutcome::Skipped { .. } => self.skipped += 1,
+            CopyFileOutcome::Error { .. } => self.errors += 1,
+        }
+    }
+}
+
+fn report_copy_info(
     term: &Term,
     source: &str,
     destination: &str,
     redacter_options: &Option<RedacterOptions>,
     file_converters: &FileConverters<'_>,
+    styles: &CopyOutputStyles,
 ) -> AppResult<()> {
-    let bold_style = Style::new().bold();
-    let redacted_output = if let Some(ref options) = redacter_options.as_ref() {
-        bold_style
-            .clone()
-            .green()
-            .apply_to(format!("✓ Yes ({})", options))
-    } else {
-        bold_style.clone().red().apply_to("✗ No".to_string())
-    };
-    let sampling_output = if let Some(ref sampling_size) = redacter_options
-        .as_ref()
-        .and_then(|o| o.base_options.sampling_size)
-    {
-        Style::new().apply_to(format!("{sampling_size} bytes."))
-    } else {
-        Style::new().dim().apply_to("-".to_string())
-    };
-
-    let converter_style = Style::new();
-    let pdf_support_output = if file_converters.pdf_image_converter.is_some() {
-        converter_style
-            .clone()
-            .green()
-            .apply_to("✓ Yes".to_string())
-    } else {
-        converter_style.clone().dim().apply_to("✗ No".to_string())
-    };
-
-    let ocr_support_output = if file_converters.ocr.is_some() {
-        converter_style
-            .clone()
-            .green()
-            .apply_to("✓ Yes".to_string())
-    } else {
-        converter_style.clone().dim().apply_to("✗ No".to_string())
+    let capabilities = CopyCapabilities {
+        redacters: redacter_options
+            .as_ref()
+            .map(|options| {
+                options
+                    .provider_options
+                    .iter()
+                    .map(|provider| provider.redacter_type())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        pdf_rendering: file_converters.pdf_image_converter.is_some(),
+        ocr: file_converters.ocr.is_some(),
+        sampling_size: redacter_options
+            .as_ref()
+            .and_then(|o| o.base_options.sampling_size),
     };
 
     term.write_line(
         format!(
-            "Copying from {} to {}.\nRedacting: {}. | Sampling: {} | PDF to image support: {} | OCR support: {}\n",
-            bold_style.clone().white().apply_to(source),
-            bold_style.clone().yellow().apply_to(destination),
-            redacted_output,
-            sampling_output,
-            pdf_support_output,
-            ocr_support_output,
+            "Copying from {} to {}.",
+            styles.highlighted.apply_to(source),
+            Style::new().bold().yellow().apply_to(destination),
         )
         .as_str(),
     )?;
+    term.write_line(format_capabilities_line(&capabilities, styles).as_str())?;
+    term.write_line("")?;
     Ok(())
 }
 
@@ -255,111 +278,6 @@ enum TransferFileResult {
     Copied,
     RedactedAndCopied,
     Skipped,
-}
-
-const PROCESSING_MEDIA_TYPE_WIDTH: usize = 28;
-const PROCESSING_MIN_PATH_WIDTH: usize = 8;
-const PROCESSING_FALLBACK_WIDTH: usize = 80;
-
-/// Truncates `s` to at most `width` display columns, keeping a prefix and a
-/// (slightly longer) suffix joined by a single `…`, so the most identifying
-/// part of a path (its file name) tends to survive. Widths are measured with
-/// `console::measure_text_width` so multi-byte and wide characters are
-/// accounted for rather than counted as one byte each.
-fn truncate_middle(s: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if console::measure_text_width(s) <= width {
-        return s.to_string();
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-    let budget = width - 1; // reserve one column for the ellipsis
-    let head_budget = budget / 2;
-    let tail_budget = budget - head_budget;
-
-    let chars: Vec<char> = s.chars().collect();
-
-    let mut head = String::new();
-    let mut used = 0;
-    for &c in &chars {
-        let w = console::measure_text_width(&c.to_string());
-        if used + w > head_budget {
-            break;
-        }
-        head.push(c);
-        used += w;
-    }
-
-    let mut tail = String::new();
-    used = 0;
-    for &c in chars.iter().rev() {
-        let w = console::measure_text_width(&c.to_string());
-        if used + w > tail_budget {
-            break;
-        }
-        tail.insert(0, c);
-        used += w;
-    }
-
-    format!("{head}…{tail}")
-}
-
-/// Fits `s` into exactly `width` display columns: pads short values on the
-/// right, and middle-truncates values that overflow.
-fn fit_column(s: &str, width: usize) -> String {
-    if console::measure_text_width(s) <= width {
-        pad_str(s, width, Alignment::Left, None).to_string()
-    } else {
-        truncate_middle(s, width)
-    }
-}
-
-/// Builds the "Processing ... to ... Size: ..." progress line so it fits
-/// within `width` display columns instead of wrapping on its own padding.
-/// The two path columns share whatever room is left after the literal text,
-/// the fixed media-type column and the (unpadded) size column, split evenly
-/// with a sane minimum so narrow terminals degrade to truncated names rather
-/// than zero-width columns.
-fn format_processing_line(
-    width: usize,
-    source_path: &str,
-    destination_path: &str,
-    media_type: &str,
-    size: &str,
-    bold_style: &Style,
-) -> String {
-    let width = if width == 0 {
-        PROCESSING_FALLBACK_WIDTH
-    } else {
-        width
-    };
-
-    let literal_width = console::measure_text_width("Processing ")
-        + console::measure_text_width(" to ")
-        + console::measure_text_width(" ")
-        + console::measure_text_width(" Size: ");
-    let size_width = console::measure_text_width(size);
-
-    let available_for_paths = width
-        .saturating_sub(literal_width)
-        .saturating_sub(PROCESSING_MEDIA_TYPE_WIDTH)
-        .saturating_sub(size_width);
-    let path_width = (available_for_paths / 2).max(PROCESSING_MIN_PATH_WIDTH);
-
-    let source_display = fit_column(source_path, path_width);
-    let destination_display = fit_column(destination_path, path_width);
-    let media_type_display = fit_column(media_type, PROCESSING_MEDIA_TYPE_WIDTH);
-
-    format!(
-        "Processing {} to {} {} Size: {}",
-        bold_style.apply_to(source_display),
-        bold_style.apply_to(destination_display),
-        media_type_display,
-        bold_style.apply_to(size)
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -377,17 +295,24 @@ async fn transfer_and_redact_file<
     redacter: &Option<(RedacterBaseOptions, Vec<Redacters<'a>>)>,
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-) -> AppResult<TransferFileResult> {
-    let bold_style = Style::new().bold().white();
+    styles: &CopyOutputStyles,
+) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
 
-    let base_resolved_file_ref = source_fs.resolve(Some(&base_file_ref));
-    match options.file_matcher.matches(&base_file_ref) {
-        FileMatcherResult::SkippedDueToSize | FileMatcherResult::SkippedDueToName => {
-            bar.inc(1);
-            return Ok(TransferFileResult::Skipped);
-        }
-        FileMatcherResult::Matched => {}
+    let skip_reason = match options.file_matcher.matches(&base_file_ref) {
+        FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
+        FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
+        FileMatcherResult::Matched => None,
+    };
+    if let Some(reason) = skip_reason {
+        let outcome = CopyFileOutcome::Skipped { reason };
+        print_file_row(term, bar, &base_file_ref, &outcome, styles);
+        bar.inc(1);
+        return Ok(TransferReport {
+            result: TransferFileResult::Skipped,
+            outcome,
+            file_size: base_file_ref.file_size,
+        });
     }
 
     let file_ref = source_file_ref.unwrap_or(&base_file_ref);
@@ -397,32 +322,16 @@ async fn transfer_and_redact_file<
         media_type: file_ref.media_type.clone(),
         file_size: file_ref.file_size,
     };
-    bar.println(
-        format_processing_line(
-            term.width() as usize,
-            &base_resolved_file_ref.file_path,
-            destination_fs
-                .resolve(Some(&dest_file_ref))
-                .file_path
-                .as_str(),
-            file_ref
-                .media_type
-                .as_ref()
-                .map(|media_type| media_type.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-                .as_str(),
-            HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
-                .to_string()
-                .as_str(),
-            &bold_style,
-        )
-        .as_str(),
+    tracing::debug!(
+        source = %source_fs.resolve(Some(&base_file_ref)).file_path,
+        destination = %destination_fs.resolve(Some(&dest_file_ref)).file_path,
+        "processing a file"
     );
-    let transfer_result = if let Some(ref redacter_with_options) = redacter {
+    let (transfer_result, outcome) = if let Some(ref redacter_with_options) = redacter {
         redact_upload_file::<SFS, DFS, _>(
             bar,
             destination_fs,
-            bold_style,
+            styles,
             source_reader,
             file_ref,
             options,
@@ -435,10 +344,40 @@ async fn transfer_and_redact_file<
         destination_fs
             .upload(source_reader, Some(&dest_file_ref))
             .await?;
-        TransferFileResult::Copied
+        (TransferFileResult::Copied, CopyFileOutcome::Copied)
     };
+    print_file_row(term, bar, file_ref, &outcome, styles);
     bar.inc(1);
-    Ok(transfer_result)
+    Ok(TransferReport {
+        result: transfer_result,
+        outcome,
+        file_size: file_ref.file_size,
+    })
+}
+
+/// Prints the row for a file once its processing has finished.
+fn print_file_row(
+    term: &Term,
+    bar: &ProgressBar,
+    file_ref: &FileSystemRef,
+    outcome: &CopyFileOutcome,
+    styles: &CopyOutputStyles,
+) {
+    bar.println(format_file_row(
+        term.width() as usize,
+        file_ref.relative_path.value(),
+        file_ref
+            .media_type
+            .as_ref()
+            .map(|media_type| media_type.to_string())
+            .unwrap_or_default()
+            .as_str(),
+        HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
+            .to_string()
+            .as_str(),
+        outcome,
+        styles,
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -450,16 +389,16 @@ async fn redact_upload_file<
 >(
     bar: &ProgressBar,
     destination_fs: &mut DFS,
-    bold_style: Style,
+    styles: &CopyOutputStyles,
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-) -> AppResult<TransferFileResult> {
+) -> AppResult<(TransferFileResult, CopyFileOutcome)> {
     let (redacter_base_options, redacters) = redacter_with_options;
-    let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters, bar);
+    let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters);
 
     let dest_file_ref_overridden = options
         .file_mime_override
@@ -475,14 +414,13 @@ async fn redact_upload_file<
             let delay = throttler.delay();
             if delay.as_millis() > 0 {
                 bar.println(
-                    format!(
-                        "⧗ Delaying redaction for {} seconds",
-                        bold_style
-                            .clone()
-                            .yellow()
-                            .apply_to(throttler.delay().as_secs().to_string())
-                    )
-                    .as_str(),
+                    styles
+                        .dimmed
+                        .apply_to(format!(
+                            "⧗ Delaying redaction for {} seconds",
+                            throttler.delay().as_secs()
+                        ))
+                        .to_string(),
                 );
                 tokio::time::sleep(*delay).await;
             }
@@ -498,65 +436,72 @@ async fn redact_upload_file<
                 destination_fs
                     .upload(redacted_result.stream, Some(dest_file_ref))
                     .await?;
-                if redacted_result.number_of_redactions > 0 {
-                    Ok(TransferFileResult::RedactedAndCopied)
+                let summary = redacted_result.summary;
+                let outcome = if !summary.applied.is_empty() {
+                    CopyFileOutcome::Redacted {
+                        redacters: summary.applied,
+                        conversion: summary.conversion,
+                    }
                 } else {
-                    Ok(TransferFileResult::Copied)
+                    CopyFileOutcome::CopiedUnredacted {
+                        reason: not_redacted_reason(summary.blocked),
+                    }
+                };
+                if redacted_result.number_of_redactions > 0 {
+                    Ok((TransferFileResult::RedactedAndCopied, outcome))
+                } else {
+                    Ok((TransferFileResult::Copied, outcome))
                 }
             }
-            Ok(_) => {
-                bar.println(
-                    format!(
-                        "↲ Skipping redaction because {} redactions were applied",
-                        bold_style.yellow().apply_to("no suitable".to_string())
-                    )
-                    .as_str(),
-                );
-                Ok(TransferFileResult::Skipped)
-            }
+            Ok(redacted_result) => Ok((
+                TransferFileResult::Skipped,
+                CopyFileOutcome::Skipped {
+                    reason: SkipReason::NotRedacted(not_redacted_reason(
+                        redacted_result.summary.blocked,
+                    )),
+                },
+            )),
             Err(ref error) => {
-                bar.println(
-                    format!(
-                        "↲ {}. Skipping due to: {}\n{:?}\n",
-                        bold_style.clone().red().apply_to("Error redacting"),
-                        bold_style.apply_to(error),
-                        error.source()
-                    )
-                    .as_str(),
-                );
-                Ok(TransferFileResult::Skipped)
+                tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
+                Ok((
+                    TransferFileResult::Skipped,
+                    CopyFileOutcome::Error {
+                        message: error.to_string(),
+                    },
+                ))
             }
         }
     } else if redacter_base_options.allow_unsupported_copies {
-        bar.println(
-            format!(
-                "↳ Copying {} because it is explicitly allowed by arguments",
-                bold_style
-                    .clone()
-                    .yellow()
-                    .apply_to("unredacted".to_string())
-            )
-            .as_str(),
-        );
         destination_fs
             .upload(source_reader, Some(dest_file_ref))
             .await?;
-        Ok(TransferFileResult::Copied)
+        Ok((
+            TransferFileResult::Copied,
+            CopyFileOutcome::CopiedUnredacted {
+                reason: NotRedactedReason::TypeNotSupported,
+            },
+        ))
     } else {
-        bar.println(
-            format!(
-                "↲ Skipping redaction because {} media type is not supported",
-                bold_style.apply_to(
-                    dest_file_ref
-                        .media_type
-                        .as_ref()
-                        .map(|mt| mt.to_string())
-                        .unwrap_or("".to_string())
-                )
-            )
-            .as_str(),
-        );
-        Ok(TransferFileResult::Skipped)
+        Ok((
+            TransferFileResult::Skipped,
+            CopyFileOutcome::Skipped {
+                reason: SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported),
+            },
+        ))
+    }
+}
+
+/// Why redaction did not happen, defaulting to "no redacter applied" when the
+/// pipeline did not record a reason.
+fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
+    use crate::redacters::RedactionBlocked;
+    match blocked {
+        Some(RedactionBlocked::PdfRendererUnavailable) => NotRedactedReason::PdfRendererUnavailable,
+        Some(RedactionBlocked::OcrUnavailable) => NotRedactedReason::OcrUnavailable,
+        Some(RedactionBlocked::OcrImageFormatNotSupported) => {
+            NotRedactedReason::OcrImageFormatNotSupported
+        }
+        None => NotRedactedReason::NoRedacterApplied,
     }
 }
 
@@ -577,130 +522,6 @@ mod tests {
     const SAMPLE_FILE_NAMES: [&str; 5] = TEST_DOCUMENT_NAMES;
     const SAMPLE_EMAIL: &str = TEST_DOCUMENT_SAMPLE_EMAIL;
     const SAMPLE_PHONE: &str = TEST_DOCUMENT_SAMPLE_PHONE;
-
-    fn plain_style() -> Style {
-        Style::new()
-    }
-
-    #[test]
-    fn processing_line_fits_within_width_with_long_destination() {
-        let destination = "redacted/redacted.zip:documents/customer-profile.html";
-        assert_eq!(console::measure_text_width(destination), 53);
-
-        let line = format_processing_line(
-            150,
-            "documents/customer-profile.html",
-            destination,
-            "text/html",
-            "12.34 KiB",
-            &plain_style(),
-        );
-
-        assert!(
-            console::measure_text_width(&line) <= 150,
-            "line was {} columns wide: {:?}",
-            console::measure_text_width(&line),
-            line
-        );
-        assert!(line.ends_with("12.34 KiB"), "line was: {line:?}");
-        assert_eq!(
-            line,
-            line.trim_end(),
-            "line has trailing whitespace: {line:?}"
-        );
-    }
-
-    #[test]
-    fn processing_line_middle_truncates_long_paths_at_narrow_width() {
-        let source = "documents/very-long-nested-directory-path/a.txt";
-        let destination = "redacted/very-long-nested-directory-path/a.txt";
-
-        let line = format_processing_line(
-            80,
-            source,
-            destination,
-            "text/plain",
-            "1.00 KiB",
-            &plain_style(),
-        );
-
-        assert!(
-            console::measure_text_width(&line) <= 80,
-            "line was {} columns wide: {:?}",
-            console::measure_text_width(&line),
-            line
-        );
-        assert!(line.contains('…'), "line was: {line:?}");
-        // The tail (file name) must survive truncation.
-        assert!(line.contains("a.txt"), "line was: {line:?}");
-    }
-
-    #[test]
-    fn fit_column_pads_short_values_without_truncating() {
-        let result = fit_column("a.txt", 20);
-        assert!(!result.contains('…'), "result was: {result:?}");
-        assert_eq!(console::measure_text_width(&result), 20);
-        assert!(result.starts_with("a.txt"));
-    }
-
-    #[test]
-    fn processing_line_falls_back_to_80_columns_when_width_is_zero() {
-        // Short enough that whether the path column is computed from a
-        // width of 0 or of 80 changes how much padding trails it, so a
-        // missing width == 0 fallback shows up as a mismatch here.
-        let line_zero = format_processing_line(
-            0,
-            "src.txt",
-            "dst.txt",
-            "text/plain",
-            "1.00 KiB",
-            &plain_style(),
-        );
-        let line_eighty = format_processing_line(
-            80,
-            "src.txt",
-            "dst.txt",
-            "text/plain",
-            "1.00 KiB",
-            &plain_style(),
-        );
-        assert_eq!(line_zero, line_eighty);
-    }
-
-    #[test]
-    fn truncate_middle_measures_multibyte_characters_by_display_width() {
-        let source = "documents/café-résumé-naïve-longer-file-name.txt";
-        // Every character in this path is 1 display column wide (no CJK),
-        // so display width differs from byte length but not from char count.
-        assert!(source.len() > source.chars().count());
-
-        let truncated = truncate_middle(source, 20);
-        assert_eq!(console::measure_text_width(&truncated), 20);
-        assert!(truncated.contains('…'));
-
-        let wide = "文档/非常长的中文文件名称示例说明.txt";
-        let truncated_wide = truncate_middle(wide, 20);
-        assert!(console::measure_text_width(&truncated_wide) <= 20);
-        assert!(truncated_wide.contains('…'));
-    }
-
-    #[test]
-    fn processing_line_truncates_media_type_longer_than_28_columns() {
-        let media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        assert!(console::measure_text_width(media_type) > 28);
-
-        let line = format_processing_line(
-            150,
-            "documents/source.txt",
-            "redacted/destination.txt",
-            media_type,
-            "1.00 KiB",
-            &plain_style(),
-        );
-
-        assert!(line.contains('…'), "line was: {line:?}");
-        assert!(!line.contains(media_type), "line was: {line:?}");
-    }
 
     fn base_redacter_options(provider_options: RedacterProviderOptions) -> RedacterOptions {
         RedacterOptions {

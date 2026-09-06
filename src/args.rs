@@ -100,7 +100,7 @@ impl CliCommand {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedacterType {
     GcpDlp,
     AwsComprehend,

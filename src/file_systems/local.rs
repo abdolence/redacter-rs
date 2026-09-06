@@ -144,7 +144,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         self.reporter
-            .report(format!("Listing files in dir: {}", self.root_path.as_str()))?;
+            .report_debug(format!("Listing files in dir: {}", self.root_path.as_str()));
         let source = PathBuf::from(self.root_path.as_str());
         let source_str = source.to_string_lossy().to_string();
         self.list_files_recursive(source_str.clone(), &file_matcher, max_files_limit)
