@@ -290,6 +290,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
         match self {
             RedacterDataItemContent::Value(value) => {
                 Ok(gcloud_sdk::google::privacy::dlp::v2::ContentItem {
+                    content_metadata: None,
                     data_item: Some(
                         gcloud_sdk::google::privacy::dlp::v2::content_item::DataItem::Value(value),
                     ),
@@ -313,6 +314,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
                         .collect()
                 };
                 Ok(gcloud_sdk::google::privacy::dlp::v2::ContentItem {
+                    content_metadata: None,
                     data_item: Some(
                         gcloud_sdk::google::privacy::dlp::v2::content_item::DataItem::Table(
                             gcloud_sdk::google::privacy::dlp::v2::Table {

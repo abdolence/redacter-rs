@@ -56,8 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!(
                     "{}: {}\nDetails: {:?}",
                     bold_style.clone().red().apply_to("Error"),
-                    &err,
-                    &err.source()
+                    err,
+                    err.source()
                 )
                 .as_str(),
             )?;

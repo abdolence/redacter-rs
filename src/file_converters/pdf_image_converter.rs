@@ -47,7 +47,7 @@ impl PdfToImage for PdfImageConverter {
         let document = self.pdfium.load_pdf_from_byte_vec(pdf_bytes.into(), None)?;
         let mut pdf_info = PdfInfo { pages: Vec::new() };
         for page in document.pages().iter() {
-            let image = page.render_with_config(&render_config)?.as_image();
+            let image = page.render_with_config(&render_config)?.as_image()?;
             let page_info = PdfPageInfo {
                 height: page.height(),
                 width: page.width(),

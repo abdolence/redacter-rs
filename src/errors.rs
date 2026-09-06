@@ -35,6 +35,7 @@ pub enum AppError {
     RedacterConfigError { message: String },
     #[error("Template error: {0}")]
     TemplateError(#[from] TemplateError),
+    #[cfg(feature = "pdf-render")]
     #[error("PDF conversion error: {0}")]
     PdfiumError(#[from] pdfium_render::prelude::PdfiumError),
     #[error("Image conversion error: {0}")]
@@ -48,7 +49,7 @@ pub enum AppError {
     JsonSerializeError(#[from] serde_json::Error),
     #[cfg(feature = "ocr")]
     #[error("Model load error: {0}")]
-    OcrModelLoadError(#[from] rten::ModelLoadError),
+    OcrModelLoadError(#[from] rten::LoadError),
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),

@@ -8,7 +8,11 @@ pub struct PdfInfo {
 
 #[derive(Debug, Clone)]
 pub struct PdfPageInfo {
+    // Only read by the pdf-render feature's converter and its callers in
+    // stream_redacter.rs; unread when that feature is disabled.
+    #[cfg_attr(not(feature = "pdf-render"), allow(dead_code))]
     pub height: PdfPoints,
+    #[cfg_attr(not(feature = "pdf-render"), allow(dead_code))]
     pub width: PdfPoints,
     pub page_as_images: image::DynamicImage,
 }

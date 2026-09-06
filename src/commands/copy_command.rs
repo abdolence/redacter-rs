@@ -204,7 +204,7 @@ async fn report_copy_info(
         bold_style
             .clone()
             .green()
-            .apply_to(format!("✓ Yes ({})", &options))
+            .apply_to(format!("✓ Yes ({})", options))
     } else {
         bold_style.clone().red().apply_to("✗ No".to_string())
     };
