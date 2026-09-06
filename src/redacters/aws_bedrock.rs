@@ -1,5 +1,4 @@
 use aws_config::Region;
-use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, ConverseOutput, ImageBlock, ImageFormat, ImageSource,
@@ -186,21 +185,6 @@ pub fn nova_text_answer_to_image_coords(
         .collect()
 }
 
-/// Formats a Bedrock SDK failure, keeping the service error code and message when the call
-/// reached the service and the whole source chain when it did not.
-fn bedrock_error<E, R>(context: &str, err: &SdkError<E, R>) -> AppError
-where
-    E: ProvideErrorMetadata + std::error::Error + 'static,
-    R: std::fmt::Debug,
-{
-    let message = match (err.code(), err.message()) {
-        (Some(code), Some(message)) => format!("{context}: {code}: {message}"),
-        (Some(code), None) => format!("{context}: {code}"),
-        (None, _) => format!("{context}: {}", DisplayErrorContext(err)),
-    };
-    AppError::AwsBedrockError { message }
-}
-
 /// Text blocks of a Converse answer, concatenated in order.
 fn converse_response_text(output: Option<&ConverseOutput>) -> Option<String> {
     let message = match output {
@@ -300,7 +284,7 @@ impl<'a> AwsBedrockRedacter<'a> {
             .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
             .send()
             .await
-            .map_err(|err| bedrock_error("Failed to redact the text", &err))?;
+            .map_err(|err| super::bedrock_error("Failed to redact the text", &err))?;
 
         match converse_response_text(response.output.as_ref()) {
             Some(redacted_content) => Ok(RedacterDataItem {
@@ -352,7 +336,9 @@ impl<'a> AwsBedrockRedacter<'a> {
             .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
             .send()
             .await
-            .map_err(|err| bedrock_error("Failed to locate the personal information", &err))?;
+            .map_err(|err| {
+                super::bedrock_error("Failed to locate the personal information", &err)
+            })?;
 
         let Some(answer) = converse_response_text(response.output.as_ref()) else {
             return Err(AppError::AwsBedrockError {
