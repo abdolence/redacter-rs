@@ -491,8 +491,8 @@ async fn redact_upload_file<
     }
 }
 
-/// Why redaction did not happen, defaulting to "there was nothing left to redact"
-/// when the pipeline did not record a reason.
+/// Why redaction did not happen, defaulting to "no redacter applied" when the
+/// pipeline did not record a reason.
 fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
     use crate::redacters::RedactionBlocked;
     match blocked {
@@ -501,7 +501,7 @@ fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> N
         Some(RedactionBlocked::OcrImageFormatNotSupported) => {
             NotRedactedReason::OcrImageFormatNotSupported
         }
-        None => NotRedactedReason::AlreadyRedacted,
+        None => NotRedactedReason::NoRedacterApplied,
     }
 }
 

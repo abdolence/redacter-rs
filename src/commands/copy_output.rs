@@ -13,9 +13,9 @@ use console::{pad_str, Alignment, Style};
 pub enum NotRedactedReason {
     /// No configured redacter supports the file's media type.
     TypeNotSupported,
-    /// The redaction pipeline applied no redaction step: there was nothing suitable
-    /// to redact in the file, so its content is left as it is.
-    AlreadyRedacted,
+    /// The redaction pipeline ran no redacter for the file, so its content is left
+    /// as it is.
+    NoRedacterApplied,
     /// The file is a PDF and the PDF renderer is not available in this build.
     PdfRendererUnavailable,
     /// Redaction needs the OCR engine and it is not available in this build.
@@ -163,7 +163,7 @@ impl NotRedactedReason {
     fn detail(&self) -> &'static str {
         match self {
             NotRedactedReason::TypeNotSupported => "type not supported",
-            NotRedactedReason::AlreadyRedacted => "already redacted",
+            NotRedactedReason::NoRedacterApplied => "no redacter applied",
             NotRedactedReason::PdfRendererUnavailable => "pdf renderer unavailable",
             NotRedactedReason::OcrUnavailable => "ocr unavailable",
             NotRedactedReason::OcrImageFormatNotSupported => "ocr: image format not supported",
@@ -553,8 +553,8 @@ mod tests {
                 "type not supported",
             ),
             (
-                SkipReason::NotRedacted(NotRedactedReason::AlreadyRedacted),
-                "already redacted",
+                SkipReason::NotRedacted(NotRedactedReason::NoRedacterApplied),
+                "no redacter applied",
             ),
             (
                 SkipReason::NotRedacted(NotRedactedReason::PdfRendererUnavailable),
