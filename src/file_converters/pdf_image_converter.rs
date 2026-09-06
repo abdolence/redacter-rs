@@ -47,7 +47,7 @@ impl PdfToImage for PdfImageConverter {
         let document = self.pdfium.load_pdf_from_byte_vec(pdf_bytes.into(), None)?;
         let mut pdf_info = PdfInfo { pages: Vec::new() };
         for page in document.pages().iter() {
-            let image = page.render_with_config(&render_config)?.as_image();
+            let image = page.render_with_config(&render_config)?.as_image()?;
             let page_info = PdfPageInfo {
                 height: page.height(),
                 width: page.width(),
@@ -77,5 +77,55 @@ impl PdfToImage for PdfImageConverter {
             page.objects_mut().add_image_object(object)?;
         }
         Ok(document.save_to_bytes()?.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pdfium is bound to a native library that is not committed to the repo (see
+    /// `lib/libpdfium.so`, gitignored). Machines without it should skip rather than fail.
+    fn converter_or_skip(test_name: &str) -> Option<PdfImageConverter> {
+        match PdfImageConverter::new() {
+            Ok(converter) => Some(converter),
+            Err(error) => {
+                println!("Skipping {test_name}: pdfium is not available ({error})");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn renders_sample_form_pdf_to_a_single_page_image() -> AppResult<()> {
+        // Binding pdfium races with any other test that also binds it (directly, or
+        // through `command_copy`), so serialize on the shared test lock. See
+        // `pdfium_test_lock`'s doc comment for what happens without it.
+        let _guard = crate::redacters::test_support::pdfium_test_lock().blocking_lock();
+
+        let Some(converter) = converter_or_skip("renders_sample_form_pdf_to_a_single_page_image")
+        else {
+            return Ok(());
+        };
+
+        let pdf_bytes: Bytes = std::fs::read("test-fixtures/documents/customer-form.pdf")?.into();
+        let pdf_info = converter.convert_to_images(pdf_bytes)?;
+
+        assert_eq!(pdf_info.pages.len(), 1, "the fixture is a one-page PDF");
+        let page = &pdf_info.pages[0];
+        assert!(
+            page.page_as_images.width() > 100 && page.page_as_images.height() > 100,
+            "expected a sensibly sized rendered page, got {}x{}",
+            page.page_as_images.width(),
+            page.page_as_images.height()
+        );
+
+        let round_tripped = converter.images_to_pdf(pdf_info)?;
+        assert!(
+            !round_tripped.is_empty(),
+            "converting the rendered page back to a PDF should not be empty"
+        );
+
+        Ok(())
     }
 }

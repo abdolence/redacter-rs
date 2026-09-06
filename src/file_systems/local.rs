@@ -297,4 +297,75 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn list_sample_documents_fixtures_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+
+        let mut fs = DetectFileSystem::open("test-fixtures/documents/", &reporter).await?;
+        let list_files_result = fs.list_files(None, None).await?;
+
+        let mut files_by_name: std::collections::HashMap<String, FileSystemRef> = list_files_result
+            .files
+            .into_iter()
+            .map(|file_ref| (file_ref.relative_path.filename(), file_ref))
+            .collect();
+        assert_eq!(files_by_name.len(), 5);
+
+        let expected_media_types = [
+            ("customer-note.txt", mime::TEXT_PLAIN),
+            ("customers.csv", mime::TEXT_CSV),
+            ("customer.json", mime::APPLICATION_JSON),
+            ("customer-profile.html", mime::TEXT_HTML),
+            ("customer-form.pdf", mime::APPLICATION_PDF),
+        ];
+        for (name, expected_media_type) in expected_media_types {
+            let file_ref = files_by_name
+                .remove(name)
+                .unwrap_or_else(|| panic!("{name} should be listed"));
+            assert_eq!(
+                file_ref.media_type,
+                Some(expected_media_type),
+                "unexpected media type for {name}"
+            );
+            assert!(
+                file_ref.file_size.unwrap_or(0) > 0,
+                "{name} should have a non-zero size"
+            );
+        }
+
+        fs.close().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn download_sample_note_fixture_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+
+        let mut fs = DetectFileSystem::open("test-fixtures/documents/", &reporter).await?;
+        let (file_ref, stream) = fs
+            .download(Some(&FileSystemRef {
+                relative_path: "customer-note.txt".into(),
+                media_type: None,
+                file_size: None,
+            }))
+            .await?;
+
+        let downloaded_bytes: Vec<bytes::Bytes> = stream.try_collect().await?;
+        let content = String::from_utf8(downloaded_bytes.concat())?;
+        assert!(
+            content.contains("john.smith@example.com"),
+            "expected the note to carry the fake customer email"
+        );
+        assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
+
+        fs.close().await?;
+
+        Ok(())
+    }
 }

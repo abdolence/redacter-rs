@@ -15,8 +15,6 @@ pub enum AppError {
     DestinationDoesNotSupportMultipleFiles { destination: String },
     #[error("Google Cloud REST SDK error:\n{0}")]
     GoogleCloudRestSdkError(#[from] gcloud_sdk::error::Error),
-    #[error("Google Cloud REST SDK API error:\n{0:?}")]
-    GoogleCloudRestSdkApiError(Box<dyn std::fmt::Debug + Send + Sync + 'static>),
     #[error("Google Cloud SDK error:\n{0}")]
     GoogleCloudGrpcError(#[from] gcloud_sdk::tonic::Status),
     #[error("Google Cloud invalid metadata value:\n{0}")]
@@ -35,6 +33,7 @@ pub enum AppError {
     RedacterConfigError { message: String },
     #[error("Template error: {0}")]
     TemplateError(#[from] TemplateError),
+    #[cfg(feature = "pdf-render")]
     #[error("PDF conversion error: {0}")]
     PdfiumError(#[from] pdfium_render::prelude::PdfiumError),
     #[error("Image conversion error: {0}")]
@@ -48,7 +47,7 @@ pub enum AppError {
     JsonSerializeError(#[from] serde_json::Error),
     #[cfg(feature = "ocr")]
     #[error("Model load error: {0}")]
-    OcrModelLoadError(#[from] rten::ModelLoadError),
+    OcrModelLoadError(#[from] rten::LoadError),
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),
@@ -68,14 +67,6 @@ impl<
 {
     fn from(err: aws_sdk_s3::error::SdkError<O, H>) -> Self {
         Self::AwsSdkError(Box::new(err))
-    }
-}
-
-impl<T: std::fmt::Debug + Send + Sync + 'static>
-    From<gcloud_sdk::google_rest_apis::storage_v1::Error<T>> for AppError
-{
-    fn from(err: gcloud_sdk::google_rest_apis::storage_v1::Error<T>) -> Self {
-        Self::GoogleCloudRestSdkApiError(Box::new(err))
     }
 }
 

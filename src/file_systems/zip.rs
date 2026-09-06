@@ -287,4 +287,49 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn list_sample_documents_fixtures_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_sample_fixtures")?;
+        let zip_file_path = temp_dir.path().join("documents.zip");
+
+        let fixture_names = [
+            "customer-note.txt",
+            "customers.csv",
+            "customer.json",
+            "customer-profile.html",
+            "customer-form.pdf",
+        ];
+        let mut zip = ZipWriter::new(std::fs::File::create(&zip_file_path)?);
+        for name in fixture_names {
+            let content = std::fs::read(Path::new("test-fixtures/documents").join(name))?;
+            zip.start_file(name, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(&content)?;
+        }
+        zip.finish()?;
+
+        let mut fs = ZipFileSystem::new(
+            &format!("zip://{}", zip_file_path.to_string_lossy()),
+            &reporter,
+        )
+        .await?;
+        let list_files_result = fs.list_files(None, None).await?;
+        let mut listed_names: Vec<String> = list_files_result
+            .files
+            .iter()
+            .map(|file_ref| file_ref.relative_path.filename())
+            .collect();
+        listed_names.sort();
+        let mut expected_names: Vec<String> =
+            fixture_names.iter().map(|name| name.to_string()).collect();
+        expected_names.sort();
+        assert_eq!(listed_names, expected_names);
+
+        fs.close().await?;
+
+        Ok(())
+    }
 }

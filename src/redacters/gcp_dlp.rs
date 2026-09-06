@@ -290,6 +290,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
         match self {
             RedacterDataItemContent::Value(value) => {
                 Ok(gcloud_sdk::google::privacy::dlp::v2::ContentItem {
+                    content_metadata: None,
                     data_item: Some(
                         gcloud_sdk::google::privacy::dlp::v2::content_item::DataItem::Value(value),
                     ),
@@ -313,6 +314,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterData
                         .collect()
                 };
                 Ok(gcloud_sdk::google::privacy::dlp::v2::ContentItem {
+                    content_metadata: None,
                     data_item: Some(
                         gcloud_sdk::google::privacy::dlp::v2::content_item::DataItem::Table(
                             gcloud_sdk::google::privacy::dlp::v2::Table {
@@ -436,9 +438,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("Failed to install rustls crypto provider");
+        crate::redacters::test_support::initialize_crypto();
 
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);

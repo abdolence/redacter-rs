@@ -25,6 +25,12 @@ impl<'a> FileConverters<'a> {
         }
     }
 
+    // `mut` and `app_reporter` are only used inside the feature-gated blocks
+    // below; unused when neither the pdf-render nor ocr feature is enabled.
+    #[cfg_attr(
+        not(any(feature = "pdf-render", feature = "ocr")),
+        allow(unused_mut, unused_variables)
+    )]
     pub async fn init(mut self, app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
         #[cfg(feature = "pdf-render")]
         {

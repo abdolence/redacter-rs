@@ -1,13 +1,16 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
-    GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, OpenAiLlmApiKey,
+    GcpDlpRedacterOptions, GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey,
     OpenAiModelName, RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
 };
 use clap::*;
 use std::fmt::Display;
 use std::path::PathBuf;
 use url::Url;
+
+/// Vertex AI location used when `--gcp-region` is not given.
+const DEFAULT_GCP_VERTEX_AI_REGION: &str = "global";
 
 #[derive(Parser, Debug)]
 #[command(author, about)]
@@ -112,6 +115,8 @@ impl std::str::FromStr for RedacterType {
             "aws-comprehend" => Ok(RedacterType::AwsComprehend),
             "ms-presidio" => Ok(RedacterType::MsPresidio),
             "gemini-llm" => Ok(RedacterType::GeminiLlm),
+            "open-ai-llm" => Ok(RedacterType::OpenAiLlm),
+            "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -124,7 +129,7 @@ impl Display for RedacterType {
             RedacterType::AwsComprehend => write!(f, "aws-comprehend"),
             RedacterType::MsPresidio => write!(f, "ms-presidio"),
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
-            RedacterType::OpenAiLlm => write!(f, "openai-llm"),
+            RedacterType::OpenAiLlm => write!(f, "open-ai-llm"),
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
         }
     }
@@ -160,25 +165,27 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "GCP region that will be used to redact and bill API calls for Vertex AI"
+        value_enum,
+        default_value = "auto",
+        help = "How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images"
+    )]
+    pub llm_image_mode: LlmImageMode,
+
+    #[arg(
+        long,
+        help = "GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted"
     )]
     pub gcp_region: Option<GcpRegion>,
 
     #[arg(
         long,
-        help = "Vertex AI model supports image editing natively. Default is false."
-    )]
-    pub gcp_vertex_ai_native_image_support: bool,
-
-    #[arg(
-        long,
-        help = "Model name for text redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-flash-001'"
+        help = "Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'"
     )]
     pub gcp_vertex_ai_text_model: Option<GcpVertexAiModelName>,
 
     #[arg(
         long,
-        help = "Model name for image redaction in Vertex AI. Default is 'publishers/google/models/gemini-1.5-pro-001'"
+        help = "Model name for native image editing in Vertex AI. Default is 'publishers/google/models/gemini-3.1-flash-image'"
     )]
     pub gcp_vertex_ai_image_model: Option<GcpVertexAiModelName>,
 
@@ -210,9 +217,15 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Gemini model name for Gemini LLM redacter. Default is 'models/gemini-1.5-flash'"
+        help = "Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'"
     )]
     pub gemini_model: Option<GeminiLlmModelName>,
+
+    #[arg(
+        long,
+        help = "Gemini model name for native image editing. Default is 'models/gemini-3.1-flash-image'"
+    )]
+    pub gemini_image_model: Option<GeminiLlmModelName>,
 
     #[arg(
         long,
@@ -225,9 +238,15 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Open AI model name for OpenAI LLM redacter. Default is 'gpt-4o-mini'"
+        help = "Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'"
     )]
     pub open_ai_model: Option<OpenAiModelName>,
+
+    #[arg(
+        long,
+        help = "Open AI model name for native image editing. Default is 'gpt-image-2'"
+    )]
+    pub open_ai_image_model: Option<OpenAiModelName>,
 
     #[arg(
         long,
@@ -293,6 +312,8 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             }
                         })?,
                         gemini_model: self.gemini_model.clone(),
+                        gemini_image_model: self.gemini_image_model.clone(),
+                        image_mode: self.llm_image_mode,
                     },
                 )),
                 RedacterType::OpenAiLlm => Ok(RedacterProviderOptions::OpenAiLlm(
@@ -304,6 +325,8 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                             }
                         })?,
                         model: self.open_ai_model.clone(),
+                        image_model: self.open_ai_image_model.clone(),
+                        image_mode: self.llm_image_mode,
                     },
                 )),
                 RedacterType::GcpVertexAi => Ok(RedacterProviderOptions::GcpVertexAi(
@@ -314,13 +337,10 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                                     .to_string(),
                             }
                         })?,
-                        gcp_region: self.gcp_region.clone().ok_or_else(|| {
-                            AppError::RedacterConfigError {
-                                message: "GCP region is required for GCP Vertex AI redacter"
-                                    .to_string(),
-                            }
-                        })?,
-                        native_image_support: self.gcp_vertex_ai_native_image_support,
+                        gcp_region: self.gcp_region.clone().unwrap_or_else(|| {
+                            GcpRegion::new(DEFAULT_GCP_VERTEX_AI_REGION.to_string())
+                        }),
+                        image_mode: self.llm_image_mode,
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
@@ -341,5 +361,37 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             provider_options,
             base_options,
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn redacter_type_round_trips_through_its_name() {
+        for redacter_type in [
+            RedacterType::GcpDlp,
+            RedacterType::AwsComprehend,
+            RedacterType::MsPresidio,
+            RedacterType::GeminiLlm,
+            RedacterType::OpenAiLlm,
+            RedacterType::GcpVertexAi,
+        ] {
+            let name = redacter_type.to_string();
+            let parsed = <RedacterType as FromStr>::from_str(&name)
+                .unwrap_or_else(|err| panic!("{name} should parse back: {err}"));
+            assert_eq!(parsed.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn redacter_type_names_match_the_cli_values() {
+        for redacter_type in RedacterType::value_variants() {
+            let cli_value = redacter_type
+                .to_possible_value()
+                .expect("every redacter type is selectable on the command line");
+            assert_eq!(redacter_type.to_string(), cli_value.get_name());
+        }
     }
 }
