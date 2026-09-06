@@ -30,6 +30,11 @@ pub use ms_presidio::*;
 mod gemini_llm;
 pub use gemini_llm::*;
 
+#[allow(dead_code)] // consumed by LocalRulesRedacter, wired in Task 5
+mod local_rules;
+#[allow(unused_imports)] // consumed by LocalRulesRedacter, wired in Task 5
+pub use local_rules::*;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
