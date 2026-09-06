@@ -3,12 +3,14 @@ use crate::common_types::{GcpProjectId, GcpRegion, TextImageCoords};
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_image_at_coords, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, LlmImageMode,
+    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
+use mime::Mime;
 use rand::RngExt;
 use rvstruct::ValueStruct;
 
@@ -16,7 +18,7 @@ use rvstruct::ValueStruct;
 pub struct GcpVertexAiRedacterOptions {
     pub project_id: GcpProjectId,
     pub gcp_region: GcpRegion,
-    pub native_image_support: bool,
+    pub image_mode: LlmImageMode,
     pub text_model: Option<GcpVertexAiModelName>,
     pub image_model: Option<GcpVertexAiModelName>,
     pub block_none_harmful: bool,
@@ -29,7 +31,6 @@ pub struct GcpVertexAiModelName(String);
 pub struct GcpVertexAiRedacter<'a> {
     client: GoogleApi<gcloud_sdk::google::cloud::aiplatform::v1::prediction_service_client::PredictionServiceClient<GoogleAuthMiddleware>>,
     options: GcpVertexAiRedacterOptions,
-    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
     safety_setting: gcloud_sdk::google::cloud::aiplatform::v1::safety_setting::HarmBlockThreshold,
 }
@@ -201,7 +202,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
     pub async fn redact_image_file_natively(
         &self,
         input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
+    ) -> Result<RedacterDataItem, NativeImageEditError> {
         let model_name = self
             .options
             .image_model
@@ -218,17 +219,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                let image_format =
-                    image::ImageFormat::from_mime_type(&mime_type).ok_or_else(|| {
-                        AppError::SystemError {
-                            message: format!("Unsupported image mime type: {mime_type}"),
-                        }
-                    })?;
-                let image = image::load_from_memory_with_format(&data, image_format)?;
-                let resized_image = image.resize(1024, 1024, image::imageops::FilterType::Gaussian);
-                let mut resized_image_bytes = std::io::Cursor::new(Vec::new());
-                resized_image.write_to(&mut resized_image_bytes, image_format)?;
-                let resized_image_data = resized_image_bytes.into_inner();
+                let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
 
                 let mut request = tonic::Request::new(
                     gcloud_sdk::google::cloud::aiplatform::v1::GenerateContentRequest {
@@ -249,8 +240,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                     gcloud_sdk::google::cloud::aiplatform::v1::Part {
                                         data: Some(
                                             gcloud_sdk::google::cloud::aiplatform::v1::part::Data::Text(
-                                                format!("Find and replace in the attached image everything that look like personal information. Generate a new image with the sensitive information redacted using black boxes. \
-                                                The source image width is: {}. The source image height is: {}.", resized_image.width(), resized_image.height()),
+                                                NATIVE_IMAGE_REDACTION_PROMPT.to_string(),
                                             ),
                                         ),
                                         metadata: None,
@@ -261,7 +251,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             gcloud_sdk::google::cloud::aiplatform::v1::part::Data::InlineData(
                                                 gcloud_sdk::google::cloud::aiplatform::v1::Blob {
                                                     mime_type: mime_type.to_string(),
-                                                    data: resized_image_data.clone(),
+                                                    data: prepared_image.data.to_vec(),
                                                 }
                                             ),
                                         ),
@@ -275,7 +265,10 @@ impl<'a> GcpVertexAiRedacter<'a> {
                         generation_config: Some(
                             gcloud_sdk::google::cloud::aiplatform::v1::GenerationConfig {
                                 candidate_count: Some(1),
-                                temperature: Some(1.0),
+                                response_modalities: vec![
+                                    gcloud_sdk::google::cloud::aiplatform::v1::generation_config::Modality::Image as i32,
+                                    gcloud_sdk::google::cloud::aiplatform::v1::generation_config::Modality::Text as i32,
+                                ],
                                 ..std::default::Default::default()
                             },
                         ),
@@ -286,54 +279,46 @@ impl<'a> GcpVertexAiRedacter<'a> {
                     "x-goog-user-project",
                     gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
                         self.options.project_id.as_ref(),
-                    )?,
-                );
-                println!(
-                    "Sending image redaction request to Vertex AI with model: {:?}",
-                    request
+                    )
+                    .map_err(AppError::from)?,
                 );
 
                 let response = self.client.get().generate_content(request).await?;
 
-                if let Some(content) = response
+                let redacted_image_blob = response
                     .into_inner()
                     .candidates
                     .pop()
-                    .and_then(|c| c.content)
-                {
-                    match content
-                        .parts
-                        .into_iter()
-                        .filter_map(|part| match part.data {
+                    .and_then(|candidate| candidate.content)
+                    .and_then(|content| {
+                        content.parts.into_iter().find_map(|part| match part.data {
                             Some(
                                 gcloud_sdk::google::cloud::aiplatform::v1::part::Data::InlineData(
                                     blob,
                                 ),
-                            ) => Some(blob.data),
+                            ) => Some(blob),
                             _ => None,
                         })
-                        .next()
-                    {
-                        Some(redacted_image_data) => Ok(RedacterDataItem {
+                    });
+
+                match redacted_image_blob {
+                    Some(blob) => {
+                        let redacted_mime_type: Mime =
+                            blob.mime_type.parse().map_err(AppError::from)?;
+                        Ok(RedacterDataItem {
                             file_ref: input.file_ref,
                             content: RedacterDataItemContent::Image {
-                                mime_type,
-                                data: redacted_image_data.into(),
+                                mime_type: redacted_mime_type,
+                                data: blob.data.into(),
                             },
-                        }),
-                        None => Err(AppError::SystemError {
-                            message: "No image data in the response".to_string(),
-                        }),
+                        })
                     }
-                } else {
-                    Err(AppError::SystemError {
-                        message: "No content item in the response".to_string(),
-                    })
+                    None => Err(NativeImageEditError::no_image_in_response()),
                 }
             }
-            _ => Err(AppError::SystemError {
+            _ => Err(NativeImageEditError::fatal(AppError::SystemError {
                 message: "Unsupported item for image redacting".to_string(),
-            }),
+            })),
         }
     }
 
@@ -346,7 +331,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
             .text_model
             .as_ref()
             .map(|model_name| model_name.value().to_string())
-            .unwrap_or_else(|| Self::DEFAULT_IMAGE_MODEL.to_string());
+            .unwrap_or_else(|| Self::DEFAULT_TEXT_MODEL.to_string());
 
         let model_path = format!(
             "projects/{}/locations/{}/{}",
@@ -357,17 +342,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                let image_format =
-                    image::ImageFormat::from_mime_type(&mime_type).ok_or_else(|| {
-                        AppError::SystemError {
-                            message: format!("Unsupported image mime type: {mime_type}"),
-                        }
-                    })?;
-                let image = image::load_from_memory_with_format(&data, image_format)?;
-                let resized_image = image.resize(1024, 1024, image::imageops::FilterType::Gaussian);
-                let mut resized_image_bytes = std::io::Cursor::new(Vec::new());
-                resized_image.write_to(&mut resized_image_bytes, image_format)?;
-                let resized_image_data = resized_image_bytes.into_inner();
+                let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
 
                 let mut request = tonic::Request::new(
                     gcloud_sdk::google::cloud::aiplatform::v1::GenerateContentRequest {
@@ -391,7 +366,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                                 format!("Find anything in the attached image that look like personal information. \
                                                 Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
                                                 The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
-                                                The image width is: {}. The image height is: {}.", resized_image.width(), resized_image.height()),
+                                                The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height),
                                             ),
                                         ),
                                         metadata: None,
@@ -402,7 +377,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                                             gcloud_sdk::google::cloud::aiplatform::v1::part::Data::InlineData(
                                                 gcloud_sdk::google::cloud::aiplatform::v1::Blob {
                                                     mime_type: mime_type.to_string(),
-                                                    data: resized_image_data.clone(),
+                                                    data: prepared_image.data.to_vec(),
                                                 }
                                             ),
                                         ),
@@ -500,7 +475,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             mime_type: mime_type.clone(),
                             data: redact_image_at_coords(
                                 mime_type.clone(),
-                                resized_image_data.into(),
+                                prepared_image.data.clone(),
                                 pii_image_coords,
                                 0.20,
                             )?,
@@ -523,11 +498,15 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
-            RedacterDataItemContent::Image { .. } if self.options.native_image_support => {
-                self.redact_image_file_natively(input).await
-            }
             RedacterDataItemContent::Image { .. } => {
-                self.redact_image_file_using_coords(input).await
+                redact_image_with_mode(
+                    self.options.image_mode,
+                    input,
+                    self.reporter,
+                    |item| self.redact_image_file_natively(item),
+                    |item| self.redact_image_file_using_coords(item),
+                )
+                .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::SystemError {
@@ -554,20 +533,11 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redacters::test_support::{
+        check_and_save_redacted_image, initialize_crypto, test_image_item,
+    };
     use crate::redacters::RedacterProviderOptions;
     use console::Term;
-
-    use std::sync::Once;
-
-    static _INIT_CRYPTO: Once = Once::new();
-
-    fn initialize_crypto() {
-        _INIT_CRYPTO.call_once(|| {
-            // rustls::crypto::ring::default_provider()
-            //     .install_default()
-            //     .expect("Failed to install rustls crypto provider");
-        });
-    }
 
     #[test]
     fn vertex_ai_endpoint_test() {
@@ -618,7 +588,7 @@ mod tests {
             GcpVertexAiRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gcp_region: GcpRegion::new(test_gcp_region),
-                native_image_support: false,
+                image_mode: LlmImageMode::Auto,
                 text_model: None,
                 image_model: None,
                 block_none_harmful: false,
@@ -636,5 +606,55 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    async fn redact_image_file_test_with_mode(
+        image_mode: LlmImageMode,
+        output_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        initialize_crypto();
+        let test_gcp_project_id =
+            std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
+        let test_gcp_region =
+            std::env::var("TEST_GCP_REGION").unwrap_or_else(|_| "global".to_string());
+
+        let input = test_image_item();
+        let redacter = GcpVertexAiRedacter::new(
+            GcpVertexAiRedacterOptions {
+                project_id: GcpProjectId::new(test_gcp_project_id),
+                gcp_region: GcpRegion::new(test_gcp_region),
+                image_mode,
+                text_model: None,
+                image_model: None,
+                block_none_harmful: false,
+            },
+            &reporter,
+        )
+        .await?;
+
+        let redacted_item = redacter.redact(input.clone()).await?;
+        let output_path = check_and_save_redacted_image(&input, &redacted_item, output_name);
+        term.write_line(&format!(
+            "Redacted image written to {}",
+            output_path.display()
+        ))?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
+    async fn redact_image_file_auto_mode_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        redact_image_file_test_with_mode(LlmImageMode::Auto, "vertex-ai-auto.png").await
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
+    async fn redact_image_file_coords_mode_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        redact_image_file_test_with_mode(LlmImageMode::Coords, "vertex-ai-coords.png").await
     }
 }

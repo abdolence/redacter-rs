@@ -36,11 +36,15 @@ Google Cloud Platform's DLP API.
     * [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs) based redaction using any available models such as
       Gemini, Claude, etc.:
         * text, html, csv, json files
-        * images that are supported by the models
+        * images, redacted by the model itself or by blacking out the coordinates it reports
+        * PDF files (rendering as images)
+    * [Google Gemini API](https://ai.google.dev/) based redaction
+        * text, html, csv, json files
+        * images, redacted by the model itself or by blacking out the coordinates it reports
         * PDF files (rendering as images)
     * [Open AI LLM](https://openai.com/) based redaction
         * text, html, csv, json files
-        * images that are supported by the models
+        * images, redacted by the model itself or by blacking out the coordinates it reports
         * PDF files (rendering as images)
     * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
         * text, html, csv, json files
@@ -96,10 +100,10 @@ Options:
           Additional GCP DLP built in info types for redaction
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
+      --llm-image-mode <LLM_IMAGE_MODE>
+          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' tries native first and falls back to coordinates [default: auto] [possible values: auto, native, coords]
       --gcp-region <GCP_REGION>
           GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
-      --gcp-vertex-ai-native-image-support
-          Vertex AI model supports image editing natively. Default is false.
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
           Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
@@ -195,10 +199,6 @@ By default, they are set to:
 - `publishers/google/models/gemini-3.8-flash` for the text model
 - `publishers/google/models/gemini-3.1-flash-image` for the image model
 
-In case you have access to native image editing models such as Google Imagen 3, you can enable those capabilities using
-`--gcp-vertex-ai-native-image-support` option.
-Without native image support, the tool will use LLM output and editing images by coordinates.
-
 ### Google Gemini API
 
 To be able to use the Gemini API redacter you need to authenticate with credentials that carry the
@@ -211,6 +211,16 @@ Models are selected with `--gemini-model` (default `models/gemini-3.8-flash`) an
 To be able to use Open AI LLM you need to provide an API key using `--open-ai-api-key` command line option.
 Optionally, you can provide model names using `--open-ai-model` (default `gpt-5.6-luna`) and
 `--open-ai-image-model` (default `gpt-image-2`) options.
+
+### Image redaction with LLM redacters
+
+All three LLM redacters (GCP Vertex AI, Gemini API and Open AI) redact images in one of two ways, selected with
+`--llm-image-mode`:
+
+- `native` (the image model edits the image and returns it with the personal information covered by black boxes);
+- `coords` (the text model reports the coordinates of the personal information and the tool blacks them out locally);
+- `auto` (the default): the native path is tried first and the tool falls back to coordinates when the model
+  cannot edit images. Authentication, permission and quota errors are never retried.
 
 ### AWS Comprehend
 
