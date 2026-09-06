@@ -9,6 +9,9 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use url::Url;
 
+/// Vertex AI location used when `--gcp-region` is not given.
+const DEFAULT_GCP_VERTEX_AI_REGION: &str = "global";
+
 #[derive(Parser, Debug)]
 #[command(author, about)]
 pub struct CliArgs {
@@ -160,7 +163,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "GCP region that will be used to redact and bill API calls for Vertex AI"
+        help = "GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted"
     )]
     pub gcp_region: Option<GcpRegion>,
 
@@ -314,12 +317,9 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                                     .to_string(),
                             }
                         })?,
-                        gcp_region: self.gcp_region.clone().ok_or_else(|| {
-                            AppError::RedacterConfigError {
-                                message: "GCP region is required for GCP Vertex AI redacter"
-                                    .to_string(),
-                            }
-                        })?,
+                        gcp_region: self.gcp_region.clone().unwrap_or_else(|| {
+                            GcpRegion::new(DEFAULT_GCP_VERTEX_AI_REGION.to_string())
+                        }),
                         native_image_support: self.gcp_vertex_ai_native_image_support,
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),

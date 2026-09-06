@@ -97,7 +97,7 @@ Options:
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
       --gcp-region <GCP_REGION>
-          GCP region that will be used to redact and bill API calls for Vertex AI
+          GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
       --gcp-vertex-ai-native-image-support
           Vertex AI model supports image editing natively. Default is false.
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
@@ -181,7 +181,10 @@ To be able to use GCP Vertex AI you need to:
 - authenticate using `gcloud auth application-default login` or provide a service account key
   using `GOOGLE_APPLICATION_CREDENTIALS` environment variable.
 - provide a GCP project id using `--gcp-project-id` option.
-- provide a GCP region using `--gcp-region` option.
+
+The location is optional and defaults to `global`. Use `--gcp-region` to pick another one: the `us` and `eu`
+multi-regions and regional locations such as `us-central1` are accepted. Note that the Gemini 3.x models are
+served only on `global`, `us` and `eu`.
 
 You can specify different models using `--gcp-vertex-ai-text-model` and `--gcp-vertex-ai-image-model` options.
 By default, they are set to:
@@ -281,7 +284,7 @@ redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/
 Vertex AI redacter:
 
 ```sh
-redacter cp -d gcp-vertex-ai --gcp-project-id my-little-project --gcp-region europe-north1 tmp/source/ tmp/redacted/
+redacter cp -d gcp-vertex-ai --gcp-project-id my-little-project tmp/source/ tmp/redacted/
 ```
 
 Override media types based on filenames:

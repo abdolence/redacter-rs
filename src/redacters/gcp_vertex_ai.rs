@@ -34,6 +34,18 @@ pub struct GcpVertexAiRedacter<'a> {
     safety_setting: gcloud_sdk::google::cloud::aiplatform::v1::safety_setting::HarmBlockThreshold,
 }
 
+/// Endpoint host serving Vertex AI in the given location.
+///
+/// The `global`, `us` and `eu` multi-regions are served by the bare
+/// `aiplatform.googleapis.com` host; every other location has its own
+/// regional host.
+pub fn vertex_ai_endpoint(region: &GcpRegion) -> String {
+    match region.value().as_str() {
+        "global" | "us" | "eu" => "https://aiplatform.googleapis.com".to_string(),
+        regional_location => format!("https://{regional_location}-aiplatform.googleapis.com"),
+    }
+}
+
 impl<'a> GcpVertexAiRedacter<'a> {
     const DEFAULT_TEXT_MODEL: &'static str = "publishers/google/models/gemini-2.5-flash";
     const DEFAULT_IMAGE_MODEL: &'static str = "publishers/google/models/gemini-2.5-flash"; // "publishers/google/models/imagegeneration";
@@ -45,7 +57,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
         let client =
             GoogleApi::from_function(
                 gcloud_sdk::google::cloud::aiplatform::v1::prediction_service_client::PredictionServiceClient::new,
-                format!("https://{}-aiplatform.googleapis.com", options.gcp_region.value()),
+                vertex_ai_endpoint(&options.gcp_region),
                 None,
             ).await?;
 
@@ -555,6 +567,30 @@ mod tests {
         });
     }
 
+    #[test]
+    fn vertex_ai_endpoint_test() {
+        assert_eq!(
+            vertex_ai_endpoint(&GcpRegion::new("global".to_string())),
+            "https://aiplatform.googleapis.com"
+        );
+        assert_eq!(
+            vertex_ai_endpoint(&GcpRegion::new("us".to_string())),
+            "https://aiplatform.googleapis.com"
+        );
+        assert_eq!(
+            vertex_ai_endpoint(&GcpRegion::new("eu".to_string())),
+            "https://aiplatform.googleapis.com"
+        );
+        assert_eq!(
+            vertex_ai_endpoint(&GcpRegion::new("us-central1".to_string())),
+            "https://us-central1-aiplatform.googleapis.com"
+        );
+        assert_eq!(
+            vertex_ai_endpoint(&GcpRegion::new("europe-west1".to_string())),
+            "https://europe-west1-aiplatform.googleapis.com"
+        );
+    }
+
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -563,7 +599,8 @@ mod tests {
         initialize_crypto();
         let test_gcp_project_id =
             std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
-        let test_gcp_region = std::env::var("TEST_GCP_REGION").expect("TEST_GCP_REGION required");
+        let test_gcp_region =
+            std::env::var("TEST_GCP_REGION").unwrap_or_else(|_| "global".to_string());
         let test_content = "Hello, John";
 
         let file_ref = FileSystemRef {
