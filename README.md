@@ -468,8 +468,9 @@ redacter cp -d local-rules -d local-ner tmp/source/ tmp/redacted/
 Use a release binary (or `cargo run --release`) for `local-ner`: a debug build spends about 12
 seconds per 512-token window of text, against about 95 ms in release. In release, loading the model
 takes about 100 ms and it holds about 232 MiB of peak memory; the download in
-[Models and downloads](#models-and-downloads) is about 131.6 MiB in total. These numbers are
-approximate and depend on your hardware and the amount of text.
+[Models and downloads](#models-and-downloads) is about 131.6 MiB in total. A table costs one forward
+pass per cell that holds a letter, so a CSV of many short rows is far slower than a text file of the
+same size. These numbers are approximate and depend on your hardware and the amount of text.
 
 `--local-ner-min-score` is the model confidence a word needs to be redacted, between 0 and 1
 (default 0.5); lower values redact more and produce more false positives. The model does not detect
@@ -521,8 +522,8 @@ The OCR engine and the `local-ner` redacter need model files that are not bundle
 
 | Model | Files | Size | Source | Licence |
 |---|---|---|---|---|
-| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 12 MB | https://ocrs-models.s3-accelerate.amazonaws.com/ | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
-| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 132 MB | https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision `c2a4dbf`) | AFL-3.0 |
+| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | https://ocrs-models.s3-accelerate.amazonaws.com/ | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision `c2a4dbf`) | AFL-3.0 |
 
 Nothing is downloaded without your consent. `--download-models` controls it:
 
@@ -534,9 +535,11 @@ Nothing is downloaded without your consent. `--download-models` controls it:
 
 Downloaded files are verified against SHA-256 digests pinned in the tool and stored under
 `~/.cache/redacter/models/<model>/` on Linux, `~/Library/Caches/redacter/models/<model>/` on macOS and
-`%LOCALAPPDATA%\redacter\models\<model>\` on Windows. `--models-dir <DIR>` (or the
-`REDACTER_MODELS_DIR` environment variable) moves that directory. Downloads honour the `HTTPS_PROXY`
-environment variable.
+`%LOCALAPPDATA%\redacter\models\<model>\` on Windows. Only downloads are checksummed: a file already
+in that directory is checked against its pinned size, and a copy you place in `models/<model>/` next
+to the executable or in the legacy OCR directories is used as it is, checked against nothing.
+`--models-dir <DIR>` (or the `REDACTER_MODELS_DIR` environment variable) moves that directory.
+Downloads honour the `HTTPS_PROXY` environment variable.
 
 For air-gapped machines, download the files listed above on another computer and copy them into
 `<models dir>/<model>/`, for example `~/.cache/redacter/models/ocrs/text-detection.rten`. The tool
