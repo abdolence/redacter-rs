@@ -1,6 +1,5 @@
 mod error;
 mod rules;
-mod spans;
 mod user_rules;
 mod validators;
 

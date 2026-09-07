@@ -1,7 +1,7 @@
 use super::error::LocalRulesError;
-use super::spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
 use super::user_rules::{UserMatcher, UserRule};
 use super::validators::{self, Validator};
+use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
 use clap::ValueEnum;
 use regex::{Regex, RegexBuilder};
 use std::collections::BTreeSet;

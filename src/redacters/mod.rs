@@ -33,6 +33,9 @@ pub use gemini_llm::*;
 mod local_rules;
 pub use local_rules::*;
 
+/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`).
+pub(crate) mod text_spans;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 

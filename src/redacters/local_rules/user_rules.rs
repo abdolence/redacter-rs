@@ -1,5 +1,5 @@
 use super::error::LocalRulesError;
-use super::spans::RuleName;
+use crate::redacters::text_spans::RuleName;
 use serde::Deserialize;
 use std::path::Path;
 
