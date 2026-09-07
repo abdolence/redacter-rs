@@ -4,14 +4,14 @@ use crate::errors::AppError;
 /// that was wrong so the user can find it in their command line or rule file.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalRulesError {
-    #[error("unknown local rule group `{name}`, valid groups: {valid}")]
-    UnknownGroup { name: String, valid: String },
     #[error("rule `{rule}` has an invalid regex: {reason}")]
     InvalidRegex { rule: String, reason: String },
     #[error("rule name `{name}` is used more than once")]
     DuplicateRule { name: String },
     #[error("rule `{name}` has an empty dictionary")]
     EmptyDictionary { name: String },
+    #[error("rule `{name}` has a dictionary word that is empty or only whitespace")]
+    EmptyDictionaryWord { name: String },
     #[error("inline rule `{value}` must have the form name=regex")]
     InvalidInlineRule { value: String },
     #[error("rule file {path}: {reason}")]

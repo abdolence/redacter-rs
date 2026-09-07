@@ -80,16 +80,25 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "phone-international",
         group: RuleGroup::Phone,
-        capture_group: 0,
+        capture_group: 1,
         validator: Some(validators::phone_digits),
-        pattern: r"(?:\+|\b00)[1-9]\d{0,2}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12}\b",
+        // The leading `(?:^|[^\w.+-])` is a left boundary `\b` cannot express: without it the
+        // `+` of a semver build suffix (`1.2.3+20240115`) starts a match. Only group 1 is
+        // redacted so the character before the number survives.
+        pattern: r"(?:^|[^\w.+-])((?:\+|00)[1-9]\d{0,2}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12})\b",
     },
     RuleSpec {
         name: "phone-national",
         group: RuleGroup::Phone,
         capture_group: 0,
-        validator: Some(validators::phone_digits),
-        pattern: r"(?:\(\d{2,4}\)|\b\d{2,4})[ .-]\d{3}[ .-]\d{3,4}\b",
+        validator: Some(validators::phone_national_digits),
+        // NANP-style area code plus 3-4, or a trunk `0` followed by 2 to 5 groups of digits
+        // (UK `020 7946 0958`, FR `01 23 45 67 89`, DE `030 901820`). The trunk form repeats
+        // one separator rather than mixing them, so a run of dates (`2024-04-30 2024-05-01`)
+        // cannot be joined into one number; the validator enforces the 9-digit minimum that
+        // keeps `03.04.2024` and other 8-digit shapes out. Hyphen-separated groups need three
+        // digits because 3-2-4 with hyphens is the US SSN shape, whose own rule owns it.
+        pattern: r"(?:\(\d{2,4}\)|\b\d{2,4})[ .-]\d{3}[ .-]\d{3,4}\b|\b0\d{1,4}(?:(?: \d{2,8}){1,4}|(?:\.\d{2,8}){1,4}|(?:-\d{3,8}){1,4})\b",
     },
     RuleSpec {
         name: "iban",
@@ -103,7 +112,12 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::PaymentCard,
         capture_group: 0,
         validator: Some(validators::luhn),
-        pattern: r"\b\d(?:[ -]?\d){12,18}\b",
+        // Separators are only allowed where cards actually group them (4-4-4-4 with an
+        // optional 3-digit tail, or Amex 4-6-5); a separator between any two digits made
+        // pairs of dates such as `2024-04-30 2024-05-01` a card whenever Luhn passed. An
+        // unbroken run must start with a card major industry digit, which keeps epoch
+        // milliseconds (13 digits starting with 1 until 2033) out.
+        pattern: r"\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}(?:[ -]\d{3})?|\d{4}[ -]\d{6}[ -]\d{5}|[3-6]\d{12,18})\b",
     },
     RuleSpec {
         name: "ipv4",
@@ -145,6 +159,9 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::Secrets,
         capture_group: 1,
         validator: None,
+        // Tighter than the spec, which asks only for a 40-character value near the word
+        // `secret`: any `secret=<40 chars>` matches base64-looking build hashes and generic
+        // application secrets, so `aws` is required nearby as well.
         pattern: r#"(?i)aws.{0,20}?secret.{0,20}?[=:'"\s]\s*([A-Za-z0-9/+=]{40})(?:[^A-Za-z0-9/+=]|$)"#,
     },
     RuleSpec {
@@ -194,7 +211,8 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::Secrets,
         capture_group: 0,
         validator: None,
-        pattern: r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        // `BLOCK` is optional so armoured PGP keys (`BEGIN PGP PRIVATE KEY BLOCK`) match too.
+        pattern: r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
     },
     RuleSpec {
         name: "us-ssn",
@@ -364,6 +382,12 @@ impl RuleSet {
                 let Some(matched) = captures.get(rule.capture_group) else {
                     continue;
                 };
+                // A pattern that can match the empty string (a user rule such as `a*`) yields
+                // one zero-length match per position; redacting those inserts the token
+                // between every character of the input.
+                if matched.is_empty() {
+                    continue;
+                }
                 if rule
                     .validator
                     .is_some_and(|validate| !validate(matched.as_str()))
@@ -464,6 +488,53 @@ mod tests {
         );
         assert_redacts("5500-0000-0000-0004", "[REDACTED]");
         assert_untouched("4111 1111 1111 1112");
+    }
+
+    #[test]
+    fn phone_national_covers_common_european_forms() {
+        assert_redacts("call 020 7946 0958 now", "call [REDACTED] now");
+        assert_redacts("tel 01 23 45 67 89", "tel [REDACTED]");
+        assert_redacts("ruf 030 901820 an", "ruf [REDACTED] an");
+        assert_untouched("total 12.345.678");
+        assert_untouched("am 03.04.2024");
+        assert_untouched("sum 1.234.567,89");
+        assert_untouched("on 2024-04-30");
+    }
+
+    #[test]
+    fn phone_international_needs_a_left_boundary() {
+        assert_untouched("build v1.2.3+20240115");
+        assert_redacts("Tel: +44 20 7946 0958", "Tel: [REDACTED]");
+    }
+
+    #[test]
+    fn payment_card_ignores_dates_and_epoch_timestamps() {
+        assert_untouched("Report 2024-04-30 2024-05-01");
+        assert_untouched("ts 1725700000004");
+    }
+
+    #[test]
+    fn payment_card_covers_grouped_and_unbroken_numbers() {
+        assert_redacts("4111-1111-1111-1111", "[REDACTED]");
+        assert_redacts("4111111111111111", "[REDACTED]");
+        assert_redacts("amex 3782 822463 10005", "amex [REDACTED]");
+        assert_untouched("4111111111111112");
+    }
+
+    #[test]
+    fn probe_line_keeps_dates_and_redacts_the_phone_and_card() {
+        assert_redacts(
+            "Report 2024-04-30 2024-05-01 ts 1725700000004 v1.2.3+20240115 call 020 7946 0958 card 4111 1111 1111 1111",
+            "Report 2024-04-30 2024-05-01 ts 1725700000004 v1.2.3+20240115 call [REDACTED] card [REDACTED]",
+        );
+    }
+
+    #[test]
+    fn private_key_block_covers_pgp_blocks() {
+        assert_redacts(
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
+            "[REDACTED]\nafter",
+        );
     }
 
     #[test]
@@ -703,6 +774,48 @@ mod tests {
         let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap_err();
         assert!(
             matches!(err, LocalRulesError::InvalidRegex { ref rule, .. } if rule == "broken"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn user_regex_matching_the_empty_string_leaves_the_text_untouched() {
+        let rule = UserRule {
+            name: RuleName::new("empty"),
+            matcher: UserMatcher::Regex("a*".to_string()),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        let (redacted, findings) = rules.redact("xyz");
+        assert_eq!(redacted, "xyz");
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(rules.redact("aaa xyz").0, "[REDACTED] xyz");
+    }
+
+    #[test]
+    fn user_dictionary_does_not_match_next_to_a_non_ascii_letter() {
+        let word_rule = |word: &str| UserRule {
+            name: RuleName::new("tags"),
+            matcher: UserMatcher::Dictionary(vec![word.to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("tag")]).unwrap();
+        assert_eq!(rules.redact("étag").0, "étag");
+        assert_eq!(rules.redact("tagé").0, "tagé");
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("étag")]).unwrap();
+        assert_eq!(rules.redact("étag").0, "[REDACTED]");
+    }
+
+    #[test]
+    fn two_user_rules_with_the_same_name_are_rejected() {
+        let rule = |pattern: &str| UserRule {
+            name: RuleName::new("employee-id"),
+            matcher: UserMatcher::Regex(pattern.to_string()),
+            case_insensitive: false,
+        };
+        let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule("a"), rule("b")]).unwrap_err();
+        assert!(
+            matches!(err, LocalRulesError::DuplicateRule { ref name } if name == "employee-id"),
             "{err}"
         );
     }

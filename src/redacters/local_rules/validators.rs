@@ -115,9 +115,21 @@ pub fn iban(value: &str) -> bool {
     mod97(&rearranged) == 1
 }
 
-pub fn phone_digits(value: &str) -> bool {
+/// A phone candidate: `min` to 15 digits once separators are stripped, and not a run of one
+/// repeated digit (`+1 111 111 1111` is a placeholder, not a number).
+fn phone_digit_count(value: &str, min: usize) -> bool {
     let digits = digits_of(value);
-    (8..=15).contains(&digits.len()) && digits.iter().any(|&d| d != digits[0])
+    (min..=15).contains(&digits.len()) && digits.iter().any(|&d| d != digits[0])
+}
+
+pub fn phone_digits(value: &str) -> bool {
+    phone_digit_count(value, 8)
+}
+
+/// National forms carry no country code, so the spec's 9-digit minimum applies: it is what
+/// separates a phone number from a dotted date or amount of 8 digits.
+pub fn phone_national_digits(value: &str) -> bool {
+    phone_digit_count(value, 9)
 }
 
 /// SSN `AAA-GG-SSSS` with the SSA exclusions, or an ITIN (area 900-999, group in the
@@ -139,17 +151,34 @@ pub fn us_ssn_or_itin(value: &str) -> bool {
     true
 }
 
-pub fn dutch_bsn(value: &str) -> bool {
-    let digits = digits_of(value);
-    if digits.len() != 9 {
-        return false;
-    }
+/// The Dutch eleven test: the first eight digits weighted 9 down to 2, minus the ninth, is a
+/// multiple of 11. Shared by the BSN and the Dutch VAT number. `digits` must hold at least 9.
+fn dutch_eleven_test(digits: &[u32]) -> bool {
     let weighted: i64 = digits[..8]
         .iter()
         .enumerate()
         .map(|(i, &d)| i64::from(d) * (9 - i as i64))
         .sum();
     (weighted - i64::from(digits[8])).rem_euclid(11) == 0
+}
+
+/// ISO 7064 MOD 11,10 over `digits`, returning the check digit that must follow them. Shared
+/// by the German tax identification number and the German VAT number.
+fn iso7064_mod_11_10_check(digits: &[u32]) -> u32 {
+    let mut product = 10;
+    for &d in digits {
+        let mut sum = (d + product) % 10;
+        if sum == 0 {
+            sum = 10;
+        }
+        product = (sum * 2) % 11;
+    }
+    (11 - product) % 10
+}
+
+pub fn dutch_bsn(value: &str) -> bool {
+    let digits = digits_of(value);
+    digits.len() == 9 && dutch_eleven_test(&digits)
 }
 
 const DNI_LETTERS: &[u8] = b"TRWAGMYFPDXBNJZSQVHLCKE";
@@ -232,16 +261,7 @@ pub fn german_steuer_id(value: &str) -> bool {
     if digits.len() != 11 || digits[0] == 0 {
         return false;
     }
-    let mut product = 10;
-    for &d in &digits[..10] {
-        let mut sum = (d + product) % 10;
-        if sum == 0 {
-            sum = 10;
-        }
-        product = (sum * 2) % 11;
-    }
-    let check = (11 - product) % 10;
-    check == digits[10]
+    iso7064_mod_11_10_check(&digits[..10]) == digits[10]
 }
 
 pub fn uk_nino(value: &str) -> bool {
@@ -269,21 +289,8 @@ pub fn eu_vat(value: &str) -> bool {
     let (country, body) = compact.split_at(2);
     let digits = digits_of(body);
     match country {
-        "DE" => {
-            // ISO 7064 MOD 11,10 over 9 digits.
-            if digits.len() != 9 {
-                return false;
-            }
-            let mut product = 10;
-            for &d in &digits[..8] {
-                let mut sum = (d + product) % 10;
-                if sum == 0 {
-                    sum = 10;
-                }
-                product = (sum * 2) % 11;
-            }
-            (11 - product) % 10 == digits[8]
-        }
+        // ISO 7064 MOD 11,10 over 9 digits.
+        "DE" => digits.len() == 9 && iso7064_mod_11_10_check(&digits[..8]) == digits[8],
         "FR" => {
             if body.len() != 11 || !body[..2].bytes().all(|b| b.is_ascii_digit()) {
                 return body.len() == 11;
@@ -294,17 +301,7 @@ pub fn eu_vat(value: &str) -> bool {
             (12 + 3 * (siren % 97)) % 97 == key
         }
         "IT" => digits.len() == 11 && luhn_any_length(&digits),
-        "NL" => {
-            if digits.len() != 11 || &body[9..10] != "B" {
-                return false;
-            }
-            let weighted: i64 = digits[..8]
-                .iter()
-                .enumerate()
-                .map(|(i, &d)| i64::from(d) * (9 - i as i64))
-                .sum();
-            (weighted - i64::from(digits[8])).rem_euclid(11) == 0
-        }
+        "NL" => digits.len() == 11 && &body[9..10] == "B" && dutch_eleven_test(&digits),
         "BE" => {
             if digits.len() != 10 {
                 return false;

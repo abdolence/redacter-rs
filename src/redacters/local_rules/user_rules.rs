@@ -18,6 +18,7 @@ pub enum UserMatcher {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RulesFile {
     rules: Vec<RuleEntry>,
 }
@@ -37,7 +38,9 @@ pub fn parse_inline_rule(value: &str) -> Result<UserRule, LocalRulesError> {
         value: value.to_string(),
     };
     let (name, pattern) = value.split_once('=').ok_or_else(invalid)?;
-    if name.is_empty() || pattern.is_empty() {
+    // A blank name would leave findings unattributable in the report, and a blank pattern
+    // matches the empty string everywhere.
+    if name.trim().is_empty() || pattern.is_empty() {
         return Err(invalid());
     }
     Ok(UserRule {
@@ -65,7 +68,11 @@ pub fn load_rules_file(path: &Path) -> Result<Vec<UserRule>, LocalRulesError> {
                 EntryError::Matcher(name) => file_error(format!(
                     "rule `{name}` must have exactly one of `regex` or `dictionary`"
                 )),
+                EntryError::BlankName => file_error("a rule has an empty name".to_string()),
                 EntryError::EmptyDictionary(name) => LocalRulesError::EmptyDictionary { name },
+                EntryError::BlankDictionaryWord(name) => {
+                    LocalRulesError::EmptyDictionaryWord { name }
+                }
             })
         })
         .collect()
@@ -73,14 +80,24 @@ pub fn load_rules_file(path: &Path) -> Result<Vec<UserRule>, LocalRulesError> {
 
 enum EntryError {
     Matcher(String),
+    BlankName,
     EmptyDictionary(String),
+    BlankDictionaryWord(String),
 }
 
 fn entry_to_rule(entry: RuleEntry) -> Result<UserRule, EntryError> {
+    // A blank name would leave findings unattributable in the report; a blank dictionary word
+    // matches the empty string at every position.
+    if entry.name.trim().is_empty() {
+        return Err(EntryError::BlankName);
+    }
     let (matcher, default_case_insensitive) = match (entry.regex, entry.dictionary) {
         (Some(regex), None) => (UserMatcher::Regex(regex), false),
         (None, Some(words)) if words.is_empty() => {
             return Err(EntryError::EmptyDictionary(entry.name))
+        }
+        (None, Some(words)) if words.iter().any(|word| word.trim().is_empty()) => {
+            return Err(EntryError::BlankDictionaryWord(entry.name))
         }
         (None, Some(words)) => (UserMatcher::Dictionary(words), true),
         _ => return Err(EntryError::Matcher(entry.name)),
@@ -171,6 +188,58 @@ mod tests {
             load_rules_file(file.path()).unwrap_err(),
             LocalRulesError::EmptyDictionary { .. }
         ));
+    }
+
+    #[test]
+    fn inline_rule_with_a_blank_name_is_rejected() {
+        for value in [" =a*", "\t=a*"] {
+            assert!(
+                matches!(
+                    parse_inline_rule(value),
+                    Err(LocalRulesError::InvalidInlineRule { .. })
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_file_rejects_a_blank_rule_name() {
+        for contents in [
+            r#"{"rules":[{"name":"","regex":"a"}]}"#,
+            r#"{"rules":[{"name":"  ","regex":"a"}]}"#,
+        ] {
+            let file = write_temp(contents);
+            let err = load_rules_file(file.path()).unwrap_err();
+            assert!(matches!(err, LocalRulesError::RuleFile { .. }), "{err}");
+            assert!(
+                err.to_string().contains(&file.path().display().to_string()),
+                "{err}"
+            );
+            assert!(err.to_string().contains("empty name"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rules_file_rejects_a_blank_dictionary_word() {
+        let file = write_temp(r#"{"rules":[{"name":"x","dictionary":["ok"," "]}]}"#);
+        let err = load_rules_file(file.path()).unwrap_err();
+        assert!(
+            matches!(err, LocalRulesError::EmptyDictionaryWord { ref name } if name == "x"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rules_file_rejects_an_unknown_top_level_key() {
+        let file = write_temp(r#"{"rulez":[{"name":"x","regex":"a"}]}"#);
+        let err = load_rules_file(file.path()).unwrap_err();
+        assert!(matches!(err, LocalRulesError::RuleFile { .. }), "{err}");
+        assert!(
+            err.to_string().contains(&file.path().display().to_string()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("rulez"), "{err}");
     }
 
     #[test]
