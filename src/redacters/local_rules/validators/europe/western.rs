@@ -1,11 +1,11 @@
 //! Identifiers of Western and Southern Europe. Each function documents the format and the
 //! published check it applies.
 
-use super::checksums::{
+use super::super::checksums::{
     alphanumerics_of, digits_of, dutch_eleven_test, ean13_check_digit, iso7064_mod_11_10_check,
     luhn_any_length, verhoeff_check_digit, weighted_sum,
 };
-use super::dates::{pair, valid_date};
+use super::super::dates::{pair, valid_date};
 
 pub fn dutch_bsn(value: &str) -> bool {
     let digits = digits_of(value);

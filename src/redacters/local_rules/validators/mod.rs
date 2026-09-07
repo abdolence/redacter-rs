@@ -2,17 +2,19 @@
 //! text, separators included, and answers whether the value is structurally valid. The
 //! generic validators live here; national identifiers are grouped by region.
 
+mod africa;
+mod americas;
+mod asia_pacific;
 mod checksums;
 mod dates;
-mod eastern_europe;
 mod europe;
-mod nordic;
-mod world;
+mod us;
 
-pub use eastern_europe::*;
+pub use africa::*;
+pub use americas::*;
+pub use asia_pacific::*;
 pub use europe::*;
-pub use nordic::*;
-pub use world::*;
+pub use us::*;
 
 pub use dates::birth_date;
 #[cfg(test)]

@@ -1,9 +1,9 @@
 //! Identifiers of Central, Eastern and South-Eastern Europe.
 
-use super::checksums::{
+use super::super::checksums::{
     alphanumerics_of, digits_of, iso7064_mod_11_10_check, mod11_complement, weighted_sum,
 };
-use super::dates::{pair, valid_date};
+use super::super::dates::{pair, valid_date};
 
 /// Polish PESEL: `YYMMDDSSSSC`; the month carries the century (1-12 for the 1900s, 21-32 for
 /// the 2000s; the 1800s and 2100s offsets are not accepted). C is `(10 - Σ weights 1 3 7 9

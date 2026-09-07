@@ -1,8 +1,8 @@
 //! Nordic and Baltic personal identity numbers. All embed a birth date; the check digits
 //! follow the published algorithm named on each function.
 
-use super::checksums::{digits_of, luhn_any_length, mod11_complement, weighted_sum};
-use super::dates::{pair, valid_date};
+use super::super::checksums::{digits_of, luhn_any_length, mod11_complement, weighted_sum};
+use super::super::dates::{pair, valid_date};
 
 /// Swedish personnummer and samordningsnummer: `YYMMDD-NNNC` (10 digits; `+` instead of
 /// `-` for people over 100) or `YYYYMMDD-NNNC`. Luhn over the 10-digit form; a
