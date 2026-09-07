@@ -254,6 +254,9 @@ pub fn uk_nino(value: &str) -> bool {
     if b"DFIQUV".contains(&first) || b"DFIQUVO".contains(&second) {
         return false;
     }
+    if !matches!(bytes[8], b'A'..=b'D') || !bytes[2..8].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
     let prefix = &compact[..2];
     !["BG", "GB", "NK", "KN", "TN", "NT", "ZZ"].contains(&prefix)
 }
@@ -431,6 +434,13 @@ mod tests {
         assert!(!uk_nino("BG 12 34 56 C"));
         assert!(!uk_nino("DA 12 34 56 C"));
         assert!(!uk_nino("AO 12 34 56 C"));
+    }
+
+    #[test]
+    fn uk_nino_rejects_a_bad_suffix_or_non_digit_body() {
+        assert!(!uk_nino("AB 12 34 56 E"));
+        assert!(!uk_nino("ABCDEFGHI"));
+        assert!(!uk_nino("AB123456E"));
     }
 
     #[test]
