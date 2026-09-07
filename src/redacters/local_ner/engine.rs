@@ -35,12 +35,7 @@ impl NerEngine {
     /// directory. Every missing piece is a typed error naming it.
     pub fn load(files: &ModelFiles) -> Result<Self, LocalNerError> {
         let (labels, body) = read_config(&files.path("config.json"))?;
-        let tokenizer_path = files.path("tokenizer.json");
-        let tokenizer =
-            Tokenizer::from_file(&tokenizer_path).map_err(|err| LocalNerError::TokenizerLoad {
-                path: tokenizer_path.display().to_string(),
-                reason: err.to_string(),
-            })?;
+        let tokenizer = load_tokenizer(&files.path("tokenizer.json"))?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
         let model_path = files.path("model_uint8.onnx");
@@ -210,7 +205,32 @@ fn read_config(path: &Path) -> Result<(LabelSet, usize), LocalNerError> {
                 "max_position_embeddings {max_positions} leaves no room for tokens"
             ))
         })?;
+    // Windows step forward by `body - OVERLAP` tokens, so a window that is not longer than
+    // the overlap would never reach the end of a long text.
+    if body <= OVERLAP {
+        return Err(config_error(format!(
+            "max_position_embeddings {max_positions} leaves {body} tokens per window, which is \
+             not more than the {OVERLAP}-token window overlap"
+        )));
+    }
     Ok((labels, body))
+}
+
+/// Loads `tokenizer.json` with truncation and padding turned off. The pipeline windows the
+/// token stream itself and needs every token of the text: a `truncation` block left in the
+/// file — the copies next to the binary and the legacy directories are checked against
+/// nothing — would cut each text at one window and copy the rest of it unredacted.
+fn load_tokenizer(path: &Path) -> Result<Tokenizer, LocalNerError> {
+    let load_error = |reason: String| LocalNerError::TokenizerLoad {
+        path: path.display().to_string(),
+        reason,
+    };
+    let mut tokenizer = Tokenizer::from_file(path).map_err(|err| load_error(err.to_string()))?;
+    tokenizer
+        .with_truncation(None)
+        .map_err(|err| load_error(err.to_string()))?;
+    tokenizer.with_padding(None);
+    Ok(tokenizer)
 }
 
 fn special_token(tokenizer: &Tokenizer, token: &str) -> Result<u32, LocalNerError> {
@@ -315,6 +335,86 @@ mod tests {
         ));
     }
 
+    /// A tokenizer.json carrying a `truncation` block, the shape a legacy or hand-placed
+    /// copy can still have: one word per token, and every text cut at 8 tokens unless the
+    /// loader turns truncation off.
+    fn truncating_tokenizer_file() -> tempfile::NamedTempFile {
+        let vocab: String = (0..40)
+            .map(|id| format!("\"w{id}\": {id}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let json = format!(
+            r#"{{
+  "version": "1.0",
+  "truncation": {{"direction": "Right", "max_length": 8, "strategy": "LongestFirst", "stride": 0}},
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {{"type": "Whitespace"}},
+  "post_processor": null,
+  "decoder": null,
+  "model": {{"type": "WordLevel", "vocab": {{{vocab}, "[UNK]": 40}}, "unk_token": "[UNK]"}}
+}}"#
+        );
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), json).unwrap();
+        file
+    }
+
+    /// The pipeline windows the token stream itself and needs every token: a tokenizer that
+    /// truncates would hand it the first window of a long text and the rest would be copied
+    /// out unredacted, with nothing in the output saying so.
+    #[test]
+    fn the_loaded_tokenizer_never_truncates_a_long_text() {
+        let file = truncating_tokenizer_file();
+        let tokenizer = load_tokenizer(file.path()).unwrap();
+        let text: Vec<String> = (0..30).map(|id| format!("w{id}")).collect();
+        let text = text.join(" ");
+        let encoding = tokenizer.encode(text.as_str(), false).unwrap();
+        assert_eq!(
+            encoding.get_ids().len(),
+            30,
+            "the truncation block in the file must be turned off at load"
+        );
+        assert_eq!(encoding.get_ids().first(), Some(&0));
+        assert_eq!(encoding.get_ids().last(), Some(&29));
+    }
+
+    #[test]
+    fn a_missing_tokenizer_file_names_itself() {
+        let err = load_tokenizer(Path::new("/nonexistent/tokenizer.json")).unwrap_err();
+        match &err {
+            LocalNerError::TokenizerLoad { path, .. } => {
+                assert_eq!(path, "/nonexistent/tokenizer.json")
+            }
+            other => panic!("expected TokenizerLoad, got {other}"),
+        }
+    }
+
+    /// A window no longer than the overlap between two windows never advances, so a config
+    /// that asks for one is rejected at load rather than at the first long text.
+    #[test]
+    fn a_window_no_longer_than_the_overlap_is_rejected() {
+        let file =
+            config_file(r#"{"id2label": {"0": "O", "1": "B-PER"}, "max_position_embeddings": 32}"#);
+        let err = read_config(file.path()).unwrap_err();
+        match &err {
+            LocalNerError::Config { reason, .. } => {
+                assert!(reason.contains("max_position_embeddings 32"), "{reason}");
+                assert!(reason.contains("30 tokens per window"), "{reason}");
+                assert!(reason.contains("64"), "{reason}");
+            }
+            other => panic!("expected Config, got {other}"),
+        }
+
+        // One more than the overlap plus the two special tokens is the smallest window
+        // that works.
+        let file =
+            config_file(r#"{"id2label": {"0": "O", "1": "B-PER"}, "max_position_embeddings": 67}"#);
+        let (_, body) = read_config(file.path()).unwrap();
+        assert_eq!(body, 65);
+    }
+
     async fn engine() -> NerEngine {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
@@ -322,7 +422,7 @@ mod tests {
             download: DownloadModels::Yes,
             models_dir: None,
         };
-        let store = ModelStore::new(&options, &reporter).unwrap();
+        let store = ModelStore::new(&options, &reporter);
         let files = store.resolve(ModelId::NerMultilingualHrl).await.unwrap();
         NerEngine::load(&files).unwrap()
     }

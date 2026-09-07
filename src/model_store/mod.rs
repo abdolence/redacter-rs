@@ -10,7 +10,7 @@ pub use consent::{is_interactive, ConsentSource, DownloadRequest, TerminalConsen
 // `ByteStream` joins this list once something outside `download.rs` names it (Task 4's OCR
 // migration); re-exporting it before then is a warning, same reasoning as the note it replaces.
 pub use download::{download_file, Fetcher, HttpFetcher};
-pub use error::ModelStoreError;
+pub use error::{ErrorPhase, ModelStoreError};
 pub use manifest::{manifest, ModelFile, ModelId, ModelManifest};
 
 use crate::reporter::AppReporter;
@@ -35,18 +35,15 @@ pub struct ModelFiles {
 
 // Only the ocr and local-ner features read a resolved model's files; a `--no-default-features`
 // (or pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a
-// future consumer just adds its feature to the list below.
+// future consumer just adds its feature to the list below. ocrs takes the whole directory
+// (it loads its own files by name), local-ner names it in the line it reports before loading
+// and opens each file by name.
 #[cfg(any(feature = "ocr", feature = "local-ner", test))]
 impl ModelFiles {
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
-}
 
-// ocrs takes the whole directory (it loads its own files by name) and local-ner names it in
-// the line it reports before loading; a build without either feature has no caller.
-#[cfg(any(feature = "ocr", feature = "local-ner", test))]
-impl ModelFiles {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -55,6 +52,20 @@ impl ModelFiles {
 /// Where manually placed copies of a model may live besides the managed root, in lookup
 /// order. Injected so tests can point it at a temporary directory.
 pub type ManualDirs = Box<dyn Fn(&ModelManifest) -> Vec<PathBuf> + Send + Sync>;
+
+/// The managed models root, looked up only when a model has to be found there. A system
+/// with no cache directory and no `--models-dir` fails here rather than at start-up, so a
+/// run that needs no managed model never fails for the lack of one. Injected, like
+/// `ManualDirs`, so a test can exercise that system without touching the environment.
+pub type ManagedRoot = Box<dyn Fn() -> Result<PathBuf, ModelStoreError> + Send + Sync>;
+
+/// `<platform cache>/redacter/models`, or `NoCacheDir` where the platform has no cache
+/// directory to put it in.
+pub fn platform_models_root() -> Result<PathBuf, ModelStoreError> {
+    dirs::cache_dir()
+        .map(|cache| cache.join("redacter").join("models"))
+        .ok_or(ModelStoreError::NoCacheDir)
+}
 
 /// The `--download-models` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -106,7 +117,7 @@ pub fn default_manual_dirs(manifest: &ModelManifest) -> Vec<PathBuf> {
 }
 
 pub struct ModelStore<'a> {
-    root: PathBuf,
+    root: ManagedRoot,
     manual_dirs: ManualDirs,
     policy: DownloadPolicy,
     consent: Box<dyn ConsentSource + 'a>,
@@ -124,32 +135,29 @@ enum FileState {
 }
 
 impl<'a> ModelStore<'a> {
-    /// The production store: platform cache root unless overridden, terminal consent, reqwest.
-    pub fn new(
-        options: &ModelStoreOptions,
-        reporter: &'a AppReporter<'a>,
-    ) -> Result<Self, ModelStoreError> {
-        let root = match &options.models_dir {
-            Some(dir) => dir.clone(),
-            None => dirs::cache_dir()
-                .map(|cache| cache.join("redacter").join("models"))
-                .ok_or(ModelStoreError::NoCacheDir)?,
-        };
+    /// The production store: platform cache root unless overridden, terminal consent,
+    /// reqwest. Never fails: the cache directory and the HTTP client are only needed by a
+    /// run that has to find or download a model, and both are looked up there.
+    pub fn new(options: &ModelStoreOptions, reporter: &'a AppReporter<'a>) -> Self {
+        let models_dir = options.models_dir.clone();
         let policy = resolve_policy(options.download, is_interactive());
-        Ok(Self::with_parts(
-            root,
+        Self::with_parts(
+            Box::new(move || match &models_dir {
+                Some(dir) => Ok(dir.clone()),
+                None => platform_models_root(),
+            }),
             Box::new(default_manual_dirs),
             policy,
             Box::new(TerminalConsent),
-            Box::new(HttpFetcher::new()?),
+            Box::new(HttpFetcher::new()),
             reporter,
-        ))
+        )
     }
 
     /// Builds a store from its parts. Production code uses `ModelStore::new`; tests inject a
     /// temporary root, a fixed consent answer and canned downloads.
     pub fn with_parts(
-        root: PathBuf,
+        root: ManagedRoot,
         manual_dirs: ManualDirs,
         policy: DownloadPolicy,
         consent: Box<dyn ConsentSource + 'a>,
@@ -182,7 +190,20 @@ impl<'a> ModelStore<'a> {
         if let Some(files) = self.cached(manifest.dir_name) {
             return Ok(files);
         }
-        let managed = self.root.join(manifest.dir_name);
+        let managed = match (self.root)() {
+            Ok(root) => root.join(manifest.dir_name),
+            // Nowhere to install this model: a manual copy is the only way it can still be
+            // found, and the missing root is only reported when there is none.
+            Err(no_root) => {
+                let dir = match self.find_manual_dir(manifest) {
+                    Some(dir) => dir,
+                    None => return Err(no_root),
+                };
+                let files = ModelFiles { dir };
+                self.remember(manifest.dir_name, files.clone());
+                return Ok(files);
+            }
+        };
         let mut wanted: Vec<&'static ModelFile> = Vec::new();
         let mut stale: Option<(PathBuf, u64, u64)> = None;
         for file in manifest.files {
@@ -205,6 +226,7 @@ impl<'a> ModelStore<'a> {
                         location: path.display().to_string(),
                         expected,
                         actual,
+                        phase: ErrorPhase::Lookup,
                     });
                 }
                 Some(_) => self.download(manifest, &managed, wanted).await?,
@@ -303,6 +325,7 @@ fn file_state(path: &Path, expected: u64) -> Result<FileState, ModelStoreError> 
         Err(source) => Err(ModelStoreError::Io {
             path: path.display().to_string(),
             source,
+            phase: ErrorPhase::Lookup,
         }),
     }
 }
@@ -319,40 +342,30 @@ fn progress_bar(file: &ModelFile) -> Result<ProgressBar, ModelStoreError> {
     Ok(bar)
 }
 
+/// Fakes for every test that resolves a model, here and in the modules that call the store.
 #[cfg(test)]
-mod tests {
-    use super::download::test_support::{part_files, FakeFetcher, TEST_FILES};
-    use super::manifest::no_legacy_dirs;
+pub(crate) mod test_support {
     use super::*;
-    use console::Term;
-    use std::sync::{Arc, Mutex};
-    use tempfile::TempDir;
+    use std::sync::Arc;
 
-    static TEST_MANIFEST: ModelManifest = ModelManifest {
-        dir_name: "test-model",
-        needed_by: "A test",
-        source: "https://example.invalid/",
-        license: "none",
-        files: &TEST_FILES,
-        legacy_dirs: no_legacy_dirs,
-    };
+    pub use super::download::test_support::{part_files, FakeFetcher, TEST_FILES};
 
     /// Answers every prompt the same way and records the file names it was asked about. The
     /// record is shared so a test can read it after the store has taken ownership.
-    struct FakeConsent {
+    pub struct FakeConsent {
         answer: bool,
         asked: Arc<Mutex<Vec<Vec<String>>>>,
     }
 
     impl FakeConsent {
-        fn new(answer: bool) -> Self {
+        pub fn new(answer: bool) -> Self {
             Self {
                 answer,
                 asked: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        fn asked(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
+        pub fn asked(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
             self.asked.clone()
         }
     }
@@ -366,6 +379,34 @@ mod tests {
             Ok(self.answer)
         }
     }
+
+    /// A managed root that is simply this directory.
+    pub fn fixed_root(dir: PathBuf) -> ManagedRoot {
+        Box::new(move || Ok(dir.clone()))
+    }
+
+    /// A system with nowhere to install a model.
+    pub fn no_root() -> ManagedRoot {
+        Box::new(|| Err(ModelStoreError::NoCacheDir))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest::no_legacy_dirs;
+    use super::test_support::*;
+    use super::*;
+    use console::Term;
+    use tempfile::TempDir;
+
+    static TEST_MANIFEST: ModelManifest = ModelManifest {
+        dir_name: "test-model",
+        needed_by: "A test",
+        source: "https://example.invalid/",
+        license: "none",
+        files: &TEST_FILES,
+        legacy_dirs: no_legacy_dirs,
+    };
 
     struct Fixture {
         _root: TempDir,
@@ -394,9 +435,26 @@ mod tests {
             fetcher: FakeFetcher,
             reporter: &'a AppReporter<'a>,
         ) -> ModelStore<'a> {
+            self.store_rooted(
+                fixed_root(self.managed.parent().unwrap().to_path_buf()),
+                policy,
+                consent,
+                fetcher,
+                reporter,
+            )
+        }
+
+        fn store_rooted<'a>(
+            &'a self,
+            root: ManagedRoot,
+            policy: DownloadPolicy,
+            consent: FakeConsent,
+            fetcher: FakeFetcher,
+            reporter: &'a AppReporter<'a>,
+        ) -> ModelStore<'a> {
             let manual_root = self.manual.parent().unwrap().to_path_buf();
             ModelStore::with_parts(
-                self.managed.parent().unwrap().to_path_buf(),
+                root,
                 Box::new(move |m: &ModelManifest| vec![manual_root.join(m.dir_name)]),
                 policy,
                 Box::new(consent),
@@ -582,6 +640,7 @@ mod tests {
                 location,
                 expected,
                 actual,
+                ..
             } => {
                 assert_eq!(
                     location,
@@ -636,6 +695,109 @@ mod tests {
             2,
             "the second resolve must not fetch"
         );
+    }
+
+    #[tokio::test]
+    async fn without_a_managed_root_a_manual_copy_is_still_a_hit() {
+        let fx = Fixture::new();
+        fx.write(&fx.manual, "weights.bin", b"hello world");
+        fx.write(&fx.manual, "config.json", b"abc");
+        let reporter = AppReporter::from(&fx.term);
+        let store = fx.store_rooted(
+            no_root(),
+            DownloadPolicy::No,
+            FakeConsent::new(false),
+            FakeFetcher::good(),
+            &reporter,
+        );
+        let files = store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
+        assert_eq!(files.dir(), fx.manual);
+    }
+
+    #[tokio::test]
+    async fn without_a_managed_root_and_without_a_manual_copy_the_cache_dir_is_the_failure() {
+        let fx = Fixture::new();
+        let reporter = AppReporter::from(&fx.term);
+        let store = fx.store_rooted(
+            no_root(),
+            DownloadPolicy::Yes,
+            FakeConsent::new(true),
+            FakeFetcher::good(),
+            &reporter,
+        );
+        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
+        assert!(matches!(err, ModelStoreError::NoCacheDir), "{err}");
+        assert!(
+            err.is_pre_consent_lookup_failure(),
+            "a missing cache directory is a lookup failure: {err}"
+        );
+    }
+
+    /// The split that decides whether a caller which can run without the model carries on
+    /// (OCR) or the whole run stops: everything found on the way to a download is a lookup
+    /// failure, everything raised by an authorised download is not.
+    #[test]
+    fn lookup_failures_are_told_apart_from_download_failures() {
+        let lookup = [
+            ModelStoreError::NotInstalled {
+                model: "ocrs".to_string(),
+                dir: "/models/ocrs".to_string(),
+                files: "text-detection.rten".to_string(),
+            },
+            ModelStoreError::Declined {
+                model: "ocrs".to_string(),
+            },
+            ModelStoreError::NoCacheDir,
+            ModelStoreError::SizeMismatch {
+                location: "/models/ocrs/text-detection.rten".to_string(),
+                expected: 2_510_284,
+                actual: 4,
+                phase: ErrorPhase::Lookup,
+            },
+            ModelStoreError::Io {
+                path: "/models/ocrs".to_string(),
+                source: std::io::Error::other("not a directory"),
+                phase: ErrorPhase::Lookup,
+            },
+        ];
+        for err in lookup {
+            assert!(err.is_pre_consent_lookup_failure(), "{err}");
+        }
+
+        let fatal = [
+            ModelStoreError::HttpStatus {
+                url: "https://example.invalid/x".to_string(),
+                status: 500,
+            },
+            ModelStoreError::ChecksumMismatch {
+                url: "https://example.invalid/x".to_string(),
+                expected: "a".to_string(),
+                actual: "b".to_string(),
+            },
+            ModelStoreError::SizeMismatch {
+                location: "https://example.invalid/x".to_string(),
+                expected: 2_510_284,
+                actual: 12,
+                phase: ErrorPhase::Download,
+            },
+            ModelStoreError::Io {
+                path: "/models/ocrs/text-detection.rten.part".to_string(),
+                source: std::io::Error::other("disk full"),
+                phase: ErrorPhase::Download,
+            },
+            ModelStoreError::Prompt {
+                source: std::io::Error::other("no terminal"),
+            },
+            ModelStoreError::Progress {
+                reason: "bad template".to_string(),
+            },
+            ModelStoreError::Report {
+                reason: "closed".to_string(),
+            },
+        ];
+        for err in fatal {
+            assert!(!err.is_pre_consent_lookup_failure(), "{err}");
+        }
     }
 
     #[test]
@@ -694,8 +856,12 @@ mod tests {
             download: DownloadModels::No,
             models_dir: Some(PathBuf::from("/override/models")),
         };
-        let store = ModelStore::new(&options, &reporter).unwrap();
-        assert_eq!(store.root, PathBuf::from("/override/models"));
+        let store = ModelStore::new(&options, &reporter);
+        assert_eq!(
+            (store.root)().unwrap(),
+            PathBuf::from("/override/models"),
+            "--models-dir is the managed root"
+        );
         assert_eq!(store.policy, DownloadPolicy::No);
     }
 }

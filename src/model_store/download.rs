@@ -1,4 +1,4 @@
-use super::error::ModelStoreError;
+use super::error::{ErrorPhase, ModelStoreError};
 use super::manifest::ModelFile;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -7,6 +7,7 @@ use futures::StreamExt;
 use indicatif::ProgressBar;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -20,26 +21,53 @@ pub trait Fetcher: Send + Sync {
 /// The production fetcher: reqwest with connect and read timeouts, following redirects
 /// (Hugging Face answers 302 to its CDN) and honouring the proxy environment variables.
 pub struct HttpFetcher {
-    client: reqwest::Client,
+    /// Built on the first fetch and kept for the rest of the run: a run that finds every
+    /// model it needs on disk never builds a client, so a system whose TLS backend cannot
+    /// be initialised still copies files.
+    client: Mutex<Option<reqwest::Client>>,
 }
 
 impl HttpFetcher {
-    pub fn new() -> Result<Self, ModelStoreError> {
-        let client = reqwest::Client::builder()
+    pub fn new() -> Self {
+        Self {
+            client: Mutex::new(None),
+        }
+    }
+
+    /// The shared client, built on first use. `reqwest::Client` is a handle around one
+    /// connection pool, so cloning it out of the lock costs an `Arc` bump.
+    fn client(&self) -> Result<reqwest::Client, ModelStoreError> {
+        let mut client = self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(client) = client.as_ref() {
+            return Ok(client.clone());
+        }
+        let built = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(60))
+            .https_only(true)
             .user_agent(concat!("redacter/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|source| ModelStoreError::HttpClient { source })?;
-        Ok(Self { client })
+        *client = Some(built.clone());
+        Ok(built)
+    }
+}
+
+impl Default for HttpFetcher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Fetcher for HttpFetcher {
     fn fetch<'s>(&'s self, url: &'s str) -> BoxFuture<'s, Result<ByteStream, ModelStoreError>> {
         Box::pin(async move {
+            let client = self.client()?;
             let response =
-                self.client
+                client
                     .get(url)
                     .send()
                     .await
@@ -108,6 +136,7 @@ pub async fn download_file(
                 location: file.url.to_string(),
                 expected: file.size,
                 actual: written,
+                phase: ErrorPhase::Download,
             });
         }
     }
@@ -121,6 +150,7 @@ pub async fn download_file(
             location: file.url.to_string(),
             expected: file.size,
             actual: written,
+            phase: ErrorPhase::Download,
         });
     }
     let actual = hex(hasher.finalize().as_slice());
@@ -131,6 +161,11 @@ pub async fn download_file(
             actual,
         });
     }
+    // The bytes are verified; make them durable before the rename, so a crash between the
+    // two cannot leave a short file under the final, checked-by-size name.
+    part.as_file()
+        .sync_all()
+        .map_err(|source| io_error(part.path(), source))?;
     let target = dir.join(file.name);
     part.persist(&target)
         .map_err(|err| io_error(&target, err.error))?;
@@ -156,15 +191,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Every I/O failure in this file happens during a download the user has agreed to, so it
+/// carries `ErrorPhase::Download` and aborts the run.
 fn io_error(path: &Path, source: std::io::Error) -> ModelStoreError {
     ModelStoreError::Io {
         path: path.display().to_string(),
         source,
+        phase: ErrorPhase::Download,
     }
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -290,6 +328,7 @@ mod tests {
                 location,
                 expected,
                 actual,
+                ..
             } => {
                 assert_eq!(location, "https://example.invalid/weights.bin");
                 assert_eq!((expected, actual), (11, 5));
@@ -343,6 +382,7 @@ mod tests {
                 location,
                 expected,
                 actual,
+                ..
             } => {
                 assert_eq!(location, "https://example.invalid/weights.bin");
                 assert_eq!(expected, 11);

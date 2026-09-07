@@ -354,6 +354,36 @@ mod tests {
         assert_eq!(findings, 1);
     }
 
+    /// The prefix is cut off by byte length, and a German header is one byte longer than it
+    /// looks: `Straße: ` is 8 characters and 9 bytes. A shift counted in characters would
+    /// move every finding one byte into the cell and cut a multi-byte one in half.
+    #[test]
+    fn a_non_ascii_header_shifts_the_findings_by_bytes() {
+        let prefix = "Straße: ".len();
+        assert_eq!(prefix, 9, "the header is one byte longer than it is wide");
+        let (row, seen, findings) = run_row(
+            &["Straße"],
+            &["Königsallee"],
+            vec![vec![finding(prefix, prefix + "Königsallee".len())]],
+        );
+        assert_eq!(seen, ["Straße: Königsallee"]);
+        assert_eq!(row, ["[REDACTED]"]);
+        assert_eq!(findings, 1);
+
+        // An ASCII header in front of a multi-byte cell: only the second word is tagged.
+        let (row, seen, findings) = run_row(
+            &["Stadt"],
+            &["München Süd"],
+            vec![vec![finding(
+                "Stadt: München ".len(),
+                "Stadt: München Süd".len(),
+            )]],
+        );
+        assert_eq!(seen, ["Stadt: München Süd"]);
+        assert_eq!(row, ["München [REDACTED]"]);
+        assert_eq!(findings, 1);
+    }
+
     /// Without a header there is nothing to prefix with, and the cell is scored alone.
     #[test]
     fn a_cell_with_no_header_is_scored_on_its_own() {
@@ -377,7 +407,7 @@ mod tests {
             download: DownloadModels::Yes,
             models_dir: None,
         };
-        let store = ModelStore::new(&options, reporter).unwrap();
+        let store = ModelStore::new(&options, reporter);
         let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
         LocalNerRedacter::new(options, reporter, &store)
             .await
@@ -495,12 +525,12 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
-    async fn redacts_the_spike_multilingual_fixture() {
+    async fn redacts_the_multilingual_fixture() {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
         let redacter = redacter(&reporter).await;
         let text =
-            std::fs::read_to_string("experiments/spike-ner/fixtures/multilingual.txt").unwrap();
+            std::fs::read_to_string(format!("{TEST_DOCUMENTS_DIR}multilingual.txt")).unwrap();
         let redacted = redacter
             .redact(item(
                 "multilingual.txt",

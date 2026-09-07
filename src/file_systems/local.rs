@@ -312,10 +312,11 @@ mod tests {
             .into_iter()
             .map(|file_ref| (file_ref.relative_path.filename(), file_ref))
             .collect();
-        assert_eq!(files_by_name.len(), 5);
+        assert_eq!(files_by_name.len(), 6);
 
         let expected_media_types = [
             ("customer-note.txt", mime::TEXT_PLAIN),
+            ("multilingual.txt", mime::TEXT_PLAIN),
             ("customers.csv", mime::TEXT_CSV),
             ("customer.json", mime::APPLICATION_JSON),
             ("customer-profile.html", mime::TEXT_HTML),

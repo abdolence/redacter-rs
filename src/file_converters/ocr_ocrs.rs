@@ -86,7 +86,7 @@ mod tests {
     async fn test_recognise_png_file() -> AppResult<()> {
         let term = Term::stdout();
         let app_reporter = AppReporter::from(&term);
-        let store = ModelStore::new(&ModelStoreOptions::default(), &app_reporter)?;
+        let store = ModelStore::new(&ModelStoreOptions::default(), &app_reporter);
         let files = store.resolve(ModelId::Ocrs).await?;
         let ocrs = Ocrs::new(&files, &app_reporter)?;
         let image = image::open("test-fixtures/media/form-example.png")?;
