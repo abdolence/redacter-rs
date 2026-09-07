@@ -33,7 +33,7 @@ pub struct CliArgs {
     #[arg(
         long,
         global = true,
-        help = "Directory holding downloaded and manually placed models, one subdirectory per model. Default is the user cache directory, for example ~/.cache/redacter/models"
+        help = "Directory holding downloaded and manually placed models, one subdirectory per model. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models"
     )]
     pub models_dir: Option<PathBuf>,
 
