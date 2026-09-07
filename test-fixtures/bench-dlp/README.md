@@ -11,7 +11,8 @@ chain `local-rules+local-ner`) against the cloud ones (`gcp-dlp`,
 `gcp-vertex-ai`).
 
 Not part of the `redacter` crate build; this is a measurement harness kept
-under `test-fixtures/` for re-runs after future changes to the redacters.
+under `test-fixtures/` for re-runs after future changes to the redacters, run
+via the ignored integration test `tests/bench_dlp.rs`.
 
 ## What's measured
 
@@ -32,8 +33,8 @@ substrings:
 A truth string counts as "gone" (a pii hit, a redacted entity, or a lost keep
 string) when it is no longer present anywhere in the output file as an exact
 substring. This is coarse by design: it does not check that the *right* span
-was redacted, only whether the original text survived. See `score.py`'s
-docstring.
+was redacted, only whether the original text survived. See `score_text` in
+`tests/bench_dlp.rs`.
 
 `local-rules` is a regex/dictionary matcher: it is not expected to hit person
 names, postal addresses or `entities` (it has no notion of named entities) --
@@ -53,10 +54,10 @@ which is exactly the kind of gap this benchmark is meant to surface.
 ## Corpus
 
 Seven text-only fixtures (no images/PDF, to keep cloud cost and OCR variance
-out of the comparison), read directly from `test-fixtures/documents/` by
-name -- `run.sh` lists them explicitly rather than scanning the directory, so
-`test-fixtures/documents/customer-form.pdf` (and anything else added there
-later) is never pulled into the corpus:
+out of the comparison), copied from `test-fixtures/documents/` into a fresh
+temp directory by name -- `tests/bench_dlp.rs` lists them explicitly rather
+than scanning the directory, so `test-fixtures/documents/customer-form.pdf`
+(and anything else added there later) is never pulled into the corpus:
 
 - `customer-note.txt`, `customer.json`, `customer-profile.html`,
   `customers.csv`, `multilingual.txt`, `false-positives-en.txt`,
@@ -66,45 +67,51 @@ Total corpus size is under 3 KB.
 
 ## Running it
 
-Build a release binary (use a scratch `CARGO_TARGET_DIR`, never the shared
-checkout's `target/`):
+Build a release binary, then run the ignored benchmark test with
+`--nocapture` so its progress and summary table print to the terminal:
 
 ```sh
-export CARGO_TARGET_DIR=/some/scratch/dir
 cargo build --release
+cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-Local providers only (no network calls):
+Configuration is via environment variables:
+
+- `BENCH_DLP_PROVIDERS`: comma-separated provider specs. Defaults to
+  `local-rules,local-ner,local-rules+local-ner` (local providers only, no
+  network calls).
+- `BENCH_DLP_GCP_PROJECT`: GCP project id, required only when a `gcp-dlp` or
+  `gcp-vertex-ai` spec is listed; the test fails fast with a clear message if
+  it's missing.
+- `BENCH_DLP_OUT`: output directory for run artifacts and `summary.md`.
+  Defaults to `target/bench-dlp`.
+
+Local providers only (the default):
 
 ```sh
-./run.sh local-rules local-ner local-rules+local-ner
-./score.py
+cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-All five providers, including the cloud ones (requires GCP credentials and
-`--gcp-project-id`, hardcoded in `run.sh` as `latestbit`; override with
-`GCP_PROJECT_ID=...`):
+All five providers, including the cloud ones (requires GCP credentials):
 
 ```sh
-./run.sh local-rules local-ner local-rules+local-ner gcp-dlp gcp-vertex-ai
-./score.py
+BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,gcp-dlp,gcp-vertex-ai \
+BENCH_DLP_GCP_PROJECT=latestbit \
+cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
-
-`run.sh` finds the binary via `REDACTER_BIN`, or `$CARGO_TARGET_DIR/release/redacter`,
-or `../../target/release/redacter`.
 
 ### What each run does
 
-For every provider spec passed to `run.sh`:
+For every provider spec:
 
 1. One warm-up pass over the whole corpus directory (untimed, discarded).
-2. Three timed passes over the whole corpus directory (`date +%s%N` around
-   the `redacter cp` invocation) -- `score.py` reports the median.
+2. Three timed passes over the whole corpus directory (`std::time::Instant`
+   around the `redacter cp` invocation) -- the median is reported.
 3. One timed pass per corpus file, for per-file latency.
 
-Results land in `results/<provider>/` (gitignored): `run1/`..`run3/` and
-`perfile/<name>/` hold the redacted output, `timings.json` holds the raw
-timings, `warmup.log` etc. hold stdout/stderr per pass.
+Results land in `<BENCH_DLP_OUT>/<provider>/` (scratch, not committed):
+`run1/`..`run3/` and `perfile/<name>/` hold the redacted output, and
+`<BENCH_DLP_OUT>/summary.md` holds the final table.
 
 A provider spec joined with `+` (e.g. `local-rules+local-ner`) runs the chain
 in a single `redacter cp -d local-rules -d local-ner ...` invocation, not as
@@ -112,22 +119,19 @@ separate passes.
 
 ### Cloud cost note
 
-Each cloud provider spec is invoked exactly `1 + 3 + <file count>` times by a
-single `run.sh` call (currently 7 corpus files, so 11 invocations). `run.sh`
-prints this count before starting and aborts if it would ever be exceeded --
-there is no retry loop. Across those 11 invocations, the whole ~3 KB corpus is
-sent roughly 5 times over (4 whole-corpus passes' worth of bytes, plus the
-per-file passes covering the corpus once more), so each cloud provider sees
-under 40 KB total per `run.sh` invocation.
+Each cloud provider spec is invoked exactly `1 + 3 + <file count>` times per
+run (currently 7 corpus files, so 11 invocations). The test prints this count
+before starting and aborts if it would ever be exceeded -- there is no retry
+loop. Across those 11 invocations, the whole ~3 KB corpus is sent roughly 5
+times over (4 whole-corpus passes' worth of bytes, plus the per-file passes
+covering the corpus once more), so each cloud provider sees under 40 KB total
+per run.
 
 ## Scoring
 
-```sh
-./score.py
-```
-
-Reads `truth.json` and every `results/<provider>/`, prints a markdown table,
-and writes it to `results/summary.md`:
+Scoring happens automatically at the end of the same test run: it reads
+`truth.json`, scores each provider's `run1/` output, prints a markdown table,
+and writes it to `<BENCH_DLP_OUT>/summary.md`:
 
 | column | meaning |
 |---|---|
@@ -141,10 +145,11 @@ and writes it to `results/summary.md`:
 ## Results
 
 Measured at commit `3c3491e`, on an Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz
-(16 logical cores), 2026-09-07. Full run: `./run.sh local-rules local-ner
-local-rules+local-ner gcp-dlp gcp-vertex-ai && ./score.py`. All five
-providers completed cleanly (11/11 calls made each, no errors, no retries
-needed).
+(16 logical cores), 2026-09-07. Full run:
+`BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,gcp-dlp,gcp-vertex-ai
+BENCH_DLP_GCP_PROJECT=latestbit cargo test --release --test bench_dlp --
+--ignored --nocapture`. All five providers completed cleanly (11/11 calls
+made each, no errors, no retries needed).
 
 | provider | wall time (median of 3) | per-file median | pii hits/total | loc/org redacted/total | keep survived/total | [REDACTED] count |
 |---|---|---|---|---|---|---|

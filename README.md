@@ -529,7 +529,8 @@ numbers include network time from Europe):
 The six PII strings the local chain leaves behind are three dates of birth, a passport-style number without a
 keyword next to it and a UK postcode; GCP DLP misses only the postcode and Gemini misses nothing. The two
 non-PII strings the NER model removes are "Apple" in "Apple pie" and the sign-off "The Support Desk", both
-tagged as organisations, which is the over-redaction to expect from entity-based detection. Run `test-fixtures/bench-dlp/run.sh`
+tagged as organisations, which is the over-redaction to expect from entity-based detection. Run
+`cargo test --release --test bench_dlp -- --ignored --nocapture` (see `test-fixtures/bench-dlp/README.md`)
 to reproduce the table on your own machine and documents.
 
 In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap
