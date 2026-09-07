@@ -33,15 +33,20 @@ pub struct ModelFiles {
     dir: PathBuf,
 }
 
-// Only the ocr feature reads a resolved model's files today; a `--no-default-features` (or
-// pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a future
-// consumer (e.g. the local-ner redacter) just adds its feature to the list below.
-#[cfg(any(feature = "ocr", test))]
+// Only the ocr and local-ner features read a resolved model's files; a `--no-default-features`
+// (or pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a
+// future consumer just adds its feature to the list below.
+#[cfg(any(feature = "ocr", feature = "local-ner", test))]
 impl ModelFiles {
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
+}
 
+// Only ocrs takes the whole directory (it loads its own files by name); local-ner asks for
+// one file at a time through `path`.
+#[cfg(any(feature = "ocr", test))]
+impl ModelFiles {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
