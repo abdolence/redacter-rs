@@ -1,0 +1,125 @@
+{
+  "customer-note.txt": {
+    "pii": [
+      "John Michael Smith",
+      "john.smith@example.com",
+      "+1 (555) 123-4567",
+      "14 March 1985",
+      "221B Baker Street, London NW1 6XE",
+      "4111 1111 1111 1111"
+    ],
+    "entities": [],
+    "keep": [
+      "#A-10422",
+      "6pm"
+    ]
+  },
+  "customer.json": {
+    "pii": [
+      "John Michael Smith",
+      "john.smith@example.com",
+      "+1 (555) 123-4567",
+      "1985-03-14",
+      "221B Baker Street",
+      "NW1 6XE",
+      "4111 1111 1111 1111"
+    ],
+    "entities": [
+      "London"
+    ],
+    "keep": [
+      "12/28",
+      "Prefers contact by email in the evening."
+    ]
+  },
+  "customer-profile.html": {
+    "pii": [
+      "John Michael Smith",
+      "john.smith@example.com",
+      "+1 (555) 123-4567",
+      "14 March 1985",
+      "221B Baker Street, London NW1 6XE",
+      "X1234567"
+    ],
+    "entities": [],
+    "keep": [
+      "Customer profile",
+      "Passport no.",
+      "Prefers contact by email in the evening."
+    ]
+  },
+  "customers.csv": {
+    "pii": [
+      "John Michael Smith",
+      "john.smith@example.com",
+      "+1 (555) 123-4567",
+      "Maria Garcia Lopez",
+      "maria.garcia@example.org",
+      "+34 612 345 678",
+      "Akira Tanaka",
+      "akira.tanaka@example.net",
+      "+81 90-1234-5678",
+      "X1234567"
+    ],
+    "entities": [
+      "London",
+      "Madrid",
+      "Osaka"
+    ],
+    "keep": [
+      "Called on 2026-08-30",
+      "Prefers email"
+    ]
+  },
+  "multilingual.txt": {
+    "pii": [
+      "Klaus Bergmann",
+      "klaus.bergmann@nordwind-logistik.de",
+      "+49 30 1234 5678",
+      "Lindenstraße 47, 10115 Berlin",
+      "Sophie Lefebvre",
+      "sophie.lefebvre@banquepopulaire.fr",
+      "+33 1 42 68 53 00",
+      "12 rue de la Paix, 75002 Paris",
+      "Carlos Ramírez Ortega",
+      "carlos.ramirez@distribibericas.es",
+      "+34 915 22 44 66",
+      "Calle Gran Vía 28, 28013 Madrid"
+    ],
+    "entities": [
+      "Nordwind Logistik GmbH",
+      "Banque Populaire du Rhône",
+      "Distribuciones Ibéricas S.L."
+    ],
+    "keep": [
+      "avant vendredi",
+      "esta semana"
+    ]
+  },
+  "false-positives-en.txt": {
+    "pii": [],
+    "entities": [],
+    "keep": [
+      "Monday",
+      "Apple",
+      "Dutch",
+      "Marketing",
+      "Friday",
+      "Tuesday",
+      "March",
+      "January",
+      "December",
+      "Support Desk"
+    ]
+  },
+  "dates-en.txt": {
+    "pii": [],
+    "entities": [],
+    "keep": [
+      "14 March 1985",
+      "2026-08-30",
+      "January 2024",
+      "invoice"
+    ]
+  }
+}

@@ -15,7 +15,7 @@ categories = ["command-line-utilities"]
 description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
 
 [features]
-default = ["pdf-render", "clipboard", "ocr"]
+default = ["pdf-render", "clipboard", "ocr", "local-ner"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
@@ -23,6 +23,7 @@ ci-gcp-llm = [] # For testing on CI/GCP with LLM models
 ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clipboard = [] # For testing on CI/Clipboard
 ci-ocr = [] # For testing on CI/OCR
+ci-local-ner = [] # For testing on CI with the downloaded local NER model
 ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
 ci = [
     "ci-gcp",
@@ -36,6 +37,7 @@ ci = [
 pdf-render = ["pdfium-render"]
 clipboard = ["arboard"]
 ocr = ["ocrs", "rten", "rten-imageproc"]
+local-ner = ["tokenizers", "rten", "rten-tensor"]
 
 [dependencies]
 rsb_derive = "0.5"
@@ -106,8 +108,14 @@ arboard = { version = "3", features = ["image"], optional = true }
 ocrs = { version = "0.13", optional = true }
 rten = { version = "0.26", optional = true }
 rten-imageproc = { version = "0.26", optional = true }
+rten-tensor = { version = "0.26", optional = true }
+tokenizers = { version = "0.23", default-features = false, features = [
+    "fancy-regex",
+], optional = true }
 dirs = "7.0.0"
 base64 = "0.23"
+regex = "1"
+sha2 = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 
 

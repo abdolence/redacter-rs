@@ -231,6 +231,7 @@ fn claude_box_to_image_coords(
         x2: clamped_x1.max(clamped_x2),
         y2: clamped_y1.max(clamped_y2),
         text,
+        line: 0,
     }
 }
 

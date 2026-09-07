@@ -16,6 +16,11 @@ pub struct TextImageCoords {
     pub x2: f32,
     pub y2: f32,
     pub text: Option<String>,
+    /// The OCR line this word belongs to, so callers can rebuild line structure (e.g. to
+    /// join words with newlines instead of spaces). Producers that do not recognise lines
+    /// (the LLM image redacters, which locate PII by asking a model for a bounding box
+    /// directly) set this to `0`.
+    pub line: usize,
 }
 
 #[derive(Debug, Clone)]

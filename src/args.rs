@@ -1,10 +1,14 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
+use crate::model_store::DownloadModels;
 use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
-    GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey, OpenAiModelName,
-    RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
+    GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
+    OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
+    RedacterProviderOptions, RuleGroup, UserRule,
 };
+#[cfg(feature = "local-ner")]
+use crate::redacters::{Entity, LocalNerRedacterOptions};
 use clap::*;
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -19,8 +23,35 @@ const DEFAULT_AWS_BEDROCK_GUARDRAIL_VERSION: &str = "DRAFT";
 #[derive(Parser, Debug)]
 #[command(author, about)]
 pub struct CliArgs {
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value = "ask",
+        help = "Whether missing model files (OCR, local-ner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'"
+    )]
+    pub download_models: DownloadModels,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Directory holding downloaded and manually placed models, one subdirectory per model. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models"
+    )]
+    pub models_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: CliCommand,
+}
+
+/// Merges `--models-dir` with the `REDACTER_MODELS_DIR` environment value, the flag winning.
+/// Kept as a plain function rather than a `clap` `env` attribute so a parse of `CliArgs`
+/// never reads the real process environment: production passes
+/// `std::env::var_os("REDACTER_MODELS_DIR")`, tests pass an explicit value.
+pub fn resolve_models_dir(
+    cli_value: Option<PathBuf>,
+    env_value: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    cli_value.or_else(|| env_value.map(PathBuf::from))
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,6 +141,8 @@ pub enum RedacterType {
     GcpVertexAi,
     AwsBedrock,
     AwsBedrockGuardrails,
+    LocalRules,
+    LocalNer,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -125,6 +158,8 @@ impl std::str::FromStr for RedacterType {
             "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
             "aws-bedrock" => Ok(RedacterType::AwsBedrock),
             "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
+            "local-rules" => Ok(RedacterType::LocalRules),
+            "local-ner" => Ok(RedacterType::LocalNer),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -141,6 +176,8 @@ impl Display for RedacterType {
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
             RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
             RedacterType::AwsBedrockGuardrails => write!(f, "aws-bedrock-guardrails"),
+            RedacterType::LocalRules => write!(f, "local-rules"),
+            RedacterType::LocalNer => write!(f, "local-ner"),
         }
     }
 }
@@ -281,6 +318,51 @@ pub struct RedacterArgs {
         help = "Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled"
     )]
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Rule groups enabled for the local-rules redacter, comma separated. Default is every group"
+    )]
+    pub local_rules: Option<Vec<RuleGroup>>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Rule groups disabled for the local-rules redacter, comma separated. Applied after --local-rules"
+    )]
+    pub local_rules_disable: Option<Vec<RuleGroup>>,
+
+    #[arg(
+        long,
+        help = "User-defined regex rule for the local-rules redacter in the form name=regex. Can be repeated"
+    )]
+    pub local_rule: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        help = "JSON file with user-defined regex and dictionary rules for the local-rules redacter. Can be repeated"
+    )]
+    pub local_rules_file: Option<Vec<std::path::PathBuf>>,
+
+    #[cfg(feature = "local-ner")]
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Entity types the local-ner redacter removes, comma separated: per (people), org (organisations), loc (locations). Default is all three"
+    )]
+    pub local_ner_entities: Option<Vec<Entity>>,
+
+    #[cfg(feature = "local-ner")]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5"
+    )]
+    pub local_ner_min_score: f32,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -403,6 +485,42 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         },
                     ))
                 }
+                RedacterType::LocalRules => {
+                    let mut groups = match &self.local_rules {
+                        Some(enabled) => enabled.iter().copied().collect(),
+                        None => RuleGroup::all(),
+                    };
+                    for group in self.local_rules_disable.iter().flatten() {
+                        groups.remove(group);
+                    }
+                    let mut user_rules: Vec<UserRule> = Vec::new();
+                    for inline in self.local_rule.iter().flatten() {
+                        user_rules.push(crate::redacters::parse_inline_rule(inline)?);
+                    }
+                    for path in self.local_rules_file.iter().flatten() {
+                        user_rules.extend(crate::redacters::load_rules_file(path)?);
+                    }
+                    Ok(RedacterProviderOptions::LocalRules(
+                        LocalRulesRedacterOptions { groups, user_rules },
+                    ))
+                }
+                #[cfg(feature = "local-ner")]
+                RedacterType::LocalNer => {
+                    let entities = match &self.local_ner_entities {
+                        Some(list) => list.iter().copied().collect(),
+                        None => Entity::all(),
+                    };
+                    LocalNerRedacterOptions::validated(entities, self.local_ner_min_score)
+                        .map(RedacterProviderOptions::LocalNer)
+                        .map_err(|err| AppError::RedacterConfigError {
+                            message: err.to_string(),
+                        })
+                }
+                #[cfg(not(feature = "local-ner"))]
+                RedacterType::LocalNer => Err(AppError::RedacterConfigError {
+                    message: "local-ner is not available in this build (compiled without the local-ner feature)"
+                        .to_string(),
+                }),
             }?;
             provider_options.push(redacter_options);
         }
@@ -425,6 +543,77 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    use crate::model_store::DownloadModels;
+
+    #[test]
+    fn download_models_defaults_to_ask_and_models_dir_to_none() {
+        let cli = CliArgs::try_parse_from(["redacter", "cp", "a", "b"]).unwrap();
+        assert_eq!(cli.download_models, DownloadModels::Ask);
+        assert_eq!(cli.models_dir, None);
+    }
+
+    #[test]
+    fn global_model_flags_are_accepted_before_and_after_the_subcommand() {
+        let before = CliArgs::try_parse_from([
+            "redacter",
+            "--download-models",
+            "no",
+            "--models-dir",
+            "/m",
+            "cp",
+            "a",
+            "b",
+        ])
+        .unwrap();
+        let after = CliArgs::try_parse_from([
+            "redacter",
+            "cp",
+            "a",
+            "b",
+            "--download-models",
+            "yes",
+            "--models-dir",
+            "/m",
+        ])
+        .unwrap();
+        assert_eq!(before.download_models, DownloadModels::No);
+        assert_eq!(after.download_models, DownloadModels::Yes);
+        assert_eq!(before.models_dir, Some(PathBuf::from("/m")));
+        assert_eq!(after.models_dir, Some(PathBuf::from("/m")));
+    }
+
+    #[test]
+    fn download_models_rejects_unknown_values() {
+        let err =
+            CliArgs::try_parse_from(["redacter", "cp", "a", "b", "--download-models", "maybe"])
+                .expect_err("unknown value must fail");
+        assert!(err.to_string().contains("maybe"), "{err}");
+    }
+
+    #[test]
+    fn models_dir_flag_wins_over_the_environment_value() {
+        assert_eq!(
+            resolve_models_dir(
+                Some(PathBuf::from("/flag")),
+                Some(std::ffi::OsString::from("/env"))
+            ),
+            Some(PathBuf::from("/flag"))
+        );
+    }
+
+    #[test]
+    fn models_dir_falls_back_to_the_environment_value() {
+        assert_eq!(
+            resolve_models_dir(None, Some(std::ffi::OsString::from("/env"))),
+            Some(PathBuf::from("/env"))
+        );
+    }
+
+    #[test]
+    fn models_dir_is_none_without_either() {
+        assert_eq!(resolve_models_dir(None, None), None);
+    }
+
     #[test]
     fn redacter_type_round_trips_through_its_name() {
         for redacter_type in [
@@ -436,6 +625,8 @@ mod tests {
             RedacterType::GcpVertexAi,
             RedacterType::AwsBedrock,
             RedacterType::AwsBedrockGuardrails,
+            RedacterType::LocalRules,
+            RedacterType::LocalNer,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)
@@ -451,6 +642,157 @@ mod tests {
                 .to_possible_value()
                 .expect("every redacter type is selectable on the command line");
             assert_eq!(redacter_type.to_string(), cli_value.get_name());
+        }
+    }
+
+    use crate::redacters::{RedacterProviderOptions, RuleGroup, UserMatcher};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        redacter: RedacterArgs,
+    }
+
+    fn local_rules_options(
+        args: &[&str],
+    ) -> Result<crate::redacters::LocalRulesRedacterOptions, AppError> {
+        let cli = TestCli::try_parse_from([&["redacter", "-d", "local-rules"], args].concat())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let options: RedacterOptions = cli.redacter.try_into()?;
+        match options.provider_options.into_iter().next() {
+            Some(RedacterProviderOptions::LocalRules(options)) => Ok(options),
+            other => panic!("expected local rules options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_rules_default_to_every_group() {
+        let options = local_rules_options(&[]).unwrap();
+        assert_eq!(options.groups, RuleGroup::all());
+        assert!(options.user_rules.is_empty());
+    }
+
+    #[test]
+    fn local_rules_enable_list_restricts_the_groups() {
+        let options = local_rules_options(&["--local-rules", "email,phone"]).unwrap();
+        assert_eq!(
+            options.groups.into_iter().collect::<Vec<_>>(),
+            vec![RuleGroup::Email, RuleGroup::Phone]
+        );
+    }
+
+    #[test]
+    fn local_rules_disable_wins_over_enable() {
+        let options = local_rules_options(&[
+            "--local-rules",
+            "email,phone",
+            "--local-rules-disable",
+            "phone",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.groups.into_iter().collect::<Vec<_>>(),
+            vec![RuleGroup::Email]
+        );
+    }
+
+    #[test]
+    fn local_rules_unknown_group_is_rejected_by_clap() {
+        let result =
+            TestCli::try_parse_from(["redacter", "-d", "local-rules", "--local-rules", "emails"]);
+        let err = result.err().expect("unknown group must fail");
+        assert!(err.to_string().contains("emails"), "{err}");
+    }
+
+    #[test]
+    fn local_rules_inline_rule_is_parsed() {
+        let options = local_rules_options(&["--local-rule", "employee-id=EMP-[0-9]{6}"]).unwrap();
+        assert_eq!(options.user_rules.len(), 1);
+        assert_eq!(options.user_rules[0].name.as_str(), "employee-id");
+        assert_eq!(
+            options.user_rules[0].matcher,
+            UserMatcher::Regex("EMP-[0-9]{6}".to_string())
+        );
+    }
+
+    #[test]
+    fn local_rules_bad_inline_rule_is_a_config_error() {
+        let err = local_rules_options(&["--local-rule", "no-equals"]).unwrap_err();
+        assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+    }
+
+    #[test]
+    fn local_rules_file_rules_are_loaded() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"rules":[{"name":"codenames","dictionary":["Bluebird"]}]}"#,
+        )
+        .unwrap();
+        let path = file.path().to_string_lossy().to_string();
+        let options = local_rules_options(&["--local-rules-file", &path]).unwrap();
+        assert_eq!(options.user_rules.len(), 1);
+        assert_eq!(options.user_rules[0].name.as_str(), "codenames");
+    }
+
+    #[cfg(feature = "local-ner")]
+    mod local_ner {
+        use super::*;
+        use crate::redacters::{Entity, LocalNerRedacterOptions};
+
+        fn local_ner_options(args: &[&str]) -> Result<LocalNerRedacterOptions, AppError> {
+            let cli = TestCli::try_parse_from([&["redacter", "-d", "local-ner"], args].concat())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let options: RedacterOptions = cli.redacter.try_into()?;
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalNer(options)) => Ok(options),
+                other => panic!("expected local ner options, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn defaults_to_every_entity_at_half_score() {
+            let options = local_ner_options(&[]).unwrap();
+            assert_eq!(options.entities, Entity::all());
+            assert_eq!(options.min_score, 0.5);
+        }
+
+        #[test]
+        fn entities_and_score_are_parsed() {
+            let options = local_ner_options(&[
+                "--local-ner-entities",
+                "per,loc",
+                "--local-ner-min-score",
+                "0.3",
+            ])
+            .unwrap();
+            assert_eq!(
+                options.entities.into_iter().collect::<Vec<_>>(),
+                vec![Entity::Per, Entity::Loc]
+            );
+            assert_eq!(options.min_score, 0.3);
+        }
+
+        #[test]
+        fn unknown_entity_is_rejected_by_clap() {
+            let err = TestCli::try_parse_from([
+                "redacter",
+                "-d",
+                "local-ner",
+                "--local-ner-entities",
+                "person",
+            ])
+            .err()
+            .expect("unknown entity must fail");
+            assert!(err.to_string().contains("person"), "{err}");
+        }
+
+        #[test]
+        fn score_outside_the_unit_range_is_a_config_error() {
+            let err = local_ner_options(&["--local-ner-min-score", "1.5"]).unwrap_err();
+            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+            assert!(err.to_string().contains("1.5"), "{err}");
         }
     }
 }

@@ -6,6 +6,7 @@ use std::error::Error;
 
 use crate::commands::*;
 use crate::errors::AppError;
+use crate::model_store::ModelStoreOptions;
 use args::*;
 use clap::Parser;
 use console::{Style, Term};
@@ -27,6 +28,8 @@ pub type AppResult<T> = Result<T, AppError>;
 mod common_types;
 
 mod file_converters;
+
+mod model_store;
 
 pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{name}: {e}"))
@@ -80,6 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
+    let model_store = ModelStoreOptions {
+        download: cli.download_models,
+        models_dir: resolve_models_dir(cli.models_dir, std::env::var_os("REDACTER_MODELS_DIR")),
+    };
     match cli.command {
         CliCommand::Cp {
             source,
@@ -96,6 +103,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 max_size_limit,
                 max_files_limit,
                 mime_override,
+                model_store,
             );
             let copy_result = command_copy(
                 term,

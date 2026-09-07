@@ -1,5 +1,6 @@
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::model_store::{ModelId, ModelStore};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -30,8 +31,22 @@ pub use ms_presidio::*;
 mod gemini_llm;
 pub use gemini_llm::*;
 
+mod local_rules;
+pub use local_rules::*;
+
+#[cfg(feature = "local-ner")]
+pub(crate) mod local_ner;
+#[cfg(feature = "local-ner")]
+pub use local_ner::{Entity, LocalNerRedacter, LocalNerRedacterOptions};
+
+/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`).
+pub(crate) mod text_spans;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
+
+mod ocr_alignment;
+pub use ocr_alignment::*;
 
 mod simple_image_redacter;
 pub use simple_image_redacter::*;
@@ -256,6 +271,7 @@ pub fn normalized_box_to_image_coords(
         x2: raw_x1.max(raw_x2),
         y2: raw_y1.max(raw_y2),
         text,
+        line: 0,
     }
 }
 
@@ -334,6 +350,9 @@ pub enum Redacters<'a> {
     GcpVertexAi(GcpVertexAiRedacter<'a>),
     AwsBedrock(AwsBedrockRedacter<'a>),
     AwsBedrockGuardrails(AwsBedrockGuardrailsRedacter<'a>),
+    LocalRules(LocalRulesRedacter<'a>),
+    #[cfg(feature = "local-ner")]
+    LocalNer(LocalNerRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +380,9 @@ pub enum RedacterProviderOptions {
     GcpVertexAi(GcpVertexAiRedacterOptions),
     AwsBedrock(AwsBedrockRedacterOptions),
     AwsBedrockGuardrails(AwsBedrockGuardrailsRedacterOptions),
+    LocalRules(LocalRulesRedacterOptions),
+    #[cfg(feature = "local-ner")]
+    LocalNer(LocalNerRedacterOptions),
 }
 
 impl RedacterProviderOptions {
@@ -375,7 +397,20 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::GcpVertexAi(_) => RedacterType::GcpVertexAi,
             RedacterProviderOptions::AwsBedrock(_) => RedacterType::AwsBedrock,
             RedacterProviderOptions::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
+            RedacterProviderOptions::LocalRules(_) => RedacterType::LocalRules,
+            #[cfg(feature = "local-ner")]
+            RedacterProviderOptions::LocalNer(_) => RedacterType::LocalNer,
         }
+    }
+
+    /// Models that must be installed before this redacter can be built. `command_copy`
+    /// resolves them before it creates the progress bar.
+    pub fn required_models(&self) -> Vec<ModelId> {
+        #[cfg(feature = "local-ner")]
+        if let RedacterProviderOptions::LocalNer(_) = self {
+            return vec![ModelId::NerMultilingualHrl];
+        }
+        Vec::new()
     }
 }
 
@@ -392,9 +427,11 @@ impl Display for RedacterOptions {
 }
 
 impl<'a> Redacters<'a> {
+    #[cfg_attr(not(feature = "local-ner"), allow(unused_variables))]
     pub async fn new_redacter(
         provider_options: RedacterProviderOptions,
         reporter: &'a AppReporter<'a>,
+        models: &ModelStore<'_>,
     ) -> AppResult<Self> {
         match provider_options {
             RedacterProviderOptions::GcpDlp(options) => Ok(Redacters::GcpDlp(
@@ -423,6 +460,13 @@ impl<'a> Redacters<'a> {
                     AwsBedrockGuardrailsRedacter::new(options, reporter).await?,
                 ))
             }
+            RedacterProviderOptions::LocalRules(options) => Ok(Redacters::LocalRules(
+                LocalRulesRedacter::new(options, reporter).await?,
+            )),
+            #[cfg(feature = "local-ner")]
+            RedacterProviderOptions::LocalNer(options) => Ok(Redacters::LocalNer(
+                LocalNerRedacter::new(options, reporter, models).await?,
+            )),
         }
     }
 
@@ -463,6 +507,27 @@ pub enum RedactSupport {
     Unsupported,
 }
 
+/// What the local redacters support natively: text and tabular media types, which they read
+/// as strings. Images and PDFs reach them only as text extracted by the stream redacter.
+pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
+    match file_ref.media_type.as_ref() {
+        Some(media_type)
+            if Redacters::is_mime_text(media_type) || Redacters::is_mime_table(media_type) =>
+        {
+            RedactSupport::Supported
+        }
+        _ => RedactSupport::Unsupported,
+    }
+}
+
+/// Raised when a redacter that only handles strings is handed image or PDF bytes anyway:
+/// `redact_support` said no and the caller ignored it.
+pub(crate) fn unsupported_type_error() -> AppError {
+    AppError::SystemError {
+        message: "Attempt to redact of unsupported type".to_string(),
+    }
+}
+
 pub trait Redacter {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem>;
 
@@ -482,6 +547,9 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
             Redacters::AwsBedrock(redacter) => redacter.redact(input).await,
             Redacters::AwsBedrockGuardrails(redacter) => redacter.redact(input).await,
+            Redacters::LocalRules(redacter) => redacter.redact(input).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -495,6 +563,9 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
             Redacters::AwsBedrock(redacter) => redacter.redact_support(file_ref).await,
             Redacters::AwsBedrockGuardrails(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::LocalRules(redacter) => redacter.redact_support(file_ref).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -508,6 +579,9 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
             Redacters::AwsBedrock(_) => RedacterType::AwsBedrock,
             Redacters::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
+            Redacters::LocalRules(_) => RedacterType::LocalRules,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(_) => RedacterType::LocalNer,
         }
     }
 }
@@ -526,14 +600,18 @@ pub mod test_support {
     }
 
     /// Sample fixtures under `test-fixtures/documents/`, each carrying fake personal
-    /// information, that exercise a text, table, structured and PDF media type.
+    /// information, that exercise a text, table, structured and PDF media type. The
+    /// multilingual note is German, French and Spanish text for the local redacters.
     pub const TEST_DOCUMENTS_DIR: &str = "test-fixtures/documents/";
-    pub const TEST_DOCUMENT_NAMES: [&str; 5] = [
+    pub const TEST_DOCUMENT_NAMES: [&str; 8] = [
         "customer-note.txt",
         "customers.csv",
         "customer.json",
         "customer-profile.html",
         "customer-form.pdf",
+        "multilingual.txt",
+        "dates-en.txt",
+        "false-positives-en.txt",
     ];
     pub const TEST_DOCUMENT_SAMPLE_EMAIL: &str = "john.smith@example.com";
     pub const TEST_DOCUMENT_SAMPLE_PHONE: &str = "+1 (555) 123-4567";

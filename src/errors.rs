@@ -53,6 +53,11 @@ pub enum AppError {
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),
+    #[error("Model store error: {0}")]
+    ModelStoreError(#[from] crate::model_store::ModelStoreError),
+    #[cfg(feature = "local-ner")]
+    #[error("Local NER error: {0}")]
+    LocalNerError(#[from] crate::redacters::local_ner::LocalNerError),
     #[error("System error: {message}")]
     SystemError { message: String },
     #[error("System error: {message}")]
