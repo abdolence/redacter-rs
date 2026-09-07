@@ -28,6 +28,10 @@ mod common_types;
 
 mod file_converters;
 
+// Nothing constructs the store until the OCR engine loads its models through it.
+#[allow(dead_code)]
+mod model_store;
+
 pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{name}: {e}"))
 }

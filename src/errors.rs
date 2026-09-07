@@ -53,6 +53,8 @@ pub enum AppError {
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),
+    #[error("Model store error: {0}")]
+    ModelStoreError(#[from] crate::model_store::ModelStoreError),
     #[error("System error: {message}")]
     SystemError { message: String },
     #[error("System error: {message}")]
