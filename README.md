@@ -50,6 +50,9 @@ Google Cloud Platform's DLP API.
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
+    * Local rules redacter: offline regex and checksum based redaction of emails, phone numbers,
+      payment cards, IBANs, network addresses, secrets and US/EU identifiers, plus your own
+      regex and dictionary rules. No cloud account needed.
     * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
         * text, html, csv, json files
         * images, redacted by blacking out the coordinates the model reports
@@ -86,70 +89,130 @@ Copy and redact files from a source to a destination.
 Usage: redacter cp [OPTIONS] <SOURCE> <DESTINATION>
 
 Arguments:
-  <SOURCE>       Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
-  <DESTINATION>  Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
+  <SOURCE>
+          Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
+
+  <DESTINATION>
+          Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
 Options:
   -m, --max-size-limit <MAX_SIZE_LIMIT>
           Maximum size of files to copy in bytes
+
   -n, --max-files-limit <MAX_FILES_LIMIT>
           Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
+
   -f, --filename-filter <FILENAME_FILTER>
           Filter by name using glob patterns such as *.txt
+
   -d, --redact <REDACT>
-          List of redacters to use [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails]
+          List of redacters to use
+          
+          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules]
+
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
+
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
+
       --gcp-dlp-built-in-info-type <GCP_DLP_BUILT_IN_INFO_TYPE>
           Additional GCP DLP built in info types for redaction
+
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
+
       --llm-image-mode <LLM_IMAGE_MODE>
-          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images [default: auto] [possible values: auto, native, coords]
+          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images
+
+          Possible values:
+          - auto:   Edit the image with the model, verify the edit with the coordinate pass, and fall back to coordinates entirely when the model cannot edit images
+          - native: Always edit the image with the model, failing when it cannot
+          - coords: Always ask the model for PII coordinates and black them out locally
+          
+          [default: auto]
+
       --gcp-region <GCP_REGION>
           GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
+
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
           Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'
+
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
           Model name for native image editing in Vertex AI. Default is 'publishers/google/models/gemini-3.1-flash-image'
+
       --gcp-vertex-ai-block-none-harmful
           Block none harmful content threshold for Vertex AI redacter. Default is BlockOnlyHigh since BlockNone is required a special billing settings.
+
       --csv-headers-disable
           Disable CSV headers (if they are not present)
+
       --csv-delimiter <CSV_DELIMITER>
           CSV delimiter (default is ',')
+
       --aws-region <AWS_REGION>
           AWS region for the AWS Comprehend and AWS Bedrock redacters
+
       --aws-bedrock-text-model <AWS_BEDROCK_TEXT_MODEL>
           Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere
+
       --aws-bedrock-guardrail-id <AWS_BEDROCK_GUARDRAIL_ID>
           Guardrail id for the AWS Bedrock Guardrails redacter
+
       --aws-bedrock-guardrail-version <AWS_BEDROCK_GUARDRAIL_VERSION>
           Guardrail version for the AWS Bedrock Guardrails redacter. Default is 'DRAFT'
+
       --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
           URL for text analyze endpoint for MsPresidio redacter
+
       --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
           URL for image redact endpoint for MsPresidio redacter
+
       --gemini-model <GEMINI_MODEL>
           Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'
+
       --gemini-image-model <GEMINI_IMAGE_MODEL>
           Gemini model name for native image editing. Default is 'models/gemini-3.1-flash-image'
+
       --sampling-size <SAMPLING_SIZE>
           Sampling size in bytes before redacting files. Disabled by default
+
       --open-ai-api-key <OPEN_AI_API_KEY>
           API key for OpenAI LLM redacter
+
       --open-ai-model <OPEN_AI_MODEL>
           Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'
+
       --open-ai-image-model <OPEN_AI_IMAGE_MODEL>
           Open AI model name for native image editing. Default is 'gpt-image-2'
+
       --limit-dlp-requests <LIMIT_DLP_REQUESTS>
           Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled
+
+      --local-rules <LOCAL_RULES>
+          Rule groups enabled for the local-rules redacter, comma separated. Default is every group
+          
+          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, custom]
+
+      --local-rules-disable <LOCAL_RULES_DISABLE>
+          Rule groups disabled for the local-rules redacter, comma separated. Applied after --local-rules
+          
+          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, custom]
+
+      --local-rule <LOCAL_RULE>
+          User-defined regex rule for the local-rules redacter in the form name=regex. Can be repeated
+
+      --local-rules-file <LOCAL_RULES_FILE>
+          JSON file with user-defined regex and dictionary rules for the local-rules redacter. Can be repeated
+
       --mime-override <MIME_OVERRIDE>
           Override media type detection using glob patterns such as 'text/plain=*.md'
+
+      --save-json-results <SAVE_JSON_RESULTS>
+          Save redacted results in JSON format to the specified file
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```
 
 DLP is optional and should be enabled with `--redact` (`-d`) option.
@@ -301,6 +364,51 @@ aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
   --sensitive-information-policy-config file://guardrail-pii.json
 ```
 
+### Local rules redacter
+
+The `local-rules` redacter runs entirely on your machine. It finds pattern-shaped personal information
+with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
+national checks for identifiers) and replaces each match with `[REDACTED]`.
+
+Built-in rule groups, all enabled by default: `email`, `phone`, `payment-card`, `iban`, `network`
+(IPv4, IPv6, MAC), `url` (credentials embedded in URLs), `secrets` (AWS, GCP, GitHub, Slack and Stripe
+keys, JWTs, authorization headers, PEM private keys), `us-identifiers` (SSN, ITIN, passport) and
+`eu-identifiers` (VAT numbers, Spanish DNI/NIE, Italian codice fiscale, Dutch BSN, UK NINO, French NIR,
+German Steuer-ID).
+
+```sh
+# Only emails and phone numbers
+redacter cp -d local-rules --local-rules email,phone tmp/source/ tmp/redacted/
+
+# Everything except the EU identifiers
+redacter cp -d local-rules --local-rules-disable eu-identifiers tmp/source/ tmp/redacted/
+```
+
+You can add your own rules, similar to custom info types in GCP DLP, either inline or from a JSON file:
+
+```sh
+redacter cp -d local-rules --local-rule 'employee-id=\bEMP-[0-9]{6}\b' --local-rules-file rules.json ...
+```
+
+```json
+{
+  "rules": [
+    { "name": "employee-id", "regex": "\\bEMP-[0-9]{6}\\b" },
+    { "name": "project-codenames", "dictionary": ["Bluebird", "Kestrel"], "case_insensitive": true }
+  ]
+}
+```
+
+A rule has exactly one of `regex` or `dictionary`. Dictionary words match as whole words and are
+case-insensitive unless `case_insensitive` is `false`. Rule names must be unique.
+
+The local rules redacter does not detect names, addresses or organisations, and it only matches
+pattern-shaped values, so it can flag phone-like numbers that are not phone numbers. Combine it with a
+cloud redacter to cover names and addresses, for example `-d local-rules -d gcp-dlp` removes the
+pattern-shaped data locally before the remainder is sent to GCP DLP. It works only on text, html, json
+and csv files; images and PDFs are unsupported and are skipped unless `--allow-unsupported-copies` is
+set.
+
 ## Multiple redacters
 
 You can specify multiple redacters using `--redact` option multiple times.
@@ -391,6 +499,12 @@ AWS Bedrock Guardrails redacter:
 
 ```sh
 redacter cp -d aws-bedrock-guardrails --aws-region eu-north-1 --aws-bedrock-guardrail-id <id> tmp/source/ tmp/redacted/
+```
+
+Local rules redacter, entirely offline:
+
+```sh
+redacter cp -d local-rules tmp/source/ tmp/redacted/
 ```
 
 Override media types based on filenames:
