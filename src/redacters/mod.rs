@@ -34,6 +34,12 @@ pub use gemini_llm::*;
 mod local_rules;
 pub use local_rules::*;
 
+// The local NER redacter is wired into the enum with its CLI flags once its engine exists;
+// until then nothing constructs these types.
+#[cfg(feature = "local-ner")]
+#[allow(dead_code)]
+pub(crate) mod local_ner;
+
 /// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`).
 pub(crate) mod text_spans;
 
