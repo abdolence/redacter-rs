@@ -367,7 +367,6 @@ mod tests {
     const O: usize = 0;
     const B_PER: usize = 3;
     const I_PER: usize = 4;
-    const B_ORG: usize = 5;
     const I_ORG: usize = 6;
     const B_LOC: usize = 7;
     const I_LOC: usize = 8;
