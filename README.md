@@ -489,6 +489,50 @@ the ONNX export by Xenova of [Davlan/distilbert-base-multilingual-cased-ner-hrl]
 by David Adelani, released under the [Academic Free License 3.0](https://opensource.org/license/afl-3-0-php).
 The model is not bundled with the tool.
 
+### Local or cloud: quality versus performance
+
+The two local redacters run entirely on your machine, so nothing leaves it, nothing is billed and nothing needs
+credentials. The price is detection quality: curated rules only find what has a shape (emails, phones, cards,
+IBANs, keys, national ids with checksums), and a small named-entity model only finds persons, organisations and
+locations in the ten languages it was trained on. A cloud DLP service knows hundreds of info types, and an LLM
+understands context, so both find more, at the cost of latency, money, and sending the document out.
+
+Pros of local redaction:
+
+- Privacy by construction: works air-gapped, no account, no per-request cost, no rate limits.
+- Speed: rules run in microseconds; the NER model needs about 100 ms per 512 tokens on a desktop CPU.
+- Determinism: the same input always gives the same output, which makes results easy to test and audit.
+- A useful pre-pass: `-d local-rules -d local-ner -d gcp-dlp` removes the obvious PII before anything is sent.
+
+Cons of local redaction:
+
+- Narrower coverage: no dates of birth, no free-form addresses, no passport or licence numbers without a
+  context keyword, no document-level reasoning.
+- Model quality: a 66M-parameter model misses names it has never seen, needs context to tag a single word,
+  and reports organisations for product names.
+- Locale-bound rules: national formats differ; expect to enable, disable or add rules for your documents.
+
+Measured on the small corpus under `experiments/bench-dlp/` (four fixture documents plus a multilingual sample,
+about 4 KB of text, commit `3c3491e`, Intel i7-10700K, one warm-up then the median of three runs; the cloud
+numbers include network time from Europe):
+
+| Redacter | Whole corpus | Per file (median) | PII removed | Cities and organisations removed | Non-PII kept |
+|---|---|---|---|---|---|
+| `local-rules` | 18 ms | 17 ms | 20 / 41 | 0 / 7 | 25 / 25 |
+| `local-ner` | 528 ms | 192 ms | 15 / 41 | 7 / 7 | 23 / 25 |
+| `local-rules` + `local-ner` | 581 ms | 208 ms | 35 / 41 | 7 / 7 | 23 / 25 |
+| `gcp-dlp` | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
+| `gcp-vertex-ai` (Gemini) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
+
+The six PII strings the local chain leaves behind are three dates of birth, a passport-style number without a
+keyword next to it and a UK postcode; GCP DLP misses only the postcode and Gemini misses nothing. The two
+non-PII strings the NER model removes are "Apple" in "Apple pie" and the sign-off "The Support Desk", both
+tagged as organisations, which is the over-redaction to expect from entity-based detection. Run `experiments/bench-dlp/run.sh`
+to reproduce the table on your own machine and documents.
+
+In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap
+first pass; use a cloud provider, ideally after the local pass, when coverage matters more than latency and cost.
+
 ## Multiple redacters
 
 You can specify multiple redacters using `--redact` option multiple times.
