@@ -679,32 +679,43 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "uk-postcode",
         group: RuleGroup::Postcodes,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
         keyword: false,
         description: "UK postcode in upper case, with the letters allowed in each position",
         example: Example::Published("SW1A 1AA"),
-        pattern: r"\b(?:GIR ?0AA|[A-PR-UWYZ](?:[0-9]{1,2}|[A-HK-Y][0-9]{1,2}|[0-9][A-HJKPSTUW]|[A-HK-Y][0-9][ABEHMNPRVWXY]) ?[0-9][ABD-HJLNP-UW-Z]{2})\b",
+        // `\b` alone lets the postcode shape match inside an identifier such as
+        // `SKU-SW1A1AA-2024` (`-` is not a word character, so `\b` sits right there); the
+        // regex crate has no lookaround, so the surrounding non-identifier character is
+        // matched and consumed instead, and only group 1 is the finding. This means two
+        // postcodes separated by exactly one space will not both match (the shared space
+        // can only be one match's trailing context or the other's leading context, not
+        // both); two characters of separation (`, `) are enough for both to match.
+        pattern: r"(?:^|[^\w/_-])(GIR ?0AA|[A-PR-UWYZ](?:[0-9]{1,2}|[A-HK-Y][0-9]{1,2}|[0-9][A-HJKPSTUW]|[A-HK-Y][0-9][ABEHMNPRVWXY]) ?[0-9][ABD-HJLNP-UW-Z]{2})(?:[^\w/_-]|$)",
     },
     RuleSpec {
         name: "irish-eircode",
         group: RuleGroup::Postcodes,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
         keyword: false,
         description: "Irish Eircode: a routing key and a four-character unique identifier",
         example: Example::Synthetic("D02 X285"),
-        pattern: r"\b(?:D6W|[AC-FHKNPRTV-Y]\d{2}) ?[AC-FHKNPRTV-Y0-9]{4}\b",
+        // See `uk-postcode` for why the surrounding character is matched instead of using
+        // lookaround, and its limitation for two identifiers separated by a single space.
+        pattern: r"(?:^|[^\w/_-])((?:D6W|[AC-FHKNPRTV-Y]\d{2}) ?[AC-FHKNPRTV-Y0-9]{4})(?:[^\w/_-]|$)",
     },
     RuleSpec {
         name: "canadian-postal-code",
         group: RuleGroup::Postcodes,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
         keyword: false,
         description: "Canadian postal code `A1A 1A1` without the letters Canada Post excludes",
         example: Example::Published("K1A 0B1"),
-        pattern: r"\b[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d\b",
+        // See `uk-postcode` for why the surrounding character is matched instead of using
+        // lookaround, and its limitation for two identifiers separated by a single space.
+        pattern: r"(?:^|[^\w/_-])([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d)(?:[^\w/_-]|$)",
     },
     RuleSpec {
         name: "birth-date",
@@ -712,13 +723,16 @@ const RULES: &[RuleSpec] = &[
         capture_group: 1,
         validator: Some(("calendar date in 1900..=today's year", validators::birth_date)),
         keyword: true,
-        description: "Date of birth (ISO, dotted, slashed or with a month name in en, de, fr, es, it, nl, pt, pl, sv) within 30 characters of a birth keyword in those languages",
+        description: "Date of birth (ISO, dotted or slashed with either day-first or month-first order tried, or a month name in en, de, fr, es, it, nl, pt, pl, sv) within 30 characters of a birth keyword in those languages",
         example: Example::Synthetic("Date of birth: 14 March 1985"),
-        // The 30 characters may span a newline (a form puts the label on its own line). The
-        // month is any word of 3 to 12 Latin letters; the validator checks it against the
-        // month table, and `\p{L}` is not used because under `(?i)` it pushes the compiled
-        // size past `REGEX_SIZE_LIMIT`.
-        pattern: concat!(r"(?i)\b(?:", birth_keywords!(), r")\b(?s:.{0,30}?)\b(\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}|\d{1,2}(?:st|nd|rd|th|er)?\.?(?: de)? [a-zÀ-ſ]{3,12}\.?(?: de)?,? \d{4}|[a-zÀ-ſ]{3,12}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b"),
+        // The 30 characters may span a newline (a form puts the label on its own line) but
+        // not a sentence terminator, so a keyword followed by an unrelated sentence and then
+        // an unrelated date does not match; the optional `\.?` right after the keyword's own
+        // `\b` absorbs a trailing abbreviation period (`D.O.B.`) so it is not mistaken for a
+        // sentence end by the window that follows. The month is any word of 3 to 12 Latin
+        // letters; the validator checks it against the month table, and `\p{L}` is not used
+        // because under `(?i)` it pushes the compiled size past `REGEX_SIZE_LIMIT`.
+        pattern: concat!(r"(?i)\b(?:", birth_keywords!(), r")\b\.?[^.!?]{0,30}?\b(\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}|\d{1,2}(?:st|nd|rd|th|er)?\.?(?: de)? [a-zÀ-ſ]{3,12}\.?(?: de)?,? \d{4}|[a-zÀ-ſ]{3,12}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b"),
     },
 ];
 
@@ -1055,6 +1069,48 @@ mod tests {
         ] {
             assert_redacts(input, expected);
         }
+    }
+
+    #[test]
+    fn birth_date_keyword_window_does_not_cross_a_sentence_boundary() {
+        // The window between the keyword and the date must not swallow an unrelated date in
+        // the next sentence, but a newline (a form's label on its own line) and a period
+        // after the date itself must still be fine.
+        assert_untouched("born in Paris.\nInvoice date: 2024-01-05");
+        assert_redacts("Date of birth:\n14.03.1985", "Date of birth:\n[REDACTED]");
+        assert_redacts("Born 14 March 1985.", "Born [REDACTED].");
+    }
+
+    #[test]
+    fn postcode_context_excludes_surrounding_identifier_characters() {
+        for input in ["SKU-SW1A1AA-2024", "/path/SW1A1AA/"] {
+            assert_untouched(input);
+        }
+        for (input, expected) in [
+            ("London SW1A 1AA.", "London [REDACTED]."),
+            ("Dublin D02 X285,", "Dublin [REDACTED],"),
+            ("Toronto M5V 3L9", "Toronto [REDACTED]"),
+            // Two postcodes separated by two characters (", ") both match: the first
+            // match's trailing context consumes the comma, leaving the space free as the
+            // second match's own leading context. Two postcodes separated by a single
+            // space would not both match, since the shared space can only serve as
+            // trailing context for the first or leading context for the second, not both;
+            // this is a known limitation of the no-lookaround boundary trick.
+            ("SW1A 1AA, EC1A 1BB", "[REDACTED], [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn birth_date_numeric_day_and_month_are_each_tried_in_both_orders() {
+        for (input, expected) in [
+            ("DOB 13/04/1985", "DOB [REDACTED]"), // valid only day-first (month 13 invalid)
+            ("DOB 04/13/1985", "DOB [REDACTED]"), // valid only month-first (day 13, month 04)
+        ] {
+            assert_redacts(input, expected);
+        }
+        assert_untouched("DOB 13/13/1985"); // invalid either way
     }
 
     #[test]

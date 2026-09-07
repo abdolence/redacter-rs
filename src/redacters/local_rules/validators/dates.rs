@@ -289,6 +289,8 @@ mod tests {
             ("14-03-1985", true),
             ("03/14/1985", true), // month first
             ("14/03/1985", true), // day first
+            ("13/04/1985", true), // valid only day-first (month 13 does not exist)
+            ("04/13/1985", true), // valid only month-first (day 13, month 04)
             ("14 March 1985", true),
             ("14th March 1985", true),
             ("March 14, 1985", true),
