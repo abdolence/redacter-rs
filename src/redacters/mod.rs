@@ -45,6 +45,9 @@ pub(crate) mod text_spans;
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
+mod ocr_alignment;
+pub use ocr_alignment::*;
+
 mod simple_image_redacter;
 pub use simple_image_redacter::*;
 mod stream_redacter;
