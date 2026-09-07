@@ -639,8 +639,8 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        GcpDlpRedacterOptions, GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacterOptions,
-        RedacterProviderOptions, RuleGroup,
+        GcpDlpRedacterOptions, GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter,
+        LocalRulesRedacterOptions, RedacterProviderOptions, RuleGroup,
     };
     use tempfile::TempDir;
 
@@ -894,6 +894,163 @@ mod tests {
         .await?;
         assert_eq!(result.files_copied, 0);
         assert_eq!(result.files_skipped, 1, "the image is skipped without OCR");
+
+        Ok(())
+    }
+
+    /// PII values the OCR fixtures carry (`test-fixtures/documents/customer-form.pdf` and
+    /// `test-fixtures/media/form-example.png` render the same form), split into the
+    /// substrings a single OCR word can hold: OCR words never contain spaces, so a value
+    /// with spaces in it ("14 March 1985", "NW1 6XE") is checked one word at a time.
+    const OCR_FIXTURE_PII_WORDS: [&str; 8] = [
+        "john.smith@example.com",
+        "123-4567",
+        "X1234567",
+        "4111",
+        "NW1",
+        "6XE",
+        "March",
+        "1985",
+    ];
+
+    /// A word from the form's own header, never itself redacted, so a run that recognises
+    /// nothing at all (a renderer or OCR regression, not a redaction one) still fails loudly
+    /// instead of vacuously passing every "PII is gone" assertion.
+    const OCR_FIXTURE_CONTROL_WORD: &str = "Customer";
+
+    /// Runs `ocr` over `image` and asserts none of [`OCR_FIXTURE_PII_WORDS`] survived
+    /// redaction while [`OCR_FIXTURE_CONTROL_WORD`] did, proving the redacted output (not
+    /// just its byte length) carries no PII.
+    fn assert_ocr_output_is_redacted(
+        ocr: &dyn crate::file_converters::ocr::Ocr,
+        image: image::DynamicImage,
+        label: &str,
+    ) -> AppResult<()> {
+        let recognised: Vec<String> = ocr
+            .image_to_text(image)?
+            .into_iter()
+            .filter_map(|coord| coord.text)
+            .collect();
+        for pii in OCR_FIXTURE_PII_WORDS {
+            assert!(
+                !recognised.iter().any(|word| word.contains(pii)),
+                "{label}: {pii:?} should not be recognisable after redaction, saw {recognised:?}"
+            );
+        }
+        assert!(
+            recognised
+                .iter()
+                .any(|word| word.contains(OCR_FIXTURE_CONTROL_WORD)),
+            "{label}: the control word {OCR_FIXTURE_CONTROL_WORD:?} should still be \
+             recognisable (otherwise this proves nothing about redaction), saw {recognised:?}"
+        );
+        Ok(())
+    }
+
+    /// Reproduces the last-word-of-every-OCR-line defect end to end: every value on the
+    /// sample form is the last word of its line (email, phone, DOB, postcode, passport, card,
+    /// and the repeated surname in the signature line), so before the fix in
+    /// `ocr_ocrs::words_from_line` none of them ever reached `local-rules` and the output PDF
+    /// and PNG carried every one of them in the clear.
+    /// Runs the OCR redaction path on one file's bytes through `StreamRedacter`, exactly as
+    /// `command_copy` does internally, and returns the redacted output bytes.
+    async fn redact_via_stream_redacter(
+        stream_redacter: &StreamRedacter<'_>,
+        redacters: &Vec<Redacters<'_>>,
+        file_ref: &FileSystemRef,
+        input_bytes: Vec<u8>,
+    ) -> AppResult<Vec<u8>> {
+        use futures::TryStreamExt;
+        let plan = stream_redacter
+            .create_redact_plan(redacters, file_ref)
+            .await?;
+        assert!(
+            !plan.supported_redacters.is_empty(),
+            "local-rules should be able to redact {} via OCR, blocked: {:?}",
+            file_ref.relative_path.value(),
+            plan.blocked
+        );
+        let input = futures::stream::iter(vec![Ok(bytes::Bytes::from(input_bytes))]);
+        let result = stream_redacter.redact_stream(input, plan, file_ref).await?;
+        assert!(
+            result.number_of_redactions > 0,
+            "{} should have been redacted",
+            file_ref.relative_path.value()
+        );
+        let chunks: Vec<bytes::Bytes> = result.stream.try_collect().await?;
+        Ok(chunks.concat())
+    }
+
+    /// Drives `StreamRedacter` directly instead of `command_copy`: pdfium can only be bound
+    /// successfully once per process on this platform (a second `PdfImageConverter::new()`
+    /// call fails), and `command_copy` binds its own converters internally on every call, so
+    /// redacting the PDF and then reading its output back through `command_copy` a second
+    /// time would need a bind that never succeeds. Binding once here and reusing it for both
+    /// the redaction and the read-back avoids that.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-ocr"), ignore)]
+    async fn command_copy_local_rules_redacts_ocr_documents_test(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let store = ModelStore::new(&ModelStoreOptions::default(), &reporter);
+        let converters = FileConverters::new().init(&reporter, &store, true).await?;
+        let ocr = converters
+            .ocr
+            .as_deref()
+            .expect("the ci-ocr feature requires the OCR model to be resolvable");
+        let pdf_to_image = converters
+            .pdf_image_converter
+            .as_deref()
+            .expect("the ci-ocr feature requires pdfium to be available");
+
+        let base_options = base_redacter_options(RedacterProviderOptions::LocalRules(
+            LocalRulesRedacterOptions {
+                groups: RuleGroup::all(),
+                user_rules: vec![],
+            },
+        ))
+        .base_options;
+        let redacter = LocalRulesRedacter::new(
+            LocalRulesRedacterOptions {
+                groups: RuleGroup::all(),
+                user_rules: vec![],
+            },
+            &reporter,
+        )
+        .await?;
+        let redacters = vec![Redacters::LocalRules(redacter)];
+        let stream_redacter = StreamRedacter::new(&base_options, &converters);
+
+        let pdf_bytes = tokio::fs::read("test-fixtures/documents/customer-form.pdf").await?;
+        let pdf_file_ref = FileSystemRef {
+            relative_path: "customer-form.pdf".into(),
+            media_type: Some(mime::APPLICATION_PDF),
+            file_size: Some(pdf_bytes.len()),
+        };
+        let redacted_pdf_bytes =
+            redact_via_stream_redacter(&stream_redacter, &redacters, &pdf_file_ref, pdf_bytes)
+                .await?;
+        let mut pages = pdf_to_image
+            .convert_to_images(redacted_pdf_bytes.into())?
+            .pages;
+        let page_image = pages.remove(0).page_as_images;
+        assert_ocr_output_is_redacted(ocr, page_image, "the redacted PDF")?;
+
+        let png_bytes = tokio::fs::read("test-fixtures/media/form-example.png").await?;
+        let png_file_ref = FileSystemRef {
+            relative_path: "form-example.png".into(),
+            media_type: Some(mime::IMAGE_PNG),
+            file_size: Some(png_bytes.len()),
+        };
+        let redacted_png_bytes =
+            redact_via_stream_redacter(&stream_redacter, &redacters, &png_file_ref, png_bytes)
+                .await?;
+        let png_image = image::load_from_memory(&redacted_png_bytes)?;
+        assert_ocr_output_is_redacted(ocr, png_image, "the redacted PNG")?;
 
         Ok(())
     }
