@@ -28,6 +28,7 @@ impl RuleGroup {
         RuleGroup::value_variants().iter().copied().collect()
     }
 
+    #[allow(dead_code)] // consumed by the CLI's group-validation error, wired in Task 6
     pub fn valid_names() -> String {
         RuleGroup::value_variants()
             .iter()

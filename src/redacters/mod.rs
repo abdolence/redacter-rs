@@ -30,9 +30,7 @@ pub use ms_presidio::*;
 mod gemini_llm;
 pub use gemini_llm::*;
 
-#[allow(dead_code)] // consumed by LocalRulesRedacter, wired in Task 5
 mod local_rules;
-#[allow(unused_imports)] // consumed by LocalRulesRedacter, wired in Task 5
 pub use local_rules::*;
 
 mod open_ai_llm;
@@ -339,6 +337,7 @@ pub enum Redacters<'a> {
     GcpVertexAi(GcpVertexAiRedacter<'a>),
     AwsBedrock(AwsBedrockRedacter<'a>),
     AwsBedrockGuardrails(AwsBedrockGuardrailsRedacter<'a>),
+    LocalRules(LocalRulesRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +365,7 @@ pub enum RedacterProviderOptions {
     GcpVertexAi(GcpVertexAiRedacterOptions),
     AwsBedrock(AwsBedrockRedacterOptions),
     AwsBedrockGuardrails(AwsBedrockGuardrailsRedacterOptions),
+    LocalRules(LocalRulesRedacterOptions),
 }
 
 impl RedacterProviderOptions {
@@ -380,6 +380,7 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::GcpVertexAi(_) => RedacterType::GcpVertexAi,
             RedacterProviderOptions::AwsBedrock(_) => RedacterType::AwsBedrock,
             RedacterProviderOptions::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
+            RedacterProviderOptions::LocalRules(_) => RedacterType::LocalRules,
         }
     }
 }
@@ -428,6 +429,9 @@ impl<'a> Redacters<'a> {
                     AwsBedrockGuardrailsRedacter::new(options, reporter).await?,
                 ))
             }
+            RedacterProviderOptions::LocalRules(options) => Ok(Redacters::LocalRules(
+                LocalRulesRedacter::new(options, reporter).await?,
+            )),
         }
     }
 
@@ -487,6 +491,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
             Redacters::AwsBedrock(redacter) => redacter.redact(input).await,
             Redacters::AwsBedrockGuardrails(redacter) => redacter.redact(input).await,
+            Redacters::LocalRules(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -500,6 +505,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
             Redacters::AwsBedrock(redacter) => redacter.redact_support(file_ref).await,
             Redacters::AwsBedrockGuardrails(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::LocalRules(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -513,6 +519,7 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
             Redacters::AwsBedrock(_) => RedacterType::AwsBedrock,
             Redacters::AwsBedrockGuardrails(_) => RedacterType::AwsBedrockGuardrails,
+            Redacters::LocalRules(_) => RedacterType::LocalRules,
         }
     }
 }

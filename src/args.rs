@@ -110,6 +110,7 @@ pub enum RedacterType {
     GcpVertexAi,
     AwsBedrock,
     AwsBedrockGuardrails,
+    LocalRules,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -125,6 +126,7 @@ impl std::str::FromStr for RedacterType {
             "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
             "aws-bedrock" => Ok(RedacterType::AwsBedrock),
             "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
+            "local-rules" => Ok(RedacterType::LocalRules),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -141,6 +143,7 @@ impl Display for RedacterType {
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
             RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
             RedacterType::AwsBedrockGuardrails => write!(f, "aws-bedrock-guardrails"),
+            RedacterType::LocalRules => write!(f, "local-rules"),
         }
     }
 }
@@ -403,6 +406,12 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         },
                     ))
                 }
+                RedacterType::LocalRules => Ok(RedacterProviderOptions::LocalRules(
+                    crate::redacters::LocalRulesRedacterOptions {
+                        groups: crate::redacters::RuleGroup::all(),
+                        user_rules: Vec::new(),
+                    },
+                )),
             }?;
             provider_options.push(redacter_options);
         }
@@ -436,6 +445,7 @@ mod tests {
             RedacterType::GcpVertexAi,
             RedacterType::AwsBedrock,
             RedacterType::AwsBedrockGuardrails,
+            RedacterType::LocalRules,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)
