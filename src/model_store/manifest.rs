@@ -7,14 +7,10 @@ pub enum ModelId {
     // pdf-render-only) build does not carry an unreachable variant.
     #[cfg(any(feature = "ocr", test))]
     Ocrs,
-    // Constructed by the local NER redacter once it exists; nothing else asks for it.
-    // `required_models()` (src/redacters/mod.rs) returns `Vec::new()` unconditionally until
-    // Task 7, so this variant is unreferenced by production code under every feature
-    // combination today, not only when "local-ner" is off. A `cfg_attr(not(feature =
-    // "local-ner"), ...)` guard was tried first but left `cargo clippy --all-targets --
-    // -D warnings` (default features, "local-ner" on) failing on this line; verified with
-    // that exact command. Task 7 removes this attribute once it constructs the variant.
-    #[allow(dead_code)]
+    // Only the local-ner feature resolves this one; gated for the same reason as `Ocrs`, so
+    // a build without either feature carries an unreachable variant rather than an
+    // `#[allow(dead_code)]` that would also hide a real regression.
+    #[cfg(any(feature = "local-ner", test))]
     NerMultilingualHrl,
 }
 
@@ -43,6 +39,7 @@ pub struct ModelManifest {
     pub legacy_dirs: fn() -> Vec<PathBuf>,
 }
 
+#[cfg(any(feature = "local-ner", test))]
 macro_rules! ner_url {
     ($path:literal) => {
         concat!(
@@ -53,6 +50,7 @@ macro_rules! ner_url {
     };
 }
 
+#[cfg(any(feature = "local-ner", test))]
 static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
     ModelFile {
         name: "model_uint8.onnx",
@@ -75,6 +73,7 @@ static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
 ];
 
 /// A model that has never lived anywhere but the managed root.
+#[cfg(any(feature = "local-ner", test))]
 pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -122,6 +121,7 @@ static OCRS: ModelManifest = ModelManifest {
     legacy_dirs: ocrs_legacy_dirs,
 };
 
+#[cfg(any(feature = "local-ner", test))]
 static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
     dir_name: "distilbert-base-multilingual-cased-ner-hrl",
     needed_by: "The local-ner redacter",
@@ -136,6 +136,7 @@ pub fn manifest(id: ModelId) -> &'static ModelManifest {
     match id {
         #[cfg(any(feature = "ocr", test))]
         ModelId::Ocrs => &OCRS,
+        #[cfg(any(feature = "local-ner", test))]
         ModelId::NerMultilingualHrl => &NER_MULTILINGUAL_HRL,
     }
 }

@@ -43,9 +43,9 @@ impl ModelFiles {
     }
 }
 
-// Only ocrs takes the whole directory (it loads its own files by name); local-ner asks for
-// one file at a time through `path`.
-#[cfg(any(feature = "ocr", test))]
+// ocrs takes the whole directory (it loads its own files by name) and local-ner names it in
+// the line it reports before loading; a build without either feature has no caller.
+#[cfg(any(feature = "ocr", feature = "local-ner", test))]
 impl ModelFiles {
     pub fn dir(&self) -> &Path {
         &self.dir

@@ -7,6 +7,8 @@ use crate::redacters::{
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
     RedacterProviderOptions, RuleGroup, UserRule,
 };
+#[cfg(feature = "local-ner")]
+use crate::redacters::{Entity, LocalNerRedacterOptions};
 use clap::*;
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -140,6 +142,7 @@ pub enum RedacterType {
     AwsBedrock,
     AwsBedrockGuardrails,
     LocalRules,
+    LocalNer,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -156,6 +159,7 @@ impl std::str::FromStr for RedacterType {
             "aws-bedrock" => Ok(RedacterType::AwsBedrock),
             "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
             "local-rules" => Ok(RedacterType::LocalRules),
+            "local-ner" => Ok(RedacterType::LocalNer),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -173,6 +177,7 @@ impl Display for RedacterType {
             RedacterType::AwsBedrock => write!(f, "aws-bedrock"),
             RedacterType::AwsBedrockGuardrails => write!(f, "aws-bedrock-guardrails"),
             RedacterType::LocalRules => write!(f, "local-rules"),
+            RedacterType::LocalNer => write!(f, "local-ner"),
         }
     }
 }
@@ -341,6 +346,23 @@ pub struct RedacterArgs {
         help = "JSON file with user-defined regex and dictionary rules for the local-rules redacter. Can be repeated"
     )]
     pub local_rules_file: Option<Vec<std::path::PathBuf>>,
+
+    #[cfg(feature = "local-ner")]
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Entity types the local-ner redacter removes, comma separated: per (people), org (organisations), loc (locations). Default is all three"
+    )]
+    pub local_ner_entities: Option<Vec<Entity>>,
+
+    #[cfg(feature = "local-ner")]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5"
+    )]
+    pub local_ner_min_score: f32,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -482,6 +504,23 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         LocalRulesRedacterOptions { groups, user_rules },
                     ))
                 }
+                #[cfg(feature = "local-ner")]
+                RedacterType::LocalNer => {
+                    let entities = match &self.local_ner_entities {
+                        Some(list) => list.iter().copied().collect(),
+                        None => Entity::all(),
+                    };
+                    LocalNerRedacterOptions::validated(entities, self.local_ner_min_score)
+                        .map(RedacterProviderOptions::LocalNer)
+                        .map_err(|err| AppError::RedacterConfigError {
+                            message: err.to_string(),
+                        })
+                }
+                #[cfg(not(feature = "local-ner"))]
+                RedacterType::LocalNer => Err(AppError::RedacterConfigError {
+                    message: "local-ner is not available in this build (compiled without the local-ner feature)"
+                        .to_string(),
+                }),
             }?;
             provider_options.push(redacter_options);
         }
@@ -587,6 +626,7 @@ mod tests {
             RedacterType::AwsBedrock,
             RedacterType::AwsBedrockGuardrails,
             RedacterType::LocalRules,
+            RedacterType::LocalNer,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)
@@ -694,5 +734,65 @@ mod tests {
         let options = local_rules_options(&["--local-rules-file", &path]).unwrap();
         assert_eq!(options.user_rules.len(), 1);
         assert_eq!(options.user_rules[0].name.as_str(), "codenames");
+    }
+
+    #[cfg(feature = "local-ner")]
+    mod local_ner {
+        use super::*;
+        use crate::redacters::{Entity, LocalNerRedacterOptions};
+
+        fn local_ner_options(args: &[&str]) -> Result<LocalNerRedacterOptions, AppError> {
+            let cli = TestCli::try_parse_from([&["redacter", "-d", "local-ner"], args].concat())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let options: RedacterOptions = cli.redacter.try_into()?;
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalNer(options)) => Ok(options),
+                other => panic!("expected local ner options, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn defaults_to_every_entity_at_half_score() {
+            let options = local_ner_options(&[]).unwrap();
+            assert_eq!(options.entities, Entity::all());
+            assert_eq!(options.min_score, 0.5);
+        }
+
+        #[test]
+        fn entities_and_score_are_parsed() {
+            let options = local_ner_options(&[
+                "--local-ner-entities",
+                "per,loc",
+                "--local-ner-min-score",
+                "0.3",
+            ])
+            .unwrap();
+            assert_eq!(
+                options.entities.into_iter().collect::<Vec<_>>(),
+                vec![Entity::Per, Entity::Loc]
+            );
+            assert_eq!(options.min_score, 0.3);
+        }
+
+        #[test]
+        fn unknown_entity_is_rejected_by_clap() {
+            let err = TestCli::try_parse_from([
+                "redacter",
+                "-d",
+                "local-ner",
+                "--local-ner-entities",
+                "person",
+            ])
+            .err()
+            .expect("unknown entity must fail");
+            assert!(err.to_string().contains("person"), "{err}");
+        }
+
+        #[test]
+        fn score_outside_the_unit_range_is_a_config_error() {
+            let err = local_ner_options(&["--local-ner-min-score", "1.5"]).unwrap_err();
+            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+            assert!(err.to_string().contains("1.5"), "{err}");
+        }
     }
 }

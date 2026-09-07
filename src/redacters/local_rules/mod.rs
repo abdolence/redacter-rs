@@ -13,10 +13,10 @@ pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
 pub use user_rules::UserMatcher;
 
 use crate::args::RedacterType;
-use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -87,9 +87,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
                     .collect(),
             },
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
+                return Err(unsupported_type_error())
             }
         };
         if total_findings > 0 {
@@ -106,14 +104,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
-        Ok(match file_ref.media_type.as_ref() {
-            Some(media_type)
-                if Redacters::is_mime_text(media_type) || Redacters::is_mime_table(media_type) =>
-            {
-                RedactSupport::Supported
-            }
-            _ => RedactSupport::Unsupported,
-        })
+        Ok(text_or_table_support(file_ref))
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -124,6 +115,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::AppError;
     use crate::redacters::test_support::{
         TEST_DOCUMENTS_DIR, TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
