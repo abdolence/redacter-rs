@@ -53,6 +53,11 @@ Google Cloud Platform's DLP API.
     * Local rules redacter: offline regex and checksum based redaction of emails, phone numbers,
       payment cards, IBANs, network addresses, secrets and US/EU identifiers, plus your own
       regex and dictionary rules. No cloud account needed.
+    * Local NER redacter: offline detection of people, organisations and locations with a
+      multilingual transformer model running on your CPU. No cloud account needed:
+        * text, html, csv, json files
+        * images through text extraction using OCR
+        * PDF files (rendering as images from OCR)
     * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
         * text, html, csv, json files
         * images, redacted by blacking out the coordinates the model reports
@@ -79,7 +84,8 @@ cargo install redacter
 
 - If you are planning to use PDF redaction, please follow additional steps in
 the [PDF redaction](#pdf-redaction)
-- For OCR capabilities for only the DLP that can't support images, please follow additional steps in the [OCR](#ocr) instructions.
+- OCR (for the DLP providers that can't read images) and the `local-ner` redacter need model files that
+  are downloaded on request or installed by hand, see [Models and downloads](#models-and-downloads).
 
 ## Command line options
 
@@ -96,8 +102,17 @@ Arguments:
           Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
 Options:
+      --download-models <DOWNLOAD_MODELS>
+          Whether missing model files (OCR, local-ner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'
+          
+          [default: ask]
+          [possible values: ask, yes, no]
+
   -m, --max-size-limit <MAX_SIZE_LIMIT>
           Maximum size of files to copy in bytes
+
+      --models-dir <MODELS_DIR>
+          Directory holding downloaded and manually placed models, one subdirectory per model. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models
 
   -n, --max-files-limit <MAX_FILES_LIMIT>
           Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
@@ -108,7 +123,7 @@ Options:
   -d, --redact <REDACT>
           List of redacters to use
           
-          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules]
+          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner]
 
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
@@ -204,6 +219,16 @@ Options:
 
       --local-rules-file <LOCAL_RULES_FILE>
           JSON file with user-defined regex and dictionary rules for the local-rules redacter. Can be repeated
+
+      --local-ner-entities <LOCAL_NER_ENTITIES>
+          Entity types the local-ner redacter removes, comma separated: per (people), org (organisations), loc (locations). Default is all three
+          
+          [possible values: per, org, loc]
+
+      --local-ner-min-score <LOCAL_NER_MIN_SCORE>
+          Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5
+          
+          [default: 0.5]
 
       --mime-override <MIME_OVERRIDE>
           Override media type detection using glob patterns such as 'text/plain=*.md'
@@ -420,6 +445,49 @@ a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some refer
 identifiers are accepted on their checksum alone. Use `--local-rules` or `--local-rules-disable` to turn
 off the groups you do not need.
 
+### Local NER redacter
+
+The `local-ner` redacter finds names of people (`per`), organisations (`org`) and locations (`loc`)
+with a multilingual named-entity model running entirely on your machine, and replaces each of them
+with `[REDACTED]`. It uses the `distilbert-base-multilingual-cased-ner-hrl` model, trained on ten
+high-resource languages: Arabic, German, English, Spanish, French, Italian, Latvian, Dutch,
+Portuguese and Chinese. Nothing leaves your computer; the only network access is the one-time,
+opt-in download of the model files described in [Models and downloads](#models-and-downloads).
+
+```sh
+# People, organisations and locations, the default
+redacter cp -d local-ner tmp/source/ tmp/redacted/
+
+# Only people, and redact more aggressively
+redacter cp -d local-ner --local-ner-entities per --local-ner-min-score 0.3 tmp/source/ tmp/redacted/
+
+# Pattern-shaped data by rules, names by the model, all offline
+redacter cp -d local-rules -d local-ner tmp/source/ tmp/redacted/
+```
+
+Use a release binary (or `cargo run --release`) for `local-ner`: a debug build spends about 12
+seconds per 512-token window of text, against about 95 ms in release. In release, loading the model
+takes about 100 ms and it holds about 232 MiB of peak memory; the download in
+[Models and downloads](#models-and-downloads) is about 131.6 MiB in total. These numbers are
+approximate and depend on your hardware and the amount of text.
+
+`--local-ner-min-score` is the model confidence a word needs to be redacted, between 0 and 1
+(default 0.5); lower values redact more and produce more false positives. The model does not detect
+dates, emails, phone numbers or identifiers: combine it with `local-rules` for those. Its accuracy is
+below the cloud DLP services, and the CPU time grows with the amount of text. It works natively on
+text, html, json and csv files, and handles images and PDFs the way the AWS Comprehend redacter does:
+through OCR and Pdfium, when those optional capabilities are installed.
+
+A single word with nothing around it carries no context for the model, so a one-word text file may
+not be tagged at all; a name in a table cell is scored together with its column header, which is why
+a CSV or HTML table column of names is reliably redacted even though each cell is short. The `org`
+label also over-redacts occasionally, tagging product and brand names alongside real organisations.
+
+The model is [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl),
+the ONNX export by Xenova of [Davlan/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Davlan/distilbert-base-multilingual-cased-ner-hrl)
+by David Adelani, released under the [Academic Free License 3.0](https://opensource.org/license/afl-3-0-php).
+The model is not bundled with the tool.
+
 ## Multiple redacters
 
 You can specify multiple redacters using `--redact` option multiple times.
@@ -447,15 +515,39 @@ Installation instructions:
 If library is detected correctly it will be reported in the tool output as.
 > PDF to image support: ✓ Yes
 
+## Models and downloads
+
+The OCR engine and the `local-ner` redacter need model files that are not bundled with the tool:
+
+| Model | Files | Size | Source | Licence |
+|---|---|---|---|---|
+| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 12 MB | https://ocrs-models.s3-accelerate.amazonaws.com/ | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 132 MB | https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision `c2a4dbf`) | AFL-3.0 |
+
+Nothing is downloaded without your consent. `--download-models` controls it:
+
+- `ask` (default): when a run needs a model that is not installed and the tool runs in a terminal,
+  it prints what it would download (files, size, source, licence, destination) and asks
+  `Download now? [y/N]`. Without a terminal it behaves as `no`.
+- `yes`: downloads without asking, for scripts and CI.
+- `no`: never downloads; a missing model is reported with the manual installation instructions.
+
+Downloaded files are verified against SHA-256 digests pinned in the tool and stored under
+`~/.cache/redacter/models/<model>/` on Linux, `~/Library/Caches/redacter/models/<model>/` on macOS and
+`%LOCALAPPDATA%\redacter\models\<model>\` on Windows. `--models-dir <DIR>` (or the
+`REDACTER_MODELS_DIR` environment variable) moves that directory. Downloads honour the `HTTPS_PROXY`
+environment variable.
+
+For air-gapped machines, download the files listed above on another computer and copy them into
+`<models dir>/<model>/`, for example `~/.cache/redacter/models/ocrs/text-detection.rten`. The tool
+also looks in `models/<model>/` next to its own executable, and the OCR models are still found in
+`~/.cache/ocrs` and `../share/ocrs` as in earlier versions.
+
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
-To enable OCR you need to download the OCR models:
-
-- https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten
-- https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten
-
-and copy those files to the `~/.cache/ocrs` directory.
+The OCR models are downloaded on request or installed by hand as described in
+[Models and downloads](#models-and-downloads); `~/.cache/ocrs` from earlier versions keeps working.
 
 ## Examples:
 
@@ -555,6 +647,8 @@ redacter ls gs://my-little-bucket/my-big-files/
 ## Security considerations
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
+- The local redacters (`local-rules`, `local-ner`) send nothing anywhere. Their model files are
+  fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
 - The tool was mostly designed to redact files internally. Not recommended to use it in public environments without
   apropriate security measures and manual review.
