@@ -51,24 +51,23 @@ impl<'a> LocalRulesRedacter<'a> {
         })
     }
 
-    fn redact_text(&self, file_ref: &FileSystemRef, text: &str) -> String {
+    /// Redacts one piece of text and reports nothing: the caller aggregates finding counts
+    /// across every value/cell in the item and reports once, so a table with many cells does
+    /// not log once per cell.
+    fn redact_text(&self, text: &str) -> (String, usize) {
         let (redacted, findings) = self.rules.redact(text);
-        if !findings.is_empty() {
-            self.reporter.report_debug(format!(
-                "local-rules: {} finding(s) in {}",
-                findings.len(),
-                file_ref.relative_path.value()
-            ));
-        }
-        redacted
+        (redacted, findings.len())
     }
 }
 
 impl<'a> Redacter for LocalRulesRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+        let mut total_findings = 0usize;
         let content = match input.content {
             RedacterDataItemContent::Value(text) => {
-                RedacterDataItemContent::Value(self.redact_text(&input.file_ref, &text))
+                let (redacted, findings) = self.redact_text(&text);
+                total_findings += findings;
+                RedacterDataItemContent::Value(redacted)
             }
             RedacterDataItemContent::Table { headers, rows } => RedacterDataItemContent::Table {
                 headers,
@@ -76,7 +75,11 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
                     .into_iter()
                     .map(|row| {
                         row.iter()
-                            .map(|cell| self.redact_text(&input.file_ref, cell))
+                            .map(|cell| {
+                                let (redacted, findings) = self.redact_text(cell);
+                                total_findings += findings;
+                                redacted
+                            })
                             .collect()
                     })
                     .collect(),
@@ -87,6 +90,13 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
                 })
             }
         };
+        if total_findings > 0 {
+            self.reporter.report_debug(format!(
+                "local-rules: {} finding(s) in {}",
+                total_findings,
+                input.file_ref.relative_path.value()
+            ));
+        }
         Ok(RedacterDataItem {
             content,
             file_ref: input.file_ref,
