@@ -23,6 +23,7 @@ pub enum RuleGroup {
     Secrets,
     UsIdentifiers,
     EuIdentifiers,
+    WorldIdentifiers,
     Custom,
 }
 
@@ -341,6 +342,7 @@ mod tests {
     fn group_names_are_kebab_case() {
         assert_eq!(RuleGroup::PaymentCard.to_string(), "payment-card");
         assert_eq!(RuleGroup::UsIdentifiers.to_string(), "us-identifiers");
+        assert_eq!(RuleGroup::WorldIdentifiers.to_string(), "world-identifiers");
     }
 
     #[test]

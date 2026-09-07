@@ -1,8 +1,5 @@
 //! Calendar helpers for identifiers that embed a birth date.
 
-// Consumed by the national identifier validators added in the next tasks.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Year of the current UTC date, 1970 if the clock is before the epoch.

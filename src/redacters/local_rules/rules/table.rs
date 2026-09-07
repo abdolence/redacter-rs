@@ -395,6 +395,251 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic("780123/3540"),
         pattern: r"\b\d{6}/?\d{4}\b",
     },
+    RuleSpec {
+        name: "portuguese-nif",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("mod-11 check digit", validators::portuguese_nif)),
+        keyword: true,
+        description: "Portuguese NIF, 9 digits within 20 characters of `nif`, `nipc` or `contribuinte`",
+        example: Example::Synthetic("NIF 123456789"),
+        pattern: r"(?i)\b(?:nif|nipc|contribuinte)\b.{0,20}?\b(\d{3} ?\d{3} ?\d{3})\b",
+    },
+    RuleSpec {
+        name: "irish-pps",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-23 check letter", validators::irish_pps)),
+        keyword: false,
+        description: "Irish PPS number, 7 digits and one or two letters",
+        // https://en.wikipedia.org/wiki/Personal_Public_Service_Number, the worked example.
+        example: Example::Published("1234567FA"),
+        pattern: r"\b\d{7}[A-W][A-IW]?\b",
+    },
+    RuleSpec {
+        name: "swiss-ahv",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("EAN-13 check digit", validators::swiss_ahv)),
+        keyword: false,
+        description: "Swiss AHV/AVS number `756.NNNN.NNNN.NC`",
+        example: Example::Synthetic("756.9217.0769.85"),
+        pattern: r"\b756\.?\d{4}\.?\d{4}\.?\d{2}\b",
+    },
+    RuleSpec {
+        name: "austrian-svnr",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 check digit and date", validators::austrian_svnr)),
+        keyword: false,
+        description: "Austrian Sozialversicherungsnummer `LLLP DDMMYY`",
+        example: Example::Synthetic("1237 010180"),
+        pattern: r"\b[1-9]\d{3} ?\d{6}\b",
+    },
+    RuleSpec {
+        name: "belgian-national-number",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-97 check and date", validators::belgian_national_number)),
+        keyword: false,
+        description: "Belgian national number `YY.MM.DD-SSS.CC`",
+        example: Example::Synthetic("85.07.30-033.28"),
+        pattern: r"\b\d{2}\.?\d{2}\.?\d{2}[-.]?\d{3}\.?\d{2}\b",
+    },
+    RuleSpec {
+        name: "luxembourg-matricule",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("Luhn and Verhoeff check digits and date", validators::luxembourg_matricule)),
+        keyword: false,
+        description: "Luxembourg matricule, 13 digits starting with the birth date `YYYYMMDD`",
+        example: Example::Synthetic("1893120105732"),
+        pattern: r"\b(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{5}\b",
+    },
+    RuleSpec {
+        name: "hungarian-personal-number",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 check digit and date", validators::hungarian_personal_number)),
+        keyword: false,
+        description: "Hungarian személyi szám, 11 digits `M YYMMDD SSSC`",
+        example: Example::Synthetic("1 900101 1249"),
+        pattern: r"\b[1-8][ -]?\d{6}[ -]?\d{4}\b",
+    },
+    RuleSpec {
+        name: "hungarian-taj",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("mod-10 check digit", validators::hungarian_taj)),
+        keyword: true,
+        description: "Hungarian TAJ number, 9 digits within 20 characters of `TAJ`",
+        example: Example::Synthetic("TAJ szám: 123 456 788"),
+        pattern: r"(?i)\b(?:taj(?:[ -]?sz[áa]m)?|t[áa]rsadalombiztos[íi]t[áa]si)\b.{0,20}?\b(\d{3}[ -]?\d{3}[ -]?\d{3})\b",
+    },
+    RuleSpec {
+        name: "greek-amka",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("Luhn and date", validators::greek_amka)),
+        keyword: false,
+        description: "Greek AMKA, 11 digits starting with the birth date `DDMMYY`",
+        example: Example::Synthetic("01019012341"),
+        pattern: r"\b\d{11}\b",
+    },
+    RuleSpec {
+        name: "greek-afm",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("mod-11 check digit", validators::greek_afm)),
+        keyword: true,
+        description: "Greek AFM (tax number), 9 digits within 20 characters of `AFM` or `ΑΦΜ`",
+        example: Example::Synthetic("ΑΦΜ: 090000045"),
+        pattern: r"(?i)\b(?:afm|α\.?φ\.?μ\.?)\b.{0,20}?\b(\d{9})\b",
+    },
+    RuleSpec {
+        name: "bulgarian-egn",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 check digit and date", validators::bulgarian_egn)),
+        keyword: false,
+        description: "Bulgarian EGN, 10 digits starting with the birth date `YYMMDD`",
+        example: Example::Synthetic("6101057509"),
+        pattern: r"\b\d{10}\b",
+    },
+    RuleSpec {
+        name: "croatian-oib",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("ISO 7064 MOD 11,10", validators::croatian_oib)),
+        keyword: true,
+        description: "Croatian OIB, 11 digits within 20 characters of `OIB`",
+        example: Example::Synthetic("OIB: 69435151530"),
+        pattern: r"(?i)\boib\b.{0,20}?\b(\d{11})\b",
+    },
+    RuleSpec {
+        name: "jmbg",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 check digit and date", validators::jmbg)),
+        keyword: false,
+        description: "JMBG of Serbia, Bosnia and Herzegovina, Montenegro and North Macedonia, and the Slovenian EMŠO, 13 digits",
+        // https://en.wikipedia.org/wiki/Unique_Master_Citizen_Number, the worked example
+        // (first male baby registered in Slovenia on 1 January 2006).
+        example: Example::Published("0101006500006"),
+        pattern: r"\b\d{13}\b",
+    },
+    RuleSpec {
+        name: "romanian-cnp",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 check digit, date and county", validators::romanian_cnp)),
+        keyword: false,
+        description: "Romanian CNP, 13 digits `S YYMMDD JJ NNN C`",
+        example: Example::Synthetic("1900101123457"),
+        pattern: r"\b[1-9]\d{12}\b",
+    },
+    RuleSpec {
+        name: "turkish-tckn",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("two mod-10 check digits", validators::turkish_tckn)),
+        keyword: true,
+        description: "Turkish TCKN, 11 digits within 20 characters of `TCKN` or `T.C. Kimlik No`",
+        example: Example::Synthetic("T.C. Kimlik No: 10000000146"),
+        pattern: r"(?i)\b(?:tckn|t\.?c\.? ?kimlik(?: no| numaras[ıi])?|kimlik (?:no|numaras[ıi]))\b.{0,20}?\b([1-9]\d{10})\b",
+    },
+    RuleSpec {
+        name: "albanian-nid",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("date", validators::albanian_nid)),
+        keyword: true,
+        description: "Albanian NID (letter, 8 digits, letter) within 20 characters of `NID` or `numri personal`",
+        example: Example::Synthetic("NID: I05101999Q"),
+        pattern: r"(?i)\b(?:nid|numri (?:personal|i identitetit)|id personale)\b.{0,20}?\b([A-M]\d{8}[A-W])\b",
+    },
+    RuleSpec {
+        name: "maltese-id",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: None,
+        keyword: true,
+        description: "Maltese identity card number (7 digits and a letter) within 20 characters of `ID card`",
+        example: Example::Synthetic("ID card no. 0123456M"),
+        pattern: r"(?i)\b(?:id(?:entity)? card|karta tal-identit[àa]|maltese id|id number)\b.{0,20}?\b(\d{7}[MGAPLHBZ])\b",
+    },
+    RuleSpec {
+        name: "canadian-sin",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 1,
+        validator: Some(("Luhn", validators::canadian_sin)),
+        keyword: true,
+        description: "Canadian SIN, 9 digits within 20 characters of `SIN`, `NAS` or `social insurance`",
+        // https://en.wikipedia.org/wiki/Social_Insurance_Number, "a fictitious, but valid, SIN".
+        example: Example::Published("SIN: 046 454 286"),
+        // `SIN` and `NAS` are case-sensitive on purpose: `sin` is an English word.
+        pattern: r"\b(?:SIN|NAS|(?i:social insurance(?: number)?|num[ée]ro d'assurance sociale|assurance sociale))\b.{0,20}?\b(\d{3}[ -]?\d{3}[ -]?\d{3})\b",
+    },
+    RuleSpec {
+        name: "australian-tfn",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 1,
+        validator: Some(("mod-11 weighted sum", validators::australian_tfn)),
+        keyword: true,
+        description: "Australian TFN, 9 digits within 20 characters of `TFN` or `tax file number`",
+        example: Example::Synthetic("TFN 123 456 782"),
+        pattern: r"(?i)\b(?:tfn|tax file (?:number|no))\b.{0,20}?\b(\d{3}[ -]?\d{3}[ -]?\d{3})\b",
+    },
+    RuleSpec {
+        name: "brazilian-cpf",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 0,
+        validator: Some(("two mod-11 check digits", validators::brazilian_cpf)),
+        keyword: false,
+        description: "Brazilian CPF in its written form `NNN.NNN.NNN-NN`",
+        example: Example::Synthetic("111.444.777-35"),
+        pattern: r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b",
+    },
+    RuleSpec {
+        name: "brazilian-cpf-plain",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 1,
+        validator: Some(("two mod-11 check digits", validators::brazilian_cpf)),
+        keyword: true,
+        description: "Brazilian CPF as 11 bare digits within 20 characters of `CPF`",
+        example: Example::Synthetic("CPF: 12345678909"),
+        pattern: r"(?i)\bcpf\b.{0,20}?\b(\d{11})\b",
+    },
+    RuleSpec {
+        name: "indian-aadhaar",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 1,
+        validator: Some(("Verhoeff", validators::indian_aadhaar)),
+        keyword: true,
+        description: "Indian Aadhaar, 12 digits within 20 characters of `Aadhaar` or `UIDAI`",
+        example: Example::Synthetic("Aadhaar 9999 4105 7058"),
+        pattern: r"(?i)\b(?:aadha?ar|uidai)\b.{0,20}?\b([2-9]\d{3} ?\d{4} ?\d{4})\b",
+    },
+    RuleSpec {
+        name: "south-african-id",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 0,
+        validator: Some(("Luhn, date and citizenship digit", validators::south_african_id)),
+        keyword: false,
+        description: "South African ID number, 13 digits starting with the birth date `YYMMDD`",
+        example: Example::Synthetic("8001015009087"),
+        pattern: r"\b\d{13}\b",
+    },
+    RuleSpec {
+        name: "chinese-resident-id",
+        group: RuleGroup::WorldIdentifiers,
+        capture_group: 0,
+        validator: Some(("ISO 7064 MOD 11-2 and date", validators::chinese_resident_id)),
+        keyword: false,
+        description: "Chinese resident identity number, 18 characters with the birth date `YYYYMMDD`",
+        example: Example::Synthetic("11010519491231002X"),
+        pattern: r"\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9X]\b",
+    },
 ];
 
 #[cfg(test)]
@@ -466,6 +711,102 @@ mod tests {
             "010190-11232",    // Latvian control digit wrong
             "44051401358",     // PESEL control digit wrong
             "900101/1238",     // rodné číslo not divisible by 11
+        ] {
+            assert_untouched(input);
+        }
+    }
+
+    #[test]
+    fn rest_of_europe_identifiers_are_redacted() {
+        for (input, expected) in [
+            ("NIF 123456789", "NIF [REDACTED]"),
+            (
+                "n.º de contribuinte: 212 345 672",
+                "n.º de contribuinte: [REDACTED]",
+            ),
+            ("PPS 1234567FA", "PPS [REDACTED]"),
+            ("PPSN 7654321G", "PPSN [REDACTED]"),
+            ("AHV 756.9217.0769.85", "AHV [REDACTED]"),
+            ("AHV 7561234123413", "AHV [REDACTED]"),
+            ("SVNR 1237 010180", "SVNR [REDACTED]"),
+            (
+                "rijksregisternummer 85.07.30-033.28",
+                "rijksregisternummer [REDACTED]",
+            ),
+            ("numéro national 85073003328", "numéro national [REDACTED]"),
+            ("matricule 1893120105732", "matricule [REDACTED]"),
+            ("személyi szám 1 900101 1249", "személyi szám [REDACTED]"),
+            ("TAJ szám: 123 456 788", "TAJ szám: [REDACTED]"),
+            ("ΑΜΚΑ 01019012341", "ΑΜΚΑ [REDACTED]"),
+            ("ΑΦΜ: 090000045", "ΑΦΜ: [REDACTED]"),
+            ("AFM 123456783", "AFM [REDACTED]"),
+            ("ЕГН 6101057509", "ЕГН [REDACTED]"),
+            ("OIB: 69435151530", "OIB: [REDACTED]"),
+            ("EMŠO 0101006500006", "EMŠO [REDACTED]"),
+            ("CNP 1900101123457", "CNP [REDACTED]"),
+            ("T.C. Kimlik No: 10000000146", "T.C. Kimlik No: [REDACTED]"),
+            ("TCKN 12345678950", "TCKN [REDACTED]"),
+            ("NID: I05101999Q", "NID: [REDACTED]"),
+            ("ID card no. 0123456M", "ID card no. [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn world_identifiers_are_redacted() {
+        for (input, expected) in [
+            ("SIN: 046 454 286", "SIN: [REDACTED]"),
+            (
+                "Social Insurance Number 123-456-782",
+                "Social Insurance Number [REDACTED]",
+            ),
+            ("TFN 123 456 782", "TFN [REDACTED]"),
+            ("Tax File No. 876543210", "Tax File No. [REDACTED]"),
+            ("CPF 111.444.777-35", "CPF [REDACTED]"),
+            ("111.444.777-35", "[REDACTED]"),
+            ("cpf: 12345678909", "cpf: [REDACTED]"),
+            ("Aadhaar 9999 4105 7058", "Aadhaar [REDACTED]"),
+            ("UIDAI 234567890124", "UIDAI [REDACTED]"),
+            ("ID 8001015009087", "ID [REDACTED]"),
+            ("身份证 11010519491231002X", "身份证 [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn rest_of_europe_and_world_lookalikes_are_kept() {
+        for input in [
+            "ref 123456789",     // NIF, AFM, SIN, TFN shapes without a keyword
+            "1234567FB",         // PPS second letter changes the check
+            "756.1234.1234.14",  // AHV check digit wrong
+            "1237 010181",       // SVNR check digit wrong
+            "85.07.30-033.29",   // Belgian check wrong
+            "1990010112386",     // Luxembourg Verhoeff digit wrong
+            "19001011248",       // Hungarian check wrong
+            "TAJ 123456789",     // TAJ check wrong
+            "01019012342",       // AMKA Luhn wrong
+            "AFM 123456784",     // AFM check wrong
+            "9001011237",        // EGN check wrong
+            "OIB 12345678904",   // OIB check wrong
+            "0101985501230",     // JMBG check wrong
+            "1900101123458",     // CNP check wrong
+            "TCKN 12345678951",  // TCKN check wrong
+            "NID I05132999Q",    // Albanian day 32
+            "ID card 12345678M", // Maltese id has 7 digits
+            "SIN 123456783",     // SIN Luhn wrong
+            "TFN 876543211",     // TFN check wrong
+            // Not "111.444.777-36": phone-national's own varied-digit pattern independently
+            // matches "111.444.777" (a valid grouped phone shape) even though the CPF check
+            // fails, so that value is redacted by a different, correctly-firing rule. A body
+            // of one repeated digit fails phone-national's variety check too.
+            "222.222.222-99",         // CPF check wrong
+            "cpf 12345678900",        // CPF check wrong
+            "ref 12345678909",        // bare CPF without a keyword
+            "Aadhaar 2345 6789 0125", // Verhoeff wrong
+            "9001015009087",          // South African Luhn wrong
+            "110105199001011233",     // Chinese check wrong
         ] {
             assert_untouched(input);
         }

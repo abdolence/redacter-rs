@@ -2,9 +2,6 @@
 //! digits already extracted with `digits_of` (so each is 0..=9); the callers decide lengths,
 //! date fields and which digit is the check.
 
-// Consumed by the national identifier validators added in the next tasks.
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub(super) fn digits_of(value: &str) -> Vec<u32> {
     value.chars().filter_map(|c| c.to_digit(10)).collect()
 }
