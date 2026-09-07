@@ -130,9 +130,9 @@ impl<'a> DetectFileSystem<'a> {
             }
             #[cfg(not(feature = "clipboard"))]
             {
-                return Err(AppError::UnknownFileSystem {
+                Err(AppError::UnknownFileSystem {
                     file_path: file_path.to_string(),
-                });
+                })
             }
         } else {
             Err(AppError::UnknownFileSystem {
