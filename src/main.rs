@@ -29,10 +29,6 @@ mod common_types;
 
 mod file_converters;
 
-// `ModelId::NerMultilingualHrl` is not yet constructed outside tests, and `ModelFiles::path`/
-// `dir` are not yet called outside tests: `required_models()` returns `Vec::new()` until
-// Task 7, so `command_copy`'s resolve loop never runs. Remove once a real caller lands.
-#[allow(dead_code)]
 mod model_store;
 
 pub fn config_env_var(name: &str) -> Result<String, String> {

@@ -33,6 +33,10 @@ pub struct ModelFiles {
     dir: PathBuf,
 }
 
+// Only the ocr feature reads a resolved model's files today; a `--no-default-features` (or
+// pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a future
+// consumer (e.g. the local-ner redacter) just adds its feature to the list below.
+#[cfg(any(feature = "ocr", test))]
 impl ModelFiles {
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)

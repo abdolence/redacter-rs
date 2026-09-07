@@ -1,8 +1,20 @@
 use std::path::PathBuf;
 
-/// A model the tool can install. `Ocrs` joins when OCR loads through the store.
+/// A model the tool can install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelId {
+    // Only the ocr feature resolves this today; gated so a `--no-default-features` (or
+    // pdf-render-only) build does not carry an unreachable variant.
+    #[cfg(any(feature = "ocr", test))]
+    Ocrs,
+    // Constructed by the local NER redacter once it exists; nothing else asks for it.
+    // `required_models()` (src/redacters/mod.rs) returns `Vec::new()` unconditionally until
+    // Task 7, so this variant is unreferenced by production code under every feature
+    // combination today, not only when "local-ner" is off. A `cfg_attr(not(feature =
+    // "local-ner"), ...)` guard was tried first but left `cargo clippy --all-targets --
+    // -D warnings` (default features, "local-ner" on) failing on this line; verified with
+    // that exact command. Task 7 removes this attribute once it constructs the variant.
+    #[allow(dead_code)]
     NerMultilingualHrl,
 }
 
@@ -67,6 +79,49 @@ pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
 
+#[cfg(any(feature = "ocr", test))]
+static OCRS_FILES: [ModelFile; 2] = [
+    ModelFile {
+        name: "text-detection.rten",
+        url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+        size: 2_510_284,
+        sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+    },
+    ModelFile {
+        name: "text-recognition.rten",
+        url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+        size: 9_716_568,
+        sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
+    },
+];
+
+/// Where earlier versions of the tool looked for the OCR models; still honoured, never verified.
+#[cfg(any(feature = "ocr", test))]
+fn ocrs_legacy_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(share) = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .and_then(|bin| bin.parent())
+            .map(|p| p.to_path_buf())
+    }) {
+        dirs.push(share.join("share").join("ocrs"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".cache").join("ocrs"));
+    }
+    dirs
+}
+
+#[cfg(any(feature = "ocr", test))]
+static OCRS: ModelManifest = ModelManifest {
+    dir_name: "ocrs",
+    needed_by: "OCR",
+    source: "https://ocrs-models.s3-accelerate.amazonaws.com/",
+    license: "ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets",
+    files: &OCRS_FILES,
+    legacy_dirs: ocrs_legacy_dirs,
+};
+
 static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
     dir_name: "distilbert-base-multilingual-cased-ner-hrl",
     needed_by: "The local-ner redacter",
@@ -79,6 +134,8 @@ static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
 
 pub fn manifest(id: ModelId) -> &'static ModelManifest {
     match id {
+        #[cfg(any(feature = "ocr", test))]
+        ModelId::Ocrs => &OCRS,
         ModelId::NerMultilingualHrl => &NER_MULTILINGUAL_HRL,
     }
 }
@@ -86,6 +143,52 @@ pub fn manifest(id: ModelId) -> &'static ModelManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn ocrs_manifest_lists_both_rten_files_with_pinned_sizes() {
+        let manifest = manifest(ModelId::Ocrs);
+        assert_eq!(manifest.dir_name, "ocrs");
+        assert_eq!(manifest.needed_by, "OCR");
+        let files: Vec<(&str, u64)> = manifest.files.iter().map(|f| (f.name, f.size)).collect();
+        assert_eq!(
+            files,
+            [
+                ("text-detection.rten", 2_510_284),
+                ("text-recognition.rten", 9_716_568)
+            ]
+        );
+        for file in manifest.files {
+            assert_eq!(
+                file.url,
+                format!(
+                    "https://ocrs-models.s3-accelerate.amazonaws.com/{}",
+                    file.name
+                )
+            );
+            assert_eq!(file.sha256.len(), 64, "{}", file.name);
+            assert!(
+                file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "{}",
+                file.name
+            );
+        }
+    }
+
+    #[test]
+    fn ocrs_legacy_dirs_are_share_ocrs_and_cache_ocrs() {
+        let dirs = (manifest(ModelId::Ocrs).legacy_dirs)();
+        assert!(
+            dirs.iter()
+                .any(|d| d.ends_with(Path::new("share").join("ocrs"))),
+            "{dirs:?}"
+        );
+        assert!(
+            dirs.iter()
+                .any(|d| d.ends_with(Path::new(".cache").join("ocrs"))),
+            "{dirs:?}"
+        );
+    }
 
     #[test]
     fn ner_manifest_lists_the_three_pinned_files() {

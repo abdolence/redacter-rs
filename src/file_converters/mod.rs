@@ -26,16 +26,15 @@ impl<'a> FileConverters<'a> {
         }
     }
 
-    // `mut` and `app_reporter` are only used inside the feature-gated blocks
-    // below; unused when neither the pdf-render nor ocr feature is enabled.
-    #[cfg_attr(
-        not(any(feature = "pdf-render", feature = "ocr")),
-        allow(unused_mut, unused_variables)
-    )]
+    // `mut self` is only mutated inside the pdf-render/ocr blocks below; unused when neither
+    // feature is enabled. `app_reporter` and `models` are only read inside the ocr block;
+    // unused whenever the ocr feature is off, pdf-render-only builds included.
+    #[cfg_attr(not(any(feature = "pdf-render", feature = "ocr")), allow(unused_mut))]
+    #[cfg_attr(not(feature = "ocr"), allow(unused_variables))]
     pub async fn init(
         mut self,
         app_reporter: &'a AppReporter<'a>,
-        _models: &ModelStore<'_>,
+        models: &ModelStore<'_>,
     ) -> AppResult<Self> {
         #[cfg(feature = "pdf-render")]
         {
@@ -45,8 +44,19 @@ impl<'a> FileConverters<'a> {
         }
         #[cfg(feature = "ocr")]
         {
-            if let Ok(ocr) = ocr_ocrs::Ocrs::new(app_reporter) {
-                self.ocr = Some(Box::new(ocr));
+            use crate::model_store::{ModelId, ModelStoreError};
+            match models.resolve(ModelId::Ocrs).await {
+                Ok(files) => {
+                    if let Ok(ocr) = ocr_ocrs::Ocrs::new(&files, app_reporter) {
+                        self.ocr = Some(Box::new(ocr));
+                    }
+                }
+                Err(
+                    err @ (ModelStoreError::NotInstalled { .. } | ModelStoreError::Declined { .. }),
+                ) => {
+                    app_reporter.report_debug(format!("OCR is unavailable: {err}"));
+                }
+                Err(err) => return Err(err.into()),
             }
         }
 

@@ -114,6 +114,19 @@ mod tests {
     }
 
     #[test]
+    fn ocrs_prompt_matches_the_spec() {
+        let model = manifest(ModelId::Ocrs);
+        let request = DownloadRequest {
+            model,
+            dir: PathBuf::from("/home/you/.cache/redacter/models/ocrs"),
+            files: model.files.iter().collect(),
+            total_bytes: model.files.iter().map(|f| f.size).sum(),
+        };
+        let expected = "OCR needs the model \"ocrs\", which is not installed.\n  files    text-detection.rten, text-recognition.rten (11.7 MiB)\n  from     https://ocrs-models.s3-accelerate.amazonaws.com/\n  license  ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets\n  to       /home/you/.cache/redacter/models/ocrs\nDownload now? [y/N] ";
+        assert_eq!(format_consent_prompt(&request), expected);
+    }
+
+    #[test]
     fn only_y_and_yes_are_consent() {
         for answer in ["y", "Y", "yes", "YES", " yes "] {
             assert!(is_yes(answer), "{answer:?}");

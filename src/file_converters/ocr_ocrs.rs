@@ -1,10 +1,9 @@
 use crate::common_types::TextImageCoords;
-use crate::errors::AppError;
 use crate::file_converters::ocr::Ocr;
+use crate::model_store::ModelFiles;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams, OcrInput, TextItem};
-use std::path::PathBuf;
 
 pub struct Ocrs<'a> {
     ocr_engine: OcrEngine,
@@ -13,16 +12,13 @@ pub struct Ocrs<'a> {
 }
 
 impl<'a> Ocrs<'a> {
-    pub fn new(app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
-        let find_models_dir = Self::find_models_dir()?;
+    pub fn new(models: &ModelFiles, app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
         app_reporter.report(format!(
             "Loading OCR models from {}",
-            find_models_dir.to_string_lossy()
+            models.dir().to_string_lossy()
         ))?;
-        let detection_model_path = find_models_dir.join("text-detection.rten");
-        let rec_model_path = find_models_dir.join("text-recognition.rten");
-        let detection_model = rten::Model::load_file(detection_model_path)?;
-        let recognition_model = rten::Model::load_file(rec_model_path)?;
+        let detection_model = rten::Model::load_file(models.path("text-detection.rten"))?;
+        let recognition_model = rten::Model::load_file(models.path("text-recognition.rten"))?;
         let ocr_engine = OcrEngine::new(OcrEngineParams {
             detection_model: Some(detection_model),
             recognition_model: Some(recognition_model),
@@ -31,28 +27,6 @@ impl<'a> Ocrs<'a> {
         Ok(Self {
             ocr_engine,
             app_reporter,
-        })
-    }
-
-    fn find_models_dir() -> AppResult<std::path::PathBuf> {
-        let executable = std::env::current_exe()?;
-        let current_dir = executable.parent().map(|p| p.to_path_buf());
-
-        vec![
-            current_dir.clone().map(|p| p.join("models").join("ocrs")),
-            current_dir
-                .clone()
-                .and_then(|p| p.parent().map(|p| p.join("share").join("ocrs"))),
-            dirs::home_dir().map(|p| p.join(".cache").join("ocrs")),
-        ]
-        .into_iter()
-        .collect::<Vec<Option<PathBuf>>>()
-        .iter()
-        .flatten()
-        .find(|p| p.exists())
-        .cloned()
-        .ok_or_else(|| AppError::SystemError {
-            message: "Could not find models directory".to_string(),
         })
     }
 }
@@ -104,14 +78,17 @@ impl Ocr for Ocrs<'_> {
 #[allow(unused_imports)]
 mod tests {
     use super::*;
+    use crate::model_store::{ModelId, ModelStore, ModelStoreOptions};
     use console::Term;
 
-    #[test]
+    #[tokio::test]
     #[cfg_attr(not(feature = "ci-ocr"), ignore)]
-    fn test_recognise_png_file() -> AppResult<()> {
+    async fn test_recognise_png_file() -> AppResult<()> {
         let term = Term::stdout();
         let app_reporter = AppReporter::from(&term);
-        let ocrs = Ocrs::new(&app_reporter)?;
+        let store = ModelStore::new(&ModelStoreOptions::default(), &app_reporter)?;
+        let files = store.resolve(ModelId::Ocrs).await?;
+        let ocrs = Ocrs::new(&files, &app_reporter)?;
         let image = image::open("test-fixtures/media/form-example.png")?;
         let text_image_coords = ocrs.image_to_text(image)?;
         assert!(text_image_coords.len() > 10);
