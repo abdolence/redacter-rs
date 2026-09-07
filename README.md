@@ -397,6 +397,11 @@ The `local-rules` redacter runs entirely on your machine. It finds pattern-shape
 with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
 national checks for identifiers) and replaces each match with `[REDACTED]`.
 
+On an image or a PDF, the file first goes through the OCR engine: every word it recognises is passed
+to the redacter (and, with more than one `-d`, to the whole chain in turn) as if it were reading the
+page as text, and every word the chain changes is blacked out on a rasterised copy of the page — the
+output PDF or image carries no text layer for the original words to survive in.
+
 Built-in rule groups, all enabled by default:
 
 | Group | Contents |
@@ -485,6 +490,10 @@ with `[REDACTED]`. It uses the `distilbert-base-multilingual-cased-ner-hrl` mode
 high-resource languages: Arabic, German, English, Spanish, French, Italian, Latvian, Dutch,
 Portuguese and Chinese. Nothing leaves your computer; the only network access is the one-time,
 opt-in download of the model files described in [Models and downloads](#models-and-downloads).
+
+Like `local-rules`, an image or a PDF first goes through the OCR engine: every recognised word is
+passed to the model as if it were reading the page as text, and every word the chain redacts is
+blacked out on a rasterised copy of the page.
 
 ```sh
 # People, organisations and locations, the default

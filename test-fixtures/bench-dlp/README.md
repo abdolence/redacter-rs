@@ -65,6 +65,13 @@ than scanning the directory, so `test-fixtures/documents/customer-form.pdf`
 
 Total corpus size is under 3 KB.
 
+The corpus is text only, on purpose, so this benchmark says nothing about the
+OCR path (images and PDFs read through the OCR engine before redaction): that
+path has its own coverage, the `ci-ocr`-gated
+`command_copy_local_rules_redacts_ocr_documents_test` in
+`src/commands/copy_command.rs`, which redacts `customer-form.pdf` and
+`form-example.png` and OCRs the output back to confirm no PII survives.
+
 ## Running it
 
 Build a release binary, then run the ignored benchmark test with
