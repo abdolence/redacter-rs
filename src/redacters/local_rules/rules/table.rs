@@ -301,4 +301,170 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic("Steuer-ID 86095742719"),
         pattern: r"(?i)\b(?:steuer-?id|steuer-?idnr|idnr|steueridentifikationsnummer|steuerliche identifikationsnummer|tax id)\b.{0,20}?\b([1-9]\d{10})\b",
     },
+    RuleSpec {
+        name: "swedish-personnummer",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("Luhn and date", validators::swedish_personnummer)),
+        keyword: false,
+        description: "Swedish personnummer or samordningsnummer, `YYMMDD-NNNC` or `YYYYMMDD-NNNC`",
+        example: Example::Published("811218-9876"),
+        // The century is two digits: `19811218-9876` is `19` + `811218` + `-9876`.
+        pattern: r"\b(?:18|19|20)?\d{6}[-+]?\d{4}\b",
+    },
+    RuleSpec {
+        name: "norwegian-fodselsnummer",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("two mod-11 control digits and date", validators::norwegian_fodselsnummer)),
+        keyword: false,
+        description: "Norwegian fødselsnummer or D-number, 11 digits `DDMMYY IIIKK`",
+        example: Example::Synthetic("01019012480"),
+        pattern: r"\b\d{6} ?\d{5}\b",
+    },
+    RuleSpec {
+        name: "danish-cpr",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("date", validators::danish_cpr)),
+        keyword: true,
+        description: "Danish CPR number `DDMMYY-SSSS` within 20 characters of `cpr` or `personnummer`",
+        example: Example::Synthetic("CPR-nr. 010203-1234"),
+        pattern: r"(?i)\b(?:cpr|personnummer)\b.{0,20}?\b(\d{6}-?\d{4})\b",
+    },
+    RuleSpec {
+        name: "finnish-hetu",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-31 control character and date", validators::finnish_hetu)),
+        keyword: false,
+        description: "Finnish henkilötunnus `DDMMYYCZZZQ` with its century marker",
+        example: Example::Published("131052-308T"),
+        pattern: r"\b\d{6}[-+A-FU-Y]\d{3}[0-9A-FHJ-NPR-Y]\b",
+    },
+    RuleSpec {
+        name: "icelandic-kennitala",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 control digit and date", validators::icelandic_kennitala)),
+        keyword: false,
+        description: "Icelandic kennitala of a person, `DDMMYY-NNCM`",
+        example: Example::Published("120174-3399"),
+        pattern: r"\b\d{6}-?\d{4}\b",
+    },
+    RuleSpec {
+        name: "baltic-personal-code",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 control digit and date", validators::baltic_personal_code)),
+        keyword: false,
+        description: "Estonian isikukood or Lithuanian asmens kodas, 11 digits `GYYMMDDSSSC`",
+        example: Example::Published("37605030299"),
+        pattern: r"\b[1-6]\d{10}\b",
+    },
+    RuleSpec {
+        name: "latvian-personas-kods",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-11 control digit, date on the pre-2017 form", validators::latvian_personas_kods)),
+        keyword: false,
+        description: "Latvian personas kods, `DDMMYY-CSSSK` or the post-2017 `32SSSS-SSSSK`",
+        example: Example::Published("161175-19997"),
+        pattern: r"\b\d{6}-?\d{5}\b",
+    },
+    RuleSpec {
+        name: "polish-pesel",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("mod-10 control digit and date", validators::polish_pesel)),
+        keyword: false,
+        description: "Polish PESEL, 11 digits with the century encoded in the month",
+        example: Example::Published("44051401359"),
+        pattern: r"\b\d{11}\b",
+    },
+    RuleSpec {
+        name: "czech-slovak-rodne-cislo",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 0,
+        validator: Some(("divisible by 11 and date", validators::czech_slovak_rodne_cislo)),
+        keyword: false,
+        description: "Czech or Slovak rodné číslo, `YYMMDD/SSSC` (10 digits, issued since 1954)",
+        example: Example::Published("780123/3540"),
+        pattern: r"\b\d{6}/?\d{4}\b",
+    },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{assert_redacts, assert_untouched};
+
+    /// Strings no built-in rule may touch: order and epoch numbers, timestamps, versions,
+    /// amounts, dates without a birth keyword, and checksum-failing neighbours.
+    pub(super) const CONTROLS: &[&str] = &[
+        "order 1234567890",
+        "epoch 1700000000",
+        "ref 12345678901",
+        "ts 1725700000004",
+        "id 9876543210987",
+        "build v1.2.3+20240115",
+        "sum 1.234.567,89",
+        "am 03.04.2024",
+        "on 2024-04-30",
+        "GB82 WEST 1234 5698 7654 33",
+        "4111 1111 1111 1112",
+        "uid 123456789012",
+    ];
+
+    #[test]
+    fn controls_are_kept() {
+        for input in CONTROLS {
+            assert_untouched(input);
+        }
+    }
+
+    #[test]
+    fn nordic_baltic_polish_and_czech_identifiers_are_redacted() {
+        for (input, expected) in [
+            ("personnummer 811218-9876", "personnummer [REDACTED]"),
+            ("pnr 198112189876", "pnr [REDACTED]"),
+            (
+                "samordningsnummer 811278-9873",
+                "samordningsnummer [REDACTED]",
+            ),
+            ("fnr 01019012480", "fnr [REDACTED]"),
+            ("d-nummer 41019012393", "d-nummer [REDACTED]"),
+            ("CPR-nr. 010203-1234", "CPR-nr. [REDACTED]"),
+            ("personnummer: 0102031234", "personnummer: [REDACTED]"),
+            ("hetu 131052-308T", "hetu [REDACTED]"),
+            ("hetu 010594Y9021", "hetu [REDACTED]"),
+            ("kennitala 120174-3399", "kennitala [REDACTED]"),
+            ("isikukood 37605030299", "isikukood [REDACTED]"),
+            ("asmens kodas 33309240064", "asmens kodas [REDACTED]"),
+            ("personas kods 161175-19997", "personas kods [REDACTED]"),
+            ("personas kods 320000-12340", "personas kods [REDACTED]"),
+            ("PESEL 44051401359", "PESEL [REDACTED]"),
+            ("rodné číslo 780123/3540", "rodné číslo [REDACTED]"),
+            ("rodné číslo 7801233540", "rodné číslo [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn nordic_baltic_polish_and_czech_lookalikes_are_kept() {
+        for input in [
+            "811218-9877",     // Swedish Luhn fails
+            "8113189875",      // Luhn passes, month 13
+            "15068512334",     // Norwegian second control digit wrong
+            "ref 010203-1235", // Danish shape without a keyword (and no other checksum)
+            "131052-308U",     // Finnish control character wrong
+            "120174-3389",     // Icelandic control digit wrong
+            "39001011238",     // Baltic control digit wrong
+            "010190-11232",    // Latvian control digit wrong
+            "44051401358",     // PESEL control digit wrong
+            "900101/1238",     // rodné číslo not divisible by 11
+        ] {
+            assert_untouched(input);
+        }
+    }
+}

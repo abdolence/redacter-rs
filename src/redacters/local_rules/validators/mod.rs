@@ -4,10 +4,14 @@
 
 mod checksums;
 mod dates;
+mod eastern_europe;
 mod europe;
+mod nordic;
 mod world;
 
+pub use eastern_europe::*;
 pub use europe::*;
+pub use nordic::*;
 pub use world::*;
 
 use checksums::{alphanumerics_of, digits_of, luhn_any_length, mod97};
