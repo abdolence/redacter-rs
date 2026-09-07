@@ -1,12 +1,6 @@
-//! Identifiers of the Americas outside the US.
+//! Brazilian identifiers: the CPF.
 
-use super::checksums::{digits_of, luhn_any_length};
-
-/// Canadian SIN: 9 digits, Luhn.
-pub fn canadian_sin(value: &str) -> bool {
-    let digits = digits_of(value);
-    digits.len() == 9 && luhn_any_length(&digits)
-}
+use super::super::checksums::digits_of;
 
 /// Brazilian CPF `NNN.NNN.NNN-CC`: each check digit is 11 minus the weighted sum of the
 /// digits before it (weights counting down from 10, then from 11) modulo 11, or 0 when
@@ -41,19 +35,6 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(validator(value), *expected, "{value}");
         }
-    }
-
-    #[test]
-    fn canadian_sin_luhn() {
-        check(
-            canadian_sin,
-            &[
-                ("046 454 286", true), // published (Wikipedia)
-                ("123456782", true),
-                ("123-456-782", true),
-                ("123456783", false),
-            ],
-        );
     }
 
     #[test]

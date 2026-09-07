@@ -1,7 +1,7 @@
-//! Identifiers of Africa.
+//! South African identifiers: the South African ID number.
 
-use super::checksums::{digits_of, luhn_any_length};
-use super::dates::{pair, valid_date};
+use super::super::checksums::{digits_of, luhn_any_length};
+use super::super::dates::{pair, valid_date};
 
 /// South African ID `YYMMDDSSSSCAZ`: C is the citizenship (0 or 1), Z a Luhn check digit.
 pub fn south_african_id(value: &str) -> bool {

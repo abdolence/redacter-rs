@@ -4,17 +4,17 @@
 
 mod africa;
 mod americas;
-mod asia_pacific;
+mod asia;
 mod checksums;
 mod dates;
 mod europe;
-mod us;
+mod oceania;
 
 pub use africa::*;
 pub use americas::*;
-pub use asia_pacific::*;
+pub use asia::*;
 pub use europe::*;
-pub use us::*;
+pub use oceania::*;
 
 pub use dates::birth_date;
 #[cfg(test)]

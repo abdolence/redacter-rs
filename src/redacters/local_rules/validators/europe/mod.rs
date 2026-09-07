@@ -1,10 +1,65 @@
-//! European national identifiers, split by sub-region: Western and Southern Europe,
-//! the Nordic and Baltic countries, and Central/Eastern/South-Eastern Europe.
+//! European national identifiers, one module per country (a shared format, such as the
+//! Czech/Slovak rodné číslo, the Estonian/Lithuanian personal code, the former Yugoslav
+//! JMBG or the EU VAT number, gets one module named for what it covers).
 
-mod eastern;
-mod nordic;
-mod western;
+mod albania;
+mod austria;
+mod belgium;
+mod bulgaria;
+mod croatia;
+mod czechia_slovakia;
+mod denmark;
+mod estonia_lithuania;
+mod eu_vat;
+mod finland;
+mod former_yugoslavia;
+mod france;
+mod germany;
+mod greece;
+mod hungary;
+mod iceland;
+mod ireland;
+mod italy;
+mod latvia;
+mod luxembourg;
+mod netherlands;
+mod norway;
+mod poland;
+mod portugal;
+mod romania;
+mod spain;
+mod sweden;
+mod switzerland;
+mod turkey;
+mod united_kingdom;
 
-pub use eastern::*;
-pub use nordic::*;
-pub use western::*;
+pub use albania::*;
+pub use austria::*;
+pub use belgium::*;
+pub use bulgaria::*;
+pub use croatia::*;
+pub use czechia_slovakia::*;
+pub use denmark::*;
+pub use estonia_lithuania::*;
+pub use eu_vat::*;
+pub use finland::*;
+pub use former_yugoslavia::*;
+pub use france::*;
+pub use germany::*;
+pub use greece::*;
+pub use hungary::*;
+pub use iceland::*;
+pub use ireland::*;
+pub use italy::*;
+pub use latvia::*;
+pub use luxembourg::*;
+pub use netherlands::*;
+pub use norway::*;
+pub use poland::*;
+pub use portugal::*;
+pub use romania::*;
+pub use spain::*;
+pub use sweden::*;
+pub use switzerland::*;
+pub use turkey::*;
+pub use united_kingdom::*;

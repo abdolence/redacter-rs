@@ -1,6 +1,6 @@
 //! United States identifiers.
 
-use super::checksums::digits_of;
+use super::super::checksums::digits_of;
 
 /// SSN `AAA-GG-SSSS` with the SSA exclusions, or an ITIN (area 900-999, group in the
 /// issued ranges 70-88, 90-92, 94-99).
