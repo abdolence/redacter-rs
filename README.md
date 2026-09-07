@@ -7,8 +7,10 @@
 Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII)
 across various sources and destinations and utilizing Data Loss Prevention (DLP) capabilities.
 
-The tool doesn't implement DLP itself, but rather relies on external models such as
-Google Cloud Platform's DLP API.
+The tool ships two redacters that run entirely on your machine, a rule-based one with checksum validation and a
+small multilingual named-entity model, and can also delegate to cloud DLP services and LLMs such as Google Cloud
+Platform's DLP API. Local redaction keeps the data on the host and costs nothing per file; the cloud providers
+find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
 
 ![redacter-demo](media/redacter-demo.gif)
 
