@@ -268,6 +268,7 @@ pub fn normalized_box_to_image_coords(
         x2: raw_x1.max(raw_x2),
         y2: raw_y1.max(raw_y2),
         text,
+        line: 0,
     }
 }
 

@@ -72,6 +72,7 @@ mod tests {
             x2: 60.0,
             y2: 50.0,
             text: None,
+            line: 0,
         }];
         redact_rgba_image_at_coords(&mut image, &coords, 0.5);
 
@@ -98,6 +99,7 @@ mod tests {
             x2: 10.0,
             y2: 10.0,
             text: None,
+            line: 0,
         }];
         redact_rgba_image_at_coords(&mut image, &coords, 0.5);
 
@@ -115,6 +117,7 @@ mod tests {
             x2: 200.0,
             y2: 200.0,
             text: None,
+            line: 0,
         }];
         redact_rgba_image_at_coords(&mut image, &coords, 0.1);
 
