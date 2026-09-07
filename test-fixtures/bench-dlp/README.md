@@ -10,8 +10,8 @@ Providers compared: the offline ones (`local-rules`, `local-ner`, and the
 chain `local-rules+local-ner`) against the cloud ones (`gcp-dlp`,
 `gcp-vertex-ai`).
 
-Not part of the `redacter` crate build; this is a throwaway measurement
-harness kept for re-runs after future changes to the redacters.
+Not part of the `redacter` crate build; this is a measurement harness kept
+under `test-fixtures/` for re-runs after future changes to the redacters.
 
 ## What's measured
 
@@ -52,18 +52,15 @@ which is exactly the kind of gap this benchmark is meant to surface.
 
 ## Corpus
 
-Text-only fixtures (no images/PDF, to keep cloud cost and OCR variance out of
-the comparison), copied into `corpus/` from existing test fixtures:
+Seven text-only fixtures (no images/PDF, to keep cloud cost and OCR variance
+out of the comparison), read directly from `test-fixtures/documents/` by
+name -- `run.sh` lists them explicitly rather than scanning the directory, so
+`test-fixtures/documents/customer-form.pdf` (and anything else added there
+later) is never pulled into the corpus:
 
 - `customer-note.txt`, `customer.json`, `customer-profile.html`,
-  `customers.csv` (from `test-fixtures/documents/`)
-- `multilingual.txt`, `false-positives-en.txt`, `dates-en.txt` (from
-  `experiments/spike-ner/fixtures/`)
-
-`experiments/spike-ner/fixtures/long-multi.txt` is generated and gitignored
-there; if it exists on disk it is not included here (it's a synthetic
-6x-repeated file built only to exercise the NER sliding-window path, not a
-distinct detection-quality case).
+  `customers.csv`, `multilingual.txt`, `false-positives-en.txt`,
+  `dates-en.txt`
 
 Total corpus size is under 3 KB.
 

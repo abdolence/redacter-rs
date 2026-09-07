@@ -512,7 +512,7 @@ Cons of local redaction:
   and reports organisations for product names.
 - Locale-bound rules: national formats differ; expect to enable, disable or add rules for your documents.
 
-Measured on the small corpus under `experiments/bench-dlp/` (four fixture documents plus a multilingual sample,
+Measured on the small corpus under `test-fixtures/bench-dlp/` (four fixture documents plus a multilingual sample,
 about 4 KB of text, commit `3c3491e`, Intel i7-10700K, one warm-up then the median of three runs; the cloud
 numbers include network time from Europe):
 
@@ -527,7 +527,7 @@ numbers include network time from Europe):
 The six PII strings the local chain leaves behind are three dates of birth, a passport-style number without a
 keyword next to it and a UK postcode; GCP DLP misses only the postcode and Gemini misses nothing. The two
 non-PII strings the NER model removes are "Apple" in "Apple pie" and the sign-off "The Support Desk", both
-tagged as organisations, which is the over-redaction to expect from entity-based detection. Run `experiments/bench-dlp/run.sh`
+tagged as organisations, which is the over-redaction to expect from entity-based detection. Run `test-fixtures/bench-dlp/run.sh`
 to reproduce the table on your own machine and documents.
 
 In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap

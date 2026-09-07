@@ -1,2 +1,0 @@
-onnx>=1.22
-onnxruntime>=1.29

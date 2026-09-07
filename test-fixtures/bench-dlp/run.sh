@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bench harness: runs the redacter binary against the fixed corpus under
-# experiments/bench-dlp/corpus/ for one or more provider specs and records
-# timings + redacted output under experiments/bench-dlp/results/<provider>/.
+# Bench harness: runs the redacter binary against the fixed corpus of text
+# fixtures under test-fixtures/documents/ for one or more provider specs and
+# records timings + redacted output under test-fixtures/bench-dlp/results/<provider>/.
 #
 # Usage:
 #   ./run.sh <provider-spec>...
@@ -25,9 +25,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORPUS_DIR="$SCRIPT_DIR/corpus"
+DOCUMENTS_DIR="$SCRIPT_DIR/../documents"
 RESULTS_DIR="$SCRIPT_DIR/results"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-latestbit}"
+
+# The seven text-only fixtures that make up the corpus, read directly from
+# test-fixtures/documents/ rather than a copy. This is an explicit list, not a
+# directory listing, so that test-fixtures/documents/customer-form.pdf (and
+# anything else added there later) never becomes part of the corpus -- see
+# README.md for why the corpus is text-only.
+CORPUS_FILE_NAMES=(
+  customer-note.txt
+  customer.json
+  customer-profile.html
+  customers.csv
+  multilingual.txt
+  false-positives-en.txt
+  dates-en.txt
+)
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <provider-spec>... (e.g. local-rules local-ner local-rules+local-ner gcp-dlp gcp-vertex-ai)" >&2
@@ -57,12 +72,28 @@ if [[ -z "$REDACTER_BIN" || ! -x "$REDACTER_BIN" ]]; then
   exit 1
 fi
 
-mapfile -t CORPUS_FILES < <(find "$CORPUS_DIR" -maxdepth 1 -type f | sort)
+CORPUS_FILES=()
+for name in "${CORPUS_FILE_NAMES[@]}"; do
+  path="$DOCUMENTS_DIR/$name"
+  if [[ ! -f "$path" ]]; then
+    echo "error: corpus fixture not found: $path" >&2
+    exit 1
+  fi
+  CORPUS_FILES+=("$path")
+done
 FILE_COUNT=${#CORPUS_FILES[@]}
-if [[ "$FILE_COUNT" -eq 0 ]]; then
-  echo "error: no corpus files found under $CORPUS_DIR" >&2
-  exit 1
-fi
+
+# Whole-corpus passes need a single directory to hand to `redacter cp`. Build
+# one under $RESULTS_DIR (gitignored) out of hard links to the fixtures
+# above -- not symlinks, since the local filesystem walker skips symlinks --
+# so the corpus is read straight from test-fixtures/documents/ without a
+# checked-in copy and without pulling in customer-form.pdf.
+CORPUS_VIEW_DIR="$RESULTS_DIR/corpus-view"
+rm -rf "$CORPUS_VIEW_DIR"
+mkdir -p "$CORPUS_VIEW_DIR"
+for f in "${CORPUS_FILES[@]}"; do
+  ln "$f" "$CORPUS_VIEW_DIR/$(basename "$f")"
+done
 
 is_cloud_spec() {
   case "$1" in
@@ -122,14 +153,14 @@ for spec in "$@"; do
 
   # Warm-up pass (untimed, discarded output) -- loads models / establishes
   # client connections so the timed passes measure steady-state latency.
-  invoke_redacter "$spec warm-up" "$CORPUS_DIR" "$out_root/warmup" "${PROVIDER_FLAGS[@]}"
+  invoke_redacter "$spec warm-up" "$CORPUS_VIEW_DIR" "$out_root/warmup" "${PROVIDER_FLAGS[@]}"
 
   # 3 timed whole-corpus passes.
   whole_ms=()
   for i in 1 2 3; do
     run_dir="$out_root/run$i"
     t0=$(date +%s%N)
-    invoke_redacter "$spec run$i" "$CORPUS_DIR" "$run_dir" "${PROVIDER_FLAGS[@]}"
+    invoke_redacter "$spec run$i" "$CORPUS_VIEW_DIR" "$run_dir" "${PROVIDER_FLAGS[@]}"
     t1=$(date +%s%N)
     ms=$(( (t1 - t0) / 1000000 ))
     whole_ms+=("$ms")

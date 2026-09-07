@@ -635,7 +635,7 @@ mod tests {
     use tempfile::TempDir;
 
     const SAMPLE_DOCUMENTS_DIR: &str = TEST_DOCUMENTS_DIR;
-    const SAMPLE_FILE_NAMES: [&str; 6] = TEST_DOCUMENT_NAMES;
+    const SAMPLE_FILE_NAMES: [&str; 8] = TEST_DOCUMENT_NAMES;
     const SAMPLE_EMAIL: &str = TEST_DOCUMENT_SAMPLE_EMAIL;
     const SAMPLE_PHONE: &str = TEST_DOCUMENT_SAMPLE_PHONE;
 

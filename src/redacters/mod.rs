@@ -599,13 +599,15 @@ pub mod test_support {
     /// information, that exercise a text, table, structured and PDF media type. The
     /// multilingual note is German, French and Spanish text for the local redacters.
     pub const TEST_DOCUMENTS_DIR: &str = "test-fixtures/documents/";
-    pub const TEST_DOCUMENT_NAMES: [&str; 6] = [
+    pub const TEST_DOCUMENT_NAMES: [&str; 8] = [
         "customer-note.txt",
         "customers.csv",
         "customer.json",
         "customer-profile.html",
         "customer-form.pdf",
         "multilingual.txt",
+        "dates-en.txt",
+        "false-positives-en.txt",
     ];
     pub const TEST_DOCUMENT_SAMPLE_EMAIL: &str = "john.smith@example.com";
     pub const TEST_DOCUMENT_SAMPLE_PHONE: &str = "+1 (555) 123-4567";

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Score the results produced by run.sh against truth.json.
 
-Reads experiments/bench-dlp/results/<provider>/{run1,run2,run3,perfile,timings.json}
-and experiments/bench-dlp/truth.json, then prints a markdown table and writes it
-to experiments/bench-dlp/results/summary.md.
+Reads test-fixtures/bench-dlp/results/<provider>/{run1,run2,run3,perfile,timings.json}
+and test-fixtures/bench-dlp/truth.json, then prints a markdown table and writes it
+to test-fixtures/bench-dlp/results/summary.md.
 
 truth.json lists, per file, three sets of exact substrings: "pii" (person
 names, emails, phones, postal addresses, national ids, card/iban numbers,
@@ -114,7 +114,9 @@ def main():
         print(f"error: {RESULTS_DIR} not found -- run ./run.sh first", file=sys.stderr)
         return 1
 
-    provider_dirs = sorted(p for p in RESULTS_DIR.iterdir() if p.is_dir())
+    provider_dirs = sorted(
+        p for p in RESULTS_DIR.iterdir() if p.is_dir() and p.name != "corpus-view"
+    )
     if not provider_dirs:
         print(f"error: no provider results under {RESULTS_DIR} -- run ./run.sh first", file=sys.stderr)
         return 1
