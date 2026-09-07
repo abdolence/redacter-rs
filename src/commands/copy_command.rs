@@ -593,14 +593,14 @@ async fn redact_upload_file<
         Ok((
             TransferFileResult::Copied,
             CopyFileOutcome::CopiedUnredacted {
-                reason: NotRedactedReason::TypeNotSupported,
+                reason: plan_blocked_reason(redact_plan.blocked),
             },
         ))
     } else {
         Ok((
             TransferFileResult::Skipped,
             CopyFileOutcome::Skipped {
-                reason: SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported),
+                reason: SkipReason::NotRedacted(plan_blocked_reason(redact_plan.blocked)),
             },
         ))
     }
@@ -617,6 +617,16 @@ fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> N
             NotRedactedReason::OcrImageFormatNotSupported
         }
         None => NotRedactedReason::NoRedacterApplied,
+    }
+}
+
+/// Why nothing in the plan could redact this file at all (`redact_stream` was never called):
+/// a PDF or image blocked on a missing conversion engine reports that reason, and anything
+/// else defaults to "type not supported" as before.
+fn plan_blocked_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
+    match blocked {
+        Some(blocked) => not_redacted_reason(Some(blocked)),
+        None => NotRedactedReason::TypeNotSupported,
     }
 }
 
