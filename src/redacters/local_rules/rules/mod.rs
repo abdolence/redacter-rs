@@ -849,7 +849,10 @@ mod reference {
 
     #[test]
     fn rules_reference_is_up_to_date() {
-        let committed = std::fs::read_to_string(PATH).unwrap_or_default();
+        // Git may check the file out with CRLF line endings on Windows; compare the text only.
+        let committed = std::fs::read_to_string(PATH)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert!(
             committed == render_rules_reference(),
             "docs/local-rules.md is stale: run `cargo test rules_reference_regenerate -- --ignored` to regenerate"

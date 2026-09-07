@@ -1,3 +1,4 @@
 *.rten filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 test-fixtures/media/*.png -filter -diff -merge -text
+docs/local-rules.md text eol=lf
