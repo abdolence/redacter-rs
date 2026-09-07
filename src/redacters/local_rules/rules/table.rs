@@ -354,8 +354,8 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-31 control character and date", validators::finnish_hetu)),
         keyword: false,
         description: "Finnish henkilötunnus `DDMMYYCZZZQ` with its century marker",
-        // https://dvv.fi/en/personal-identity-code, the "Anna Suomalainen" worked example.
-        example: Example::Published("131052-308T"),
+        // The "Anna Suomalainen" worked example.
+        example: Example::Published("131052-308T", "https://dvv.fi/en/personal-identity-code"),
         pattern: r"\b\d{6}[-+A-FU-Y]\d{3}[0-9A-FHJ-NPR-Y]\b",
     },
     RuleSpec {
@@ -365,8 +365,10 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 control digit and date", validators::icelandic_kennitala)),
         keyword: false,
         description: "Icelandic kennitala of a person, `DDMMYY-NNCM`",
-        // https://en.wikipedia.org/wiki/Icelandic_identification_number
-        example: Example::Published("120174-3399"),
+        example: Example::Published(
+            "120174-3399",
+            "https://en.wikipedia.org/wiki/Icelandic_identification_number",
+        ),
         pattern: r"\b\d{6}-?\d{4}\b",
     },
     RuleSpec {
@@ -376,8 +378,8 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 control digit and date", validators::baltic_personal_code)),
         keyword: false,
         description: "Estonian isikukood or Lithuanian asmens kodas, 11 digits `GYYMMDDSSSC`",
-        // https://et.wikipedia.org/wiki/Isikukood, the worked checksum example.
-        example: Example::Published("37605030299"),
+        // The worked checksum example.
+        example: Example::Published("37605030299", "https://et.wikipedia.org/wiki/Isikukood"),
         pattern: r"\b[1-6]\d{10}\b",
     },
     RuleSpec {
@@ -427,8 +429,11 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-23 check letter", validators::irish_pps)),
         keyword: false,
         description: "Irish PPS number, 7 digits and one or two letters",
-        // https://en.wikipedia.org/wiki/Personal_Public_Service_Number, the worked example.
-        example: Example::Published("1234567FA"),
+        // The worked example.
+        example: Example::Published(
+            "1234567FA",
+            "https://en.wikipedia.org/wiki/Personal_Public_Service_Number",
+        ),
         pattern: r"\b\d{7}[A-W][A-IW]?\b",
     },
     RuleSpec {
@@ -538,9 +543,11 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 check digit and date", validators::jmbg)),
         keyword: false,
         description: "JMBG of Serbia, Bosnia and Herzegovina, Montenegro and North Macedonia, and the Slovenian EMŠO, 13 digits",
-        // https://en.wikipedia.org/wiki/Unique_Master_Citizen_Number, the worked example
-        // (first male baby registered in Slovenia on 1 January 2006).
-        example: Example::Published("0101006500006"),
+        // The worked example (first male baby registered in Slovenia on 1 January 2006).
+        example: Example::Published(
+            "0101006500006",
+            "https://en.wikipedia.org/wiki/Unique_Master_Citizen_Number",
+        ),
         pattern: r"\b\d{13}\b",
     },
     RuleSpec {
@@ -590,8 +597,11 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("Luhn", validators::canadian_sin)),
         keyword: true,
         description: "Canadian SIN, 9 digits within 20 characters of `SIN`, `NAS` or `social insurance`",
-        // https://en.wikipedia.org/wiki/Social_Insurance_Number, "a fictitious, but valid, SIN".
-        example: Example::Published("SIN: 046 454 286"),
+        // "a fictitious, but valid, SIN".
+        example: Example::Published(
+            "SIN: 046 454 286",
+            "https://en.wikipedia.org/wiki/Social_Insurance_Number",
+        ),
         // `SIN` and `NAS` are case-sensitive on purpose: `sin` is an English word.
         pattern: r"\b(?:SIN|NAS|(?i:social insurance(?: number)?|num[ée]ro d'assurance sociale|assurance sociale))\b.{0,20}?\b(\d{3}[ -]?\d{3}[ -]?\d{3})\b",
     },
@@ -673,7 +683,9 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("date fields", validators::uk_driving_licence)),
         keyword: true,
         description: "UK driving licence number (16 characters encoding the birth date) within 20 characters of a driving licence keyword or `DVLA`",
-        example: Example::Published("Driving licence: MORGA657054SM9IJ"),
+        // No citable source gives a full worked number for this format; built from the
+        // published field layout (surname, then date of birth, then initials).
+        example: Example::Synthetic("Driving licence: MORGA657054SM9IJ"),
         pattern: concat!(r"(?i)\b(?:", driving_licence_keywords!(), r"|dvla)\b.{0,20}?\b([A-Z9]{5}\d{6}[A-Z9]{2}\d[A-Z0-9]{2})\b"),
     },
     RuleSpec {
@@ -683,7 +695,11 @@ const RULES: &[RuleSpec] = &[
         validator: None,
         keyword: false,
         description: "UK postcode in upper case, with the letters allowed in each position",
-        example: Example::Published("SW1A 1AA"),
+        // Allocated to Buckingham Palace.
+        example: Example::Published(
+            "SW1A 1AA",
+            "https://en.wikipedia.org/wiki/Postcodes_in_the_United_Kingdom",
+        ),
         // `\b` alone lets the postcode shape match inside an identifier such as
         // `SKU-SW1A1AA-2024` (`-` is not a word character, so `\b` sits right there); the
         // regex crate has no lookaround, so the surrounding non-identifier character is
@@ -712,7 +728,11 @@ const RULES: &[RuleSpec] = &[
         validator: None,
         keyword: false,
         description: "Canadian postal code `A1A 1A1` without the letters Canada Post excludes",
-        example: Example::Published("K1A 0B1"),
+        // Canada Post's own headquarters building in Ottawa.
+        example: Example::Published(
+            "K1A 0B1",
+            "https://en.wikipedia.org/wiki/Postal_codes_in_Canada",
+        ),
         // See `uk-postcode` for why the surrounding character is matched instead of using
         // lookaround, and its limitation for two identifiers separated by a single space.
         pattern: r"(?:^|[^\w/_-])([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d)(?:[^\w/_-]|$)",

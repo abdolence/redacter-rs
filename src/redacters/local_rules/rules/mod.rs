@@ -33,6 +33,34 @@ impl RuleGroup {
     pub fn all() -> BTreeSet<RuleGroup> {
         RuleGroup::value_variants().iter().copied().collect()
     }
+
+    /// One line per group for `--help`-style listings and the rules reference. Read only
+    /// by tests and the generator; this is a binary crate, so without the attribute
+    /// `-D warnings` fails on "method is never used" (same idiom as `RuleSpec::keyword`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn purpose(&self) -> &'static str {
+        match self {
+            RuleGroup::Email => "Email addresses",
+            RuleGroup::Phone => "Phone numbers, international and national forms",
+            RuleGroup::PaymentCard => "Payment card numbers",
+            RuleGroup::Iban => "International bank account numbers",
+            RuleGroup::Network => "IPv4, IPv6 and MAC addresses",
+            RuleGroup::Url => "Credentials embedded in URLs",
+            RuleGroup::Secrets => "API keys, tokens, authorization headers and private keys",
+            RuleGroup::UsIdentifiers => {
+                "US identifiers: SSN and ITIN, passports, driver's licenses"
+            }
+            RuleGroup::EuIdentifiers => {
+                "European identifiers: national personal numbers, VAT numbers, UK driving licences"
+            }
+            RuleGroup::WorldIdentifiers => {
+                "Identifiers of Canada, Australia, Brazil, India, South Africa and China"
+            }
+            RuleGroup::Postcodes => "UK, Irish and Canadian postcodes",
+            RuleGroup::BirthDates => "Dates of birth next to a birth keyword",
+            RuleGroup::Custom => "User-defined regex and dictionary rules, always enabled",
+        }
+    }
 }
 
 impl Display for RuleGroup {
@@ -70,11 +98,11 @@ pub struct RuleSpec {
 
 /// A value the rule redacts, for the reference and for the self-test of the table.
 pub enum Example {
-    /// From a public specification or vendor documentation cited in the row's comment. No
-    /// row in this task's table cites one; the national identifiers added in Tasks 2-4 do,
-    /// so this stays unconstructed by production code until then.
+    /// From a public specification or vendor documentation: the worked value, then the URL
+    /// that publishes it. The rules reference prints the URL beside the value so nobody
+    /// mistakes it for a live identifier without also seeing where it came from.
     #[cfg_attr(not(test), allow(dead_code))]
-    Published(&'static str),
+    Published(&'static str, &'static str),
     /// Made up for the tests (checksums computed from the published formula).
     Synthetic(&'static str),
 }
@@ -83,7 +111,7 @@ impl Example {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn text(&self) -> &'static str {
         match self {
-            Example::Published(text) | Example::Synthetic(text) => text,
+            Example::Published(text, _) | Example::Synthetic(text) => text,
         }
     }
 }
@@ -318,7 +346,10 @@ mod tests {
 
     #[test]
     fn example_text_unwraps_either_variant() {
-        assert_eq!(Example::Published("cited").text(), "cited");
+        assert_eq!(
+            Example::Published("cited", "https://example.com").text(),
+            "cited"
+        );
         assert_eq!(Example::Synthetic("made up").text(), "made up");
     }
 
@@ -724,5 +755,111 @@ mod tests {
             matches!(err, LocalRulesError::DuplicateRule { .. }),
             "{err}"
         );
+    }
+}
+
+/// Renders `docs/local-rules.md`, the user-facing list of every built-in rule, from the
+/// table. Test-only: the file is regenerated on purpose and checked in.
+#[cfg(test)]
+mod reference {
+    use super::table::builtin_rules;
+    use super::{Example, RuleGroup, RuleSpec};
+    use clap::ValueEnum;
+    use std::fmt::Write;
+
+    const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/local-rules.md");
+
+    /// Markdown table cell: pipes and newlines would break the row.
+    fn cell(text: &str) -> String {
+        text.replace('|', "\\|").replace('\n', "\\n")
+    }
+
+    fn example(example: &Example) -> String {
+        match example {
+            Example::Published(text, citation) => {
+                format!("`{}` (published, [source]({citation}))", cell(text))
+            }
+            Example::Synthetic(text) => format!("`{}` (synthetic)", cell(text)),
+        }
+    }
+
+    fn render_rules_reference() -> String {
+        let rules = builtin_rules();
+        let mut out = String::from("# Local rules reference\n\n");
+        out.push_str(
+            "Every built-in rule of the `local-rules` redacter, grouped as the `--local-rules` \
+             and `--local-rules-disable` options see them. A rule with a validator only redacts \
+             values that pass the named check; a rule with a keyword only redacts values within \
+             a few characters of a context word such as `passport` or `NIF`. A synthetic example \
+             is made up for the tests, with check digits computed from the published formula; a \
+             published example is a real worked value from the cited public specification or \
+             vendor documentation. Generated from the rule table by \
+             `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n",
+        );
+        out.push_str("| Group | Rules | Purpose |\n|---|---|---|\n");
+        for group in RuleGroup::value_variants() {
+            let count = if *group == RuleGroup::Custom {
+                "user-defined".to_string()
+            } else {
+                rules
+                    .iter()
+                    .filter(|rule| rule.group == *group)
+                    .count()
+                    .to_string()
+            };
+            writeln!(out, "| `{group}` | {count} | {} |", group.purpose()).unwrap();
+        }
+        for group in RuleGroup::value_variants() {
+            let members: Vec<&RuleSpec> =
+                rules.iter().filter(|rule| rule.group == *group).collect();
+            if members.is_empty() {
+                continue;
+            }
+            write!(
+                out,
+                "\n## `{group}`\n\n{}.\n\n| Rule | Description | Validator | Keyword | Example |\n|---|---|---|---|---|\n",
+                group.purpose()
+            )
+            .unwrap();
+            for rule in members {
+                let validator = rule
+                    .validator
+                    .map_or_else(|| "no".to_string(), |(name, _)| format!("yes ({name})"));
+                let keyword = if rule.keyword { "yes" } else { "no" };
+                writeln!(
+                    out,
+                    "| `{}` | {} | {validator} | {keyword} | {} |",
+                    rule.name,
+                    cell(rule.description),
+                    example(&rule.example)
+                )
+                .unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_group_has_a_purpose() {
+        for group in RuleGroup::value_variants() {
+            let purpose = group.purpose();
+            assert!(!purpose.is_empty() && !purpose.ends_with('.'), "{group}");
+        }
+    }
+
+    #[test]
+    fn rules_reference_is_up_to_date() {
+        let committed = std::fs::read_to_string(PATH).unwrap_or_default();
+        assert!(
+            committed == render_rules_reference(),
+            "docs/local-rules.md is stale: run `cargo test rules_reference_regenerate -- --ignored` to regenerate"
+        );
+    }
+
+    #[test]
+    #[ignore = "writes docs/local-rules.md; run on purpose to regenerate it"]
+    fn rules_reference_regenerate() {
+        std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/docs")).unwrap();
+        std::fs::write(PATH, render_rules_reference()).unwrap();
     }
 }
