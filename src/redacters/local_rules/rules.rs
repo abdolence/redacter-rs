@@ -153,7 +153,7 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::Secrets,
         capture_group: 0,
         validator: None,
-        pattern: r"\bAIza[0-9A-Za-z_-]{35,}\b",
+        pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
     },
     RuleSpec {
         name: "github-token",
@@ -435,7 +435,8 @@ mod tests {
     #[test]
     fn secrets() {
         assert_redacts("key AKIAIOSFODNN7EXAMPLE", "key [REDACTED]");
-        assert_redacts("AIzaSyA-1234567890abcdefghijklmnopqrstuvw", "[REDACTED]");
+        assert_redacts("AIzaSyA1234567890abcdefghijklmnopqrstuv", "[REDACTED]");
+        assert_untouched("AIzaSyA-1234567890abcdefghijklmnopqrstuvw");
         assert_redacts("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "[REDACTED]");
         assert_redacts("xoxb-123456789012-abcdefghij", "[REDACTED]");
         assert_redacts("sk_live_abcdefghijklmnop", "[REDACTED]");
