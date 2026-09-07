@@ -1,11 +1,14 @@
 use super::error::LocalRulesError;
 use super::user_rules::{UserMatcher, UserRule};
-use super::validators::{self, Validator};
+use super::validators::Validator;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
 use clap::ValueEnum;
 use regex::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fmt::Display;
+
+mod table;
+use table::builtin_rules;
 
 /// Switchable families of built-in rules. `Custom` holds user-defined rules and is always
 /// enabled when any are given.
@@ -40,13 +43,46 @@ impl Display for RuleGroup {
 
 /// One built-in rule as declared in the table. `capture_group` 0 redacts the whole match;
 /// a higher number redacts only that group (used where the pattern needs context such as
-/// the word "passport" that must survive).
+/// the word "passport" that must survive). `validator` carries the name of the check for the
+/// rules reference. `description`, `keyword` and `example` feed `docs/local-rules.md`.
 pub struct RuleSpec {
     pub name: &'static str,
     pub group: RuleGroup,
     pub pattern: &'static str,
     pub capture_group: usize,
-    pub validator: Option<Validator>,
+    pub validator: Option<(&'static str, Validator)>,
+    // The three fields below are read only by the tests and the `docs/local-rules.md`
+    // generator; this is a binary crate, so without the attribute `-D warnings` fails on
+    // "field is never read" (same idiom as `file_converters/pdf.rs`).
+    /// True when the pattern only matches next to a context word (`passport`, `bsn`, ...),
+    /// which also means a CSV cell holding the bare value is not found.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub keyword: bool,
+    /// One line, no trailing period: what the rule matches.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub description: &'static str,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub example: Example,
+}
+
+/// A value the rule redacts, for the reference and for the self-test of the table.
+pub enum Example {
+    /// From a public specification or vendor documentation cited in the row's comment. No
+    /// row in this task's table cites one; the national identifiers added in Tasks 2-4 do,
+    /// so this stays unconstructed by production code until then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Published(&'static str),
+    /// Made up for the tests (checksums computed from the published formula).
+    Synthetic(&'static str),
+}
+
+impl Example {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn text(&self) -> &'static str {
+        match self {
+            Example::Published(text) | Example::Synthetic(text) => text,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -68,220 +104,6 @@ pub struct RuleSet {
 
 /// Upper bound on the compiled size of one regex, built-in or user-supplied.
 pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
-
-const RULES: &[RuleSpec] = &[
-    RuleSpec {
-        name: "email",
-        group: RuleGroup::Email,
-        capture_group: 0,
-        validator: None,
-        pattern: r"(?i)\b[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
-    },
-    RuleSpec {
-        name: "phone-international",
-        group: RuleGroup::Phone,
-        capture_group: 1,
-        validator: Some(validators::phone_digits),
-        // The leading `(?:^|[^\w.+-])` is a left boundary `\b` cannot express: without it the
-        // `+` of a semver build suffix (`1.2.3+20240115`) starts a match. Only group 1 is
-        // redacted so the character before the number survives.
-        pattern: r"(?:^|[^\w.+-])((?:\+|00)[1-9]\d{0,2}[ .-]?(?:\(\d{1,4}\)[ .-]?)?\d(?:[ .-]?\d){6,12})\b",
-    },
-    RuleSpec {
-        name: "phone-national",
-        group: RuleGroup::Phone,
-        capture_group: 0,
-        validator: Some(validators::phone_national_digits),
-        // NANP-style area code plus 3-4, or a trunk `0` followed by 2 to 5 groups of digits
-        // (UK `020 7946 0958`, FR `01 23 45 67 89`, DE `030 901820`). The trunk form repeats
-        // one separator rather than mixing them, so a run of dates (`2024-04-30 2024-05-01`)
-        // cannot be joined into one number; the validator enforces the 9-digit minimum that
-        // keeps `03.04.2024` and other 8-digit shapes out. Hyphen-separated groups need three
-        // digits because 3-2-4 with hyphens is the US SSN shape, whose own rule owns it.
-        pattern: r"(?:\(\d{2,4}\)|\b\d{2,4})[ .-]\d{3}[ .-]\d{3,4}\b|\b0\d{1,4}(?:(?: \d{2,8}){1,4}|(?:\.\d{2,8}){1,4}|(?:-\d{3,8}){1,4})\b",
-    },
-    RuleSpec {
-        name: "iban",
-        group: RuleGroup::Iban,
-        capture_group: 0,
-        validator: Some(validators::iban),
-        pattern: r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b",
-    },
-    RuleSpec {
-        name: "payment-card",
-        group: RuleGroup::PaymentCard,
-        capture_group: 0,
-        validator: Some(validators::luhn),
-        // Separators are only allowed where cards actually group them (4-4-4-4 with an
-        // optional 3-digit tail, or Amex 4-6-5); a separator between any two digits made
-        // pairs of dates such as `2024-04-30 2024-05-01` a card whenever Luhn passed. An
-        // unbroken run must start with a card major industry digit, which keeps epoch
-        // milliseconds (13 digits starting with 1 until 2033) out.
-        pattern: r"\b(?:\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}(?:[ -]\d{3})?|\d{4}[ -]\d{6}[ -]\d{5}|[3-6]\d{12,18})\b",
-    },
-    RuleSpec {
-        name: "ipv4",
-        group: RuleGroup::Network,
-        capture_group: 0,
-        validator: Some(validators::ipv4),
-        pattern: r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
-    },
-    RuleSpec {
-        name: "ipv6",
-        group: RuleGroup::Network,
-        capture_group: 0,
-        validator: Some(validators::ipv6),
-        pattern: r"(?i)\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{1,4}\b",
-    },
-    RuleSpec {
-        name: "mac-address",
-        group: RuleGroup::Network,
-        capture_group: 0,
-        validator: None,
-        pattern: r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b",
-    },
-    RuleSpec {
-        name: "url-credentials",
-        group: RuleGroup::Url,
-        capture_group: 1,
-        validator: None,
-        pattern: r"\b[a-zA-Z][a-zA-Z0-9+.-]*://([^\s/@:]+:[^\s/@]+)@",
-    },
-    RuleSpec {
-        name: "aws-access-key",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        pattern: r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
-    },
-    RuleSpec {
-        name: "aws-secret-key",
-        group: RuleGroup::Secrets,
-        capture_group: 1,
-        validator: None,
-        // Tighter than the spec, which asks only for a 40-character value near the word
-        // `secret`: any `secret=<40 chars>` matches base64-looking build hashes and generic
-        // application secrets, so `aws` is required nearby as well.
-        pattern: r#"(?i)aws.{0,20}?secret.{0,20}?[=:'"\s]\s*([A-Za-z0-9/+=]{40})(?:[^A-Za-z0-9/+=]|$)"#,
-    },
-    RuleSpec {
-        name: "gcp-api-key",
-        group: RuleGroup::Secrets,
-        capture_group: 1,
-        validator: None,
-        pattern: r"\b(AIza[0-9A-Za-z_-]{35})(?:[^0-9A-Za-z_-]|$)",
-    },
-    RuleSpec {
-        name: "github-token",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        pattern: r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b",
-    },
-    RuleSpec {
-        name: "slack-token",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        pattern: r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b",
-    },
-    RuleSpec {
-        name: "stripe-key",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        pattern: r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b",
-    },
-    RuleSpec {
-        name: "jwt",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        pattern: r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b",
-    },
-    RuleSpec {
-        name: "authorization-header",
-        group: RuleGroup::Secrets,
-        capture_group: 1,
-        validator: None,
-        pattern: r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]+)",
-    },
-    RuleSpec {
-        name: "private-key-block",
-        group: RuleGroup::Secrets,
-        capture_group: 0,
-        validator: None,
-        // `BLOCK` is optional so armoured PGP keys (`BEGIN PGP PRIVATE KEY BLOCK`) match too.
-        pattern: r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----",
-    },
-    RuleSpec {
-        name: "us-ssn",
-        group: RuleGroup::UsIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::us_ssn_or_itin),
-        pattern: r"\b\d{3}-\d{2}-\d{4}\b",
-    },
-    RuleSpec {
-        name: "us-passport",
-        group: RuleGroup::UsIdentifiers,
-        capture_group: 1,
-        validator: None,
-        pattern: r"(?i)\bpassport\b.{0,20}?\b([A-Z]?\d{8,9})\b",
-    },
-    RuleSpec {
-        name: "eu-vat",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::eu_vat),
-        pattern: r"\b(?:DE\d{9}|FR[A-Z0-9]{2}\d{9}|IT\d{11}|ES[A-Z0-9]\d{7}[A-Z0-9]|NL\d{9}B\d{2}|BE0\d{9}|GB\d{9}(?:\d{3})?)\b",
-    },
-    RuleSpec {
-        name: "spanish-dni-nie",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::spanish_dni_nie),
-        pattern: r"\b(?:\d{8}|[XYZ]\d{7})[A-Z]\b",
-    },
-    RuleSpec {
-        name: "italian-codice-fiscale",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::italian_codice_fiscale),
-        pattern: r"\b[A-Z]{6}\d{2}[A-EHLMPRST]\d{2}[A-Z]\d{3}[A-Z]\b",
-    },
-    RuleSpec {
-        name: "dutch-bsn",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 1,
-        validator: Some(validators::dutch_bsn),
-        pattern: r"(?i)\b(?:bsn|burgerservicenummer|sofinummer|sofi-nummer)\b.{0,20}?\b(\d{9})\b",
-    },
-    RuleSpec {
-        name: "uk-nino",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::uk_nino),
-        pattern: r"\b[A-Z]{2} ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b",
-    },
-    RuleSpec {
-        name: "french-nir",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
-        validator: Some(validators::french_nir),
-        pattern: r"\b[12] ?\d{2} ?(?:0[1-9]|1[0-2]|20) ?(?:\d{2}|2[AB]) ?\d{3} ?\d{3} ?\d{2}\b",
-    },
-    RuleSpec {
-        name: "german-steuer-id",
-        group: RuleGroup::EuIdentifiers,
-        capture_group: 1,
-        validator: Some(validators::german_steuer_id),
-        pattern: r"(?i)\b(?:steuer-?id|steuer-?idnr|idnr|steueridentifikationsnummer|steuerliche identifikationsnummer|tax id)\b.{0,20}?\b([1-9]\d{10})\b",
-    },
-];
-
-pub fn builtin_rules() -> &'static [RuleSpec] {
-    RULES
-}
 
 fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, LocalRulesError> {
     RegexBuilder::new(pattern)
@@ -322,7 +144,7 @@ impl RuleSet {
                 name: RuleName::new(spec.name),
                 regex: compile(spec.name, spec.pattern, false)?,
                 capture_group: spec.capture_group,
-                validator: spec.validator,
+                validator: spec.validator.map(|(_, validate)| validate),
                 whole_word: false,
             });
         }
@@ -414,23 +236,87 @@ impl RuleSet {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(super) mod test_support {
+    use super::{compile, RuleGroup, RuleSet, RuleSpec};
+    use std::sync::OnceLock;
 
-    fn all_rules() -> RuleSet {
-        RuleSet::new(&RuleGroup::all()).unwrap()
+    /// Every built-in group, compiled once per test binary: the table is large and the
+    /// per-rule tests below call this hundreds of times.
+    pub(super) fn all_rules() -> &'static RuleSet {
+        static ALL: OnceLock<RuleSet> = OnceLock::new();
+        ALL.get_or_init(|| RuleSet::new(&RuleGroup::all()).unwrap())
     }
 
-    fn redact_all(text: &str) -> String {
+    pub(super) fn redact_all(text: &str) -> String {
         all_rules().redact(text).0
     }
 
-    fn assert_redacts(text: &str, expected: &str) {
+    pub(super) fn assert_redacts(text: &str, expected: &str) {
         assert_eq!(redact_all(text), expected, "input: {text}");
     }
 
-    fn assert_untouched(text: &str) {
+    pub(super) fn assert_untouched(text: &str) {
         assert_eq!(redact_all(text), text, "input: {text}");
+    }
+
+    /// Runs one rule on its own: its regex, its capture group and its validator, without
+    /// the other rules and without the merge.
+    pub(super) fn rule_matches(spec: &RuleSpec, text: &str) -> bool {
+        let regex = compile(spec.name, spec.pattern, false).unwrap();
+        let matched_any = regex.captures_iter(text).any(|captures| {
+            captures.get(spec.capture_group).is_some_and(|matched| {
+                !matched.is_empty()
+                    && spec
+                        .validator
+                        .is_none_or(|(_, validate)| validate(matched.as_str()))
+            })
+        });
+        matched_any
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+
+    #[test]
+    fn every_rule_example_is_matched_by_its_own_rule() {
+        for spec in builtin_rules() {
+            assert!(
+                rule_matches(spec, spec.example.text()),
+                "{}: {:?}",
+                spec.name,
+                spec.example.text()
+            );
+            assert!(
+                !spec.description.is_empty() && !spec.description.ends_with('.'),
+                "{}: description is one line without a trailing period",
+                spec.name
+            );
+            if spec.keyword {
+                // A keyword rule only matches next to its context word (`passport`, `bsn`,
+                // ...); the bare captured value on its own must not match, which is also
+                // why a CSV cell holding just the value is missed.
+                let regex = compile(spec.name, spec.pattern, false).unwrap();
+                let value = regex
+                    .captures(spec.example.text())
+                    .and_then(|captures| captures.get(spec.capture_group))
+                    .unwrap()
+                    .as_str();
+                assert!(
+                    !rule_matches(spec, value),
+                    "{}: matched {value:?} without its keyword",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn example_text_unwraps_either_variant() {
+        assert_eq!(Example::Published("cited").text(), "cited");
+        assert_eq!(Example::Synthetic("made up").text(), "made up");
     }
 
     #[test]
