@@ -1,5 +1,6 @@
 use super::error::LocalRulesError;
 use super::spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
+use super::user_rules::{UserMatcher, UserRule};
 use super::validators::{self, Validator};
 use clap::ValueEnum;
 use regex::{Regex, RegexBuilder};
@@ -56,6 +57,7 @@ pub struct RuleSpec {
     pub validator: Option<Validator>,
 }
 
+#[derive(Debug)]
 struct CompiledRule {
     name: RuleName,
     regex: Regex,
@@ -63,6 +65,7 @@ struct CompiledRule {
     validator: Option<Validator>,
 }
 
+#[derive(Debug)]
 pub struct RuleSet {
     rules: Vec<CompiledRule>,
 }
@@ -299,6 +302,42 @@ impl RuleSet {
         self.rules.is_empty()
     }
 
+    /// Built-in rules of the enabled groups followed by the user's rules. Names must be
+    /// unique across both sets so reports are unambiguous.
+    pub fn with_user_rules(
+        groups: &BTreeSet<RuleGroup>,
+        user_rules: &[UserRule],
+    ) -> Result<Self, LocalRulesError> {
+        let mut set = Self::new(groups)?;
+        let mut names: BTreeSet<RuleName> = set.rules.iter().map(|r| r.name.clone()).collect();
+        for rule in user_rules {
+            if !names.insert(rule.name.clone()) {
+                return Err(LocalRulesError::DuplicateRule {
+                    name: rule.name.to_string(),
+                });
+            }
+            let pattern = match &rule.matcher {
+                UserMatcher::Regex(pattern) => pattern.clone(),
+                UserMatcher::Dictionary(words) => {
+                    if words.is_empty() {
+                        return Err(LocalRulesError::EmptyDictionary {
+                            name: rule.name.to_string(),
+                        });
+                    }
+                    let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
+                    format!(r"\b(?:{})\b", escaped.join("|"))
+                }
+            };
+            set.rules.push(CompiledRule {
+                name: rule.name.clone(),
+                regex: compile(rule.name.as_str(), &pattern, rule.case_insensitive)?,
+                capture_group: 0,
+                validator: None,
+            });
+        }
+        Ok(set)
+    }
+
     /// Every validated match of every rule, merged so no two findings overlap.
     pub fn find(&self, text: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
@@ -532,6 +571,73 @@ mod tests {
         assert_redacts(
             "<a href=\"mailto:a@b.io\">",
             "<a href=\"mailto:[REDACTED]\">",
+        );
+    }
+
+    #[test]
+    fn user_regex_rule_is_applied() {
+        let rule = UserRule {
+            name: RuleName::new("employee-id"),
+            matcher: UserMatcher::Regex(r"\bEMP-\d{6}\b".to_string()),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        let (redacted, findings) = rules.redact("badge EMP-123456 issued");
+        assert_eq!(redacted, "badge [REDACTED] issued");
+        assert_eq!(findings[0].rule.as_str(), "employee-id");
+    }
+
+    #[test]
+    fn user_dictionary_rule_matches_whole_words_case_insensitively() {
+        let rule = UserRule {
+            name: RuleName::new("codenames"),
+            matcher: UserMatcher::Dictionary(vec!["Bluebird".to_string(), "Kestrel".to_string()]),
+            case_insensitive: true,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(
+            rules.redact("project BLUEBIRD and kestrel").0,
+            "project [REDACTED] and [REDACTED]"
+        );
+        assert_eq!(rules.redact("bluebirds fly").0, "bluebirds fly");
+    }
+
+    #[test]
+    fn user_dictionary_words_are_escaped() {
+        let rule = UserRule {
+            name: RuleName::new("special"),
+            matcher: UserMatcher::Dictionary(vec!["a.b".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(rules.redact("a.b axb").0, "[REDACTED] axb");
+    }
+
+    #[test]
+    fn user_rule_with_invalid_regex_is_rejected() {
+        let rule = UserRule {
+            name: RuleName::new("broken"),
+            matcher: UserMatcher::Regex("(".to_string()),
+            case_insensitive: false,
+        };
+        let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap_err();
+        assert!(
+            matches!(err, LocalRulesError::InvalidRegex { ref rule, .. } if rule == "broken"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn user_rule_named_like_a_builtin_is_rejected() {
+        let rule = UserRule {
+            name: RuleName::new("email"),
+            matcher: UserMatcher::Regex("x".to_string()),
+            case_insensitive: false,
+        };
+        let err = RuleSet::with_user_rules(&RuleGroup::all(), &[rule]).unwrap_err();
+        assert!(
+            matches!(err, LocalRulesError::DuplicateRule { .. }),
+            "{err}"
         );
     }
 }
