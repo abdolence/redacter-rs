@@ -2,8 +2,9 @@ use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
-    GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, OpenAiLlmApiKey, OpenAiModelName,
-    RedacterBaseOptions, RedacterOptions, RedacterProviderOptions,
+    GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
+    OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
+    RedacterProviderOptions, RuleGroup, UserRule,
 };
 use clap::*;
 use std::fmt::Display;
@@ -284,6 +285,34 @@ pub struct RedacterArgs {
         help = "Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled"
     )]
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Rule groups enabled for the local-rules redacter, comma separated. Default is every group"
+    )]
+    pub local_rules: Option<Vec<RuleGroup>>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Rule groups disabled for the local-rules redacter, comma separated. Applied after --local-rules"
+    )]
+    pub local_rules_disable: Option<Vec<RuleGroup>>,
+
+    #[arg(
+        long,
+        help = "User-defined regex rule for the local-rules redacter in the form name=regex. Can be repeated"
+    )]
+    pub local_rule: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        help = "JSON file with user-defined regex and dictionary rules for the local-rules redacter. Can be repeated"
+    )]
+    pub local_rules_file: Option<Vec<std::path::PathBuf>>,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -406,12 +435,25 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         },
                     ))
                 }
-                RedacterType::LocalRules => Ok(RedacterProviderOptions::LocalRules(
-                    crate::redacters::LocalRulesRedacterOptions {
-                        groups: crate::redacters::RuleGroup::all(),
-                        user_rules: Vec::new(),
-                    },
-                )),
+                RedacterType::LocalRules => {
+                    let mut groups = match &self.local_rules {
+                        Some(enabled) => enabled.iter().copied().collect(),
+                        None => RuleGroup::all(),
+                    };
+                    for group in self.local_rules_disable.iter().flatten() {
+                        groups.remove(group);
+                    }
+                    let mut user_rules: Vec<UserRule> = Vec::new();
+                    for inline in self.local_rule.iter().flatten() {
+                        user_rules.push(crate::redacters::parse_inline_rule(inline)?);
+                    }
+                    for path in self.local_rules_file.iter().flatten() {
+                        user_rules.extend(crate::redacters::load_rules_file(path)?);
+                    }
+                    Ok(RedacterProviderOptions::LocalRules(
+                        LocalRulesRedacterOptions { groups, user_rules },
+                    ))
+                }
             }?;
             provider_options.push(redacter_options);
         }
@@ -462,5 +504,96 @@ mod tests {
                 .expect("every redacter type is selectable on the command line");
             assert_eq!(redacter_type.to_string(), cli_value.get_name());
         }
+    }
+
+    use crate::redacters::{RedacterProviderOptions, RuleGroup, UserMatcher};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        redacter: RedacterArgs,
+    }
+
+    fn local_rules_options(
+        args: &[&str],
+    ) -> Result<crate::redacters::LocalRulesRedacterOptions, AppError> {
+        let cli = TestCli::try_parse_from([&["redacter", "-d", "local-rules"], args].concat())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let options: RedacterOptions = cli.redacter.try_into()?;
+        match options.provider_options.into_iter().next() {
+            Some(RedacterProviderOptions::LocalRules(options)) => Ok(options),
+            other => panic!("expected local rules options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_rules_default_to_every_group() {
+        let options = local_rules_options(&[]).unwrap();
+        assert_eq!(options.groups, RuleGroup::all());
+        assert!(options.user_rules.is_empty());
+    }
+
+    #[test]
+    fn local_rules_enable_list_restricts_the_groups() {
+        let options = local_rules_options(&["--local-rules", "email,phone"]).unwrap();
+        assert_eq!(
+            options.groups.into_iter().collect::<Vec<_>>(),
+            vec![RuleGroup::Email, RuleGroup::Phone]
+        );
+    }
+
+    #[test]
+    fn local_rules_disable_wins_over_enable() {
+        let options = local_rules_options(&[
+            "--local-rules",
+            "email,phone",
+            "--local-rules-disable",
+            "phone",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.groups.into_iter().collect::<Vec<_>>(),
+            vec![RuleGroup::Email]
+        );
+    }
+
+    #[test]
+    fn local_rules_unknown_group_is_rejected_by_clap() {
+        let result =
+            TestCli::try_parse_from(["redacter", "-d", "local-rules", "--local-rules", "emails"]);
+        let err = result.err().expect("unknown group must fail");
+        assert!(err.to_string().contains("emails"), "{err}");
+    }
+
+    #[test]
+    fn local_rules_inline_rule_is_parsed() {
+        let options = local_rules_options(&["--local-rule", "employee-id=EMP-[0-9]{6}"]).unwrap();
+        assert_eq!(options.user_rules.len(), 1);
+        assert_eq!(options.user_rules[0].name.as_str(), "employee-id");
+        assert_eq!(
+            options.user_rules[0].matcher,
+            UserMatcher::Regex("EMP-[0-9]{6}".to_string())
+        );
+    }
+
+    #[test]
+    fn local_rules_bad_inline_rule_is_a_config_error() {
+        let err = local_rules_options(&["--local-rule", "no-equals"]).unwrap_err();
+        assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+    }
+
+    #[test]
+    fn local_rules_file_rules_are_loaded() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"rules":[{"name":"codenames","dictionary":["Bluebird"]}]}"#,
+        )
+        .unwrap();
+        let path = file.path().to_string_lossy().to_string();
+        let options = local_rules_options(&["--local-rules-file", &path]).unwrap();
+        assert_eq!(options.user_rules.len(), 1);
+        assert_eq!(options.user_rules[0].name.as_str(), "codenames");
     }
 }

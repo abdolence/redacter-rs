@@ -1,14 +1,17 @@
 mod error;
 mod rules;
 mod spans;
-#[allow(dead_code)] // parsing helpers consumed by the CLI, wired in Task 6
 mod user_rules;
 mod validators;
 
 pub use error::LocalRulesError;
 pub use rules::{RuleGroup, RuleSet};
-#[allow(unused_imports)] // consumed by the CLI, wired in Task 6
-pub use user_rules::{load_rules_file, parse_inline_rule, UserMatcher, UserRule};
+pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
+// Only referenced by the CLI's test suite (`args.rs`), which asserts the exact matcher a
+// parsed rule produced; production code only ever constructs `UserRule` through
+// `parse_inline_rule`/`load_rules_file` and never names `UserMatcher` itself.
+#[cfg(test)]
+pub use user_rules::UserMatcher;
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
