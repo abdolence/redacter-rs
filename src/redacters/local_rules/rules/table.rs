@@ -308,7 +308,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("Luhn and date", validators::swedish_personnummer)),
         keyword: false,
         description: "Swedish personnummer or samordningsnummer, `YYMMDD-NNNC` or `YYYYMMDD-NNNC`",
-        example: Example::Published("811218-9876"),
+        example: Example::Synthetic("811218-9876"),
         // The century is two digits: `19811218-9876` is `19` + `811218` + `-9876`.
         pattern: r"\b(?:18|19|20)?\d{6}[-+]?\d{4}\b",
     },
@@ -339,6 +339,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-31 control character and date", validators::finnish_hetu)),
         keyword: false,
         description: "Finnish henkilötunnus `DDMMYYCZZZQ` with its century marker",
+        // https://dvv.fi/en/personal-identity-code, the "Anna Suomalainen" worked example.
         example: Example::Published("131052-308T"),
         pattern: r"\b\d{6}[-+A-FU-Y]\d{3}[0-9A-FHJ-NPR-Y]\b",
     },
@@ -349,6 +350,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 control digit and date", validators::icelandic_kennitala)),
         keyword: false,
         description: "Icelandic kennitala of a person, `DDMMYY-NNCM`",
+        // https://en.wikipedia.org/wiki/Icelandic_identification_number
         example: Example::Published("120174-3399"),
         pattern: r"\b\d{6}-?\d{4}\b",
     },
@@ -359,6 +361,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 control digit and date", validators::baltic_personal_code)),
         keyword: false,
         description: "Estonian isikukood or Lithuanian asmens kodas, 11 digits `GYYMMDDSSSC`",
+        // https://et.wikipedia.org/wiki/Isikukood, the worked checksum example.
         example: Example::Published("37605030299"),
         pattern: r"\b[1-6]\d{10}\b",
     },
@@ -369,7 +372,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-11 control digit, date on the pre-2017 form", validators::latvian_personas_kods)),
         keyword: false,
         description: "Latvian personas kods, `DDMMYY-CSSSK` or the post-2017 `32SSSS-SSSSK`",
-        example: Example::Published("161175-19997"),
+        example: Example::Synthetic("161175-19997"),
         pattern: r"\b\d{6}-?\d{5}\b",
     },
     RuleSpec {
@@ -379,7 +382,7 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("mod-10 control digit and date", validators::polish_pesel)),
         keyword: false,
         description: "Polish PESEL, 11 digits with the century encoded in the month",
-        example: Example::Published("44051401359"),
+        example: Example::Synthetic("44051401359"),
         pattern: r"\b\d{11}\b",
     },
     RuleSpec {
@@ -389,14 +392,14 @@ const RULES: &[RuleSpec] = &[
         validator: Some(("divisible by 11 and date", validators::czech_slovak_rodne_cislo)),
         keyword: false,
         description: "Czech or Slovak rodné číslo, `YYMMDD/SSSC` (10 digits, issued since 1954)",
-        example: Example::Published("780123/3540"),
+        example: Example::Synthetic("780123/3540"),
         pattern: r"\b\d{6}/?\d{4}\b",
     },
 ];
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{assert_redacts, assert_untouched};
+    use super::super::test_support::{all_rules, assert_redacts, assert_untouched};
 
     /// Strings no built-in rule may touch: order and epoch numbers, timestamps, versions,
     /// amounts, dates without a birth keyword, and checksum-failing neighbours.
@@ -466,5 +469,21 @@ mod tests {
         ] {
             assert_untouched(input);
         }
+    }
+
+    #[test]
+    fn same_span_matched_by_two_rules_redacts_once_and_deterministically() {
+        // "010101-0189" is a 10-digit shape that is simultaneously a valid Swedish
+        // personnummer (Luhn over all 10 digits, month 01, day 01) and a valid Icelandic
+        // kennitala (day 01, month 01, year 1901, mod-11 control digit 8): both rules'
+        // patterns match the identical span, so the merge must keep exactly one finding,
+        // and which rule's name wins must not change between runs.
+        let text = "id 010101-0189 done";
+        let (first_text, first_findings) = all_rules().redact(text);
+        let (second_text, second_findings) = all_rules().redact(text);
+        assert_eq!(first_text, "id [REDACTED] done");
+        assert_eq!(first_findings.len(), 1, "{first_findings:?}");
+        assert_eq!(first_text, second_text);
+        assert_eq!(first_findings, second_findings);
     }
 }
