@@ -103,6 +103,13 @@ pub async fn download_file(
             .map_err(|source| io_error(part.path(), source))?;
         written += chunk.len() as u64;
         progress.inc(chunk.len() as u64);
+        if written > file.size {
+            return Err(ModelStoreError::SizeMismatch {
+                location: file.url.to_string(),
+                expected: file.size,
+                actual: written,
+            });
+        }
     }
     writer
         .flush()
@@ -314,6 +321,34 @@ mod tests {
                 );
             }
             other => panic!("expected ChecksumMismatch, got {other}"),
+        }
+        assert!(!dir.path().join("weights.bin").exists());
+        assert!(part_files(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_download_aborts_as_soon_as_it_exceeds_the_manifest_size() {
+        let dir = TempDir::new().unwrap();
+        // 20 bytes in 4-byte chunks against an 11-byte manifest: the third chunk (12 bytes
+        // written) is where an early abort must stop, well before the fourth and fifth.
+        let fetcher = FakeFetcher::new(&[(
+            "https://example.invalid/weights.bin",
+            b"01234567890123456789",
+        )]);
+        let err = download_file(&fetcher, &TEST_FILES[0], dir.path(), &ProgressBar::hidden())
+            .await
+            .unwrap_err();
+        match err {
+            ModelStoreError::SizeMismatch {
+                location,
+                expected,
+                actual,
+            } => {
+                assert_eq!(location, "https://example.invalid/weights.bin");
+                assert_eq!(expected, 11);
+                assert_eq!(actual, 12, "must abort at the first chunk that overshoots");
+            }
+            other => panic!("expected SizeMismatch, got {other}"),
         }
         assert!(!dir.path().join("weights.bin").exists());
         assert!(part_files(dir.path()).is_empty());

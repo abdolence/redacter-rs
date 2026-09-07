@@ -6,10 +6,10 @@ mod download;
 mod error;
 mod manifest;
 
-pub use consent::{ConsentSource, DownloadRequest};
-// `ByteStream` and `HttpFetcher` join this list in Task 3, with the `ModelStore::new` that
-// builds the production fetcher; re-exporting them before anything names them is a warning.
-pub use download::{download_file, Fetcher};
+pub use consent::{is_interactive, ConsentSource, DownloadRequest, TerminalConsent};
+// `ByteStream` joins this list once something outside `download.rs` names it (Task 4's OCR
+// migration); re-exporting it before then is a warning, same reasoning as the note it replaces.
+pub use download::{download_file, Fetcher, HttpFetcher};
 pub use error::ModelStoreError;
 pub use manifest::{manifest, ModelFile, ModelId, ModelManifest};
 
@@ -47,6 +47,55 @@ impl ModelFiles {
 /// order. Injected so tests can point it at a temporary directory.
 pub type ManualDirs = Box<dyn Fn(&ModelManifest) -> Vec<PathBuf> + Send + Sync>;
 
+/// The `--download-models` flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DownloadModels {
+    Ask,
+    Yes,
+    No,
+}
+
+/// What the command line decided about models. `Default` is the offline choice tests and
+/// library callers want: never download, use the platform cache directory.
+#[derive(Debug, Clone)]
+pub struct ModelStoreOptions {
+    pub download: DownloadModels,
+    pub models_dir: Option<PathBuf>,
+}
+
+impl Default for ModelStoreOptions {
+    fn default() -> Self {
+        Self {
+            download: DownloadModels::No,
+            models_dir: None,
+        }
+    }
+}
+
+/// `ask` can only be honoured on a terminal; anywhere else it means `no`.
+pub fn resolve_policy(download: DownloadModels, interactive: bool) -> DownloadPolicy {
+    match download {
+        DownloadModels::Yes => DownloadPolicy::Yes,
+        DownloadModels::No => DownloadPolicy::No,
+        DownloadModels::Ask if interactive => DownloadPolicy::Ask,
+        DownloadModels::Ask => DownloadPolicy::No,
+    }
+}
+
+/// `<exe dir>/models/<dir_name>` for models bundled next to the binary, then the model's own
+/// legacy directories. None of these is verified.
+pub fn default_manual_dirs(manifest: &ModelManifest) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        dirs.push(exe_dir.join("models").join(manifest.dir_name));
+    }
+    dirs.extend((manifest.legacy_dirs)());
+    dirs
+}
+
 pub struct ModelStore<'a> {
     root: PathBuf,
     manual_dirs: ManualDirs,
@@ -66,6 +115,28 @@ enum FileState {
 }
 
 impl<'a> ModelStore<'a> {
+    /// The production store: platform cache root unless overridden, terminal consent, reqwest.
+    pub fn new(
+        options: &ModelStoreOptions,
+        reporter: &'a AppReporter<'a>,
+    ) -> Result<Self, ModelStoreError> {
+        let root = match &options.models_dir {
+            Some(dir) => dir.clone(),
+            None => dirs::cache_dir()
+                .map(|cache| cache.join("redacter").join("models"))
+                .ok_or(ModelStoreError::NoCacheDir)?,
+        };
+        let policy = resolve_policy(options.download, is_interactive());
+        Ok(Self::with_parts(
+            root,
+            Box::new(default_manual_dirs),
+            policy,
+            Box::new(TerminalConsent),
+            Box::new(HttpFetcher::new()?),
+            reporter,
+        ))
+    }
+
     /// Builds a store from its parts. Production code uses `ModelStore::new`; tests inject a
     /// temporary root, a fixed consent answer and canned downloads.
     pub fn with_parts(
@@ -183,8 +254,9 @@ impl<'a> ModelStore<'a> {
         }
         for file in &request.files {
             let bar = progress_bar(file)?;
-            download_file(self.fetcher.as_ref(), file, dir, &bar).await?;
+            let result = download_file(self.fetcher.as_ref(), file, dir, &bar).await;
             bar.finish_and_clear();
+            result?;
             self.reporter
                 .report(format!("Downloaded {} to {}", file.name, dir.display()))
                 .map_err(|err| ModelStoreError::Report {
@@ -555,5 +627,66 @@ mod tests {
             2,
             "the second resolve must not fetch"
         );
+    }
+
+    #[test]
+    fn ask_degrades_to_no_without_a_terminal() {
+        assert_eq!(
+            resolve_policy(DownloadModels::Ask, true),
+            DownloadPolicy::Ask
+        );
+        assert_eq!(
+            resolve_policy(DownloadModels::Ask, false),
+            DownloadPolicy::No
+        );
+        assert_eq!(
+            resolve_policy(DownloadModels::Yes, false),
+            DownloadPolicy::Yes
+        );
+        assert_eq!(resolve_policy(DownloadModels::No, true), DownloadPolicy::No);
+    }
+
+    #[test]
+    fn default_options_are_offline() {
+        let options = ModelStoreOptions::default();
+        assert_eq!(options.download, DownloadModels::No);
+        assert_eq!(options.models_dir, None);
+    }
+
+    #[test]
+    fn default_manual_dirs_start_next_to_the_executable_then_legacy_dirs() {
+        fn legacy() -> Vec<PathBuf> {
+            vec![PathBuf::from("/legacy/one"), PathBuf::from("/legacy/two")]
+        }
+        static WITH_LEGACY: ModelManifest = ModelManifest {
+            dir_name: "test-model",
+            needed_by: "A test",
+            source: "https://example.invalid/",
+            license: "none",
+            files: &TEST_FILES,
+            legacy_dirs: legacy,
+        };
+        let dirs = default_manual_dirs(&WITH_LEGACY);
+        assert_eq!(dirs.len(), 3, "{dirs:?}");
+        assert!(
+            dirs[0].ends_with(Path::new("models").join("test-model")),
+            "{:?}",
+            dirs[0]
+        );
+        assert_eq!(dirs[1], PathBuf::from("/legacy/one"));
+        assert_eq!(dirs[2], PathBuf::from("/legacy/two"));
+    }
+
+    #[test]
+    fn new_uses_the_models_dir_override_as_root() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let options = ModelStoreOptions {
+            download: DownloadModels::No,
+            models_dir: Some(PathBuf::from("/override/models")),
+        };
+        let store = ModelStore::new(&options, &reporter).unwrap();
+        assert_eq!(store.root, PathBuf::from("/override/models"));
+        assert_eq!(store.policy, DownloadPolicy::No);
     }
 }

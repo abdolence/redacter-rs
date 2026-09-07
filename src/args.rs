@@ -1,5 +1,6 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
+use crate::model_store::DownloadModels;
 use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
@@ -20,8 +21,35 @@ const DEFAULT_AWS_BEDROCK_GUARDRAIL_VERSION: &str = "DRAFT";
 #[derive(Parser, Debug)]
 #[command(author, about)]
 pub struct CliArgs {
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value = "ask",
+        help = "Whether missing model files (OCR, local-ner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'"
+    )]
+    pub download_models: DownloadModels,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Directory holding downloaded and manually placed models, one subdirectory per model. Default is the user cache directory, for example ~/.cache/redacter/models"
+    )]
+    pub models_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: CliCommand,
+}
+
+/// Merges `--models-dir` with the `REDACTER_MODELS_DIR` environment value, the flag winning.
+/// Kept as a plain function rather than a `clap` `env` attribute so a parse of `CliArgs`
+/// never reads the real process environment: production passes
+/// `std::env::var_os("REDACTER_MODELS_DIR")`, tests pass an explicit value.
+pub fn resolve_models_dir(
+    cli_value: Option<PathBuf>,
+    env_value: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    cli_value.or_else(|| env_value.map(PathBuf::from))
 }
 
 #[derive(Subcommand, Debug)]
@@ -475,6 +503,77 @@ impl TryInto<RedacterOptions> for RedacterArgs {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    use crate::model_store::DownloadModels;
+
+    #[test]
+    fn download_models_defaults_to_ask_and_models_dir_to_none() {
+        let cli = CliArgs::try_parse_from(["redacter", "cp", "a", "b"]).unwrap();
+        assert_eq!(cli.download_models, DownloadModels::Ask);
+        assert_eq!(cli.models_dir, None);
+    }
+
+    #[test]
+    fn global_model_flags_are_accepted_before_and_after_the_subcommand() {
+        let before = CliArgs::try_parse_from([
+            "redacter",
+            "--download-models",
+            "no",
+            "--models-dir",
+            "/m",
+            "cp",
+            "a",
+            "b",
+        ])
+        .unwrap();
+        let after = CliArgs::try_parse_from([
+            "redacter",
+            "cp",
+            "a",
+            "b",
+            "--download-models",
+            "yes",
+            "--models-dir",
+            "/m",
+        ])
+        .unwrap();
+        assert_eq!(before.download_models, DownloadModels::No);
+        assert_eq!(after.download_models, DownloadModels::Yes);
+        assert_eq!(before.models_dir, Some(PathBuf::from("/m")));
+        assert_eq!(after.models_dir, Some(PathBuf::from("/m")));
+    }
+
+    #[test]
+    fn download_models_rejects_unknown_values() {
+        let err =
+            CliArgs::try_parse_from(["redacter", "cp", "a", "b", "--download-models", "maybe"])
+                .expect_err("unknown value must fail");
+        assert!(err.to_string().contains("maybe"), "{err}");
+    }
+
+    #[test]
+    fn models_dir_flag_wins_over_the_environment_value() {
+        assert_eq!(
+            resolve_models_dir(
+                Some(PathBuf::from("/flag")),
+                Some(std::ffi::OsString::from("/env"))
+            ),
+            Some(PathBuf::from("/flag"))
+        );
+    }
+
+    #[test]
+    fn models_dir_falls_back_to_the_environment_value() {
+        assert_eq!(
+            resolve_models_dir(None, Some(std::ffi::OsString::from("/env"))),
+            Some(PathBuf::from("/env"))
+        );
+    }
+
+    #[test]
+    fn models_dir_is_none_without_either() {
+        assert_eq!(resolve_models_dir(None, None), None);
+    }
 
     #[test]
     fn redacter_type_round_trips_through_its_name() {

@@ -7,6 +7,7 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
+use crate::model_store::{DownloadModels, ModelStore, ModelStoreOptions};
 use crate::redacters::{
     RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
@@ -33,6 +34,7 @@ pub struct CopyCommandOptions {
     pub file_matcher: FileMatcher,
     pub file_mime_override: FileMimeOverride,
     pub max_files_limit: Option<usize>,
+    pub model_store: ModelStoreOptions,
 }
 
 impl CopyCommandOptions {
@@ -41,6 +43,7 @@ impl CopyCommandOptions {
         max_size_limit: Option<usize>,
         max_files_limit: Option<usize>,
         mime_override: Vec<(mime::Mime, globset::Glob)>,
+        model_store: ModelStoreOptions,
     ) -> Self {
         let filename_matcher = filename_filter
             .as_ref()
@@ -49,6 +52,7 @@ impl CopyCommandOptions {
             file_matcher: FileMatcher::new(filename_matcher, max_size_limit),
             file_mime_override: FileMimeOverride::new(mime_override),
             max_files_limit,
+            model_store,
         }
     }
 }
@@ -69,7 +73,13 @@ pub async fn command_copy(
     redacter_options: Option<RedacterOptions>,
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
-    let file_converters = FileConverters::new().init(&term_reporter).await?;
+    // A plain copy never uses a model, so it must never prompt for one.
+    let mut model_store_options = options.model_store.clone();
+    if redacter_options.is_none() {
+        model_store_options.download = DownloadModels::No;
+    }
+    let models = ModelStore::new(&model_store_options, &term_reporter)?;
+    let file_converters = FileConverters::new().init(&term_reporter, &models).await?;
     let styles = CopyOutputStyles::new();
 
     report_copy_info(
@@ -80,6 +90,16 @@ pub async fn command_copy(
         &file_converters,
         &styles,
     )?;
+
+    // Every model the redacters need is resolved before the progress bar exists, so the
+    // consent prompt and the download bar never interleave with it.
+    if let Some(ref redacter_options) = redacter_options {
+        for provider in &redacter_options.provider_options {
+            for id in provider.required_models() {
+                models.resolve(id).await?;
+            }
+        }
+    }
 
     let bar = ProgressBar::new(1);
     bar.set_style(
@@ -102,7 +122,8 @@ pub async fn command_copy(
         Some(options) => {
             let mut redacters = Vec::with_capacity(options.provider_options.len());
             for provider_options in options.provider_options {
-                let redacter = Redacters::new_redacter(provider_options, &app_reporter).await?;
+                let redacter =
+                    Redacters::new_redacter(provider_options, &app_reporter, &models).await?;
                 redacters.push(redacter);
             }
             Some((options.base_options, redacters))
@@ -551,7 +572,7 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &temp_dir.path().to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![]),
+            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
             None,
         )
         .await?;
@@ -593,7 +614,7 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &temp_dir.path().to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![]),
+            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
             Some(redacter_options),
         )
         .await?;
@@ -670,7 +691,7 @@ mod tests {
             &term,
             "test-fixtures/documents/customer-form.pdf",
             &pdf_destination.to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![]),
+            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
             Some(vertex_ai_options()),
         )
         .await?;
@@ -680,7 +701,7 @@ mod tests {
             &term,
             "test-fixtures/documents/customer-note.txt",
             &note_destination.to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![]),
+            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
             Some(vertex_ai_options()),
         )
         .await?;

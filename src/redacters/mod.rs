@@ -1,5 +1,6 @@
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::model_store::{ModelId, ModelStore};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -386,6 +387,12 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::LocalRules(_) => RedacterType::LocalRules,
         }
     }
+
+    /// Models that must be installed before this redacter can be built. `command_copy`
+    /// resolves them before it creates the progress bar. No redacter needs one yet.
+    pub fn required_models(&self) -> Vec<ModelId> {
+        Vec::new()
+    }
 }
 
 impl Display for RedacterOptions {
@@ -404,6 +411,7 @@ impl<'a> Redacters<'a> {
     pub async fn new_redacter(
         provider_options: RedacterProviderOptions,
         reporter: &'a AppReporter<'a>,
+        _models: &ModelStore<'_>,
     ) -> AppResult<Self> {
         match provider_options {
             RedacterProviderOptions::GcpDlp(options) => Ok(Redacters::GcpDlp(

@@ -1,5 +1,6 @@
 use crate::file_converters::ocr::Ocr;
 use crate::file_converters::pdf::PdfToImage;
+use crate::model_store::ModelStore;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 
@@ -31,7 +32,11 @@ impl<'a> FileConverters<'a> {
         not(any(feature = "pdf-render", feature = "ocr")),
         allow(unused_mut, unused_variables)
     )]
-    pub async fn init(mut self, app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
+    pub async fn init(
+        mut self,
+        app_reporter: &'a AppReporter<'a>,
+        _models: &ModelStore<'_>,
+    ) -> AppResult<Self> {
         #[cfg(feature = "pdf-render")]
         {
             if let Ok(pdf_image_converter) = pdf_image_converter::PdfImageConverter::new() {

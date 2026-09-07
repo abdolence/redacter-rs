@@ -6,6 +6,7 @@ use std::error::Error;
 
 use crate::commands::*;
 use crate::errors::AppError;
+use crate::model_store::ModelStoreOptions;
 use args::*;
 use clap::Parser;
 use console::{Style, Term};
@@ -28,7 +29,9 @@ mod common_types;
 
 mod file_converters;
 
-// Nothing constructs the store until the OCR engine loads its models through it.
+// `ModelId::NerMultilingualHrl` is not yet constructed outside tests, and `ModelFiles::path`/
+// `dir` are not yet called outside tests: `required_models()` returns `Vec::new()` until
+// Task 7, so `command_copy`'s resolve loop never runs. Remove once a real caller lands.
 #[allow(dead_code)]
 mod model_store;
 
@@ -84,6 +87,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
+    let model_store = ModelStoreOptions {
+        download: cli.download_models,
+        models_dir: resolve_models_dir(cli.models_dir, std::env::var_os("REDACTER_MODELS_DIR")),
+    };
     match cli.command {
         CliCommand::Cp {
             source,
@@ -100,6 +107,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 max_size_limit,
                 max_files_limit,
                 mime_override,
+                model_store,
             );
             let copy_result = command_copy(
                 term,
