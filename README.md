@@ -400,14 +400,25 @@ redacter cp -d local-rules --local-rule 'employee-id=\bEMP-[0-9]{6}\b' --local-r
 ```
 
 A rule has exactly one of `regex` or `dictionary`. Dictionary words match as whole words and are
-case-insensitive unless `case_insensitive` is `false`. Rule names must be unique.
+case-insensitive unless `case_insensitive` is `false`. Rule names must be unique. User-defined rules
+always run: they are not one of the switchable groups, so `--local-rules-disable custom` does not
+suppress them; drop the `--local-rule` and `--local-rules-file` options instead.
 
 The local rules redacter does not detect names, addresses or organisations, and it only matches
-pattern-shaped values, so it can flag phone-like numbers that are not phone numbers. Combine it with a
-cloud redacter to cover names and addresses, for example `-d local-rules -d gcp-dlp` removes the
-pattern-shaped data locally before the remainder is sent to GCP DLP. It works only on text, html, json
-and csv files; images and PDFs are unsupported and are skipped unless `--allow-unsupported-copies` is
-set.
+pattern-shaped values. Combine it with a cloud redacter to cover names and addresses, for example
+`-d local-rules -d gcp-dlp` removes the pattern-shaped data locally before the remainder is sent to GCP
+DLP. It works natively on text, html, json and csv files, and handles images and PDFs the same way the
+AWS Comprehend redacter does: images through text extraction using OCR, blacking out the words the rules
+matched, and PDF files by rendering them as images first. Both need the optional capabilities installed
+(the OCR models, and Pdfium for PDFs); without them images and PDFs are skipped unless
+`--allow-unsupported-copies` is set.
+
+Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
+with 3 to 6 that passes the Luhn check is taken for a payment card; a national phone number written with
+a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some reference numbers; any 8 or
+9 digit number within 20 characters of the word `passport` is taken for a passport number; and national
+identifiers are accepted on their checksum alone. Use `--local-rules` or `--local-rules-disable` to turn
+off the groups you do not need.
 
 ## Multiple redacters
 
