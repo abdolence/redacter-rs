@@ -53,8 +53,8 @@ find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for 
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
     * Local rules redacter: offline regex and checksum based redaction of emails, phone numbers,
-      payment cards, IBANs, network addresses, secrets and US/EU identifiers, plus your own
-      regex and dictionary rules. No cloud account needed.
+      payment cards, IBANs, network addresses, secrets, national identifiers of 43 countries,
+      postcodes and dates of birth, plus your own regex and dictionary rules. No cloud account needed.
     * Local NER redacter: offline detection of people, organisations and locations with a
       multilingual transformer model running on your CPU. No cloud account needed:
         * text, html, csv, json files
@@ -209,12 +209,12 @@ Options:
       --local-rules <LOCAL_RULES>
           Rule groups enabled for the local-rules redacter, comma separated. Default is every group
           
-          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, custom]
+          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, world-identifiers, postcodes, birth-dates, custom]
 
       --local-rules-disable <LOCAL_RULES_DISABLE>
           Rule groups disabled for the local-rules redacter, comma separated. Applied after --local-rules
           
-          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, custom]
+          [possible values: email, phone, payment-card, iban, network, url, secrets, us-identifiers, eu-identifiers, world-identifiers, postcodes, birth-dates, custom]
 
       --local-rule <LOCAL_RULE>
           User-defined regex rule for the local-rules redacter in the form name=regex. Can be repeated
@@ -397,11 +397,37 @@ The `local-rules` redacter runs entirely on your machine. It finds pattern-shape
 with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
 national checks for identifiers) and replaces each match with `[REDACTED]`.
 
-Built-in rule groups, all enabled by default: `email`, `phone`, `payment-card`, `iban`, `network`
-(IPv4, IPv6, MAC), `url` (credentials embedded in URLs), `secrets` (AWS, GCP, GitHub, Slack and Stripe
-keys, JWTs, authorization headers, PEM private keys), `us-identifiers` (SSN, ITIN, passport) and
-`eu-identifiers` (VAT numbers, Spanish DNI/NIE, Italian codice fiscale, Dutch BSN, UK NINO, French NIR,
-German Steuer-ID).
+Built-in rule groups, all enabled by default:
+
+| Group | Contents |
+|---|---|
+| `email` | Email addresses |
+| `phone` | International (`+`, `00`) and national phone numbers |
+| `payment-card` | Payment card numbers (Luhn) |
+| `iban` | IBANs (mod 97 and the national length) |
+| `network` | IPv4, IPv6 and MAC addresses |
+| `url` | Credentials embedded in URLs |
+| `secrets` | AWS, GCP, GitHub, Slack and Stripe keys, JWTs, authorization headers, PEM and PGP private keys |
+| `us-identifiers` | SSN and ITIN, passport numbers next to the word passport (in 9 languages), US driver's license numbers |
+| `eu-identifiers` | European identifiers: the national personal numbers of Albania, Austria, Belgium, Bosnia and Herzegovina, Bulgaria, Croatia, Czechia, Denmark, Estonia, Finland, France, Germany (Steuer-ID), Greece (AMKA and AFM), Hungary (személyi szám and TAJ), Iceland, Ireland, Italy, Latvia, Lithuania, Luxembourg, Malta, Montenegro, the Netherlands, North Macedonia, Norway, Poland, Portugal, Romania, Serbia, Slovakia, Slovenia, Spain, Sweden, Switzerland, Turkey and the United Kingdom (NINO and driving licence), plus EU VAT numbers |
+| `world-identifiers` | Canadian SIN, Australian TFN, Brazilian CPF, Indian Aadhaar, South African ID, Chinese resident ID |
+| `postcodes` | UK postcodes, Irish Eircodes, Canadian postal codes |
+| `birth-dates` | Dates of birth next to a birth keyword (`date of birth`, `Geburtsdatum`, `né le`, `fecha de nacimiento`, ...) in English, German, French, Spanish, Italian, Dutch, Portuguese, Polish and Swedish |
+
+`eu-identifiers` covers the whole of Europe including the Nordics, Baltics, Balkans, Switzerland, Turkey
+and the UK. Every rule with its check, whether it needs a context word, and an example is listed in
+[docs/local-rules.md](docs/local-rules.md). Each identifier is verified with its published check digit
+and, where the number embeds one, its birth date. Not covered, because the country publishes no format
+or no check digit for its personal number: Cyprus, Liechtenstein, Monaco, Andorra, San Marino, Vatican
+City and Kosovo; Ukraine, Moldova and Belarus are out of scope.
+
+Identifiers whose check digit alone would accept too many ordinary numbers (Danish CPR, Portuguese NIF,
+Greek AFM, Hungarian TAJ, Croatian OIB, Turkish TCKN, a bare Brazilian CPF, Canadian SIN, Australian TFN,
+Indian Aadhaar) and shapes without a check (passports, driving licences, dates of birth, Albanian and
+Maltese ids) are only redacted within 20 characters (30 for dates of birth) of a context word such as
+`CPR`, `NIF`, `passport` or `date of birth`, in the local language. The keyword has to be in the same
+text unit: a CSV cell is redacted on its own, so a column of bare CPFs under a `cpf` header is not found
+while the written `NNN.NNN.NNN-NN` form is.
 
 ```sh
 # Only emails and phone numbers
@@ -442,10 +468,12 @@ matched, and PDF files by rendering them as images first. Both need the optional
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
 with 3 to 6 that passes the Luhn check is taken for a payment card; a national phone number written with
-a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some reference numbers; any 8 or
-9 digit number within 20 characters of the word `passport` is taken for a passport number; and national
-identifiers are accepted on their checksum alone. Use `--local-rules` or `--local-rules-disable` to turn
-off the groups you do not need.
+a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some reference numbers; any 6 to 9
+digit number within 20 characters of the word `passport` is taken for a passport number; and national
+identifiers without a keyword are accepted on their check digit and embedded date alone, so a bare
+10-digit run of digits has about a 2% chance and an 11-digit run about 1.5% of passing one of the
+checksummed rules. For a document that is mostly numbers, `--local-rules-disable eu-identifiers` (or
+disabling the specific groups that don't apply) is the lever to pull.
 
 ### Local NER redacter
 
@@ -508,30 +536,31 @@ Pros of local redaction:
 
 Cons of local redaction:
 
-- Narrower coverage: no dates of birth, no free-form addresses, no passport or licence numbers without a
-  context keyword, no document-level reasoning.
+- Narrower coverage: no free-form addresses and no document-level reasoning; dates of birth, passport and
+  licence numbers only next to a context keyword.
 - Model quality: a 66M-parameter model misses names it has never seen, needs context to tag a single word,
   and reports organisations for product names.
 - Locale-bound rules: national formats differ; expect to enable, disable or add rules for your documents.
 
 Measured on the small corpus under `test-fixtures/bench-dlp/` (four fixture documents plus a multilingual sample,
-about 4 KB of text, commit `3c3491e`, Intel i7-10700K, one warm-up then the median of three runs; the cloud
-numbers include network time from Europe):
+about 4 KB of text; local rows at commit `540fbc5`, cloud rows from the run at commit `3c3491e`, Intel i7-10700K,
+one warm-up then the median of three runs; the cloud numbers include network time from Europe):
 
 | Redacter | Whole corpus | Per file (median) | PII removed | Cities and organisations removed | Non-PII kept |
 |---|---|---|---|---|---|
-| `local-rules` | 18 ms | 17 ms | 20 / 41 | 0 / 7 | 25 / 25 |
-| `local-ner` | 528 ms | 192 ms | 15 / 41 | 7 / 7 | 23 / 25 |
-| `local-rules` + `local-ner` | 581 ms | 208 ms | 35 / 41 | 7 / 7 | 23 / 25 |
+| `local-rules` | 38 ms | 35 ms | 28 / 41 | 0 / 7 | 25 / 25 |
+| `local-ner` | 370 ms | 144 ms | 15 / 41 | 7 / 7 | 23 / 25 |
+| `local-rules` + `local-ner` | 431 ms | 174 ms | 41 / 41 | 7 / 7 | 23 / 25 |
 | `gcp-dlp` | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
 | `gcp-vertex-ai` (Gemini) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
 
-The six PII strings the local chain leaves behind are three dates of birth, a passport-style number without a
-keyword next to it and a UK postcode; GCP DLP misses only the postcode and Gemini misses nothing. The two
-non-PII strings the NER model removes are "Apple" in "Apple pie" and the sign-off "The Support Desk", both
-tagged as organisations, which is the over-redaction to expect from entity-based detection. Run
-`cargo test --release --test bench_dlp -- --ignored --nocapture` (see `test-fixtures/bench-dlp/README.md`)
-to reproduce the table on your own machine and documents.
+The 13 PII strings `local-rules` leaves behind are the person names and the free-form street addresses,
+which have no shape to match; the chain with `local-ner` removes all 41, since the rules now cover the
+three dates of birth, the UK postcode and the passport number. GCP DLP misses only the postcode and
+Gemini misses nothing. The two non-PII strings the NER model removes are "Apple" in "Apple pie" and the
+sign-off "The Support Desk", both tagged as organisations, which is the over-redaction to expect from
+entity-based detection. Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
+`test-fixtures/bench-dlp/README.md`) to reproduce the table on your own machine and documents.
 
 In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap
 first pass; use a cloud provider, ideally after the local pass, when coverage matters more than latency and cost.

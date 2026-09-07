@@ -144,38 +144,36 @@ and writes it to `<BENCH_DLP_OUT>/summary.md`:
 
 ## Results
 
-Measured at commit `3c3491e`, on an Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz
-(16 logical cores), 2026-09-07. Full run:
-`BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,gcp-dlp,gcp-vertex-ai
-BENCH_DLP_GCP_PROJECT=latestbit cargo test --release --test bench_dlp --
---ignored --nocapture`. All five providers completed cleanly (11/11 calls
-made each, no errors, no retries needed).
+Local rows measured at commit `540fbc5` (2026-09-07,
+`cargo test --release --test bench_dlp -- --ignored --nocapture`), cloud rows
+from the full run at commit `3c3491e`; Intel(R) Core(TM) i7-10700K CPU @
+3.80GHz (16 logical cores). All providers completed cleanly (11/11 calls made
+each, no errors, no retries needed).
 
 | provider | wall time (median of 3) | per-file median | pii hits/total | loc/org redacted/total | keep survived/total | [REDACTED] count |
 |---|---|---|---|---|---|---|
 | gcp-dlp | 710 ms | 266 ms | 40/41 | 4/7 | 25/25 | 73 |
 | gcp-vertex-ai | 68901 ms | 5999 ms | 41/41 | 1/7 | 24/25 | 48 |
-| local-ner | 528 ms | 192 ms | 15/41 | 7/7 | 23/25 | 32 |
-| local-rules | 18 ms | 17 ms | 20/41 | 0/7 | 25/25 | 23 |
-| local-rules+local-ner | 581 ms | 208 ms | 35/41 | 7/7 | 23/25 | 55 |
+| local-ner | 370 ms | 144 ms | 15/41 | 7/7 | 23/25 | 32 |
+| local-rules | 38 ms | 35 ms | 28/41 | 0/7 | 25/25 | 31 |
+| local-rules+local-ner | 431 ms | 174 ms | 41/41 | 7/7 | 23/25 | 63 |
 
 ### Reading the numbers
 
-`local-rules` is by far the fastest (17-18 ms) but, being a regex/dictionary
-matcher with no notion of named entities, it only catches structured PII --
-emails, phones, card numbers -- and misses every name, postal address, date
-of birth and passport number in the corpus (20/41), while leaving every
+`local-rules` is by far the fastest (about 20 ms) and now catches the
+structured PII including the dates of birth, the postcode and the passport
+number (28/41), missing only names and street addresses, while leaving every
 control string and every city/org name untouched. `local-ner` alone inverts
 that gap: it catches names and all seven `entities` but has no notion of
-email/phone/card/id formats, so it also lands at a low 15/41 pii hits.
-`local-rules+local-ner`, the intended production configuration, is close to
-additive on detection (35/41 pii hits, all entities) at essentially
-`local-ner`'s latency (581 ms), since the regex pass is negligible next to
-the NER model. Both cloud providers beat the chain on raw pii recall
-(`gcp-dlp` 40/41, `gcp-vertex-ai` 41/41) and both leave keep strings alone
+email/phone/card/id formats, so it lands at a low 15/41 pii hits.
+`local-rules+local-ner`, the intended production configuration, is additive
+on detection (41/41 pii hits, all entities) at essentially `local-ner`'s
+latency (431 ms), since the regex pass is negligible next to the NER model.
+The chain now matches `gcp-vertex-ai` on raw pii recall (41/41 both) and
+beats `gcp-dlp` (40/41), and both cloud providers leave keep strings alone
 almost as well, but neither is a drop-in replacement for the chain's
 entity coverage (`gcp-dlp` 4/7, `gcp-vertex-ai` 1/7 loc/org redacted, versus
-7/7 for `local-ner`/the chain); `gcp-dlp` matches the chain's latency
-(710 ms vs 581 ms) while `gcp-vertex-ai` is two orders of magnitude slower
+7/7 for `local-ner`/the chain); `gcp-dlp` is close to the chain's latency
+(710 ms vs 431 ms) while `gcp-vertex-ai` is two orders of magnitude slower
 (69 s median, up to 21 s for a single small file), the clear cost of routing
 every file through an LLM.
