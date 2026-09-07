@@ -63,6 +63,10 @@ struct CompiledRule {
     regex: Regex,
     capture_group: usize,
     validator: Option<Validator>,
+    /// When true, a match is only kept if the characters immediately surrounding it (if
+    /// any) are not word characters. Used for dictionary rules, whose alternatives may
+    /// start or end with punctuation (`#tag`, `C++`) that `\b` cannot anchor on.
+    whole_word: bool,
 }
 
 #[derive(Debug)]
@@ -280,6 +284,22 @@ fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, L
         })
 }
 
+/// True if the characters immediately outside `start..end` (if any) are not word
+/// characters, matching `\b` semantics without requiring the matched text itself to
+/// start or end on a word character. Lets a dictionary entry like `#tag` or `C++` match
+/// even though its first or last character is not alphanumeric.
+fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before_is_word = text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let after_is_word = text[end..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    !before_is_word && !after_is_word
+}
+
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
@@ -293,6 +313,7 @@ impl RuleSet {
                 regex: compile(spec.name, spec.pattern, false)?,
                 capture_group: spec.capture_group,
                 validator: spec.validator,
+                whole_word: false,
             });
         }
         Ok(Self { rules })
@@ -316,16 +337,20 @@ impl RuleSet {
                     name: rule.name.to_string(),
                 });
             }
-            let pattern = match &rule.matcher {
-                UserMatcher::Regex(pattern) => pattern.clone(),
+            let (pattern, whole_word) = match &rule.matcher {
+                UserMatcher::Regex(pattern) => (pattern.clone(), false),
                 UserMatcher::Dictionary(words) => {
                     if words.is_empty() {
                         return Err(LocalRulesError::EmptyDictionary {
                             name: rule.name.to_string(),
                         });
                     }
+                    // Longest first, so the alternation prefers e.g. `#tagline` over `#tag`
+                    // when both are present and the input is `#tagline`.
+                    let mut words = words.clone();
+                    words.sort_unstable_by_key(|w| std::cmp::Reverse(w.len()));
                     let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
-                    format!(r"\b(?:{})\b", escaped.join("|"))
+                    (format!("(?:{})", escaped.join("|")), true)
                 }
             };
             set.rules.push(CompiledRule {
@@ -333,6 +358,7 @@ impl RuleSet {
                 regex: compile(rule.name.as_str(), &pattern, rule.case_insensitive)?,
                 capture_group: 0,
                 validator: None,
+                whole_word,
             });
         }
         Ok(set)
@@ -350,6 +376,9 @@ impl RuleSet {
                     .validator
                     .is_some_and(|validate| !validate(matched.as_str()))
                 {
+                    continue;
+                }
+                if rule.whole_word && !is_word_boundary(text, matched.start(), matched.end()) {
                     continue;
                 }
                 findings.push(Finding {
@@ -611,6 +640,65 @@ mod tests {
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(rules.redact("a.b axb").0, "[REDACTED] axb");
+    }
+
+    #[test]
+    fn user_dictionary_matches_a_word_with_punctuation_at_its_edges() {
+        let rule = UserRule {
+            name: RuleName::new("hashtags"),
+            matcher: UserMatcher::Dictionary(vec!["#tag".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(
+            rules.redact("wear a #tag today").0,
+            "wear a [REDACTED] today"
+        );
+    }
+
+    #[test]
+    fn user_dictionary_matches_a_word_ending_in_punctuation() {
+        let rule = UserRule {
+            name: RuleName::new("langs"),
+            matcher: UserMatcher::Dictionary(vec!["C++".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(rules.redact("we use C++ here").0, "we use [REDACTED] here");
+    }
+
+    #[test]
+    fn user_dictionary_redacts_repeated_adjacent_matches() {
+        let rule = UserRule {
+            name: RuleName::new("hashtags"),
+            matcher: UserMatcher::Dictionary(vec!["#tag".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(rules.redact("#tag #tag").0, "[REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn user_dictionary_still_requires_a_whole_word_for_plain_words() {
+        let rule = UserRule {
+            name: RuleName::new("tag"),
+            matcher: UserMatcher::Dictionary(vec!["tag".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(rules.redact("hashtags").0, "hashtags");
+        assert_eq!(rules.redact("tag_line").0, "tag_line");
+    }
+
+    #[test]
+    fn user_dictionary_prefers_the_longest_alternative() {
+        let rule = UserRule {
+            name: RuleName::new("hashtags"),
+            matcher: UserMatcher::Dictionary(vec!["#tag".to_string(), "#tagline".to_string()]),
+            case_insensitive: false,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        assert_eq!(rules.redact("#tagline").0, "[REDACTED]");
     }
 
     #[test]
