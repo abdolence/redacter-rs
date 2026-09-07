@@ -62,6 +62,180 @@ pub(super) fn pair(digits: &[u32], at: usize) -> u32 {
     digits[at] * 10 + digits[at + 1]
 }
 
+/// Month names, lowercase, in the languages the `birth-date` rule supports (English,
+/// German, French, Spanish, Italian, Dutch, Portuguese, Polish, Swedish), with the ASCII
+/// spellings of the accented ones and the common abbreviations. Names shared by several
+/// languages appear once.
+pub const MONTHS: &[(&str, u32)] = &[
+    ("january", 1),
+    ("jan", 1),
+    ("januar", 1),
+    ("janvier", 1),
+    ("enero", 1),
+    ("gennaio", 1),
+    ("januari", 1),
+    ("janeiro", 1),
+    ("stycznia", 1),
+    ("styczeń", 1),
+    ("styczen", 1),
+    ("february", 2),
+    ("feb", 2),
+    ("februar", 2),
+    ("février", 2),
+    ("fevrier", 2),
+    ("febrero", 2),
+    ("febbraio", 2),
+    ("februari", 2),
+    ("fevereiro", 2),
+    ("lutego", 2),
+    ("luty", 2),
+    ("march", 3),
+    ("mar", 3),
+    ("märz", 3),
+    ("maerz", 3),
+    ("mrz", 3),
+    ("mars", 3),
+    ("marzo", 3),
+    ("maart", 3),
+    ("março", 3),
+    ("marco", 3),
+    ("marca", 3),
+    ("marzec", 3),
+    ("april", 4),
+    ("apr", 4),
+    ("avril", 4),
+    ("abril", 4),
+    ("aprile", 4),
+    ("kwietnia", 4),
+    ("kwiecień", 4),
+    ("kwiecien", 4),
+    ("may", 5),
+    ("mai", 5),
+    ("mayo", 5),
+    ("maggio", 5),
+    ("mei", 5),
+    ("maio", 5),
+    ("maja", 5),
+    ("maj", 5),
+    ("june", 6),
+    ("jun", 6),
+    ("juni", 6),
+    ("juin", 6),
+    ("junio", 6),
+    ("giugno", 6),
+    ("junho", 6),
+    ("czerwca", 6),
+    ("czerwiec", 6),
+    ("july", 7),
+    ("jul", 7),
+    ("juli", 7),
+    ("juillet", 7),
+    ("julio", 7),
+    ("luglio", 7),
+    ("julho", 7),
+    ("lipca", 7),
+    ("lipiec", 7),
+    ("august", 8),
+    ("aug", 8),
+    ("août", 8),
+    ("aout", 8),
+    ("agosto", 8),
+    ("augustus", 8),
+    ("augusti", 8),
+    ("sierpnia", 8),
+    ("sierpień", 8),
+    ("sierpien", 8),
+    ("september", 9),
+    ("sep", 9),
+    ("sept", 9),
+    ("septembre", 9),
+    ("septiembre", 9),
+    ("setiembre", 9),
+    ("settembre", 9),
+    ("setembro", 9),
+    ("września", 9),
+    ("wrzesnia", 9),
+    ("wrzesień", 9),
+    ("wrzesien", 9),
+    ("october", 10),
+    ("oct", 10),
+    ("oktober", 10),
+    ("okt", 10),
+    ("octobre", 10),
+    ("octubre", 10),
+    ("ottobre", 10),
+    ("outubro", 10),
+    ("października", 10),
+    ("pazdziernika", 10),
+    ("październik", 10),
+    ("pazdziernik", 10),
+    ("november", 11),
+    ("nov", 11),
+    ("novembre", 11),
+    ("noviembre", 11),
+    ("novembro", 11),
+    ("listopada", 11),
+    ("listopad", 11),
+    ("december", 12),
+    ("dec", 12),
+    ("dezember", 12),
+    ("dez", 12),
+    ("décembre", 12),
+    ("decembre", 12),
+    ("diciembre", 12),
+    ("dicembre", 12),
+    ("dezembro", 12),
+    ("grudnia", 12),
+    ("grudzień", 12),
+    ("grudzien", 12),
+];
+
+fn month_number(word: &str) -> Option<u32> {
+    let word = word.trim_end_matches('.').to_lowercase();
+    MONTHS
+        .iter()
+        .find(|(name, _)| *name == word)
+        .map(|(_, month)| *month)
+}
+
+fn plausible_birth_date(year: u32, month: u32, day: u32) -> bool {
+    year >= 1900 && valid_date(Some(year), month, day)
+}
+
+/// A date of birth as captured by the `birth-date` rule: ISO `1985-03-14`, numeric
+/// `14.03.1985` or `03/14/1985` (day-first and month-first are both tried), or a day, a
+/// month name from `MONTHS` and a four-digit year in either order. Years are limited to
+/// 1900..=the current year.
+pub fn birth_date(value: &str) -> bool {
+    let numbers: Vec<u32> = value
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    let month_word = value
+        .split(|c: char| !c.is_alphabetic())
+        .find_map(month_number);
+    let (year, month, day) = match (month_word, numbers.as_slice()) {
+        // `14 March 1985`, `March 14, 1985`, `1985 March 14`
+        (Some(month), [first, second]) => {
+            if *first > 31 {
+                (*first, month, *second)
+            } else {
+                (*second, month, *first)
+            }
+        }
+        // `1985-03-14`
+        (None, [year, month, day]) if *year > 31 => (*year, *month, *day),
+        // `14.03.1985` or `03/14/1985`: whichever order is a real date
+        (None, [first, second, year]) => {
+            return plausible_birth_date(*year, *second, *first)
+                || plausible_birth_date(*year, *first, *second);
+        }
+        _ => return false,
+    };
+    plausible_birth_date(year, month, day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +279,55 @@ mod tests {
             );
         }
         assert_eq!(pair(&[1, 9, 8, 5], 2), 85);
+    }
+
+    #[test]
+    fn birth_date_accepts_the_supported_shapes_and_languages() {
+        for (value, expected) in [
+            ("1985-03-14", true),
+            ("14.03.1985", true),
+            ("14-03-1985", true),
+            ("03/14/1985", true), // month first
+            ("14/03/1985", true), // day first
+            ("14 March 1985", true),
+            ("14th March 1985", true),
+            ("March 14, 1985", true),
+            ("14 Sept. 1985", true),
+            ("14. März 1985", true),
+            ("14 mars 1985", true),
+            ("1er janvier 1985", true),
+            ("14 de marzo de 1985", true),
+            ("14 marzo 1985", true),
+            ("14 maart 1985", true),
+            ("14 de março de 1985", true),
+            ("14 marca 1985", true),
+            ("14 augusti 1985", true),
+            ("2024-04-30", true),  // a toddler is a person too
+            ("1985-02-29", false), // not a leap year
+            ("31.04.1985", false),
+            ("13/13/1985", false),
+            ("14 Smarch 1985", false),
+            ("14 March 1899", false),
+            ("14 March 2999", false),
+            ("14 March", false),
+        ] {
+            assert_eq!(birth_date(value), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn month_names_map_to_months() {
+        assert_eq!(month_number("MÄRZ"), Some(3));
+        assert_eq!(month_number("sept."), Some(9));
+        assert_eq!(month_number("października"), Some(10));
+        assert_eq!(month_number("de"), None);
+        for (name, month) in MONTHS {
+            assert!((1..=12).contains(month), "{name}");
+            assert!(
+                name.chars().count() <= 12,
+                "{name}: the pattern allows 12 letters"
+            );
+            assert_eq!(*name, name.to_lowercase(), "{name}");
+        }
     }
 }

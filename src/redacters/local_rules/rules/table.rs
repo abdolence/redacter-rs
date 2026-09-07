@@ -9,6 +9,21 @@ pub(super) fn builtin_rules() -> &'static [RuleSpec] {
     RULES
 }
 
+/// Keywords that anchor the driving licence rules, in the languages the passport rule covers.
+macro_rules! driving_licence_keywords {
+    () => {
+        r"driving licen[cs]e|driver'?s licen[cs]e|driver licen[cs]e|f[üu]hrerschein|fuehrerschein|permis de conduire|licencia de conducir|carnet de conducir|patente di guida|rijbewijs|carta de condu[çc][ãa]o|prawo jazdy|k[öo]rkort"
+    };
+}
+
+/// Keywords that anchor the birth-date rule: en, de, fr, es, it, nl, pt, pl, sv. `né le`
+/// needs its accent, because `ne le` is ordinary French.
+macro_rules! birth_keywords {
+    () => {
+        r"born(?: on)?|d\.?o\.?b|date[ _-]of[ _-]birth|birth[ _-]?date|birthday|geburtsdatum|geboren(?: am| op)?|né(?:e|\(e\))? le|date de naissance|fecha de nacimiento|nacid[oa] el|data di nascita|nat[oa] il|geboortedatum|data de nascimento|nascid[oa] em|data urodzenia|urodzon[ya]|f[öo]dd|f[öo]delsedatum"
+    };
+}
+
 const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "email",
@@ -219,14 +234,14 @@ const RULES: &[RuleSpec] = &[
         pattern: r"\b\d{3}-\d{2}-\d{4}\b",
     },
     RuleSpec {
-        name: "us-passport",
+        name: "passport",
         group: RuleGroup::UsIdentifiers,
         capture_group: 1,
         validator: None,
         keyword: true,
-        description: "Passport number of 8 or 9 digits within 20 characters of the word passport",
-        example: Example::Synthetic("Passport number: 123456789"),
-        pattern: r"(?i)\bpassport\b.{0,20}?\b([A-Z]?\d{8,9})\b",
+        description: "Passport number (6 to 9 digits with up to 3 letters, or the French `12AB34567` shape) within 20 characters of the word passport in en, de, fr, es, it, nl, pt, pl or sv",
+        example: Example::Synthetic("Passport no. X1234567"),
+        pattern: r"(?i)\b(?:passport|passeport|pasaporte|passaporto|paspoort|passaporte|paszport|reisepass|pass-?n(?:r|ummer))\b.{0,20}?\b([A-Z]{0,3}\d{6,9}|\d{2}[A-Z]{2}\d{5})\b",
     },
     RuleSpec {
         name: "eu-vat",
@@ -640,10 +655,76 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic("11010519491231002X"),
         pattern: r"\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9X]\b",
     },
+    RuleSpec {
+        name: "us-driving-licence",
+        group: RuleGroup::UsIdentifiers,
+        capture_group: 1,
+        validator: None,
+        keyword: true,
+        description: "US driver's license number (7 to 9 digits with an optional letter, or a letter and 11 to 14 digits) within 20 characters of a driving licence keyword or `DL#`",
+        example: Example::Synthetic("Driver's License: A1234567"),
+        // `dl ?#` cannot end on `\b` (both `#` and the space are non-word), hence the split.
+        pattern: concat!(r"(?i)(?:\b(?:", driving_licence_keywords!(), r"|dl ?(?:no|number))\b|\bdl ?#).{0,20}?\b([A-Z]?\d{7,9}|[A-Z]\d{11,14})\b"),
+    },
+    RuleSpec {
+        name: "uk-driving-licence",
+        group: RuleGroup::EuIdentifiers,
+        capture_group: 1,
+        validator: Some(("date fields", validators::uk_driving_licence)),
+        keyword: true,
+        description: "UK driving licence number (16 characters encoding the birth date) within 20 characters of a driving licence keyword or `DVLA`",
+        example: Example::Published("Driving licence: MORGA657054SM9IJ"),
+        pattern: concat!(r"(?i)\b(?:", driving_licence_keywords!(), r"|dvla)\b.{0,20}?\b([A-Z9]{5}\d{6}[A-Z9]{2}\d[A-Z0-9]{2})\b"),
+    },
+    RuleSpec {
+        name: "uk-postcode",
+        group: RuleGroup::Postcodes,
+        capture_group: 0,
+        validator: None,
+        keyword: false,
+        description: "UK postcode in upper case, with the letters allowed in each position",
+        example: Example::Published("SW1A 1AA"),
+        pattern: r"\b(?:GIR ?0AA|[A-PR-UWYZ](?:[0-9]{1,2}|[A-HK-Y][0-9]{1,2}|[0-9][A-HJKPSTUW]|[A-HK-Y][0-9][ABEHMNPRVWXY]) ?[0-9][ABD-HJLNP-UW-Z]{2})\b",
+    },
+    RuleSpec {
+        name: "irish-eircode",
+        group: RuleGroup::Postcodes,
+        capture_group: 0,
+        validator: None,
+        keyword: false,
+        description: "Irish Eircode: a routing key and a four-character unique identifier",
+        example: Example::Synthetic("D02 X285"),
+        pattern: r"\b(?:D6W|[AC-FHKNPRTV-Y]\d{2}) ?[AC-FHKNPRTV-Y0-9]{4}\b",
+    },
+    RuleSpec {
+        name: "canadian-postal-code",
+        group: RuleGroup::Postcodes,
+        capture_group: 0,
+        validator: None,
+        keyword: false,
+        description: "Canadian postal code `A1A 1A1` without the letters Canada Post excludes",
+        example: Example::Published("K1A 0B1"),
+        pattern: r"\b[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d\b",
+    },
+    RuleSpec {
+        name: "birth-date",
+        group: RuleGroup::BirthDates,
+        capture_group: 1,
+        validator: Some(("calendar date in 1900..=today's year", validators::birth_date)),
+        keyword: true,
+        description: "Date of birth (ISO, dotted, slashed or with a month name in en, de, fr, es, it, nl, pt, pl, sv) within 30 characters of a birth keyword in those languages",
+        example: Example::Synthetic("Date of birth: 14 March 1985"),
+        // The 30 characters may span a newline (a form puts the label on its own line). The
+        // month is any word of 3 to 12 Latin letters; the validator checks it against the
+        // month table, and `\p{L}` is not used because under `(?i)` it pushes the compiled
+        // size past `REGEX_SIZE_LIMIT`.
+        pattern: concat!(r"(?i)\b(?:", birth_keywords!(), r")\b(?s:.{0,30}?)\b(\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}|\d{1,2}(?:st|nd|rd|th|er)?\.?(?: de)? [a-zÀ-ſ]{3,12}\.?(?: de)?,? \d{4}|[a-zÀ-ſ]{3,12}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b"),
+    },
 ];
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::validators::MONTHS;
     use super::super::test_support::{all_rules, assert_redacts, assert_untouched};
 
     /// Strings no built-in rule may touch: order and epoch numbers, timestamps, versions,
@@ -809,6 +890,170 @@ mod tests {
             "110105199001011233",     // Chinese check wrong
         ] {
             assert_untouched(input);
+        }
+    }
+
+    #[test]
+    fn postcodes_are_redacted() {
+        for (input, expected) in [
+            ("London NW1 6XE", "London [REDACTED]"),
+            ("SW1A 1AA", "[REDACTED]"),
+            ("EC1A1BB", "[REDACTED]"),
+            ("GIR 0AA", "[REDACTED]"),
+            ("\"postcode\": \"NW1 6XE\"", "\"postcode\": \"[REDACTED]\""),
+            ("Dublin D02 X285", "Dublin [REDACTED]"),
+            ("Eircode D6W 1234", "Eircode [REDACTED]"),
+            ("Cork T12Y0AN", "Cork [REDACTED]"),
+            ("Ottawa K1A 0B1", "Ottawa [REDACTED]"),
+            ("M5V 3L9", "[REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn birth_dates_need_a_keyword_within_thirty_characters() {
+        for (input, expected) in [
+            ("Date of birth: 14 March 1985", "Date of birth: [REDACTED]"),
+            (
+                "\"date_of_birth\": \"1985-03-14\"",
+                "\"date_of_birth\": \"[REDACTED]\"",
+            ),
+            (
+                "<th>Date of birth</th><td>14 March 1985</td>",
+                "<th>Date of birth</th><td>[REDACTED]</td>",
+            ),
+            ("born on March 14, 1985", "born on [REDACTED]"),
+            ("DOB 03/14/1985", "DOB [REDACTED]"),
+            ("D.O.B. 14/03/1985", "D.O.B. [REDACTED]"),
+            ("Geburtsdatum: 14.03.1985", "Geburtsdatum: [REDACTED]"),
+            ("geboren am 14. März 1985", "geboren am [REDACTED]"),
+            ("née le 14 mars 1985", "née le [REDACTED]"),
+            ("né le 1er janvier 1985", "né le [REDACTED]"),
+            (
+                "fecha de nacimiento: 14 de marzo de 1985",
+                "fecha de nacimiento: [REDACTED]",
+            ),
+            (
+                "data di nascita 14 marzo 1985",
+                "data di nascita [REDACTED]",
+            ),
+            ("geboortedatum 14 maart 1985", "geboortedatum [REDACTED]"),
+            (
+                "data de nascimento 14 de março de 1985",
+                "data de nascimento [REDACTED]",
+            ),
+            (
+                "data urodzenia: 14 marca 1985",
+                "data urodzenia: [REDACTED]",
+            ),
+            ("född 1985-03-14", "född [REDACTED]"),
+            (
+                "Date of birth:\n14 March 1985",
+                "Date of birth:\n[REDACTED]",
+            ),
+            ("born 14 Sept. 1985", "born [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn every_month_name_in_the_table_is_matched_by_the_birth_date_pattern() {
+        for (name, _) in MONTHS {
+            assert_redacts(&format!("born 14 {name} 1985"), "born [REDACTED]");
+            let capitalised: String = name
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i == 0 {
+                        c.to_uppercase().next().unwrap_or(c)
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            assert_redacts(&format!("born {capitalised} 14, 1985"), "born [REDACTED]");
+        }
+    }
+
+    #[test]
+    fn passports_and_driving_licences_need_a_keyword() {
+        for (input, expected) in [
+            ("Passport number: 123456789", "Passport number: [REDACTED]"),
+            (
+                "Passport no.</th><td>X1234567",
+                "Passport no.</th><td>[REDACTED]",
+            ),
+            ("Passport X1234567", "Passport [REDACTED]"),
+            ("Reisepass Nr. C01234567", "Reisepass Nr. [REDACTED]"),
+            ("passeport 12AB34567", "passeport [REDACTED]"),
+            ("pasaporte AAB123456", "pasaporte [REDACTED]"),
+            ("paszport ZS1234567", "paszport [REDACTED]"),
+            (
+                "Driving licence: MORGA657054SM9IJ",
+                "Driving licence: [REDACTED]",
+            ),
+            (
+                "driver's license MORGA657054SM9IJ",
+                "driver's license [REDACTED]",
+            ),
+            ("Führerschein MORGA657054SM9IJ", "Führerschein [REDACTED]"),
+            ("Driver's License: A1234567", "Driver's License: [REDACTED]"),
+            (
+                "driver license no. 123456789",
+                "driver license no. [REDACTED]",
+            ),
+            ("DL# 12345678", "DL# [REDACTED]"),
+            (
+                "licencia de conducir 12345678",
+                "licencia de conducir [REDACTED]",
+            ),
+            (
+                "permis de conduire 12345678",
+                "permis de conduire [REDACTED]",
+            ),
+            ("DL no L123456789012", "DL no [REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn postcode_date_passport_and_licence_lookalikes_are_kept() {
+        for input in [
+            "nw1 6xe",                         // lowercase postcode
+            "NW1 6XC",                         // C is not a unit letter
+            "D02 X28",                         // Eircode identifier too short
+            "D1A 0B1",                         // D is not a Canadian first letter
+            "The invoice dated 14 March 1985", // no birth keyword
+            "born in 1985",                    // a year is not a date
+            "born in London",
+            "ne le 14 mars 1985",               // `ne le` is not `né le`
+            "Date of birth: 31.04.1985",        // no such day
+            "Date of birth: 14 March 1899",     // before the year window
+            "reference 123456789",              // no passport keyword
+            "passport valid until 2030",        // 4 digits
+            "driver's license 12345",           // too short
+            "ref MORGA657054SM9IJ",             // no licence keyword
+            "driving licence MORGA657354SM9IJ", // day 35
+        ] {
+            assert_untouched(input);
+        }
+    }
+
+    #[test]
+    fn passport_and_driving_licence_values_are_case_insensitive() {
+        for (input, expected) in [
+            ("Passport ab1234567", "Passport [REDACTED]"),
+            (
+                "driving licence: morga657054sm9ij",
+                "driving licence: [REDACTED]",
+            ),
+            ("dl# a1234567", "dl# [REDACTED]"),
+            ("id card no. 0123456m", "id card no. [REDACTED]"), // carried over from Task 3
+        ] {
+            assert_redacts(input, expected);
         }
     }
 

@@ -259,6 +259,25 @@ pub fn greek_afm(value: &str) -> bool {
         && weighted_sum(&digits[..8], &[256, 128, 64, 32, 16, 8, 4, 2]) % 11 % 10 == digits[8]
 }
 
+/// UK driving licence number: five surname letters (padded with 9), then the decade digit,
+/// the month (+50 for women), the day, the year digit, two initials, a check digit and two
+/// check characters. Only the date fields can be verified.
+pub fn uk_driving_licence(value: &str) -> bool {
+    let compact = alphanumerics_of(value);
+    if compact.len() != 16 {
+        return false;
+    }
+    let digits = digits_of(&compact[5..11]);
+    if digits.len() != 6 {
+        return false;
+    }
+    let mut month = pair(&digits, 1);
+    if month > 50 {
+        month -= 50;
+    }
+    valid_date(None, month, pair(&digits, 3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +451,21 @@ mod tests {
                 ("01019012341", true),
                 ("32139012341", false), // Luhn valid, day 32
                 ("01019012342", false),
+            ],
+        );
+    }
+
+    #[test]
+    fn uk_driving_licence_date_fields() {
+        check(
+            uk_driving_licence,
+            &[
+                ("MORGA657054SM9IJ", true), // DVLA specimen
+                ("SMITH710101AB9CD", true),
+                ("morga657054sm9ij", true), // lowercase: alphanumerics_of upper-cases first
+                ("MORGA657354SM9IJ", false), // day 35
+                ("MORGA663054SM9IJ", false), // month 63 (13 after the +50)
+                ("MORGA657054SM9I", false), // 15 characters
             ],
         );
     }

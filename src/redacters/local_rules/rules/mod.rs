@@ -24,6 +24,8 @@ pub enum RuleGroup {
     UsIdentifiers,
     EuIdentifiers,
     WorldIdentifiers,
+    Postcodes,
+    BirthDates,
     Custom,
 }
 
@@ -343,6 +345,8 @@ mod tests {
         assert_eq!(RuleGroup::PaymentCard.to_string(), "payment-card");
         assert_eq!(RuleGroup::UsIdentifiers.to_string(), "us-identifiers");
         assert_eq!(RuleGroup::WorldIdentifiers.to_string(), "world-identifiers");
+        assert_eq!(RuleGroup::Postcodes.to_string(), "postcodes");
+        assert_eq!(RuleGroup::BirthDates.to_string(), "birth-dates");
     }
 
     #[test]

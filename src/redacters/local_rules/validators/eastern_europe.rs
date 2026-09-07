@@ -327,6 +327,7 @@ mod tests {
             &[
                 ("I05101999Q", true),  // 1980, January (month 51 = 1, female), day 1
                 ("A00101999Q", true),  // 1900
+                ("i05101999q", true),  // lowercase: alphanumerics_of upper-cases first
                 ("I05132999Q", false), // day 32
                 ("Z05101999Q", false), // decade letter beyond M
                 ("I0510199Q", false),

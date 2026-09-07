@@ -14,6 +14,10 @@ pub use europe::*;
 pub use nordic::*;
 pub use world::*;
 
+pub use dates::birth_date;
+#[cfg(test)]
+pub use dates::MONTHS;
+
 use checksums::{alphanumerics_of, digits_of, luhn_any_length, mod97};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
