@@ -278,6 +278,34 @@ pub fn uk_driving_licence(value: &str) -> bool {
     valid_date(None, month, pair(&digits, 3))
 }
 
+/// Storage-capacity abbreviations that share the UK postcode's `<digit><letter><letter>`
+/// inward-code shape (`4GB`, `2TB`): a postcode's own inward code never spells one of these
+/// in practice, so a match ending in one is a hardware spec, not an address.
+const UK_POSTCODE_STORAGE_UNITS: &[&str] = &["GB", "TB", "MB", "KB", "PB", "EB"];
+
+pub fn uk_postcode(value: &str) -> bool {
+    let compact = alphanumerics_of(value);
+    if compact.len() < 2 {
+        return false;
+    }
+    let inward_letters = &compact[compact.len() - 2..];
+    !UK_POSTCODE_STORAGE_UNITS.contains(&inward_letters)
+}
+
+/// Irish Eircode unique identifier: the published character set mixes 15 letters and the 10
+/// digits with no rule against an all-digit draw, but no real Eircode has ever been observed
+/// with one, and a purely numeric 4-character tail is what lets a routing-key-shaped prefix
+/// (`H12`, `F12`) plus an ordinary 4-digit number (a year, a short code) pass as an Eircode.
+/// Requiring at least one letter trades that theoretical, unobserved case for rejecting the
+/// common false positive.
+pub fn irish_eircode(value: &str) -> bool {
+    let compact = alphanumerics_of(value);
+    compact.len() >= 4
+        && compact[compact.len() - 4..]
+            .chars()
+            .any(|c| c.is_ascii_alphabetic())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +494,39 @@ mod tests {
                 ("MORGA657354SM9IJ", false), // day 35
                 ("MORGA663054SM9IJ", false), // month 63 (13 after the +50)
                 ("MORGA657054SM9I", false), // 15 characters
+            ],
+        );
+    }
+
+    #[test]
+    fn uk_postcode_rejects_storage_capacity_inward_codes() {
+        check(
+            uk_postcode,
+            &[
+                ("SW1A 1AA", true),
+                ("M1 1AE", true),
+                ("B33 8TH", true),
+                ("CR2 6XH", true),
+                ("DN55 1PT", true),
+                ("GIR 0AA", true),
+                ("S9 4GB", false),
+                ("PC3 2GB", false),
+                ("X5 2TB", false),
+            ],
+        );
+    }
+
+    #[test]
+    fn irish_eircode_requires_a_letter_in_the_identifier() {
+        check(
+            irish_eircode,
+            &[
+                ("D02 X285", true),
+                ("A65 F4E2", true),
+                ("T12 YT20", true),
+                ("H12 2024", false),
+                ("F12 2024", false),
+                ("D6W 1234", false),
             ],
         );
     }

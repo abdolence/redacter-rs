@@ -115,7 +115,7 @@ European identifiers: national personal numbers, VAT numbers, UK driving licence
 | `icelandic-kennitala` | Icelandic kennitala of a person, `DDMMYY-NNCM` | yes (mod-11 control digit and date) | no | `120174-3399` (published, [source](https://en.wikipedia.org/wiki/Icelandic_identification_number)) |
 | `baltic-personal-code` | Estonian isikukood or Lithuanian asmens kodas, 11 digits `GYYMMDDSSSC` | yes (mod-11 control digit and date) | no | `37605030299` (published, [source](https://et.wikipedia.org/wiki/Isikukood)) |
 | `latvian-personas-kods` | Latvian personas kods, `DDMMYY-CSSSK` or the post-2017 `32SSSS-SSSSK` | yes (mod-11 control digit, date on the pre-2017 form) | no | `161175-19997` (synthetic) |
-| `polish-pesel` | Polish PESEL, 11 digits with the century encoded in the month | yes (mod-10 control digit and date) | no | `44051401359` (synthetic) |
+| `polish-pesel` | Polish PESEL, 11 digits with the century encoded in the month: 1900-1999 (month 1-12) or 2000-2099 (month 21-32) | yes (mod-10 control digit and date) | no | `44051401359` (synthetic) |
 | `czech-slovak-rodne-cislo` | Czech or Slovak rodné číslo, `YYMMDD/SSSC` (10 digits, issued since 1954) | yes (divisible by 11 and date) | no | `780123/3540` (synthetic) |
 | `portuguese-nif` | Portuguese NIF, 9 digits within 20 characters of `nif`, `nipc` or `contribuinte` | yes (mod-11 check digit) | yes | `NIF 123456789` (synthetic) |
 | `irish-pps` | Irish PPS number, 7 digits and one or two letters | yes (mod-23 check letter) | no | `1234567FA` (published, [source](https://en.wikipedia.org/wiki/Personal_Public_Service_Number)) |
@@ -127,7 +127,7 @@ European identifiers: national personal numbers, VAT numbers, UK driving licence
 | `hungarian-taj` | Hungarian TAJ number, 9 digits within 20 characters of `TAJ` | yes (mod-10 check digit) | yes | `TAJ szám: 123 456 788` (synthetic) |
 | `greek-amka` | Greek AMKA, 11 digits starting with the birth date `DDMMYY` | yes (Luhn and date) | no | `01019012341` (synthetic) |
 | `greek-afm` | Greek AFM (tax number), 9 digits within 20 characters of `AFM` or `ΑΦΜ` | yes (mod-11 check digit) | yes | `ΑΦΜ: 090000045` (synthetic) |
-| `bulgarian-egn` | Bulgarian EGN, 10 digits starting with the birth date `YYMMDD` | yes (mod-11 check digit and date) | no | `6101057509` (synthetic) |
+| `bulgarian-egn` | Bulgarian EGN, 10 digits starting with the birth date `YYMMDD`, accepted for 1900-2099 | yes (mod-11 check digit and date) | no | `6101057509` (synthetic) |
 | `croatian-oib` | Croatian OIB, 11 digits within 20 characters of `OIB` | yes (ISO 7064 MOD 11,10) | yes | `OIB: 69435151530` (synthetic) |
 | `jmbg` | JMBG of Serbia, Bosnia and Herzegovina, Montenegro and North Macedonia, and the Slovenian EMŠO, 13 digits | yes (mod-11 check digit and date) | no | `0101006500006` (published, [source](https://en.wikipedia.org/wiki/Unique_Master_Citizen_Number)) |
 | `romanian-cnp` | Romanian CNP, 13 digits `S YYMMDD JJ NNN C` | yes (mod-11 check digit, date and county) | no | `1900101123457` (synthetic) |
@@ -156,8 +156,8 @@ UK, Irish and Canadian postcodes.
 
 | Rule | Description | Validator | Keyword | Example |
 |---|---|---|---|---|
-| `uk-postcode` | UK postcode in upper case, with the letters allowed in each position | no | no | `SW1A 1AA` (published, [source](https://en.wikipedia.org/wiki/Postcodes_in_the_United_Kingdom)) |
-| `irish-eircode` | Irish Eircode: a routing key and a four-character unique identifier | no | no | `D02 X285` (synthetic) |
+| `uk-postcode` | UK postcode in upper case, with the letters allowed in each position | yes (inward code is not a storage-capacity abbreviation) | no | `SW1A 1AA` (published, [source](https://en.wikipedia.org/wiki/Postcodes_in_the_United_Kingdom)) |
+| `irish-eircode` | Irish Eircode: a routing key and a four-character unique identifier | yes (at least one letter in the unique identifier) | no | `D02 X285` (synthetic) |
 | `canadian-postal-code` | Canadian postal code `A1A 1A1` without the letters Canada Post excludes | no | no | `K1A 0B1` (published, [source](https://en.wikipedia.org/wiki/Postal_codes_in_Canada)) |
 
 ## `birth-dates`

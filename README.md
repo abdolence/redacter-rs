@@ -467,7 +467,9 @@ matched, and PDF files by rendering them as images first. Both need the optional
 `--allow-unsupported-copies` is set.
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
-with 3 to 6 that passes the Luhn check is taken for a payment card; a national phone number written with
+with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of
+a 13-digit EAN barcode starting with 3 to 6 whose own check digit happens to pass Luhn too
+(`--local-rules-disable payment-card` is the lever for either); a national phone number written with
 a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some reference numbers; any 6 to 9
 digit number within 20 characters of the word `passport` is taken for a passport number; and national
 identifiers without a keyword are accepted on their check digit and embedded date alone, so a bare

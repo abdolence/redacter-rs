@@ -16,11 +16,24 @@ macro_rules! driving_licence_keywords {
     };
 }
 
-/// Keywords that anchor the birth-date rule: en, de, fr, es, it, nl, pt, pl, sv. `né le`
-/// needs its accent, because `ne le` is ordinary French.
-macro_rules! birth_keywords {
+/// Whole-word keywords that anchor the birth-date rule: en, de, fr, es, it, nl, pt, pl, sv.
+/// `né le` needs its accent, because `ne le` is ordinary French. Each of these ends on a
+/// word character, so the caller puts a plain `\b` right after the group.
+macro_rules! birth_keywords_whole {
     () => {
-        r"born(?: on)?|d\.?o\.?b|date[ _-]of[ _-]birth|birth[ _-]?date|birthday|geburtsdatum|geboren(?: am| op)?|né(?:e|\(e\))? le|date de naissance|fecha de nacimiento|nacid[oa] el|data di nascita|nat[oa] il|geboortedatum|data de nascimento|nascid[oa] em|data urodzenia|urodzon[ya]|f[öo]dd|f[öo]delsedatum"
+        r"born(?: on)?|date[ _-]of[ _-]birth|birth[ _-]?date|birthday|geburtsdatum|geboren(?: am| op)?|né(?:e|\(e\))? le|date de naissance|fecha de nacimiento|nacid[oa] el|data di nascita|nat[oa] il|geboortedatum|data de nascimento|nascid[oa] em|data urodzenia|urodzon[ya]|f[öo]dd|f[öo]delsedatum"
+    };
+}
+
+/// Abbreviation keywords that may be followed straight by a period (`D.O.B.`, `geb.`): each
+/// carries its own ending, so the trailing period is never mistaken for a sentence end by the
+/// window that follows, and it is never absorbed from an unrelated whole word (`Born.`)
+/// either. `d\.?o\.?b` may or may not already end on its own period (`D.O.B` vs `D.O.B.`), so
+/// `(?:\.|\b)` matches whichever is there without swallowing a period that belongs to the
+/// next sentence; `geb.` always carries one.
+macro_rules! birth_keywords_abbrev {
+    () => {
+        r"d\.?o\.?b(?:\.|\b)|geb\."
     };
 }
 
@@ -241,7 +254,13 @@ const RULES: &[RuleSpec] = &[
         keyword: true,
         description: "Passport number (6 to 9 digits with up to 3 letters, or the French `12AB34567` shape) within 20 characters of the word passport in en, de, fr, es, it, nl, pt, pl or sv",
         example: Example::Synthetic("Passport no. X1234567"),
-        pattern: r"(?i)\b(?:passport|passeport|pasaporte|passaporto|paspoort|passaporte|paszport|reisepass|pass-?n(?:r|ummer))\b.{0,20}?\b([A-Z]{0,3}\d{6,9}|\d{2}[A-Z]{2}\d{5})\b",
+        // `[\s\S]` rather than `.` for the window: `.` never matches a newline, so a form's
+        // label on its own line was missed. `birth-date` instead excludes `.!?` to stop the
+        // window at a sentence boundary, but that would also break the common `no.` and
+        // `Nr.` abbreviations already inside this window (`Passport no. X1234567`,
+        // `Reisepass Nr. C01234567`), so any character including a newline is kept instead;
+        // this rule has no other test requiring a sentence boundary to stop it.
+        pattern: r"(?i)\b(?:passport|passeport|pasaporte|passaporto|paspoort|passaporte|paszport|reisepass|pass-?n(?:r|ummer))\b[\s\S]{0,20}?\b([A-Z]{0,3}\d{6,9}|\d{2}[A-Z]{2}\d{5})\b",
     },
     RuleSpec {
         name: "eu-vat",
@@ -398,7 +417,7 @@ const RULES: &[RuleSpec] = &[
         capture_group: 0,
         validator: Some(("mod-10 control digit and date", validators::polish_pesel)),
         keyword: false,
-        description: "Polish PESEL, 11 digits with the century encoded in the month",
+        description: "Polish PESEL, 11 digits with the century encoded in the month: 1900-1999 (month 1-12) or 2000-2099 (month 21-32)",
         example: Example::Synthetic("44051401359"),
         pattern: r"\b\d{11}\b",
     },
@@ -522,7 +541,7 @@ const RULES: &[RuleSpec] = &[
         capture_group: 0,
         validator: Some(("mod-11 check digit and date", validators::bulgarian_egn)),
         keyword: false,
-        description: "Bulgarian EGN, 10 digits starting with the birth date `YYMMDD`",
+        description: "Bulgarian EGN, 10 digits starting with the birth date `YYMMDD`, accepted for 1900-2099",
         example: Example::Synthetic("6101057509"),
         pattern: r"\b\d{10}\b",
     },
@@ -674,7 +693,10 @@ const RULES: &[RuleSpec] = &[
         description: "US driver's license number (7 to 9 digits with an optional letter, or a letter and 11 to 14 digits) within 20 characters of a driving licence keyword or `DL#`",
         example: Example::Synthetic("Driver's License: A1234567"),
         // `dl ?#` cannot end on `\b` (both `#` and the space are non-word), hence the split.
-        pattern: concat!(r"(?i)(?:\b(?:", driving_licence_keywords!(), r"|dl ?(?:no|number))\b|\bdl ?#).{0,20}?\b([A-Z]?\d{7,9}|[A-Z]\d{11,14})\b"),
+        // `[\s\S]` rather than `.` for the window (see `passport` for why not `[^.!?]`
+        // as in `birth-date`): `.` never matches a newline, so a form's label on its own
+        // line was missed.
+        pattern: concat!(r"(?i)(?:\b(?:", driving_licence_keywords!(), r"|dl ?(?:no|number))\b|\bdl ?#)[\s\S]{0,20}?\b([A-Z]?\d{7,9}|[A-Z]\d{11,14})\b"),
     },
     RuleSpec {
         name: "uk-driving-licence",
@@ -686,13 +708,16 @@ const RULES: &[RuleSpec] = &[
         // No citable source gives a full worked number for this format; built from the
         // published field layout (surname, then date of birth, then initials).
         example: Example::Synthetic("Driving licence: MORGA657054SM9IJ"),
-        pattern: concat!(r"(?i)\b(?:", driving_licence_keywords!(), r"|dvla)\b.{0,20}?\b([A-Z9]{5}\d{6}[A-Z9]{2}\d[A-Z0-9]{2})\b"),
+        pattern: concat!(r"(?i)\b(?:", driving_licence_keywords!(), r"|dvla)\b[\s\S]{0,20}?\b([A-Z9]{5}\d{6}[A-Z9]{2}\d[A-Z0-9]{2})\b"),
     },
     RuleSpec {
         name: "uk-postcode",
         group: RuleGroup::Postcodes,
         capture_group: 1,
-        validator: None,
+        validator: Some((
+            "inward code is not a storage-capacity abbreviation",
+            validators::uk_postcode,
+        )),
         keyword: false,
         description: "UK postcode in upper case, with the letters allowed in each position",
         // Allocated to Buckingham Palace.
@@ -713,7 +738,10 @@ const RULES: &[RuleSpec] = &[
         name: "irish-eircode",
         group: RuleGroup::Postcodes,
         capture_group: 1,
-        validator: None,
+        validator: Some((
+            "at least one letter in the unique identifier",
+            validators::irish_eircode,
+        )),
         keyword: false,
         description: "Irish Eircode: a routing key and a four-character unique identifier",
         example: Example::Synthetic("D02 X285"),
@@ -747,12 +775,14 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic("Date of birth: 14 March 1985"),
         // The 30 characters may span a newline (a form puts the label on its own line) but
         // not a sentence terminator, so a keyword followed by an unrelated sentence and then
-        // an unrelated date does not match; the optional `\.?` right after the keyword's own
-        // `\b` absorbs a trailing abbreviation period (`D.O.B.`) so it is not mistaken for a
-        // sentence end by the window that follows. The month is any word of 3 to 12 Latin
-        // letters; the validator checks it against the month table, and `\p{L}` is not used
-        // because under `(?i)` it pushes the compiled size past `REGEX_SIZE_LIMIT`.
-        pattern: concat!(r"(?i)\b(?:", birth_keywords!(), r")\b\.?[^.!?]{0,30}?\b(\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}|\d{1,2}(?:st|nd|rd|th|er)?\.?(?: de)? [a-zÀ-ſ]{3,12}\.?(?: de)?,? \d{4}|[a-zÀ-ſ]{3,12}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b"),
+        // an unrelated date does not match. Only the abbreviation keywords (`D.O.B.`,
+        // `geb.`) carry their own trailing period, so it is not mistaken for a sentence end
+        // by the window that follows; a whole-word keyword (`Born`) gets a plain `\b`
+        // instead, so a period right after it (`Born.`) still ends the sentence and is not
+        // absorbed into the window. The month is any word of 3 to 12 Latin letters; the
+        // validator checks it against the month table, and `\p{L}` is not used because under
+        // `(?i)` it pushes the compiled size past `REGEX_SIZE_LIMIT`.
+        pattern: concat!(r"(?i)\b(?:(?:", birth_keywords_whole!(), r")\b|", birth_keywords_abbrev!(), r")[^.!?]{0,30}?\b(\d{4}[-./]\d{2}[-./]\d{2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}|\d{1,2}(?:st|nd|rd|th|er)?\.?(?: de)? [a-zÀ-ſ]{3,12}\.?(?: de)?,? \d{4}|[a-zÀ-ſ]{3,12}\.? \d{1,2}(?:st|nd|rd|th)?,? \d{4})\b"),
     },
 ];
 
@@ -936,11 +966,46 @@ mod tests {
             ("GIR 0AA", "[REDACTED]"),
             ("\"postcode\": \"NW1 6XE\"", "\"postcode\": \"[REDACTED]\""),
             ("Dublin D02 X285", "Dublin [REDACTED]"),
-            ("Eircode D6W 1234", "Eircode [REDACTED]"),
+            // The Eircode spec allows an all-digit unique identifier, but no real Eircode has
+            // ever been observed with one; see `irish_eircode_rejects_all_digit_identifiers`
+            // for the case this trades away.
+            ("Eircode D6W RY20", "Eircode [REDACTED]"),
             ("Cork T12Y0AN", "Cork [REDACTED]"),
             ("Ottawa K1A 0B1", "Ottawa [REDACTED]"),
             ("M5V 3L9", "[REDACTED]"),
         ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn uk_postcode_rejects_a_hardware_storage_spec() {
+        // `S9 4GB` and `PC3 2GB` have the exact shape of a UK postcode, but the inward
+        // code's two letters spell a storage capacity, not a real unit code.
+        for input in ["S9 4GB", "PC3 2GB", "X5 2TB"] {
+            assert_untouched(input);
+        }
+        for (input, expected) in [
+            ("SW1A 1AA", "[REDACTED]"),
+            ("M1 1AE", "[REDACTED]"),
+            ("B33 8TH", "[REDACTED]"),
+            ("CR2 6XH", "[REDACTED]"),
+            ("DN55 1PT", "[REDACTED]"),
+            ("GIR 0AA", "[REDACTED]"),
+        ] {
+            assert_redacts(input, expected);
+        }
+    }
+
+    #[test]
+    fn irish_eircode_rejects_all_digit_identifiers() {
+        // A routing-key-shaped prefix followed by an ordinary 4-digit number (a year, a
+        // short code) has the exact shape of an Eircode; requiring a letter in the unique
+        // identifier rejects it without rejecting any real Eircode observed in practice.
+        for input in ["H12 2024", "F12 2024", "Eircode D6W 1234"] {
+            assert_untouched(input);
+        }
+        for (input, expected) in [("D02 X285", "[REDACTED]"), ("A65 F4E2", "[REDACTED]")] {
             assert_redacts(input, expected);
         }
     }
@@ -1054,6 +1119,32 @@ mod tests {
     }
 
     #[test]
+    fn passport_and_driving_licence_keyword_window_crosses_a_newline() {
+        // A form puts the label on its own line, the same as `birth-date`'s window; the
+        // window must reach across it rather than stop dead because `.` never matches `\n`.
+        for (input, expected) in [
+            ("Passport number:\nX1234567", "Passport number:\n[REDACTED]"),
+            (
+                "Driver's License:\nA1234567",
+                "Driver's License:\n[REDACTED]",
+            ),
+            (
+                "Driving licence:\nMORGA657054SM9IJ",
+                "Driving licence:\n[REDACTED]",
+            ),
+        ] {
+            assert_redacts(input, expected);
+        }
+        // Documented pre-existing over-redaction, unchanged by the newline fix: the passport
+        // window has no shape check on the digits themselves, so any 6-to-9-digit run within
+        // 20 characters of the keyword is taken for a passport number.
+        assert_redacts(
+            "Passport processing takes 123456 minutes",
+            "Passport processing takes [REDACTED] minutes",
+        );
+    }
+
+    #[test]
     fn postcode_date_passport_and_licence_lookalikes_are_kept() {
         for input in [
             "nw1 6xe",                         // lowercase postcode
@@ -1102,6 +1193,18 @@ mod tests {
     }
 
     #[test]
+    fn birth_date_abbreviation_period_does_not_swallow_the_sentence_end() {
+        // The optional period that lets `D.O.B.` and `geb.` be followed straight by the
+        // date must only belong to those abbreviations: a whole word like `Born` ends its
+        // own sentence with a period like any other word, and that period must still stop
+        // the window, the same as it does for "born in Paris." above.
+        assert_untouched("Born.\nInvoice date: 2024-01-05");
+        assert_redacts("D.O.B. 14/03/1985", "D.O.B. [REDACTED]");
+        assert_redacts("DOB: 14/03/1985", "DOB: [REDACTED]");
+        assert_redacts("geb. 14.03.1985", "geb. [REDACTED]");
+    }
+
+    #[test]
     fn postcode_context_excludes_surrounding_identifier_characters() {
         for input in ["SKU-SW1A1AA-2024", "/path/SW1A1AA/"] {
             assert_untouched(input);
@@ -1145,6 +1248,31 @@ mod tests {
         let (second_text, second_findings) = all_rules().redact(text);
         assert_eq!(first_text, "id [REDACTED] done");
         assert_eq!(first_findings.len(), 1, "{first_findings:?}");
+        assert_eq!(
+            first_findings[0].rule.as_str(),
+            "swedish-personnummer",
+            "{first_findings:?}"
+        );
+        assert_eq!(first_text, second_text);
+        assert_eq!(first_findings, second_findings);
+    }
+
+    #[test]
+    fn jmbg_and_south_african_id_overlap_picks_the_first_declared_rule() {
+        // "0101010003149" is a 13-digit shape that is simultaneously a valid JMBG (day 01,
+        // month 01, year 2010, mod-11 check digit 9) and a valid South African ID (month 01,
+        // day 01, citizenship digit 1, Luhn check digit 9 over all 13 digits): both rules'
+        // patterns match the identical span, so `jmbg`, declared first, must win.
+        let text = "id 0101010003149 done";
+        let (first_text, first_findings) = all_rules().redact(text);
+        let (second_text, second_findings) = all_rules().redact(text);
+        assert_eq!(first_text, "id [REDACTED] done");
+        assert_eq!(first_findings.len(), 1, "{first_findings:?}");
+        assert_eq!(
+            first_findings[0].rule.as_str(),
+            "jmbg",
+            "{first_findings:?}"
+        );
         assert_eq!(first_text, second_text);
         assert_eq!(first_findings, second_findings);
     }
