@@ -146,14 +146,14 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::Secrets,
         capture_group: 1,
         validator: None,
-        pattern: r#"(?i)aws.{0,20}?secret.{0,20}?[=:'"\s]\s*([A-Za-z0-9/+=]{40})\b"#,
+        pattern: r#"(?i)aws.{0,20}?secret.{0,20}?[=:'"\s]\s*([A-Za-z0-9/+=]{40})(?:[^A-Za-z0-9/+=]|$)"#,
     },
     RuleSpec {
         name: "gcp-api-key",
         group: RuleGroup::Secrets,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
-        pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
+        pattern: r"\b(AIza[0-9A-Za-z_-]{35})(?:[^0-9A-Za-z_-]|$)",
     },
     RuleSpec {
         name: "github-token",
@@ -235,9 +235,9 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "dutch-bsn",
         group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
+        capture_group: 1,
         validator: Some(validators::dutch_bsn),
-        pattern: r"\b\d{9}\b",
+        pattern: r"(?i)\b(?:bsn|burgerservicenummer|sofinummer|sofi-nummer)\b.{0,20}?\b(\d{9})\b",
     },
     RuleSpec {
         name: "uk-nino",
@@ -256,9 +256,9 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "german-steuer-id",
         group: RuleGroup::EuIdentifiers,
-        capture_group: 0,
+        capture_group: 1,
         validator: Some(validators::german_steuer_id),
-        pattern: r"\b[1-9]\d{10}\b",
+        pattern: r"(?i)\b(?:steuer-?id|steuer-?idnr|idnr|steueridentifikationsnummer|steuerliche identifikationsnummer|tax id)\b.{0,20}?\b([1-9]\d{10})\b",
     },
 ];
 
@@ -456,6 +456,18 @@ mod tests {
             "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
             "aws_secret_access_key = [REDACTED]",
         );
+        assert_redacts(
+            "\"aws_secret_access_key\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKE/\"",
+            "\"aws_secret_access_key\": \"[REDACTED]\"",
+        );
+        assert_redacts(
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKE/",
+            "aws_secret_access_key = [REDACTED]",
+        );
+        assert_redacts(
+            "\"api_key\": \"AIzaSyA1234567890abcdefghijklmnopqrstu-\"",
+            "\"api_key\": \"[REDACTED]\"",
+        );
     }
 
     #[test]
@@ -474,9 +486,12 @@ mod tests {
         assert_redacts("NIE X1234567L", "NIE [REDACTED]");
         assert_redacts("CF RSSMRA85M01H501Q", "CF [REDACTED]");
         assert_redacts("BSN 111222333", "BSN [REDACTED]");
+        assert_redacts("bsn,111222333", "bsn,[REDACTED]");
+        assert_untouched("order 100000009");
         assert_redacts("NINO AB 12 34 56 C", "NINO [REDACTED]");
         assert_redacts("NIR 2 69 05 49 588 157 80", "NIR [REDACTED]");
         assert_redacts("Steuer-ID 86095742719", "Steuer-ID [REDACTED]");
+        assert_untouched("ref 86095742719");
     }
 
     #[test]
