@@ -589,19 +589,17 @@ far slower than release. In release, on an Intel i7-10700K (16 threads), loading
 [Models and downloads](#models-and-downloads) is about 1.17 GB, almost all of it the fp32 model weights
 (the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
 support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 834 ms per file and
-2.8 s over the whole 8-file corpus, both dominated by the model's forward pass; the per-file figure
-includes process start and the ~0.6 s model load, since the benchmark harness invokes the binary once
-per file rather than scoring in one long-lived process, so it should not be read as in-process inference
-time. A document scores each label in batches of at most 25, so more labels cost more passes and, as
-with `organization` above, more false positives.
+2.8 s over the whole 8-file corpus. The per-file figure includes process start and the ~0.6 s model
+load, since the benchmark harness invokes the binary once per file rather than scoring in one
+long-lived process; the forward pass itself takes roughly 100-200 ms per 384-token window. A document
+scores each label in batches of at most 25, so more labels cost more passes and, as with
+`organization` above, more false positives.
 
 A date that merely looks like a date of birth may still be redacted regardless of context, since the
 model has learned the shape as well as the wording -- on the benchmark corpus this catches the invoice
 date `14 March 1985` in `dates-en.txt`, which carries no birth-related wording at all. A single word with
 nothing around it can still be missed the way it can with `local-ner`, since the model also relies on
 context to score a span highly.
-It works natively on text, html, json and csv files, and handles images and PDFs the way the AWS
-Comprehend redacter does: through OCR and Pdfium, when those optional capabilities are installed.
 
 The model is Apache-2.0, [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
 by Urchade Zaratiana, trained on the Apache-2.0
@@ -667,8 +665,8 @@ structured PII on its own. Since `organization` is off by default, `local-gliner
 `entities` string embedded in a free-form address (1/8) rather than `local-ner`'s 8/8; entity coverage is
 available via `--local-gliner-labels` but costs the false positives that come with it. The keep losses
 beyond `local-rules`' clean 31/31 are the known over-redaction cases: `local-ner` and the `local-ner`
-chain tag "Apple" and "The Support Desk" as organisations; `local-gliner` and its chain occasionally tag a
-sentence mentioning email preferences as a username or address, and mistake the invoice date
+chain tag "Apple" and "The Support Desk" as organisations; `local-gliner` and its chain tag the word "email"
+in a sentence about contact preferences as an email address, and mistake the invoice date
 `14 March 1985` in `dates-en.txt` for a date of birth by shape alone, the same false positive noted in the
 [Local GLiNER redacter](#local-gliner-redacter) section.
 Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see

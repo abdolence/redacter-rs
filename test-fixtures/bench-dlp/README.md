@@ -166,7 +166,7 @@ and writes it to `<BENCH_DLP_OUT>/summary.md`:
 
 ## Results
 
-Local rows measured at commit `f1f7ea2` (2026-09-08,
+Local rows measured at commit `e9b325d` (2026-09-08,
 `cargo test --release --test bench_dlp -- --ignored --nocapture`) on the
 8-file corpus (48 pii / 8 entities / 31 keep); Intel(R) Core(TM) i7-10700K
 CPU @ 3.80GHz (16 logical cores). All five local providers completed cleanly
@@ -181,11 +181,11 @@ are out of 41/7/25, not the 48/8/31 the local rows use below.
 |---|---|---|---|---|---|---|
 | gcp-dlp (7-file corpus) | 710 ms | 266 ms | 40/41 | 4/7 | 25/25 | 73 |
 | gcp-vertex-ai (7-file corpus) | 68901 ms | 5999 ms | 41/41 | 1/7 | 24/25 | 48 |
-| local-rules | 51 ms | 49 ms | 28/48 | 0/8 | 31/31 | 31 |
-| local-ner | 409 ms | 146 ms | 17/48 | 8/8 | 27/31 | 37 |
-| local-rules+local-ner | 468 ms | 192 ms | 43/48 | 8/8 | 27/31 | 68 |
-| local-gliner | 2357 ms | 784 ms | 45/48 | 1/8 | 28/31 | 51 |
-| local-rules+local-gliner | 2492 ms | 823 ms | 48/48 | 1/8 | 27/31 | 59 |
+| local-rules | 52 ms | 49 ms | 28/48 | 0/8 | 31/31 | 31 |
+| local-ner | 441 ms | 152 ms | 17/48 | 8/8 | 27/31 | 37 |
+| local-rules+local-ner | 466 ms | 205 ms | 43/48 | 8/8 | 27/31 | 68 |
+| local-gliner | 2827 ms | 834 ms | 48/48 | 1/8 | 28/31 | 54 |
+| local-rules+local-gliner | 2727 ms | 878 ms | 48/48 | 1/8 | 27/31 | 59 |
 
 ### Reading the numbers
 
@@ -205,13 +205,14 @@ short of the full 48 for the same reason: neither half of the chain has a
 notion of a medical condition, a handle, or a date of birth with no keyword
 and no NER-recognisable shape.
 
-`local-gliner` on its own reaches 45/48 pii at default settings (a 14-label
-PII-only list, no `organization`) and, chained after `local-rules`, reaches
-48/48 -- every PII string in the corpus, including the lower-case name,
-medical condition, keyword-less date of birth and the two handles in
-`contextual-en.txt` that neither `local-rules` nor `local-ner` find. It costs
-about 5x `local-rules+local-ner`'s latency (2492 ms vs 468 ms wall,
-mostly one-time model load repeated per invocation in this per-process
+`local-gliner` on its own reaches 48/48 pii at default settings (a 14-label
+PII-only list, no `organization`) -- every PII string in the corpus,
+including the lower-case name, medical condition, keyword-less date of birth
+and the two handles in `contextual-en.txt` that neither `local-rules` nor
+`local-ner` find; chaining it after `local-rules` adds nothing on this corpus
+but keeps the rules' checksummed identifiers for documents the model has not
+seen. It costs about 6x `local-rules+local-ner`'s latency (2727 ms vs 466 ms
+wall, mostly the model load repeated per invocation in this per-process
 harness) and, since `organization` is off by default, redacts only 1 of 8
 `entities` (the address's town name, tagged under the `address` label) rather
 than `local-ner`'s 8/8 -- entity coverage costs an extra label and the false
