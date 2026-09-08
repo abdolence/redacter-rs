@@ -1,6 +1,8 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::model_store::DownloadModels;
+#[cfg(feature = "local-gliner")]
+use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
@@ -28,7 +30,7 @@ pub struct CliArgs {
         global = true,
         value_enum,
         default_value = "ask",
-        help = "Whether missing model files (OCR, local-ner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'"
+        help = "Whether missing model files (OCR, local-ner, local-gliner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'"
     )]
     pub download_models: DownloadModels,
 
@@ -143,6 +145,7 @@ pub enum RedacterType {
     AwsBedrockGuardrails,
     LocalRules,
     LocalNer,
+    LocalGliner,
 }
 
 impl std::str::FromStr for RedacterType {
@@ -160,6 +163,7 @@ impl std::str::FromStr for RedacterType {
             "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
             "local-rules" => Ok(RedacterType::LocalRules),
             "local-ner" => Ok(RedacterType::LocalNer),
+            "local-gliner" => Ok(RedacterType::LocalGliner),
             _ => Err(format!("Unknown redacter type: {s}")),
         }
     }
@@ -178,6 +182,7 @@ impl Display for RedacterType {
             RedacterType::AwsBedrockGuardrails => write!(f, "aws-bedrock-guardrails"),
             RedacterType::LocalRules => write!(f, "local-rules"),
             RedacterType::LocalNer => write!(f, "local-ner"),
+            RedacterType::LocalGliner => write!(f, "local-gliner"),
         }
     }
 }
@@ -363,6 +368,22 @@ pub struct RedacterArgs {
         help = "Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
     pub local_ner_min_score: f32,
+
+    #[cfg(feature = "local-gliner")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Entity labels the local-gliner redacter looks for, comma separated, free text understood by the model (for example \"person,email,medical condition\"). Default is a PII list: person, address, email, phone number, date of birth, passport number, national id number, credit card number, iban, ip address, username, medical condition, postal code, license plate number"
+    )]
+    pub local_gliner_labels: Option<Vec<String>>,
+
+    #[cfg(feature = "local-gliner")]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5"
+    )]
+    pub local_gliner_min_score: f32,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -521,6 +542,23 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     message: "local-ner is not available in this build (compiled without the local-ner feature)"
                         .to_string(),
                 }),
+                #[cfg(feature = "local-gliner")]
+                RedacterType::LocalGliner => {
+                    let labels = match &self.local_gliner_labels {
+                        Some(list) => list.clone(),
+                        None => crate::redacters::local_gliner::labels::default_labels(),
+                    };
+                    LocalGlinerRedacterOptions::validated(labels, self.local_gliner_min_score)
+                        .map(RedacterProviderOptions::LocalGliner)
+                        .map_err(|err| AppError::RedacterConfigError {
+                            message: err.to_string(),
+                        })
+                }
+                #[cfg(not(feature = "local-gliner"))]
+                RedacterType::LocalGliner => Err(AppError::RedacterConfigError {
+                    message: "local-gliner is not available in this build (compiled without the local-gliner feature)"
+                        .to_string(),
+                }),
             }?;
             provider_options.push(redacter_options);
         }
@@ -627,6 +665,7 @@ mod tests {
             RedacterType::AwsBedrockGuardrails,
             RedacterType::LocalRules,
             RedacterType::LocalNer,
+            RedacterType::LocalGliner,
         ] {
             let name = redacter_type.to_string();
             let parsed = <RedacterType as FromStr>::from_str(&name)
@@ -793,6 +832,59 @@ mod tests {
             let err = local_ner_options(&["--local-ner-min-score", "1.5"]).unwrap_err();
             assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
             assert!(err.to_string().contains("1.5"), "{err}");
+        }
+    }
+
+    #[cfg(feature = "local-gliner")]
+    mod local_gliner {
+        use super::*;
+        use crate::redacters::local_gliner::labels::default_labels;
+        use crate::redacters::LocalGlinerRedacterOptions;
+
+        fn local_gliner_options(args: &[&str]) -> Result<LocalGlinerRedacterOptions, AppError> {
+            let cli = TestCli::try_parse_from([&["redacter", "-d", "local-gliner"], args].concat())
+                .unwrap_or_else(|err| panic!("{err}"));
+            let options: RedacterOptions = cli.redacter.try_into()?;
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalGliner(options)) => Ok(options),
+                other => panic!("expected local gliner options, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn defaults_to_the_pii_label_list_at_half_score() {
+            let options = local_gliner_options(&[]).unwrap();
+            assert_eq!(options.labels, default_labels());
+            assert_eq!(options.min_score, 0.5);
+        }
+
+        #[test]
+        fn labels_and_score_are_parsed() {
+            let options = local_gliner_options(&[
+                "--local-gliner-labels",
+                "person,medical condition",
+                "--local-gliner-min-score",
+                "0.3",
+            ])
+            .unwrap();
+            assert_eq!(
+                options.labels,
+                vec!["person".to_string(), "medical condition".to_string()]
+            );
+            assert_eq!(options.min_score, 0.3);
+        }
+
+        #[test]
+        fn score_outside_the_unit_range_is_a_config_error() {
+            let err = local_gliner_options(&["--local-gliner-min-score", "1.5"]).unwrap_err();
+            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+            assert!(err.to_string().contains("1.5"), "{err}");
+        }
+
+        #[test]
+        fn an_empty_label_is_a_config_error() {
+            let err = local_gliner_options(&["--local-gliner-labels", "person,  "]).unwrap_err();
+            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
         }
     }
 }

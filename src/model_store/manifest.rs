@@ -12,6 +12,9 @@ pub enum ModelId {
     // `#[allow(dead_code)]` that would also hide a real regression.
     #[cfg(any(feature = "local-ner", test))]
     NerMultilingualHrl,
+    // Only the local-gliner feature resolves this one; gated for the same reason as `Ocrs`.
+    #[cfg(any(feature = "local-gliner", test))]
+    GlinerMultiPii,
 }
 
 /// One file of a model: where it comes from and what it must look like on disk.
@@ -73,10 +76,43 @@ static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
 ];
 
 /// A model that has never lived anywhere but the managed root.
-#[cfg(any(feature = "local-ner", test))]
+#[cfg(any(feature = "local-ner", feature = "local-gliner", test))]
 pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
+
+#[cfg(any(feature = "local-gliner", test))]
+macro_rules! gliner_url {
+    ($path:literal) => {
+        concat!(
+            "https://huggingface.co/onnx-community/gliner_multi_pii-v1/resolve/",
+            "2e0397a7e8a250d76c37122232b3cbde42c8d629/",
+            $path
+        )
+    };
+}
+
+#[cfg(any(feature = "local-gliner", test))]
+static GLINER_MULTI_PII_FILES: [ModelFile; 3] = [
+    ModelFile {
+        name: "model.onnx",
+        url: gliner_url!("onnx/model.onnx"),
+        size: 1_157_129_714,
+        sha256: "7704865e414f24591da6aee08716a25677855bc8a84af81396d90e40df1e68d2",
+    },
+    ModelFile {
+        name: "tokenizer.json",
+        url: gliner_url!("tokenizer.json"),
+        size: 16_331_948,
+        sha256: "914bd3c8fb7b525af9e23b60d0ec7b1248ddb2b99014efd9c02ebeb022f8cab7",
+    },
+    ModelFile {
+        name: "gliner_config.json",
+        url: gliner_url!("gliner_config.json"),
+        size: 732,
+        sha256: "69e141f7fe1864e0d81ab0e542c68387d588db62393bcd93b471d54dcf0f5c16",
+    },
+];
 
 #[cfg(any(feature = "ocr", test))]
 static OCRS_FILES: [ModelFile; 2] = [
@@ -132,12 +168,24 @@ static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
     legacy_dirs: no_legacy_dirs,
 };
 
+#[cfg(any(feature = "local-gliner", test))]
+static GLINER_MULTI_PII: ModelManifest = ModelManifest {
+    dir_name: "gliner_multi_pii-v1",
+    needed_by: "The local-gliner redacter",
+    source: "https://huggingface.co/onnx-community/gliner_multi_pii-v1 (revision 2e0397a7)",
+    license: "Apache-2.0 (model and training data), backbone microsoft/mdeberta-v3-base MIT",
+    files: &GLINER_MULTI_PII_FILES,
+    legacy_dirs: no_legacy_dirs,
+};
+
 pub fn manifest(id: ModelId) -> &'static ModelManifest {
     match id {
         #[cfg(any(feature = "ocr", test))]
         ModelId::Ocrs => &OCRS,
         #[cfg(any(feature = "local-ner", test))]
         ModelId::NerMultilingualHrl => &NER_MULTILINGUAL_HRL,
+        #[cfg(any(feature = "local-gliner", test))]
+        ModelId::GlinerMultiPii => &GLINER_MULTI_PII,
     }
 }
 
@@ -204,6 +252,42 @@ mod tests {
         let total: u64 = manifest.files.iter().map(|f| f.size).sum();
         assert_eq!(total, 138_036_031);
         assert!((manifest.legacy_dirs)().is_empty());
+    }
+
+    #[test]
+    fn gliner_manifest_lists_the_three_pinned_files() {
+        let manifest = manifest(ModelId::GlinerMultiPii);
+        assert_eq!(manifest.dir_name, "gliner_multi_pii-v1");
+        assert_eq!(manifest.needed_by, "The local-gliner redacter");
+        let names: Vec<&str> = manifest.files.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names,
+            ["model.onnx", "tokenizer.json", "gliner_config.json"]
+        );
+        let total: u64 = manifest.files.iter().map(|f| f.size).sum();
+        assert_eq!(total, 1_157_129_714 + 16_331_948 + 732);
+        assert!((manifest.legacy_dirs)().is_empty());
+    }
+
+    #[test]
+    fn gliner_urls_pin_the_revision_and_digests_are_hex() {
+        let manifest = manifest(ModelId::GlinerMultiPii);
+        for file in manifest.files {
+            assert!(
+                file.url.starts_with(
+                    "https://huggingface.co/onnx-community/gliner_multi_pii-v1/resolve/2e0397a7e8a250d76c37122232b3cbde42c8d629/"
+                ),
+                "{}",
+                file.url
+            );
+            assert!(file.url.ends_with(file.name), "{}", file.url);
+            assert_eq!(file.sha256.len(), 64, "{}", file.name);
+            assert!(
+                file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                "{}",
+                file.name
+            );
+        }
     }
 
     #[test]

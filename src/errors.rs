@@ -58,6 +58,9 @@ pub enum AppError {
     #[cfg(feature = "local-ner")]
     #[error("Local NER error: {0}")]
     LocalNerError(#[from] crate::redacters::local_ner::LocalNerError),
+    #[cfg(feature = "local-gliner")]
+    #[error("Local GLiNER error: {0}")]
+    LocalGlinerError(#[from] crate::redacters::local_gliner::LocalGlinerError),
     #[error("System error: {message}")]
     SystemError { message: String },
     #[error("System error: {message}")]
