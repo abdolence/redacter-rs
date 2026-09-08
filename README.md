@@ -60,6 +60,11 @@ find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for 
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
+    * Local GLiNER redacter: offline, zero-shot span detection against free-text labels you
+      choose, understanding context that `local-ner` cannot. No cloud account needed:
+        * text, html, csv, json files
+        * images through text extraction using OCR
+        * PDF files (rendering as images from OCR)
     * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
         * text, html, csv, json files
         * images, redacted by blacking out the coordinates the model reports
@@ -86,8 +91,9 @@ cargo install redacter
 
 - If you are planning to use PDF redaction, please follow additional steps in
 the [PDF redaction](#pdf-redaction)
-- OCR (for the DLP providers that can't read images) and the `local-ner` redacter need model files that
-  are downloaded on request or installed by hand, see [Models and downloads](#models-and-downloads).
+- OCR (for the DLP providers that can't read images) and the `local-ner` and `local-gliner` redacters
+  need model files that are downloaded on request or installed by hand, see
+  [Models and downloads](#models-and-downloads).
 
 ## Command line options
 
@@ -105,7 +111,7 @@ Arguments:
 
 Options:
       --download-models <DOWNLOAD_MODELS>
-          Whether missing model files (OCR, local-ner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'
+          Whether missing model files (OCR, local-ner, local-gliner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'
           
           [default: ask]
           [possible values: ask, yes, no]
@@ -125,7 +131,7 @@ Options:
   -d, --redact <REDACT>
           List of redacters to use
           
-          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner]
+          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner, local-gliner]
 
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
@@ -229,6 +235,14 @@ Options:
 
       --local-ner-min-score <LOCAL_NER_MIN_SCORE>
           Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5
+          
+          [default: 0.5]
+
+      --local-gliner-labels <LOCAL_GLINER_LABELS>
+          Entity labels the local-gliner redacter looks for, comma separated, free text understood by the model (for example "person,email,medical condition"). Default is a PII list: person, address, email, phone number, date of birth, passport number, national id number, credit card number, iban, ip address, username, medical condition, postal code, license plate number
+
+      --local-gliner-min-score <LOCAL_GLINER_MIN_SCORE>
+          Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5
           
           [default: 0.5]
 
@@ -530,47 +544,129 @@ the ONNX export by Xenova of [Davlan/distilbert-base-multilingual-cased-ner-hrl]
 by David Adelani, released under the [Academic Free License 3.0](https://opensource.org/license/afl-3-0-php).
 The model is not bundled with the tool.
 
+### Local GLiNER redacter
+
+The `local-gliner` redacter runs a zero-shot span model entirely on your machine: instead of a fixed
+label set, you give it the entity labels to look for as free text, and it scores every span of the
+document against each one. It replaces each match with `[REDACTED]`, like the other local redacters.
+Unlike `local-ner`, it reads context: it finds a lower-case name with no capitalisation to key off, a
+medical condition described in a sentence, a date of birth with no `date of birth` keyword next to it,
+and handles and usernames written as free text, none of which `local-rules` or `local-ner` can find on
+their own. It uses [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
+(the [onnx-community](https://huggingface.co/onnx-community/gliner_multi_pii-v1) ONNX export),
+trained on six languages: English, French, German, Spanish, Italian and Portuguese. Nothing leaves your
+computer; the only network access is the one-time, opt-in download of the model files described in
+[Models and downloads](#models-and-downloads).
+
+Like `local-rules` and `local-ner`, an image or a PDF first goes through the OCR engine: every recognised
+word is passed to the model as if it were reading the page as text, and every word the chain redacts is
+blacked out on a rasterised copy of the page.
+
+```sh
+# The default PII label list
+redacter cp -d local-gliner tmp/source/ tmp/redacted/
+
+# Your own labels, and redact more aggressively
+redacter cp -d local-gliner --local-gliner-labels "person,email,medical condition" --local-gliner-min-score 0.3 tmp/source/ tmp/redacted/
+
+# Pattern-shaped data by rules, everything else by the context-aware model, all offline
+redacter cp -d local-rules -d local-gliner tmp/source/ tmp/redacted/
+```
+
+`--local-gliner-labels` is a comma-separated list of free-text labels, understood by the model rather
+than looked up in a fixed taxonomy; the default is a PII-only list: person, address, email, phone
+number, date of birth, passport number, national id number, credit card number, iban, ip address,
+username, medical condition, postal code, license plate number. `organization` is deliberately not in
+the default list: measured against this model, it tags team and desk names such as "Marketing team" and
+"The Support Desk" as organisations, which is over-redaction for a label most callers do not want on by
+default; add it with `--local-gliner-labels` when you do. `--local-gliner-min-score` is the model
+confidence a span needs to be redacted, between 0 and 1 (default 0.5); lower values redact more. Scores
+are well separated in practice, so lowering the threshold rarely changes the result.
+
+Use a release binary (or `cargo run --release`) for `local-gliner`: like `local-ner`, a debug build is
+far slower than release. In release, on an Intel i7-10700K (16 threads), loading the model takes about
+0.6 s and it holds about 1.5 GB of peak memory while redacting a small text corpus; the download in
+[Models and downloads](#models-and-downloads) is about 1.17 GB, almost all of it the fp32 model weights
+(the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
+support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 784 ms per file and
+2.4 s over the whole 8-file corpus, both dominated by the model's forward pass; a document scores each
+label in batches of at most 25, so more labels cost more passes and, as with `organization` above, more
+false positives.
+
+A date that merely looks like a date of birth may still be redacted regardless of context, since the
+model has learned the shape as well as the wording -- on the benchmark corpus this catches the invoice
+date `14 March 1985` in `dates-en.txt`, which carries no birth-related wording at all. A single word with
+nothing around it can still be missed the way it can with `local-ner`, since the model also relies on
+context to score a span highly.
+It works natively on text, html, json and csv files, and handles images and PDFs the way the AWS
+Comprehend redacter does: through OCR and Pdfium, when those optional capabilities are installed.
+
+The model is Apache-2.0, [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
+by Urchade Zaratiana, trained on the Apache-2.0
+[`urchade/synthetic-pii-ner-mistral-v1`](https://huggingface.co/datasets/urchade/synthetic-pii-ner-mistral-v1)
+dataset; its backbone, `microsoft/mdeberta-v3-base`, is MIT licensed. The model is not bundled with the
+tool.
+
 ### Local or cloud: quality versus performance
 
-The two local redacters run entirely on your machine, so nothing leaves it, nothing is billed and nothing needs
+The three local redacters run entirely on your machine, so nothing leaves it, nothing is billed and nothing needs
 credentials. The price is detection quality: curated rules only find what has a shape (emails, phones, cards,
-IBANs, keys, national ids with checksums), and a small named-entity model only finds persons, organisations and
-locations in the ten languages it was trained on. A cloud DLP service knows hundreds of info types, and an LLM
-understands context, so both find more, at the cost of latency, money, and sending the document out.
+IBANs, keys, national ids with checksums); a small named-entity model only finds persons, organisations and
+locations in the ten languages it was trained on; a zero-shot span model (`local-gliner`) reads context well
+enough to close most of that gap, at several times the latency and over a gigabyte of memory. A cloud DLP
+service knows hundreds of info types, and an LLM reasons over the whole document, so both can still find more
+in the hardest cases, at the cost of latency, money, and sending the document out.
 
 Pros of local redaction:
 
 - Privacy by construction: works air-gapped, no account, no per-request cost, no rate limits.
-- Speed: rules run in microseconds; the NER model needs about 100 ms per 512 tokens on a desktop CPU.
+- Speed: rules run in microseconds; the NER model needs about 100 ms per 512 tokens on a desktop CPU;
+  GLiNER is slower, under a second per file, but still local and free.
 - Determinism: the same input always gives the same output, which makes results easy to test and audit.
-- A useful pre-pass: `-d local-rules -d local-ner -d gcp-dlp` removes the obvious PII before anything is sent.
+- A useful pre-pass: `-d local-rules -d local-ner -d gcp-dlp` (or `-d local-gliner` in place of `local-ner`)
+  removes the obvious PII before anything is sent.
 
 Cons of local redaction:
 
-- Narrower coverage: no free-form addresses and no document-level reasoning; dates of birth, passport and
-  licence numbers only next to a context keyword.
-- Model quality: a 66M-parameter model misses names it has never seen, needs context to tag a single word,
-  and reports organisations for product names.
+- Narrower coverage without `local-gliner`: `local-rules` alone has no free-form addresses or document-level
+  reasoning, and only redacts dates of birth, passport and licence numbers next to a context keyword.
+- Model quality: the 66M-parameter NER model misses names it has never seen, needs context to tag a single
+  word, and reports organisations for product names; GLiNER can mistake a plain date for a date of birth by
+  shape alone, and more labels bring more of that kind of false positive.
+- Resource cost: `local-gliner`'s model is a ~1.17 GB download and needs about 1.5 GB of memory while running,
+  against `local-ner`'s 132 MB and 232 MB.
 - Locale-bound rules: national formats differ; expect to enable, disable or add rules for your documents.
 
-Measured on the small corpus under `test-fixtures/bench-dlp/` (four fixture documents plus a multilingual sample,
-about 4 KB of text; local rows at commit `540fbc5`, cloud rows from the run at commit `3c3491e`, Intel i7-10700K,
-one warm-up then the median of three runs; the cloud numbers include network time from Europe):
+Measured on the corpus under `test-fixtures/bench-dlp/` (eight fixture documents including a contextual note
+written so its PII needs context rather than shape to find, about 3.7 KB of text; local rows measured at
+commit `f1f7ea2`, Intel i7-10700K, one warm-up then the median of three runs). The cloud rows are kept from an
+earlier run on a 7-file corpus (commit `3c3491e`, before the contextual file was added, 41 PII / 7 entities /
+25 keep) and were not re-run against the current corpus, so they are not directly comparable to the PII/kept
+counts below:
 
 | Redacter | Whole corpus | Per file (median) | PII removed | Cities and organisations removed | Non-PII kept |
 |---|---|---|---|---|---|
-| `local-rules` | 38 ms | 35 ms | 28 / 41 | 0 / 7 | 25 / 25 |
-| `local-ner` | 370 ms | 144 ms | 15 / 41 | 7 / 7 | 23 / 25 |
-| `local-rules` + `local-ner` | 431 ms | 174 ms | 41 / 41 | 7 / 7 | 23 / 25 |
-| `gcp-dlp` | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
-| `gcp-vertex-ai` (Gemini) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
+| `local-rules` | 51 ms | 49 ms | 28 / 48 | 0 / 8 | 31 / 31 |
+| `local-ner` | 409 ms | 146 ms | 17 / 48 | 8 / 8 | 27 / 31 |
+| `local-rules` + `local-ner` | 468 ms | 192 ms | 43 / 48 | 8 / 8 | 27 / 31 |
+| `local-gliner` | 2.4 s | 784 ms | 45 / 48 | 1 / 8 | 28 / 31 |
+| `local-rules` + `local-gliner` | 2.5 s | 823 ms | 48 / 48 | 1 / 8 | 27 / 31 |
+| `gcp-dlp` (7-file corpus) | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
+| `gcp-vertex-ai` (Gemini, 7-file corpus) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
 
-The 13 PII strings `local-rules` leaves behind are the person names and the free-form street addresses,
-which have no shape to match; the chain with `local-ner` removes all 41, since the rules now cover the
-three dates of birth, the UK postcode and the passport number. GCP DLP misses only the postcode and
-Gemini misses nothing. The two non-PII strings the NER model removes are "Apple" in "Apple pie" and the
-sign-off "The Support Desk", both tagged as organisations, which is the over-redaction to expect from
-entity-based detection. Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
+`local-rules` still leaves behind the person names and free-form street addresses that have no shape to
+match; `local-rules+local-ner` closes most of that gap but, with no notion of context, still misses the
+contextual file's lower-case name, medical condition, keyword-less date of birth and two handles (43/48).
+`local-gliner` on its own reaches 45/48 with its default 14-label PII list, and chained after `local-rules`
+reaches 48/48 -- every PII string in the corpus, including all of the contextual file's. Since `organization`
+is off by default, `local-gliner` redacts only the one `entities` string embedded in a free-form address
+(1/8) rather than `local-ner`'s 8/8; entity coverage is available via `--local-gliner-labels` but costs the
+false positives that come with it. The keep losses beyond `local-rules`' clean 31/31 are the known
+over-redaction cases: `local-ner` and the `local-ner` chain tag "Apple" and "The Support Desk" as
+organisations; `local-gliner` and its chain occasionally tag a sentence mentioning email preferences as a
+username or address, and mistake the invoice date `14 March 1985` in `dates-en.txt` for a date of birth by
+shape alone, the same false positive noted in the [Local GLiNER redacter](#local-gliner-redacter) section.
+Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
 `test-fixtures/bench-dlp/README.md`) to reproduce the table on your own machine and documents.
 
 In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap
@@ -605,12 +701,14 @@ If library is detected correctly it will be reported in the tool output as.
 
 ## Models and downloads
 
-The OCR engine and the `local-ner` redacter need model files that are not bundled with the tool:
+The OCR engine and the `local-ner` and `local-gliner` redacters need model files that are not bundled
+with the tool:
 
 | Model | Files | Size | Source | Licence |
 |---|---|---|---|---|
 | `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | https://ocrs-models.s3-accelerate.amazonaws.com/ | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
 | `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision `c2a4dbf`) | AFL-3.0 |
+| `gliner_multi_pii-v1` (`local-gliner`) | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | https://huggingface.co/onnx-community/gliner_multi_pii-v1 (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 
 Nothing is downloaded without your consent. `--download-models` controls it:
 
@@ -737,8 +835,8 @@ redacter ls gs://my-little-bucket/my-big-files/
 ## Security considerations
 
 - Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
-- The local redacters (`local-rules`, `local-ner`) send nothing anywhere. Their model files are
-  fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
+- The local redacters (`local-rules`, `local-ner`, `local-gliner`) send nothing anywhere. Their model
+  files are fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
 - The tool was mostly designed to redact files internally. Not recommended to use it in public environments without
   apropriate security measures and manual review.

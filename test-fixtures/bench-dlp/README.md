@@ -78,7 +78,7 @@ providers. `local-rules` and plain `local-ner` are not expected to find most
 of this file's PII; it exists to show what a context-aware provider adds over
 the regex/NER baseline.
 
-Total corpus size is under 3 KB.
+Total corpus size is under 4 KB.
 
 The corpus is text only, on purpose, so this benchmark says nothing about the
 OCR path (images and PDFs read through the OCR engine before redaction): that
@@ -166,7 +166,7 @@ and writes it to `<BENCH_DLP_OUT>/summary.md`:
 
 ## Results
 
-Local rows measured at commit `257e8eb` (2026-09-08,
+Local rows measured at commit `f1f7ea2` (2026-09-08,
 `cargo test --release --test bench_dlp -- --ignored --nocapture`) on the
 8-file corpus (48 pii / 8 entities / 31 keep); Intel(R) Core(TM) i7-10700K
 CPU @ 3.80GHz (16 logical cores). All five local providers completed cleanly
@@ -193,14 +193,17 @@ are out of 41/7/25, not the 48/8/31 the local rows use below.
 PII including the dates of birth, the postcode and the passport number
 (28/48), missing the names and free-form addresses that have no shape to
 match, while leaving every control string alone (31/31 keep). `local-ner`
-alone inverts that gap: it catches names and all eight `entities` but has no
-notion of email/phone/card/id formats or of context, so it lands at 17/48 pii
-hits and misses three of the contextual fixture's context-only items.
-`local-rules+local-ner` is additive on the structured/named split (43/48 pii,
-all entities) at essentially `local-ner`'s latency (468 ms), but is still
-short of the full 48 because neither half of the chain reads context: the
-keyword-less date of birth and the free-form address in `contextual-en.txt`
-need more than shape or a name-shaped token to find.
+alone inverts that gap: it catches names, capitalised addresses and all
+eight `entities` but has no notion of email/phone/card/id formats, so it
+lands at 17/48 pii hits, missing five of the contextual fixture's seven PII
+items: the lower-case name (NER needs capitalisation), the medical
+condition, the keyword-less date of birth and the two handles -- none of
+which are person, organisation or location entities to begin with.
+`local-rules+local-ner` is additive on the structured/named split (43/48
+pii, all entities) at essentially `local-ner`'s latency (468 ms), but stays
+short of the full 48 for the same reason: neither half of the chain has a
+notion of a medical condition, a handle, or a date of birth with no keyword
+and no NER-recognisable shape.
 
 `local-gliner` on its own reaches 45/48 pii at default settings (a 14-label
 PII-only list, no `organization`) and, chained after `local-rules`, reaches
