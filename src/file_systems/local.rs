@@ -312,7 +312,7 @@ mod tests {
             .into_iter()
             .map(|file_ref| (file_ref.relative_path.filename(), file_ref))
             .collect();
-        assert_eq!(files_by_name.len(), 8);
+        assert_eq!(files_by_name.len(), 9);
 
         let expected_media_types = [
             ("customer-note.txt", mime::TEXT_PLAIN),
@@ -323,6 +323,7 @@ mod tests {
             ("customer-form.pdf", mime::APPLICATION_PDF),
             ("dates-en.txt", mime::TEXT_PLAIN),
             ("false-positives-en.txt", mime::TEXT_PLAIN),
+            ("contextual-en.txt", mime::TEXT_PLAIN),
         ];
         for (name, expected_media_type) in expected_media_types {
             let file_ref = files_by_name

@@ -39,7 +39,12 @@ pub(crate) mod local_ner;
 #[cfg(feature = "local-ner")]
 pub use local_ner::{Entity, LocalNerRedacter, LocalNerRedacterOptions};
 
-/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`).
+#[cfg(feature = "local-gliner")]
+pub(crate) mod local_gliner;
+#[cfg(feature = "local-gliner")]
+pub use local_gliner::{LocalGlinerRedacter, LocalGlinerRedacterOptions};
+
+/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`).
 pub(crate) mod text_spans;
 
 mod open_ai_llm;
@@ -353,6 +358,8 @@ pub enum Redacters<'a> {
     LocalRules(LocalRulesRedacter<'a>),
     #[cfg(feature = "local-ner")]
     LocalNer(LocalNerRedacter<'a>),
+    #[cfg(feature = "local-gliner")]
+    LocalGliner(LocalGlinerRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +390,8 @@ pub enum RedacterProviderOptions {
     LocalRules(LocalRulesRedacterOptions),
     #[cfg(feature = "local-ner")]
     LocalNer(LocalNerRedacterOptions),
+    #[cfg(feature = "local-gliner")]
+    LocalGliner(LocalGlinerRedacterOptions),
 }
 
 impl RedacterProviderOptions {
@@ -400,6 +409,8 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::LocalRules(_) => RedacterType::LocalRules,
             #[cfg(feature = "local-ner")]
             RedacterProviderOptions::LocalNer(_) => RedacterType::LocalNer,
+            #[cfg(feature = "local-gliner")]
+            RedacterProviderOptions::LocalGliner(_) => RedacterType::LocalGliner,
         }
     }
 
@@ -409,6 +420,10 @@ impl RedacterProviderOptions {
         #[cfg(feature = "local-ner")]
         if let RedacterProviderOptions::LocalNer(_) = self {
             return vec![ModelId::NerMultilingualHrl];
+        }
+        #[cfg(feature = "local-gliner")]
+        if let RedacterProviderOptions::LocalGliner(_) = self {
+            return vec![ModelId::GlinerMultiPii];
         }
         Vec::new()
     }
@@ -427,7 +442,10 @@ impl Display for RedacterOptions {
 }
 
 impl<'a> Redacters<'a> {
-    #[cfg_attr(not(feature = "local-ner"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "local-ner", feature = "local-gliner")),
+        allow(unused_variables)
+    )]
     pub async fn new_redacter(
         provider_options: RedacterProviderOptions,
         reporter: &'a AppReporter<'a>,
@@ -466,6 +484,10 @@ impl<'a> Redacters<'a> {
             #[cfg(feature = "local-ner")]
             RedacterProviderOptions::LocalNer(options) => Ok(Redacters::LocalNer(
                 LocalNerRedacter::new(options, reporter, models).await?,
+            )),
+            #[cfg(feature = "local-gliner")]
+            RedacterProviderOptions::LocalGliner(options) => Ok(Redacters::LocalGliner(
+                LocalGlinerRedacter::new(options, reporter, models).await?,
             )),
         }
     }
@@ -550,6 +572,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalRules(redacter) => redacter.redact(input).await,
             #[cfg(feature = "local-ner")]
             Redacters::LocalNer(redacter) => redacter.redact(input).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -566,6 +590,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalRules(redacter) => redacter.redact_support(file_ref).await,
             #[cfg(feature = "local-ner")]
             Redacters::LocalNer(redacter) => redacter.redact_support(file_ref).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -582,6 +608,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalRules(_) => RedacterType::LocalRules,
             #[cfg(feature = "local-ner")]
             Redacters::LocalNer(_) => RedacterType::LocalNer,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(_) => RedacterType::LocalGliner,
         }
     }
 }
@@ -603,7 +631,7 @@ pub mod test_support {
     /// information, that exercise a text, table, structured and PDF media type. The
     /// multilingual note is German, French and Spanish text for the local redacters.
     pub const TEST_DOCUMENTS_DIR: &str = "test-fixtures/documents/";
-    pub const TEST_DOCUMENT_NAMES: [&str; 8] = [
+    pub const TEST_DOCUMENT_NAMES: [&str; 9] = [
         "customer-note.txt",
         "customers.csv",
         "customer.json",
@@ -612,6 +640,7 @@ pub mod test_support {
         "multilingual.txt",
         "dates-en.txt",
         "false-positives-en.txt",
+        "contextual-en.txt",
     ];
     pub const TEST_DOCUMENT_SAMPLE_EMAIL: &str = "john.smith@example.com";
     pub const TEST_DOCUMENT_SAMPLE_PHONE: &str = "+1 (555) 123-4567";

@@ -15,7 +15,7 @@ categories = ["command-line-utilities"]
 description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
 
 [features]
-default = ["pdf-render", "clipboard", "ocr", "local-ner"]
+default = ["pdf-render", "clipboard", "ocr", "local-ner", "local-gliner"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-ms-presidio = [] # For testing on CI/MS Presidiom
@@ -24,6 +24,7 @@ ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clipboard = [] # For testing on CI/Clipboard
 ci-ocr = [] # For testing on CI/OCR
 ci-local-ner = [] # For testing on CI with the downloaded local NER model
+ci-local-gliner = [] # For testing on CI with the downloaded local GLiNER model
 ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
 ci = [
     "ci-gcp",
@@ -38,6 +39,7 @@ pdf-render = ["pdfium-render"]
 clipboard = ["arboard"]
 ocr = ["ocrs", "rten", "rten-imageproc"]
 local-ner = ["tokenizers", "rten", "rten-tensor"]
+local-gliner = ["tokenizers", "rten", "rten-tensor"]
 
 [dependencies]
 rsb_derive = "0.5"

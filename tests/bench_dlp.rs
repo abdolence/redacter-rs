@@ -14,8 +14,8 @@
 //! `test-fixtures/bench-dlp/` for the full description):
 //!
 //! - `BENCH_DLP_PROVIDERS`: comma-separated provider specs, e.g.
-//!   `local-rules,local-ner,local-rules+local-ner,gcp-dlp,gcp-vertex-ai`.
-//!   Defaults to `local-rules,local-ner,local-rules+local-ner`.
+//!   `local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,gcp-dlp,gcp-vertex-ai`.
+//!   Defaults to `local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner`.
 //! - `BENCH_DLP_GCP_PROJECT`: GCP project id, required only when a `gcp-*`
 //!   provider is listed.
 //! - `BENCH_DLP_OUT`: output directory for run artifacts and `summary.md`.
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-/// The seven text-only fixtures that make up the corpus, read directly from
+/// The eight text-only fixtures that make up the corpus, read directly from
 /// `test-fixtures/documents/`. This is an explicit list, not a directory
 /// listing, so that `test-fixtures/documents/customer-form.pdf` (and anything
 /// else added there later) never becomes part of the corpus.
@@ -44,6 +44,7 @@ const CORPUS_FILE_NAMES: &[&str] = &[
     "multilingual.txt",
     "false-positives-en.txt",
     "dates-en.txt",
+    "contextual-en.txt",
 ];
 
 const REDACTED_TOKEN: &str = "[REDACTED]";
@@ -270,8 +271,10 @@ fn invoke_redacter(spec: &str, src: &Path, out_dir: &Path, gcp_project: Option<&
 #[test]
 #[ignore]
 fn bench_dlp() {
-    let providers_env = std::env::var("BENCH_DLP_PROVIDERS")
-        .unwrap_or_else(|_| "local-rules,local-ner,local-rules+local-ner".to_string());
+    let providers_env = std::env::var("BENCH_DLP_PROVIDERS").unwrap_or_else(|_| {
+        "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner"
+            .to_string()
+    });
     let specs: Vec<String> = providers_env
         .split(',')
         .map(|s| s.trim().to_string())
