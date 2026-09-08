@@ -443,11 +443,11 @@ mod tests {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
         let redacter = redacter(&reporter).await;
-        let fixture_path = format!(
-            "{}/.claude/plans/2026-09-08-local-llm-spike-archive/experiments/spike-fixtures/contextual-en.txt",
-            std::env::var("HOME").expect("HOME is set")
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-fixtures/documents/contextual-en.txt"
         );
-        let text = std::fs::read_to_string(&fixture_path)
+        let text = std::fs::read_to_string(fixture_path)
             .unwrap_or_else(|err| panic!("read {fixture_path}: {err}"));
         let redacted = redacter
             .redact(item(

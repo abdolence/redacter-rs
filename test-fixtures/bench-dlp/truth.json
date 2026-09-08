@@ -121,5 +121,27 @@
       "January 2024",
       "invoice"
     ]
+  },
+  "contextual-en.txt": {
+    "pii": [
+      "jonas petersen",
+      "14 Rosewood Lane, Kettering",
+      "type 2 diabetes",
+      "Mira Kowalczyk",
+      "12/03/1984",
+      "@mira_k84",
+      "mkowalczyk"
+    ],
+    "entities": [
+      "Kettering"
+    ],
+    "keep": [
+      "Apple Watch",
+      "The Support Desk",
+      "Tuesday morning",
+      "quarterly report",
+      "before Friday",
+      "glucose readings"
+    ]
   }
 }

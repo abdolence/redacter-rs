@@ -6,9 +6,9 @@ A small, fixed-corpus benchmark comparing the redacter CLI's providers on:
 - **detection quality**: does each provider actually remove the PII in the
   corpus, and does it leave non-PII "control" text alone?
 
-Providers compared: the offline ones (`local-rules`, `local-ner`, and the
-chain `local-rules+local-ner`) against the cloud ones (`gcp-dlp`,
-`gcp-vertex-ai`).
+Providers compared: the offline ones (`local-rules`, `local-ner`, `local-gliner`,
+and the chains `local-rules+local-ner` and `local-rules+local-gliner`) against
+the cloud ones (`gcp-dlp`, `gcp-vertex-ai`).
 
 Not part of the `redacter` crate build; this is a measurement harness kept
 under `test-fixtures/` for re-runs after future changes to the redacters, run
@@ -41,9 +41,13 @@ names, postal addresses or `entities` (it has no notion of named entities) --
 only structured PII like emails, phones, card numbers and IDs.  `local-ner` is
 a named-entity model: it is not expected to hit emails, phones, card numbers
 or IDs (it has no notion of those formats) -- only names and, depending on
-`--local-ner-entities`, organisations and locations. `local-rules+local-ner`
-(the chain, run left to right) is the intended production configuration: it
-is expected to cover both classes.
+`--local-ner-entities`, organisations and locations. `local-gliner` is a
+zero-shot span model driven by free-text labels (`--local-gliner-labels`):
+it is expected to cover both classes on its own, since its default label list
+includes both structured PII and person/address labels, but it has no notion
+of an entity type it was not given a label for. `local-rules+local-ner` and
+`local-rules+local-gliner` (each a chain, run left to right) are production
+configurations: they are expected to cover both classes.
 
 The same literal text can be PII in one file and a control in another on
 purpose -- e.g. `"14 March 1985"` is a customer's date of birth in
@@ -53,7 +57,7 @@ which is exactly the kind of gap this benchmark is meant to surface.
 
 ## Corpus
 
-Seven text-only fixtures (no images/PDF, to keep cloud cost and OCR variance
+Eight text-only fixtures (no images/PDF, to keep cloud cost and OCR variance
 out of the comparison), copied from `test-fixtures/documents/` into a fresh
 temp directory by name -- `tests/bench_dlp.rs` lists them explicitly rather
 than scanning the directory, so `test-fixtures/documents/customer-form.pdf`
@@ -61,7 +65,18 @@ than scanning the directory, so `test-fixtures/documents/customer-form.pdf`
 
 - `customer-note.txt`, `customer.json`, `customer-profile.html`,
   `customers.csv`, `multilingual.txt`, `false-positives-en.txt`,
-  `dates-en.txt`
+  `dates-en.txt`, `contextual-en.txt`
+
+`contextual-en.txt` is a call summary written so that every PII item needs
+context rather than shape or capitalisation to find: a lower-case name
+(`jonas petersen`), a free-form address with no postcode keyword, a medical
+condition, a keyword-less date of birth (`12/03/1984`, indistinguishable by
+shape from a plain date), a forum handle and a username. It also carries two
+non-PII controls that read like an organisation out of context (`Apple
+Watch`, `The Support Desk`) to check for over-redaction by entity-based
+providers. `local-rules` and plain `local-ner` are not expected to find most
+of this file's PII; it exists to show what a context-aware provider adds over
+the regex/NER baseline.
 
 Total corpus size is under 3 KB.
 
@@ -85,8 +100,8 @@ cargo test --release --test bench_dlp -- --ignored --nocapture
 Configuration is via environment variables:
 
 - `BENCH_DLP_PROVIDERS`: comma-separated provider specs. Defaults to
-  `local-rules,local-ner,local-rules+local-ner` (local providers only, no
-  network calls).
+  `local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner`
+  (local providers only, no network calls).
 - `BENCH_DLP_GCP_PROJECT`: GCP project id, required only when a `gcp-dlp` or
   `gcp-vertex-ai` spec is listed; the test fails fast with a clear message if
   it's missing.
@@ -99,10 +114,10 @@ Local providers only (the default):
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-All five providers, including the cloud ones (requires GCP credentials):
+All seven providers, including the cloud ones (requires GCP credentials):
 
 ```sh
-BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,gcp-dlp,gcp-vertex-ai \
+BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,gcp-dlp,gcp-vertex-ai \
 BENCH_DLP_GCP_PROJECT=latestbit \
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
@@ -127,11 +142,11 @@ separate passes.
 ### Cloud cost note
 
 Each cloud provider spec is invoked exactly `1 + 3 + <file count>` times per
-run (currently 7 corpus files, so 11 invocations). The test prints this count
+run (currently 8 corpus files, so 12 invocations). The test prints this count
 before starting and aborts if it would ever be exceeded -- there is no retry
-loop. Across those 11 invocations, the whole ~3 KB corpus is sent roughly 5
+loop. Across those 12 invocations, the whole ~4 KB corpus is sent roughly 5
 times over (4 whole-corpus passes' worth of bytes, plus the per-file passes
-covering the corpus once more), so each cloud provider sees under 40 KB total
+covering the corpus once more), so each cloud provider sees under 45 KB total
 per run.
 
 ## Scoring
@@ -151,36 +166,55 @@ and writes it to `<BENCH_DLP_OUT>/summary.md`:
 
 ## Results
 
-Local rows measured at commit `540fbc5` (2026-09-07,
-`cargo test --release --test bench_dlp -- --ignored --nocapture`), cloud rows
-from the full run at commit `3c3491e`; Intel(R) Core(TM) i7-10700K CPU @
-3.80GHz (16 logical cores). All providers completed cleanly (11/11 calls made
-each, no errors, no retries needed).
+Local rows measured at commit `257e8eb` (2026-09-08,
+`cargo test --release --test bench_dlp -- --ignored --nocapture`) on the
+8-file corpus (48 pii / 8 entities / 31 keep); Intel(R) Core(TM) i7-10700K
+CPU @ 3.80GHz (16 logical cores). All five local providers completed cleanly
+(12/12 calls made each, no errors, no retries needed).
+
+Cloud rows are kept from the 7-file corpus run at commit `3c3491e`
+(2026-09-07, 41 pii / 7 entities / 25 keep, before `contextual-en.txt` joined
+the corpus) and were not re-run this round; their pii/entities/keep totals
+are out of 41/7/25, not the 48/8/31 the local rows use below.
 
 | provider | wall time (median of 3) | per-file median | pii hits/total | loc/org redacted/total | keep survived/total | [REDACTED] count |
 |---|---|---|---|---|---|---|
-| gcp-dlp | 710 ms | 266 ms | 40/41 | 4/7 | 25/25 | 73 |
-| gcp-vertex-ai | 68901 ms | 5999 ms | 41/41 | 1/7 | 24/25 | 48 |
-| local-ner | 370 ms | 144 ms | 15/41 | 7/7 | 23/25 | 32 |
-| local-rules | 38 ms | 35 ms | 28/41 | 0/7 | 25/25 | 31 |
-| local-rules+local-ner | 431 ms | 174 ms | 41/41 | 7/7 | 23/25 | 63 |
+| gcp-dlp (7-file corpus) | 710 ms | 266 ms | 40/41 | 4/7 | 25/25 | 73 |
+| gcp-vertex-ai (7-file corpus) | 68901 ms | 5999 ms | 41/41 | 1/7 | 24/25 | 48 |
+| local-rules | 51 ms | 49 ms | 28/48 | 0/8 | 31/31 | 31 |
+| local-ner | 409 ms | 146 ms | 17/48 | 8/8 | 27/31 | 37 |
+| local-rules+local-ner | 468 ms | 192 ms | 43/48 | 8/8 | 27/31 | 68 |
+| local-gliner | 2357 ms | 784 ms | 45/48 | 1/8 | 28/31 | 51 |
+| local-rules+local-gliner | 2492 ms | 823 ms | 48/48 | 1/8 | 27/31 | 59 |
 
 ### Reading the numbers
 
-`local-rules` is by far the fastest (about 20 ms) and now catches the
-structured PII including the dates of birth, the postcode and the passport
-number (28/41), missing only names and street addresses, while leaving every
-control string and every city/org name untouched. `local-ner` alone inverts
-that gap: it catches names and all seven `entities` but has no notion of
-email/phone/card/id formats, so it lands at a low 15/41 pii hits.
-`local-rules+local-ner`, the intended production configuration, is additive
-on detection (41/41 pii hits, all entities) at essentially `local-ner`'s
-latency (431 ms), since the regex pass is negligible next to the NER model.
-The chain now matches `gcp-vertex-ai` on raw pii recall (41/41 both) and
-beats `gcp-dlp` (40/41), and both cloud providers leave keep strings alone
-almost as well, but neither is a drop-in replacement for the chain's
-entity coverage (`gcp-dlp` 4/7, `gcp-vertex-ai` 1/7 loc/org redacted, versus
-7/7 for `local-ner`/the chain); `gcp-dlp` is close to the chain's latency
-(710 ms vs 431 ms) while `gcp-vertex-ai` is two orders of magnitude slower
-(69 s median, up to 21 s for a single small file), the clear cost of routing
-every file through an LLM.
+`local-rules` is by far the fastest (about 50 ms) and catches the structured
+PII including the dates of birth, the postcode and the passport number
+(28/48), missing the names and free-form addresses that have no shape to
+match, while leaving every control string alone (31/31 keep). `local-ner`
+alone inverts that gap: it catches names and all eight `entities` but has no
+notion of email/phone/card/id formats or of context, so it lands at 17/48 pii
+hits and misses three of the contextual fixture's context-only items.
+`local-rules+local-ner` is additive on the structured/named split (43/48 pii,
+all entities) at essentially `local-ner`'s latency (468 ms), but is still
+short of the full 48 because neither half of the chain reads context: the
+keyword-less date of birth and the free-form address in `contextual-en.txt`
+need more than shape or a name-shaped token to find.
+
+`local-gliner` on its own reaches 45/48 pii at default settings (a 14-label
+PII-only list, no `organization`) and, chained after `local-rules`, reaches
+48/48 -- every PII string in the corpus, including the lower-case name,
+medical condition, keyword-less date of birth and the two handles in
+`contextual-en.txt` that neither `local-rules` nor `local-ner` find. It costs
+about 5x `local-rules+local-ner`'s latency (2492 ms vs 468 ms wall,
+mostly one-time model load repeated per invocation in this per-process
+harness) and, since `organization` is off by default, redacts only 1 of 8
+`entities` (the address's town name, tagged under the `address` label) rather
+than `local-ner`'s 8/8 -- entity coverage costs an extra label and the false
+positives that come with it (see the `local-gliner` section of the top-level
+README). Compared to the cloud rows on the smaller 7-file corpus,
+`local-rules+local-gliner`'s 48/48 pii on the harder 8-file corpus is not
+directly comparable, but the contextual fixture is exactly the kind of gap
+`gcp-vertex-ai`'s LLM-based redaction is included here to cover; a like-for-like
+comparison needs the cloud providers re-run on the current corpus.
