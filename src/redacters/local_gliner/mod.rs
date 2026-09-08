@@ -56,9 +56,9 @@ impl LocalGlinerRedacterOptions {
 }
 
 /// Redacts every table cell that could hold a labelled span, leaving the rest byte for byte.
-/// The predicate is "holds no letter", not "is a number": a cell without one cannot hold text
-/// worth scoring and never reaches the model, which would cost a tokenizer pass and a forward
-/// pass to find nothing.
+/// Only an empty or whitespace-only cell is skipped: unlike a name-only NER model, GLiNER's
+/// default labels include phone number, credit card number, iban and other digit-only spans,
+/// so a "holds no letter" skip would hide every phone number and card number in a table.
 ///
 /// Each cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a one-word cell gives the model no sentence, and short bare values are tagged
@@ -78,7 +78,7 @@ where
     for row in rows {
         let mut redacted_row = Vec::with_capacity(row.len());
         for (column, cell) in row.into_iter().enumerate() {
-            if !cell.chars().any(char::is_alphabetic) {
+            if cell.trim().is_empty() {
                 redacted_row.push(cell);
                 continue;
             }
@@ -304,8 +304,8 @@ mod tests {
     }
 
     #[test]
-    fn cells_without_letters_never_reach_the_model() {
-        let headers: Vec<String> = ["id", "full_name", "amount"]
+    fn digits_only_cells_are_scored() {
+        let headers: Vec<String> = ["id", "full_name", "phone"]
             .iter()
             .map(|h| h.to_string())
             .collect();
@@ -313,7 +313,7 @@ mod tests {
             vec![
                 "1".to_string(),
                 "Maria Garcia Lopez".to_string(),
-                " 42.5 ".to_string(),
+                "+34 612 345 678".to_string(),
             ],
             vec!["-7".to_string(), "Osaka".to_string(), String::new()],
         ];
@@ -323,13 +323,26 @@ mod tests {
             Ok(vec![finding(text.len() - 5, text.len())])
         })
         .unwrap();
-        assert_eq!(seen, ["full_name: Maria Garcia Lopez", "full_name: Osaka"]);
-        assert_eq!(findings, 2);
+        assert_eq!(
+            seen,
+            [
+                "id: 1",
+                "full_name: Maria Garcia Lopez",
+                "phone: +34 612 345 678",
+                "id: -7",
+                "full_name: Osaka",
+            ]
+        );
+        assert_eq!(findings, 5);
         assert_eq!(
             redacted,
             vec![
-                vec!["1", "Maria Garcia [REDACTED]", " 42.5 "],
-                vec!["-7", "[REDACTED]", ""],
+                vec![
+                    "[REDACTED]",
+                    "Maria Garcia [REDACTED]",
+                    "+34 612 34[REDACTED]"
+                ],
+                vec!["[REDACTED]", "[REDACTED]", ""],
             ]
         );
     }
@@ -339,9 +352,9 @@ mod tests {
         let (row, seen, findings) = run_row(
             &["id", "city"],
             &["1", "Madrid"],
-            vec![vec![finding(6, 12)]],
+            vec![vec![], vec![finding(6, 12)]],
         );
-        assert_eq!(seen, ["city: Madrid"]);
+        assert_eq!(seen, ["id: 1", "city: Madrid"]);
         assert_eq!(row, ["1", "[REDACTED]"]);
         assert_eq!(findings, 1);
         assert!(!row.iter().any(|cell| cell.contains("city")), "{row:?}");
@@ -363,6 +376,36 @@ mod tests {
         assert_eq!(findings, 1);
     }
 
+    /// The prefix is cut off by byte length, and a German header is one byte longer than it
+    /// looks: `Straße: ` is 8 characters and 9 bytes. A shift counted in characters would move
+    /// every finding one byte into the cell and cut a multi-byte one in half.
+    #[test]
+    fn a_non_ascii_header_shifts_the_findings_by_bytes() {
+        let prefix = "Straße: ".len();
+        assert_eq!(prefix, 9, "the header is one byte longer than it is wide");
+        let (row, seen, findings) = run_row(
+            &["Straße"],
+            &["Königsallee"],
+            vec![vec![finding(prefix, prefix + "Königsallee".len())]],
+        );
+        assert_eq!(seen, ["Straße: Königsallee"]);
+        assert_eq!(row, ["[REDACTED]"]);
+        assert_eq!(findings, 1);
+
+        // An ASCII header in front of a multi-byte cell: only the second word is tagged.
+        let (row, seen, findings) = run_row(
+            &["Stadt"],
+            &["München Süd"],
+            vec![vec![finding(
+                "Stadt: München ".len(),
+                "Stadt: München Süd".len(),
+            )]],
+        );
+        assert_eq!(seen, ["Stadt: München Süd"]);
+        assert_eq!(row, ["München [REDACTED]"]);
+        assert_eq!(findings, 1);
+    }
+
     #[test]
     fn a_cell_with_no_header_is_scored_on_its_own() {
         let (row, seen, findings) = run_row(&[""], &["Madrid"], vec![vec![finding(0, 6)]]);
@@ -379,6 +422,8 @@ mod tests {
         assert_eq!(row, ["Madrid", "[REDACTED]"]);
     }
 
+    /// `DownloadModels::No`: the 1.16 GB model is placed in the cache by hand for these tests
+    /// and must never be fetched over the network by a test run.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalGlinerRedacter<'a> {
         let options = ModelStoreOptions {
             download: DownloadModels::No,
@@ -473,6 +518,61 @@ mod tests {
         }
         assert!(out.contains("Apple Watch"), "{out}");
         assert!(out.contains("The Support Desk"), "{out}");
+    }
+
+    /// The `phone` column holds only digits and punctuation, so it exercises the digit-only
+    /// cell path directly against the model rather than a fake scorer.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-local-gliner"), ignore)]
+    async fn redacts_phone_numbers_in_the_customers_csv_fixture() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter).await;
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-fixtures/documents/customers.csv"
+        );
+        let text = std::fs::read_to_string(fixture_path)
+            .unwrap_or_else(|err| panic!("read {fixture_path}: {err}"));
+        let mut lines = text.lines();
+        let headers: Vec<String> = lines
+            .next()
+            .unwrap_or_else(|| panic!("{fixture_path} has no header row"))
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        let rows: Vec<Vec<String>> = lines
+            .map(|line| line.split(',').map(str::to_string).collect())
+            .collect();
+        assert_eq!(rows.len(), 3, "fixture changed: {fixture_path}");
+        let redacted = redacter
+            .redact(item(
+                "customers.csv",
+                mime::TEXT_CSV,
+                RedacterDataItemContent::Table { headers, rows },
+            ))
+            .await
+            .unwrap();
+        let RedacterDataItemContent::Table { headers, rows } = redacted.content else {
+            panic!("table stays table");
+        };
+        assert_eq!(
+            headers,
+            vec!["id", "full_name", "email", "phone", "city", "notes"]
+        );
+        assert_eq!(rows.len(), 3);
+        for phone in ["+1 (555) 123-4567", "+34 612 345 678", "+81 90-1234-5678"] {
+            assert!(
+                rows.iter().flatten().all(|cell| !cell.contains(phone)),
+                "{phone} survived: {rows:?}"
+            );
+        }
+        for city in ["London", "Madrid", "Osaka"] {
+            assert!(
+                rows.iter().flatten().any(|cell| cell.contains(city)),
+                "{city} missing: {rows:?}"
+            );
+        }
     }
 
     #[tokio::test]

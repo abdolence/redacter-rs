@@ -886,5 +886,12 @@ mod tests {
             let err = local_gliner_options(&["--local-gliner-labels", "person,  "]).unwrap_err();
             assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
         }
+
+        #[test]
+        fn a_trailing_comma_is_a_config_error() {
+            let err =
+                local_gliner_options(&["--local-gliner-labels", "person,email,"]).unwrap_err();
+            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+        }
     }
 }

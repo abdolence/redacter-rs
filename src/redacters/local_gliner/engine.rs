@@ -447,6 +447,8 @@ mod tests {
     use crate::reporter::AppReporter;
     use console::Term;
 
+    /// `DownloadModels::No`: the 1.16 GB model is placed in the cache by hand for these tests
+    /// and must never be fetched over the network by a test run.
     async fn engine() -> GlinerEngine {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
