@@ -588,10 +588,12 @@ far slower than release. In release, on an Intel i7-10700K (16 threads), loading
 0.6 s and it holds about 1.5 GB of peak memory while redacting a small text corpus; the download in
 [Models and downloads](#models-and-downloads) is about 1.17 GB, almost all of it the fp32 model weights
 (the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
-support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 784 ms per file and
-2.4 s over the whole 8-file corpus, both dominated by the model's forward pass; a document scores each
-label in batches of at most 25, so more labels cost more passes and, as with `organization` above, more
-false positives.
+support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 834 ms per file and
+2.8 s over the whole 8-file corpus, both dominated by the model's forward pass; the per-file figure
+includes process start and the ~0.6 s model load, since the benchmark harness invokes the binary once
+per file rather than scoring in one long-lived process, so it should not be read as in-process inference
+time. A document scores each label in batches of at most 25, so more labels cost more passes and, as
+with `organization` above, more false positives.
 
 A date that merely looks like a date of birth may still be redacted regardless of context, since the
 model has learned the shape as well as the wording -- on the benchmark corpus this catches the invoice
@@ -639,33 +641,36 @@ Cons of local redaction:
 
 Measured on the corpus under `test-fixtures/bench-dlp/` (eight fixture documents including a contextual note
 written so its PII needs context rather than shape to find, about 3.7 KB of text; local rows measured at
-commit `f1f7ea2`, Intel i7-10700K, one warm-up then the median of three runs). The cloud rows are kept from an
-earlier run on a 7-file corpus (commit `3c3491e`, before the contextual file was added, 41 PII / 7 entities /
-25 keep) and were not re-run against the current corpus, so they are not directly comparable to the PII/kept
-counts below:
+commit `e9b325d`, Intel i7-10700K, one warm-up then the median of three runs; per-file figures include
+process start and model load, since the harness invokes the binary once per file). The cloud rows are kept
+from an earlier run on a 7-file corpus (commit `3c3491e`, before the contextual file was added, 41 PII / 7
+entities / 25 keep) and were not re-run against the current corpus, so they are not directly comparable to
+the PII/kept counts below:
 
 | Redacter | Whole corpus | Per file (median) | PII removed | Cities and organisations removed | Non-PII kept |
 |---|---|---|---|---|---|
-| `local-rules` | 51 ms | 49 ms | 28 / 48 | 0 / 8 | 31 / 31 |
-| `local-ner` | 409 ms | 146 ms | 17 / 48 | 8 / 8 | 27 / 31 |
-| `local-rules` + `local-ner` | 468 ms | 192 ms | 43 / 48 | 8 / 8 | 27 / 31 |
-| `local-gliner` | 2.4 s | 784 ms | 45 / 48 | 1 / 8 | 28 / 31 |
-| `local-rules` + `local-gliner` | 2.5 s | 823 ms | 48 / 48 | 1 / 8 | 27 / 31 |
+| `local-rules` | 52 ms | 49 ms | 28 / 48 | 0 / 8 | 31 / 31 |
+| `local-ner` | 441 ms | 152 ms | 17 / 48 | 8 / 8 | 27 / 31 |
+| `local-rules` + `local-ner` | 466 ms | 205 ms | 43 / 48 | 8 / 8 | 27 / 31 |
+| `local-gliner` | 2.8 s | 834 ms | 48 / 48 | 1 / 8 | 28 / 31 |
+| `local-rules` + `local-gliner` | 2.7 s | 878 ms | 48 / 48 | 1 / 8 | 27 / 31 |
 | `gcp-dlp` (7-file corpus) | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
 | `gcp-vertex-ai` (Gemini, 7-file corpus) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
 
 `local-rules` still leaves behind the person names and free-form street addresses that have no shape to
 match; `local-rules+local-ner` closes most of that gap but, with no notion of context, still misses the
 contextual file's lower-case name, medical condition, keyword-less date of birth and two handles (43/48).
-`local-gliner` on its own reaches 45/48 with its default 14-label PII list, and chained after `local-rules`
-reaches 48/48 -- every PII string in the corpus, including all of the contextual file's. Since `organization`
-is off by default, `local-gliner` redacts only the one `entities` string embedded in a free-form address
-(1/8) rather than `local-ner`'s 8/8; entity coverage is available via `--local-gliner-labels` but costs the
-false positives that come with it. The keep losses beyond `local-rules`' clean 31/31 are the known
-over-redaction cases: `local-ner` and the `local-ner` chain tag "Apple" and "The Support Desk" as
-organisations; `local-gliner` and its chain occasionally tag a sentence mentioning email preferences as a
-username or address, and mistake the invoice date `14 March 1985` in `dates-en.txt` for a date of birth by
-shape alone, the same false positive noted in the [Local GLiNER redacter](#local-gliner-redacter) section.
+`local-gliner` reaches 48/48 with its default 14-label PII list on its own -- every PII string in the
+corpus, including all of the contextual file's and the digit-only phone numbers in `customers.csv` --
+and chained after `local-rules` also stays at 48/48, since `local-rules` already covers the same
+structured PII on its own. Since `organization` is off by default, `local-gliner` redacts only the one
+`entities` string embedded in a free-form address (1/8) rather than `local-ner`'s 8/8; entity coverage is
+available via `--local-gliner-labels` but costs the false positives that come with it. The keep losses
+beyond `local-rules`' clean 31/31 are the known over-redaction cases: `local-ner` and the `local-ner`
+chain tag "Apple" and "The Support Desk" as organisations; `local-gliner` and its chain occasionally tag a
+sentence mentioning email preferences as a username or address, and mistake the invoice date
+`14 March 1985` in `dates-en.txt` for a date of birth by shape alone, the same false positive noted in the
+[Local GLiNER redacter](#local-gliner-redacter) section.
 Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
 `test-fixtures/bench-dlp/README.md`) to reproduce the table on your own machine and documents.
 
