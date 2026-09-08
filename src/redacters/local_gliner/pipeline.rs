@@ -57,8 +57,11 @@ pub struct WordWindow {
 }
 
 /// The token budget left for text words in one forward pass: `max_len` minus `[CLS]`/`[SEP]`
-/// minus the longest label-batch prompt, so every batch's window fits under `max_len` even
-/// though batches share the same window plan.
+/// minus the longest label-batch prompt. This bounds how many word tokens a window plan may
+/// pack in, not how many a single word may contribute: `plan_word_windows` gives a word wider
+/// than this budget its own window rather than splitting or dropping it, and `window_inputs`
+/// truncates that word's subtokens to the budget when building the window's tensors, so every
+/// window's token count fits under `max_len` regardless of how long any one word tokenizes to.
 pub fn window_budget(max_len: usize, prompt_lens: &[usize]) -> Result<usize, LocalGlinerError> {
     let longest_prompt = prompt_lens.iter().copied().max().unwrap_or(0);
     let frame = 2 + longest_prompt;
@@ -179,12 +182,18 @@ pub struct WindowInputs {
 }
 
 /// Assembles one window's token/mask/span tensors from already-tokenized words and prompt.
+/// `budget` is the text-word token budget from [`window_budget`]: a word whose own subtoken
+/// count alone exceeds it (`plan_word_windows` still gives such a word its own window rather
+/// than splitting or dropping it) has its subtokens truncated to fit, so the graph never sees
+/// more than `budget` word tokens. The word still occupies exactly one span-decoding slot, so
+/// a span tagged on it redacts the whole word even though only a token prefix reached the model.
 pub fn window_inputs(
     cls: u32,
     sep: u32,
     prompt: &[u32],
     word_ids: &[&[u32]],
     max_width: usize,
+    budget: usize,
 ) -> WindowInputs {
     let num_words = word_ids.len();
     let mut ids = Vec::with_capacity(1 + prompt.len() + num_words * 2 + 1);
@@ -196,8 +205,11 @@ pub fn window_inputs(
         ids.push(id as i32);
         words_mask.push(0);
     }
+    let mut remaining = budget;
     for (word_index, subtokens) in word_ids.iter().enumerate() {
-        for (sub_index, &id) in subtokens.iter().enumerate() {
+        let take = subtokens.len().min(remaining);
+        remaining -= take;
+        for (sub_index, &id) in subtokens[..take].iter().enumerate() {
             ids.push(id as i32);
             words_mask.push(if sub_index == 0 {
                 (word_index + 1) as i32
@@ -340,7 +352,7 @@ pub fn score_document(
                 .iter()
                 .map(Vec::as_slice)
                 .collect();
-            let inputs = window_inputs(cls, sep, prompt, &window_word_ids, max_width);
+            let inputs = window_inputs(cls, sep, prompt, &window_word_ids, max_width, budget);
             let logits = scorer.score_window(&inputs, labels.len())?;
             let mut window_candidates = Vec::new();
             collect_candidates(
@@ -509,12 +521,28 @@ mod tests {
     #[test]
     fn window_inputs_builds_ids_words_mask_and_span_tensors() {
         let word_ids: Vec<&[u32]> = vec![&[10, 11], &[12]];
-        let inputs = window_inputs(1, 2, &[50, 51], &word_ids, 2);
+        let inputs = window_inputs(1, 2, &[50, 51], &word_ids, 2, 3);
         assert_eq!(inputs.ids, vec![1, 50, 51, 10, 11, 12, 2]);
         assert_eq!(inputs.words_mask, vec![0, 0, 0, 1, 0, 2, 0]);
         assert_eq!(inputs.num_words, 2);
         assert_eq!(inputs.span_idx, vec![[0, 0], [0, 1], [1, 1], [1, 2]]);
         assert_eq!(inputs.span_mask, vec![1, 1, 1, 0]);
+    }
+
+    /// A single word whose own subtoken count exceeds the budget still gets a window (per
+    /// `plan_word_windows`), so `window_inputs` must cap what it feeds the graph itself.
+    #[test]
+    fn window_inputs_truncates_a_word_that_alone_exceeds_the_budget() {
+        let oversized: Vec<u32> = (100..110).collect(); // 10 subtokens, budget is 4.
+        let word_ids: Vec<&[u32]> = vec![&oversized];
+        let inputs = window_inputs(1, 2, &[50], &word_ids, 12, 4);
+        // [CLS] + prompt(1) + at most 4 word subtokens + [SEP] = 7.
+        assert_eq!(inputs.ids.len(), 7, "{inputs:?}");
+        assert_eq!(inputs.ids, vec![1, 50, 100, 101, 102, 103, 2]);
+        // The word still keeps its own word index and counts as one word for span decoding,
+        // so a tagged word is redacted in full even though only its prefix reached the model.
+        assert_eq!(inputs.words_mask, vec![0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(inputs.num_words, 1);
     }
 
     #[test]
@@ -732,5 +760,82 @@ mod tests {
         assert_eq!(candidates[0].start_word, 20);
         assert_eq!(candidates[0].end_word, 20);
         assert!(*scorer.calls.borrow() > 1, "expected several windows");
+    }
+
+    /// Scores a window's single word as a hit whenever its ids carry one of two sentinels,
+    /// so a hit on the oversized word (whose real subtoken ids are truncated away) is
+    /// impossible; only the two short neighbour words can ever be scored.
+    struct TwoSentinelScorer {
+        calls: RefCell<Vec<WindowInputs>>,
+    }
+
+    impl WindowScorer for TwoSentinelScorer {
+        fn score_window(
+            &self,
+            inputs: &WindowInputs,
+            num_labels: usize,
+        ) -> Result<Logits, LocalGlinerError> {
+            self.calls.borrow_mut().push(inputs.clone());
+            let max_width = 12;
+            let mut data = vec![-10.0f32; inputs.num_words * max_width * num_labels];
+            if inputs.ids.contains(&11) || inputs.ids.contains(&33) {
+                data[0] = 10.0;
+            }
+            Ok(Logits {
+                num_words: inputs.num_words,
+                max_width,
+                num_labels,
+                data,
+            })
+        }
+    }
+
+    #[test]
+    fn score_document_caps_an_oversized_word_at_the_budget_and_still_scores_its_neighbours() {
+        let words = vec![
+            word("Alice", 0, 5),
+            word("XXXXXXXXXXXXXXXXXXXX", 6, 26),
+            word("Bob", 27, 30),
+        ];
+        let word_ids: Vec<Vec<u32>> = vec![vec![11u32], (900..920).collect(), vec![33u32]];
+        let labels = vec!["person".to_string()];
+        let label_batches: Vec<&[String]> = vec![&labels];
+        let label_ids = vec![vec![vec![99u32]]];
+        let scorer = TwoSentinelScorer {
+            calls: RefCell::new(Vec::new()),
+        };
+        let max_len = 10;
+        let candidates = score_document(
+            &scorer,
+            1,
+            2,
+            100,
+            200,
+            &words,
+            &word_ids,
+            &label_batches,
+            &label_ids,
+            max_len,
+            12,
+            0,
+            0.5,
+        )
+        .unwrap();
+
+        let calls = scorer.calls.borrow();
+        assert!(
+            calls.iter().all(|c| c.ids.len() <= max_len),
+            "a window exceeded max_len: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.num_words == 1 && c.ids.len() == max_len),
+            "expected the oversized word's window packed to the full budget: {calls:?}"
+        );
+
+        assert_eq!(candidates.len(), 2, "{candidates:?}");
+        assert_eq!((candidates[0].start_byte, candidates[0].end_byte), (0, 5));
+        assert_eq!((candidates[1].start_byte, candidates[1].end_byte), (27, 30));
     }
 }
