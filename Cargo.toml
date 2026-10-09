@@ -47,8 +47,8 @@ rvstruct = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 console = { version = "0.16" }
 indicatif = { version = "0.18" }
-clap = { version = "4.1", features = ["derive"] }
-tokio = { version = "1.14", features = [
+clap = { version = "4.6", features = ["derive"] }
+tokio = { version = "1.53", features = [
     "fs",
     "rt-multi-thread",
     "sync",
@@ -69,7 +69,7 @@ anyhow = "1"
 async-recursion = "1"
 mime = "0.3"
 mime_guess = "2"
-zip = "8"
+zip = "9"
 globset = "0.4"
 tempfile = "3"
 csv-async = { version = "1", default-features = false, features = [
