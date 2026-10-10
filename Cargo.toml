@@ -1,6 +1,6 @@
 [package]
 name = "redacter"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
 license = "Apache-2.0"
@@ -56,7 +56,7 @@ tokio = { version = "1.53", features = [
     "macros",
 ] }
 tokio-util = { version = "0.7", features = ["compat"] }
-gcloud-sdk = { version = "0.32", default-features = false, features = [
+gcloud-sdk = { version = "0.33", default-features = false, features = [
     "tls-webpki-roots",
     "google-privacy-dlp-v2",
     "google-storage-v2",
@@ -119,8 +119,6 @@ base64 = "0.23"
 regex = "1"
 sha2 = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
-
-
 
 [dev-dependencies]
 cargo-husky = { version = "1.5", default-features = false, features = [
