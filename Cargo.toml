@@ -120,11 +120,6 @@ regex = "1"
 sha2 = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 
-# Builds against the unreleased gcloud-sdk 0.33; remove once 0.33 is published on crates.io.
-[patch.crates-io]
-gcloud-sdk = { git = "https://github.com/abdolence/gcloud-sdk-rs", branch = "feat/google-cloud-auth" }
-
-
 [dev-dependencies]
 cargo-husky = { version = "1.5", default-features = false, features = [
     "run-for-all",
