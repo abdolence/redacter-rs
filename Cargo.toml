@@ -110,7 +110,7 @@ arboard = { version = "3", features = ["image"], optional = true }
 ocrs = { version = "0.13", optional = true }
 rten = { version = "0.26", optional = true }
 rten-imageproc = { version = "0.26", optional = true }
-rten-tensor = { version = "0.26", optional = true }
+rten-tensor = { version = "0.27", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = [
     "fancy-regex",
 ], optional = true }
