@@ -3,7 +3,6 @@
 
 use crate::errors::AppError;
 use crate::redacters::text_spans::{is_word_boundary, merge_findings, Finding, RuleName};
-use crate::redacters::RedacterDataItemContent;
 use regex::RegexBuilder;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -118,35 +117,6 @@ pub enum DetectionLocation {
     },
 }
 
-impl DetectionLocation {
-    /// Whether the location points into `content`: a text range on character boundaries of
-    /// a text item, an existing cell's range for a table, an ordered box for an image.
-    pub fn points_into(&self, content: &RedacterDataItemContent) -> bool {
-        match (*self, content) {
-            (DetectionLocation::Text { start, end }, RedacterDataItemContent::Value(text)) => {
-                text.get(start..end).is_some()
-            }
-            (
-                DetectionLocation::TableCell {
-                    row,
-                    column,
-                    start,
-                    end,
-                },
-                RedacterDataItemContent::Table { rows, .. },
-            ) => rows
-                .get(row)
-                .and_then(|cells| cells.get(column))
-                .is_some_and(|cell| cell.get(start..end).is_some()),
-            (
-                DetectionLocation::Image { x1, y1, x2, y2, .. },
-                RedacterDataItemContent::Image { .. },
-            ) => x1 <= x2 && y1 <= y2,
-            _ => false,
-        }
-    }
-}
-
 impl Detection {
     /// A finding of a local provider on `text`, the text its offsets index into.
     pub fn in_text(text: &str, finding: Finding) -> Self {
@@ -213,11 +183,6 @@ impl Detection {
             .into_iter()
             .map(|finding| Self::in_text(text, finding))
             .collect()
-    }
-
-    /// Whether the detection is kept under `--min-score`: an unscored one always is.
-    pub fn meets_min_score(&self, min_score: Score) -> bool {
-        self.score.is_none_or(|score| score >= min_score)
     }
 }
 
@@ -387,49 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn a_location_must_point_into_the_content_it_was_found_in() {
-        let text = RedacterDataItemContent::Value("Grüße a@b.io".to_string());
-        let table = RedacterDataItemContent::Table {
-            headers: vec!["email".to_string()],
-            rows: vec![vec!["a@b.io".to_string()]],
-        };
-        let image = RedacterDataItemContent::Image {
-            mime_type: mime::IMAGE_PNG,
-            data: bytes::Bytes::new(),
-        };
-        let text_range = |start, end| DetectionLocation::Text { start, end };
-        let cell = |row, column, end| DetectionLocation::TableCell {
-            row,
-            column,
-            start: 0,
-            end,
-        };
-        let image_box = |x1, x2| DetectionLocation::Image {
-            page: None,
-            x1,
-            y1: 0.0,
-            x2,
-            y2: 1.0,
-        };
-
-        assert!(text_range(8, 14).points_into(&text));
-        assert!(!text_range(8, 15).points_into(&text), "past the end");
-        assert!(!text_range(3, 7).points_into(&text), "inside `ü`");
-        assert!(!text_range(10, 9).points_into(&text), "reversed");
-        assert!(cell(0, 0, 6).points_into(&table));
-        assert!(!cell(1, 0, 6).points_into(&table), "no such row");
-        assert!(!cell(0, 1, 6).points_into(&table), "no such column");
-        assert!(!cell(0, 0, 7).points_into(&table), "past the cell");
-        assert!(image_box(1.0, 2.0).points_into(&image));
-        assert!(!image_box(2.0, 1.0).points_into(&image), "reversed");
-        assert!(
-            !text_range(0, 1).points_into(&image),
-            "a text range on an image"
-        );
-        assert!(!image_box(1.0, 2.0).points_into(&text), "a box on a text");
-    }
-
-    #[test]
     fn located_values_cover_every_occurrence_in_text_order() {
         let text = "Jörg wrote to Ana, then Jörg left";
         let person = DetectionLabel::new("PERSON");
@@ -540,20 +462,6 @@ mod tests {
             ],
         );
         assert_eq!(detections.len(), 1);
-    }
-
-    #[test]
-    fn the_min_score_drops_weaker_scored_detections_and_keeps_unscored_ones() {
-        let detection = |score: Option<Score>| Detection {
-            label: email(),
-            location: DetectionLocation::Text { start: 0, end: 1 },
-            score,
-            value: "a".to_string(),
-        };
-        let floor = score(0.7);
-        assert!(detection(None).meets_min_score(floor));
-        assert!(detection(Some(score(0.7))).meets_min_score(floor));
-        assert!(!detection(Some(score(0.69))).meets_min_score(floor));
     }
 
     #[test]

@@ -288,7 +288,7 @@ async fn detect_in_file(
                     context
                         .options
                         .min_score
-                        .is_none_or(|min_score| scanned.detection().meets_min_score(min_score))
+                        .is_none_or(|min_score| scanned.meets_min_score(min_score))
                 })
                 .map(|scanned| FindingReport::new(scanned, context.options.values))
                 .collect(),

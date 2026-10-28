@@ -8,7 +8,7 @@ use crate::args::RedacterType;
 use crate::commands::copy_output::{NotRedactedReason, SkipReason};
 use crate::commands::report::Report;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{DetectionLabel, DetectionLocation, ScannedDetection, Score, TextPosition};
+use crate::redacters::{DetectionLabel, ScannedDetection, ScannedLocation, Score, TextPosition};
 use console::Style;
 use rvstruct::ValueStruct;
 use serde::Serialize;
@@ -57,7 +57,7 @@ enum ReportLocation {
         start: usize,
         end: usize,
         #[serde(flatten)]
-        position: Option<TextPosition>,
+        position: TextPosition,
     },
     TableCell {
         row: usize,
@@ -74,15 +74,19 @@ enum ReportLocation {
     },
 }
 
-impl ReportLocation {
-    fn new(location: DetectionLocation, position: Option<TextPosition>) -> Self {
+impl From<ScannedLocation> for ReportLocation {
+    fn from(location: ScannedLocation) -> Self {
         match location {
-            DetectionLocation::Text { start, end } => ReportLocation::Text {
+            ScannedLocation::Text {
+                start,
+                end,
+                position,
+            } => ReportLocation::Text {
                 start,
                 end,
                 position,
             },
-            DetectionLocation::TableCell {
+            ScannedLocation::TableCell {
                 row,
                 column,
                 start,
@@ -93,7 +97,7 @@ impl ReportLocation {
                 start,
                 end,
             },
-            DetectionLocation::Image {
+            ScannedLocation::Image {
                 page,
                 x1,
                 y1,
@@ -121,15 +125,14 @@ pub struct FindingReport {
 
 impl FindingReport {
     pub fn new(scanned: &ScannedDetection, values: ValueDisplay) -> Self {
-        let detection = scanned.detection();
         Self {
             redacter: scanned.redacter(),
-            label: detection.label.clone(),
-            score: detection.score,
-            location: ReportLocation::new(detection.location, scanned.position()),
+            label: scanned.label().clone(),
+            score: scanned.score(),
+            location: scanned.location().into(),
             value: match values {
-                ValueDisplay::Masked => mask_value(&detection.value),
-                ValueDisplay::Raw => detection.value.clone(),
+                ValueDisplay::Masked => mask_value(scanned.value()),
+                ValueDisplay::Raw => scanned.value().to_string(),
             },
         }
     }
@@ -347,15 +350,9 @@ pub fn format_scan_header(
 /// table cell, `path:[x1,y1,x2,y2]` for an image and `path:page:[x1,y1,x2,y2]` for a PDF page.
 fn format_location(path: &str, location: &ReportLocation) -> String {
     match location {
-        ReportLocation::Text {
-            position: Some(position),
-            ..
-        } => format!("{path}:{}:{}", position.line, position.column),
-        ReportLocation::Text {
-            start,
-            position: None,
-            ..
-        } => format!("{path}:byte {start}"),
+        ReportLocation::Text { position, .. } => {
+            format!("{path}:{}:{}", position.line, position.column)
+        }
         ReportLocation::TableCell { row, column, .. } => format!("{path}:{row}:{column}"),
         ReportLocation::Image {
             page,
@@ -477,7 +474,6 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &ScanOutputStyles
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::Detection;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -489,7 +485,7 @@ mod tests {
 
     fn finding(
         label: &str,
-        location: DetectionLocation,
+        location: ScannedLocation,
         score: Option<f32>,
         value: &str,
     ) -> FindingReport {
@@ -497,13 +493,7 @@ mod tests {
             redacter: RedacterType::LocalRules,
             label: DetectionLabel::new(label),
             score: score.map(|score| Score::try_from(score).unwrap()),
-            location: ReportLocation::new(
-                location,
-                Some(TextPosition {
-                    line: 3,
-                    column: 15,
-                }),
-            ),
+            location: location.into(),
             value: mask_value(value),
         }
     }
@@ -514,7 +504,14 @@ mod tests {
             &file_ref("customer-note.txt", mime::TEXT_PLAIN),
             vec![finding(
                 "email",
-                DetectionLocation::Text { start: 40, end: 62 },
+                ScannedLocation::Text {
+                    start: 40,
+                    end: 62,
+                    position: TextPosition {
+                        line: 3,
+                        column: 15,
+                    },
+                },
                 None,
                 "john.smith@example.com",
             )],
@@ -523,7 +520,7 @@ mod tests {
             &file_ref("customers.csv", mime::TEXT_CSV),
             vec![finding(
                 "person",
-                DetectionLocation::TableCell {
+                ScannedLocation::TableCell {
                     row: 0,
                     column: 1,
                     start: 0,
@@ -537,7 +534,7 @@ mod tests {
             &file_ref("form.pdf", mime::APPLICATION_PDF),
             vec![finding(
                 "email",
-                DetectionLocation::Image {
+                ScannedLocation::Image {
                     page: Some(0),
                     x1: 310.2,
                     y1: 193.0,
@@ -577,19 +574,18 @@ mod tests {
 
     #[test]
     fn raw_values_are_reported_only_when_asked_for() {
-        let text = "mail john.smith@example.com";
         let scanned = |values| {
-            let detection = Detection {
-                label: DetectionLabel::new("email"),
-                location: DetectionLocation::Text { start: 5, end: 27 },
-                score: None,
-                value: text[5..27].to_string(),
-            };
-            FindingReport::new(
-                &ScannedDetection::without_position(RedacterType::LocalRules, detection),
-                values,
-            )
-            .value
+            let detection = ScannedDetection::at(
+                RedacterType::LocalRules,
+                DetectionLabel::new("email"),
+                ScannedLocation::Text {
+                    start: 5,
+                    end: 27,
+                    position: TextPosition { line: 1, column: 6 },
+                },
+                "john.smith@example.com",
+            );
+            FindingReport::new(&detection, values).value
         };
         assert_eq!(scanned(ValueDisplay::Masked), "j***m");
         assert_eq!(scanned(ValueDisplay::Raw), "john.smith@example.com");
@@ -671,7 +667,11 @@ mod tests {
             &file_ref("note.txt", mime::TEXT_PLAIN),
             vec![finding(
                 "email",
-                DetectionLocation::Text { start: 0, end: 6 },
+                ScannedLocation::Text {
+                    start: 0,
+                    end: 6,
+                    position: TextPosition { line: 1, column: 1 },
+                },
                 None,
                 "a@b.io",
             )],
