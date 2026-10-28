@@ -217,29 +217,45 @@ pub struct PreparedImage {
     pub original_height: u32,
 }
 
-impl PreparedImage {
-    /// A detection of `label` at `coords`, a box in pixels of this prepared image, reported
-    /// in pixels of the image as it was given. The box is clamped to the image and ordered;
-    /// the value is the text the model read, empty when it gave none.
-    pub fn detection_at(&self, coords: TextImageCoords, label: DetectionLabel) -> Detection {
-        let scale_x = self.original_width as f32 / self.width as f32;
-        let scale_y = self.original_height as f32 / self.height as f32;
-        let clamp_x = |x: f32| x.clamp(0.0, self.width as f32) * scale_x;
-        let clamp_y = |y: f32| y.clamp(0.0, self.height as f32) * scale_y;
-        let (x1, x2) = (clamp_x(coords.x1), clamp_x(coords.x2));
-        let (y1, y2) = (clamp_y(coords.y1), clamp_y(coords.y2));
-        Detection {
-            label,
-            location: DetectionLocation::Image {
-                page: None,
-                x1: x1.min(x2),
-                y1: y1.min(y2),
-                x2: x1.max(x2),
-                y2: y1.max(y2),
-            },
-            score: None,
-            value: coords.text.unwrap_or_default(),
-        }
+/// The kind a detection in an image carries: the coordinate pass locates text a model takes
+/// for personal information, and does not classify it.
+const IMAGE_DETECTION_LABEL: &str = "personal_information";
+
+/// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
+#[derive(Debug, Clone)]
+pub struct ImagePii {
+    pub image: PreparedImage,
+    pub coords: Vec<TextImageCoords>,
+}
+
+impl ImagePii {
+    /// The boxes as detections in pixels of the image as it was given, clamped to the image
+    /// and ordered. The value is the text the model read, empty when it gave none.
+    pub fn into_detections(self) -> Vec<Detection> {
+        let image = self.image;
+        let scale_x = image.original_width as f32 / image.width as f32;
+        let scale_y = image.original_height as f32 / image.height as f32;
+        let to_x = |x: f32| x.clamp(0.0, image.width as f32) * scale_x;
+        let to_y = |y: f32| y.clamp(0.0, image.height as f32) * scale_y;
+        self.coords
+            .into_iter()
+            .map(|coords| {
+                let (x1, x2) = (to_x(coords.x1), to_x(coords.x2));
+                let (y1, y2) = (to_y(coords.y1), to_y(coords.y2));
+                Detection {
+                    label: DetectionLabel::new(IMAGE_DETECTION_LABEL),
+                    location: DetectionLocation::Image {
+                        page: None,
+                        x1: x1.min(x2),
+                        y1: y1.min(y2),
+                        x2: x1.max(x2),
+                        y2: y1.max(y2),
+                    },
+                    score: None,
+                    value: coords.text.unwrap_or_default(),
+                }
+            })
+            .collect()
     }
 }
 
@@ -1008,5 +1024,63 @@ mod tests {
             Some("14 March 1985".to_string()),
         );
         assert_eq!(coords.text.as_deref(), Some("14 March 1985"));
+    }
+
+    #[test]
+    fn image_boxes_are_reported_in_pixels_of_the_image_as_given() {
+        let found = ImagePii {
+            image: PreparedImage {
+                format: image::ImageFormat::Png,
+                data: Default::default(),
+                width: 1024,
+                height: 737,
+                original_width: 2048,
+                original_height: 1474,
+            },
+            coords: vec![
+                TextImageCoords {
+                    x1: 300.0,
+                    y1: 80.0,
+                    x2: 100.0,
+                    y2: 50.0,
+                    text: Some("X1234567".to_string()),
+                    line: 0,
+                },
+                TextImageCoords {
+                    x1: 900.0,
+                    y1: 700.0,
+                    x2: 1100.0,
+                    y2: 800.0,
+                    text: None,
+                    line: 0,
+                },
+            ],
+        };
+
+        let detections = found.into_detections();
+
+        assert_eq!(detections[0].value, "X1234567");
+        assert_eq!(
+            detections[0].location,
+            DetectionLocation::Image {
+                page: None,
+                x1: 200.0,
+                y1: 100.0,
+                x2: 600.0,
+                y2: 160.0
+            },
+            "a reversed box is ordered and doubled to the original size"
+        );
+        assert_eq!(
+            detections[1].location,
+            DetectionLocation::Image {
+                page: None,
+                x1: 1800.0,
+                y1: 1400.0,
+                x2: 2048.0,
+                y2: 1474.0
+            },
+            "a box beyond the image is clamped to it"
+        );
     }
 }

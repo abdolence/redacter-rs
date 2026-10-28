@@ -9,8 +9,8 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_prompt, Detection, DetectionLabel, LlmImageMode,
-    LlmTextFinding, NativeImageEditError, PreparedImage, RedactSupport, Redacter, RedacterDataItem,
+    redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
+    LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
@@ -115,44 +115,6 @@ impl OpenAiLlmTextFindings {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct OpenAiLlmImageFinding {
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    text: String,
-    #[serde(rename = "type")]
-    label: String,
-}
-
-/// The answer to the image detection request: boxes in pixels of the image sent.
-#[derive(Deserialize, Debug)]
-struct OpenAiLlmImageFindings {
-    text_coords: Vec<OpenAiLlmImageFinding>,
-}
-
-impl OpenAiLlmImageFindings {
-    fn detections_from_answer(answer: &str, image: &PreparedImage) -> AppResult<Vec<Detection>> {
-        let findings: Self = serde_json::from_str(answer)?;
-        Ok(findings
-            .text_coords
-            .into_iter()
-            .map(|finding| {
-                let coords = TextImageCoords {
-                    x1: finding.x1,
-                    y1: finding.y1,
-                    x2: finding.x2,
-                    y2: finding.y2,
-                    text: Some(finding.text),
-                    line: 0,
-                };
-                image.detection_at(coords, DetectionLabel::new(finding.label))
-            })
-            .collect())
-    }
-}
-
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiImageEditResponse {
     data: Vec<OpenAiImageEditResponseItem>,
@@ -254,116 +216,97 @@ impl<'a> OpenAiLlmRedacter<'a> {
         }
     }
 
+    /// Asks the model for the boxes of personal information in the image, which is scaled
+    /// down to the model's input limit first.
+    async fn find_image_pii(
+        &self,
+        mime_type: &mime::Mime,
+        data: &gcloud_sdk::prost::bytes::Bytes,
+    ) -> AppResult<ImagePii> {
+        let prepared_image = prepare_image_for_llm(mime_type, data)?;
+
+        let analyze_request = OpenAiLlmAnalyzeRequest {
+            model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
+            messages: vec![
+                OpenAiLlmAnalyzeMessageRequest {
+                    role: "system".to_string(),
+                    content: vec![OpenAiLlmAnalyzeMessageContent::Text {
+                        text: format!("Find anything in the attached image that look like personal information. \
+                                            Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
+                                            The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
+                                            The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height)
+                    }],
+                },
+                OpenAiLlmAnalyzeMessageRequest {
+                    role: "user".to_string(),
+                    content: vec![OpenAiLlmAnalyzeMessageContent::ImageUrl { image_url: OpenAiLlmAnalyzeMessageContentUrl {
+                        url: format!("data:{};base64,{}", mime_type, base64::engine::general_purpose::STANDARD.encode(&prepared_image.data))
+                    }}],
+                },
+            ],
+            response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
+                json_schema: OpenAiLlmJsonSchema {
+                    name: "image_redact".to_string(),
+                    schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text_coords": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x1": {
+                                            "type": "number"
+                                        },
+                                        "y1": {
+                                            "type": "number"
+                                        },
+                                        "x2": {
+                                            "type": "number"
+                                        },
+                                        "y2": {
+                                            "type": "number"
+                                        },
+                                        "text": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": ["x1", "y1", "x2", "y2"]
+                                }
+                            },
+                        },
+                        "required": ["text_coords"]
+                    })
+                }
+            })
+        };
+        let answer = self.complete(&analyze_request).await?;
+        let pii_image_coords: OpenAiLlmTextCoordsResponse = serde_json::from_str(&answer)?;
+        Ok(ImagePii {
+            image: prepared_image,
+            coords: pii_image_coords.text_coords,
+        })
+    }
+
     pub async fn redact_image_file_using_coords(
         &self,
         input: RedacterDataItem,
     ) -> AppResult<RedacterDataItem> {
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
-
-                let analyze_request = OpenAiLlmAnalyzeRequest {
-                    model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
-                    messages: vec![
-                        OpenAiLlmAnalyzeMessageRequest {
-                            role: "system".to_string(),
-                            content: vec![OpenAiLlmAnalyzeMessageContent::Text {
-                                text: format!("Find anything in the attached image that look like personal information. \
-                                                    Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
-                                                    The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
-                                                    The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height)
-                            }],
-                        },
-                        OpenAiLlmAnalyzeMessageRequest {
-                            role: "user".to_string(),
-                            content: vec![OpenAiLlmAnalyzeMessageContent::ImageUrl { image_url: OpenAiLlmAnalyzeMessageContentUrl {
-                                url: format!("data:{};base64,{}", mime_type, base64::engine::general_purpose::STANDARD.encode(&prepared_image.data))
-                            }}],
-                        },
-                    ],
-                    response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
-                        json_schema: OpenAiLlmJsonSchema {
-                            name: "image_redact".to_string(),
-                            schema: serde_json::json!({
-                                "type": "object",
-                                "properties": {
-                                    "text_coords": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "x1": {
-                                                    "type": "number"
-                                                },
-                                                "y1": {
-                                                    "type": "number"
-                                                },
-                                                "x2": {
-                                                    "type": "number"
-                                                },
-                                                "y2": {
-                                                    "type": "number"
-                                                },
-                                                "text": {
-                                                    "type": "string"
-                                                }
-                                            },
-                                            "required": ["x1", "y1", "x2", "y2"]
-                                        }
-                                    },
-                                },
-                                "required": ["text_coords"]
-                            })
-                        }
-                    })
-                };
-                let response = self
-                    .client
-                    .post("https://api.openai.com/v1/chat/completions")
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", self.open_ai_llm_options.api_key.value()),
-                    )
-                    .json(&analyze_request)
-                    .send()
-                    .await?;
-
-                if !response.status().is_success()
-                    || response
-                        .headers()
-                        .get("content-type")
-                        .iter()
-                        .all(|v| *v != mime::APPLICATION_JSON.as_ref())
-                {
-                    let response_status = response.status();
-                    let response_text = response.text().await.unwrap_or_default();
-                    return Err(AppError::SystemError {
-                        message: format!(
-                            "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                        ),
-                    });
-                }
-                let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-                if let Some(content) = open_ai_response.choices.pop() {
-                    let pii_image_coords: OpenAiLlmTextCoordsResponse =
-                        serde_json::from_str(&content.message.content)?;
-                    Ok(RedacterDataItem {
-                        file_ref: input.file_ref,
-                        content: RedacterDataItemContent::Image {
-                            mime_type: mime_type.clone(),
-                            data: redact_image_at_coords(
-                                mime_type.clone(),
-                                prepared_image.data.clone(),
-                                pii_image_coords.text_coords,
-                                0.25,
-                            )?,
-                        },
-                    })
-                } else {
-                    Err(AppError::SystemError {
-                        message: "No content item in the response".to_string(),
-                    })
-                }
+                let found = self.find_image_pii(&mime_type, &data).await?;
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content: RedacterDataItemContent::Image {
+                        mime_type: mime_type.clone(),
+                        data: redact_image_at_coords(
+                            mime_type,
+                            found.image.data,
+                            found.coords,
+                            0.25,
+                        )?,
+                    },
+                })
             }
             _ => Err(AppError::SystemError {
                 message: "Unsupported item for image redacting".to_string(),
@@ -460,73 +403,6 @@ impl<'a> OpenAiLlmRedacter<'a> {
         };
         let answer = self.complete(&request).await?;
         OpenAiLlmTextFindings::detections_from_answer(&answer, text)
-    }
-
-    async fn detect_in_image(
-        &self,
-        mime_type: &mime::Mime,
-        data: &gcloud_sdk::prost::bytes::Bytes,
-    ) -> AppResult<Vec<Detection>> {
-        let prepared_image = prepare_image_for_llm(mime_type, data)?;
-        let request = OpenAiLlmAnalyzeRequest {
-            model: self.model_name(),
-            messages: vec![
-                OpenAiLlmAnalyzeMessageRequest {
-                    role: "system".to_string(),
-                    content: vec![OpenAiLlmAnalyzeMessageContent::Text {
-                        text: format!(
-                            "Find anything in the attached image that look like personal information. \
-                             Return their coordinates with x1,y1,x2,y2 as pixel coordinates, the corresponding text \
-                             and its type, a short snake_case name for the kind of data, such as person_name or email_address. \
-                             The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
-                             The image width is: {}. The image height is: {}.",
-                            prepared_image.width, prepared_image.height
-                        ),
-                    }],
-                },
-                OpenAiLlmAnalyzeMessageRequest {
-                    role: "user".to_string(),
-                    content: vec![OpenAiLlmAnalyzeMessageContent::ImageUrl {
-                        image_url: OpenAiLlmAnalyzeMessageContentUrl {
-                            url: format!(
-                                "data:{};base64,{}",
-                                mime_type,
-                                base64::engine::general_purpose::STANDARD
-                                    .encode(&prepared_image.data)
-                            ),
-                        },
-                    }],
-                },
-            ],
-            response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
-                json_schema: OpenAiLlmJsonSchema {
-                    name: "image_detect".to_string(),
-                    schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "text_coords": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "x1": { "type": "number" },
-                                        "y1": { "type": "number" },
-                                        "x2": { "type": "number" },
-                                        "y2": { "type": "number" },
-                                        "text": { "type": "string" },
-                                        "type": { "type": "string" }
-                                    },
-                                    "required": ["x1", "y1", "x2", "y2", "text", "type"]
-                                }
-                            }
-                        },
-                        "required": ["text_coords"]
-                    }),
-                },
-            }),
-        };
-        let answer = self.complete(&request).await?;
-        OpenAiLlmImageFindings::detections_from_answer(&answer, &prepared_image)
     }
 
     /// Output format accepted by the images/edits endpoint for the given input format.
@@ -658,9 +534,10 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
-            RedacterDataItemContent::Image { mime_type, data } => {
-                self.detect_in_image(mime_type, data).await
-            }
+            RedacterDataItemContent::Image { mime_type, data } => Ok(self
+                .find_image_pii(mime_type, data)
+                .await?
+                .into_detections()),
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::SystemError {
                     message: "Attempt to detect in unsupported type".to_string(),
@@ -802,35 +679,6 @@ mod tests {
         assert_eq!(
             detections[0].location,
             DetectionLocation::Text { start: 5, end: 27 }
-        );
-    }
-
-    #[test]
-    fn image_answer_is_scaled_to_the_image_as_given() {
-        let image = PreparedImage {
-            format: image::ImageFormat::Png,
-            data: Default::default(),
-            width: 1024,
-            height: 737,
-            original_width: 2048,
-            original_height: 1474,
-        };
-        let answer = r#"{"text_coords":[
-            {"x1":100,"y1":50,"x2":300,"y2":80,"text":"X1234567","type":"passport_number"}
-        ]}"#;
-
-        let detections = OpenAiLlmImageFindings::detections_from_answer(answer, &image).unwrap();
-
-        assert_eq!(detections.len(), 1);
-        assert_eq!(
-            detections[0].location,
-            DetectionLocation::Image {
-                page: None,
-                x1: 200.0,
-                y1: 100.0,
-                x2: 600.0,
-                y2: 160.0
-            }
         );
     }
 

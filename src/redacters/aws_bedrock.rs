@@ -6,7 +6,6 @@ use aws_sdk_bedrockruntime::types::{
 };
 use rand::RngExt;
 use rvstruct::ValueStruct;
-use serde::Deserialize;
 
 use crate::args::RedacterType;
 use crate::common_types::TextImageCoords;
@@ -14,8 +13,8 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_prompt, Detection, DetectionLabel, LlmImageMode,
-    LlmTextFinding, NativeImageEditError, PreparedImage, RedactSupport, Redacter, RedacterDataItem,
+    redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
+    LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
@@ -56,67 +55,10 @@ fn claude_coords_redaction_prompt(width: u32, height: u32) -> String {
     )
 }
 
-/// Instruction given to Nova on the coordinate-based image detection path: the redaction
-/// prompt's convention, with a `type` per box.
-const NOVA_COORDS_DETECTION_PROMPT: &str =
-    "Find every piece of personal information in the attached image. Return only a JSON \
-     array of objects with keys 'bbox' as [x1, y1, x2, y2] normalized to 0-1000 (top-left \
-     and bottom-right corners of the text), 'text' and 'type', a short snake_case name for \
-     the kind of data, such as person_name or email_address. Return only JSON.";
-
-/// Instruction given to Claude on the coordinate-based image detection path: the redaction
-/// prompt's convention, with a `type` per box.
-fn claude_coords_detection_prompt(width: u32, height: u32) -> String {
-    format!(
-        "Find every piece of personal information in the attached image. Return a JSON \
-         array of objects with keys 'bbox' as [x1, y1, x2, y2] in pixel coordinates of the \
-         {width}x{height} image (top-left and bottom-right corners of the text), 'text' and \
-         'type', a short snake_case name for the kind of data, such as person_name or \
-         email_address. Return only JSON."
-    )
-}
-
 /// Bedrock models have no response schema here, so the text detection prompt is preceded by
 /// the shape of the answer.
 const TEXT_DETECTION_ANSWER_FORMAT: &str =
     "Return only a JSON array of objects with keys 'text' and 'type'. Return only JSON.";
-
-/// One box a Bedrock model found in an image, in the convention of the model's family.
-#[derive(Debug, Clone, Deserialize)]
-struct BedrockImageFinding {
-    bbox: Vec<f32>,
-    text: Option<String>,
-    #[serde(rename = "type")]
-    label: String,
-}
-
-impl BedrockImageFinding {
-    /// The detections in `image` of a model's JSON array `answer`, optionally in a code
-    /// fence, in pixels of the image as the caller gave it. A box with fewer than four
-    /// numbers is dropped. An answer that is not a JSON array of findings is an error.
-    fn detections_from_answer(
-        answer: &str,
-        family: AwsBedrockModelFamily,
-        image: &PreparedImage,
-    ) -> AppResult<Vec<Detection>> {
-        let findings: Vec<Self> = serde_json::from_str(strip_json_fence(answer))?;
-        Ok(findings
-            .into_iter()
-            .filter_map(|finding| {
-                let bbox: [f32; 4] = finding.bbox.get(..4)?.try_into().ok()?;
-                let coords = match family {
-                    AwsBedrockModelFamily::Claude => {
-                        claude_box_to_image_coords(bbox, image.width, image.height, finding.text)
-                    }
-                    AwsBedrockModelFamily::Nova | AwsBedrockModelFamily::Other => {
-                        nova_box_to_image_coords(bbox, image.width, image.height, finding.text)
-                    }
-                };
-                Some(image.detection_at(coords, DetectionLabel::new(finding.label)))
-            })
-            .collect())
-    }
-}
 
 /// Bedrock model family, detected from the model id, that determines which bounding-box
 /// convention and prompt the image coordinate path uses.
@@ -474,18 +416,16 @@ impl<'a> AwsBedrockRedacter<'a> {
         }
     }
 
-    pub async fn redact_image_file_using_coords(
+    /// Asks the model for the boxes of personal information in the image, which is scaled
+    /// down to the model's input limit first.
+    async fn find_image_pii(
         &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
-        let RedacterDataItemContent::Image { mime_type, data } = input.content else {
-            return Err(AppError::SystemError {
-                message: "Unsupported item for image redacting".to_string(),
-            });
-        };
+        mime_type: &mime::Mime,
+        data: &gcloud_sdk::prost::bytes::Bytes,
+    ) -> AppResult<ImagePii> {
         let model_id = self.text_model_id();
         let family = require_supported_family(&model_id)?;
-        let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
+        let prepared_image = prepare_image_for_llm(mime_type, data)?;
         let prompt = match family {
             AwsBedrockModelFamily::Nova => NOVA_COORDS_REDACTION_PROMPT.to_string(),
             AwsBedrockModelFamily::Claude => {
@@ -547,16 +487,27 @@ impl<'a> AwsBedrockRedacter<'a> {
             }
         };
 
+        Ok(ImagePii {
+            image: prepared_image,
+            coords,
+        })
+    }
+
+    pub async fn redact_image_file_using_coords(
+        &self,
+        input: RedacterDataItem,
+    ) -> AppResult<RedacterDataItem> {
+        let RedacterDataItemContent::Image { mime_type, data } = input.content else {
+            return Err(AppError::SystemError {
+                message: "Unsupported item for image redacting".to_string(),
+            });
+        };
+        let found = self.find_image_pii(&mime_type, &data).await?;
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Image {
                 mime_type: mime_type.clone(),
-                data: redact_image_at_coords(
-                    mime_type.clone(),
-                    prepared_image.data.clone(),
-                    coords,
-                    0.25,
-                )?,
+                data: redact_image_at_coords(mime_type, found.image.data, found.coords, 0.25)?,
             },
         })
     }
@@ -603,48 +554,6 @@ impl<'a> AwsBedrockRedacter<'a> {
             )
             .await?;
         LlmTextFinding::detections_from_answer(strip_json_fence(&answer), text)
-    }
-
-    async fn detect_in_image(
-        &self,
-        mime_type: &mime::Mime,
-        data: &gcloud_sdk::prost::bytes::Bytes,
-    ) -> AppResult<Vec<Detection>> {
-        let model_id = self.text_model_id();
-        let family = require_supported_family(&model_id)?;
-        let prepared_image = prepare_image_for_llm(mime_type, data)?;
-        let prompt = match family {
-            AwsBedrockModelFamily::Claude => {
-                claude_coords_detection_prompt(prepared_image.width, prepared_image.height)
-            }
-            AwsBedrockModelFamily::Nova | AwsBedrockModelFamily::Other => {
-                NOVA_COORDS_DETECTION_PROMPT.to_string()
-            }
-        };
-        let message = Message::builder()
-            .role(ConversationRole::User)
-            .content(ContentBlock::Text(prompt))
-            .content(ContentBlock::Image(
-                ImageBlock::builder()
-                    .format(bedrock_image_format(prepared_image.format)?)
-                    .source(ImageSource::Bytes(Blob::new(prepared_image.data.to_vec())))
-                    .build()
-                    .map_err(|err| AppError::AwsBedrockError {
-                        message: format!("Failed to build the Bedrock image block: {err}"),
-                    })?,
-            ))
-            .build()
-            .map_err(|err| AppError::AwsBedrockError {
-                message: format!("Failed to build the Bedrock request: {err}"),
-            })?;
-        let answer = self
-            .converse_text(
-                model_id,
-                message,
-                "Failed to locate the personal information",
-            )
-            .await?;
-        BedrockImageFinding::detections_from_answer(&answer, family, &prepared_image)
     }
 
     /// AWS Bedrock has no active image editing model: Amazon Nova Canvas, the only inpainting
@@ -701,9 +610,10 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
-            RedacterDataItemContent::Image { mime_type, data } => {
-                self.detect_in_image(mime_type, data).await
-            }
+            RedacterDataItemContent::Image { mime_type, data } => Ok(self
+                .find_image_pii(mime_type, data)
+                .await?
+                .into_detections()),
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::SystemError {
                     message: "Attempt to detect in unsupported type".to_string(),
@@ -1231,62 +1141,6 @@ mod tests {
         Ok(())
     }
 
-    fn prepared_image(original: (u32, u32), prepared: (u32, u32)) -> PreparedImage {
-        PreparedImage {
-            format: image::ImageFormat::Png,
-            data: Default::default(),
-            width: prepared.0,
-            height: prepared.1,
-            original_width: original.0,
-            original_height: original.1,
-        }
-    }
-
-    #[test]
-    fn nova_image_answer_in_a_fence_is_scaled_to_the_image_as_given() {
-        let answer = "```text\n[{\"bbox\": [100, 250, 600, 500], \"text\": \"X1234567\", \"type\": \"passport_number\"}]\n```";
-
-        let detections = BedrockImageFinding::detections_from_answer(
-            answer,
-            AwsBedrockModelFamily::Nova,
-            &prepared_image((2000, 1440), (1024, 737)),
-        )
-        .unwrap();
-
-        assert_eq!(detections.len(), 1);
-        assert_eq!(detections[0].label.to_string(), "passport_number");
-        assert_eq!(detections[0].value, "X1234567");
-        let DetectionLocation::Image { x1, y1, x2, y2, .. } = detections[0].location else {
-            panic!("expected an image location");
-        };
-        for (actual, expected) in [(x1, 200.0), (y1, 360.0), (x2, 1200.0), (y2, 720.0)] {
-            assert!((actual - expected).abs() < 2.0, "{actual} vs {expected}");
-        }
-    }
-
-    #[test]
-    fn claude_image_answer_in_prepared_pixels_is_scaled_to_the_image_as_given() {
-        let answer = "[{\"bbox\": [100, 50, 300, 80], \"text\": \"X1234567\", \"type\": \"passport_number\"}]";
-
-        let detections = BedrockImageFinding::detections_from_answer(
-            answer,
-            AwsBedrockModelFamily::Claude,
-            &prepared_image((2048, 1474), (1024, 737)),
-        )
-        .unwrap();
-
-        assert_eq!(
-            detections[0].location,
-            DetectionLocation::Image {
-                page: None,
-                x1: 200.0,
-                y1: 100.0,
-                x2: 600.0,
-                y2: 160.0
-            }
-        );
-    }
-
     #[test]
     fn text_answer_in_a_fence_is_located_in_the_text() {
         let answer =
@@ -1304,16 +1158,6 @@ mod tests {
             detections[0].location,
             DetectionLocation::Text { start: 5, end: 27 }
         );
-    }
-
-    #[test]
-    fn image_answer_that_is_not_findings_is_an_error() {
-        assert!(BedrockImageFinding::detections_from_answer(
-            "No personal information found.",
-            AwsBedrockModelFamily::Nova,
-            &prepared_image((100, 100), (100, 100)),
-        )
-        .is_err());
     }
 
     async fn detection_test_redacter<'a>(
