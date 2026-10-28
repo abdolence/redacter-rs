@@ -46,12 +46,12 @@ impl MsPresidioAnalyzedItem {
 }
 
 impl<'a> MsPresidioRedacter<'a> {
-    /// The error of a rejected request. The body is only logged at debug level: it can quote
-    /// the scanned text, and the error reaches the terminal and the scan report.
-    fn request_failure(status: reqwest::StatusCode, body: &str) -> AppError {
-        tracing::debug!(%status, body, "MS Presidio rejected the request");
+    /// The error of a rejected request: the status only. The response body can quote the
+    /// scanned text, and both the error and the log reach the terminal and the scan report.
+    fn request_failure(operation: &str, status: reqwest::StatusCode) -> AppError {
+        tracing::debug!(%status, operation, "MS Presidio rejected the request");
         AppError::SystemError {
-            message: format!("Failed to analyze text. HTTP status: {status}."),
+            message: format!("Failed to {operation}. HTTP status: {status}."),
         }
     }
 
@@ -94,9 +94,7 @@ impl<'a> MsPresidioRedacter<'a> {
                 .iter()
                 .all(|v| *v != mime::APPLICATION_JSON.as_ref())
         {
-            let response_status = response.status();
-            let response_text = response.text().await.unwrap_or_default();
-            return Err(Self::request_failure(response_status, &response_text));
+            return Err(Self::request_failure("analyze text", response.status()));
         }
         Ok(response.json().await?)
     }
@@ -180,13 +178,7 @@ impl<'a> MsPresidioRedacter<'a> {
                     .send()
                     .await?;
                 if !response.status().is_success() {
-                    let response_status = response.status();
-                    let response_text = response.text().await.unwrap_or_default();
-                    return Err(AppError::SystemError {
-                        message: format!(
-                            "Failed to redact image: {response_text}. HTTP status: {response_status}."
-                        ),
-                    });
+                    return Err(Self::request_failure("redact image", response.status()));
                 }
                 let redacted_image_bytes = response.bytes().await?;
                 Ok(RedacterDataItem {
@@ -266,16 +258,6 @@ mod tests {
     use console::Term;
 
     use super::*;
-
-    #[test]
-    fn a_failed_request_does_not_repeat_the_response_body() {
-        let planted_value = "jane.doe@example.com";
-        let error = MsPresidioRedacter::request_failure(
-            reqwest::StatusCode::BAD_REQUEST,
-            &format!("Invalid text: {planted_value}"),
-        );
-        assert!(!error.to_string().contains(planted_value));
-    }
 
     /// An analyzer response as the Presidio service sends it: offsets count characters.
     const ANALYZER_RESPONSE: &str = r#"[

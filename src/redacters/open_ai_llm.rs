@@ -316,15 +316,15 @@ impl<'a> OpenAiLlmRedacter<'a> {
     }
 
     /// The error of a rejected request. It carries the status and OpenAI's error type and code
-    /// but not the body: the message of an API error can quote the scanned text, and the error
-    /// reaches the terminal and the scan report. The body is logged at debug level.
-    fn request_failure(status: reqwest::StatusCode, body: &str) -> AppError {
-        tracing::debug!(%status, body, "OpenAI rejected the request");
+    /// but not the body: the message of an API error can quote the scanned text, and both the
+    /// error and the log reach the terminal and the scan report.
+    fn request_failure(operation: &str, status: reqwest::StatusCode, body: &str) -> AppError {
         let identifiers = serde_json::from_str::<OpenAiErrorResponse>(body)
             .map(|response| [response.error.r#type, response.error.code])
             .unwrap_or_default();
         let identifiers: Vec<String> = identifiers.into_iter().flatten().collect();
-        let mut message = format!("Failed to analyze text. HTTP status: {status}.");
+        tracing::debug!(%status, ?identifiers, operation, "OpenAI rejected the request");
+        let mut message = format!("Failed to {operation}. HTTP status: {status}.");
         if !identifiers.is_empty() {
             message.push_str(&format!(" OpenAI error: {}.", identifiers.join(", ")));
         }
@@ -352,7 +352,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
         {
             let response_status = response.status();
             let response_text = response.text().await.unwrap_or_default();
-            return Err(Self::request_failure(response_status, &response_text));
+            return Err(Self::request_failure(
+                "analyze text",
+                response_status,
+                &response_text,
+            ));
         }
         let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
         Ok(open_ai_response
@@ -466,11 +470,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
                     let response_text = response.text().await.unwrap_or_default();
                     return Err(NativeImageEditError {
                         failure: classify_http_native_failure(response_status.as_u16()),
-                        error: AppError::SystemError {
-                            message: format!(
-                                "Failed to edit the image: {response_text}. HTTP status: {response_status}."
-                            ),
-                        },
+                        error: Self::request_failure(
+                            "edit the image",
+                            response_status,
+                            &response_text,
+                        ),
                     });
                 }
 
@@ -584,7 +588,11 @@ mod tests {
             format!("upstream said: {PLANTED_VALUE}"),
         ];
         for body in bodies {
-            let error = OpenAiLlmRedacter::request_failure(reqwest::StatusCode::BAD_REQUEST, &body);
+            let error = OpenAiLlmRedacter::request_failure(
+                "analyze text",
+                reqwest::StatusCode::BAD_REQUEST,
+                &body,
+            );
             assert!(!error.to_string().contains(PLANTED_VALUE), "{body}");
         }
     }
