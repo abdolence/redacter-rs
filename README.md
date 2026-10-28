@@ -1127,9 +1127,10 @@ for AWS Comprehend.
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.
 - The LLM redacters ask the model for the sensitive values in the text with a type for each, and report every
-  occurrence of each value, ignoring case, since the model may not copy a value letter for letter. A value that stands
-  alone as a word is reported there only; a value that never does, such as a name inside a Japanese sentence or an
-  inflected word, is reported wherever it occurs. Letters are compared one at a time, so `ß` and `SS` differ.
+  occurrence of each value, ignoring case, since the model may not copy a value letter for letter. An occurrence is
+  reported wherever it is, so a short value is also found inside longer words: `John` is reported inside `Johnson`,
+  which covers inflected words and scripts written without spaces. An occurrence inside a longer reported one is
+  dropped. Letters are compared one at a time, so `ß` and `SS` differ, while Greek `ς` and `Σ` match.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
 - AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by

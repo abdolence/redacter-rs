@@ -71,8 +71,8 @@ pub struct LlmTextFinding {
 }
 
 impl LlmTextFinding {
-    /// Every occurrence in `text` of what the model's JSON array `answer` found. A value the
-    /// model did not copy verbatim has no occurrence and is not reported. An answer that is
+    /// Every occurrence in `text` of what the model's JSON array `answer` found. A value that
+    /// does not occur in the text, even ignoring case, is not reported. An answer that is
     /// not a JSON array of findings is an error: reading it as "nothing found" would report
     /// a clean file.
     pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
