@@ -53,6 +53,9 @@ pub use detection::*;
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
+mod llm_detection;
+pub use llm_detection::*;
+
 mod ocr_alignment;
 pub use ocr_alignment::*;
 
@@ -209,6 +212,35 @@ pub struct PreparedImage {
     pub data: bytes::Bytes,
     pub width: u32,
     pub height: u32,
+    /// Size of the image before it was scaled down, which is the size detections report in.
+    pub original_width: u32,
+    pub original_height: u32,
+}
+
+impl PreparedImage {
+    /// A detection of `label` at `coords`, a box in pixels of this prepared image, reported
+    /// in pixels of the image as it was given. The box is clamped to the image and ordered;
+    /// the value is the text the model read, empty when it gave none.
+    pub fn detection_at(&self, coords: TextImageCoords, label: DetectionLabel) -> Detection {
+        let scale_x = self.original_width as f32 / self.width as f32;
+        let scale_y = self.original_height as f32 / self.height as f32;
+        let clamp_x = |x: f32| x.clamp(0.0, self.width as f32) * scale_x;
+        let clamp_y = |y: f32| y.clamp(0.0, self.height as f32) * scale_y;
+        let (x1, x2) = (clamp_x(coords.x1), clamp_x(coords.x2));
+        let (y1, y2) = (clamp_y(coords.y1), clamp_y(coords.y2));
+        Detection {
+            label,
+            location: DetectionLocation::Image {
+                page: None,
+                x1: x1.min(x2),
+                y1: y1.min(y2),
+                x2: x1.max(x2),
+                y2: y1.max(y2),
+            },
+            score: None,
+            value: coords.text.unwrap_or_default(),
+        }
+    }
 }
 
 /// Decodes, scales down and re-encodes an image so it fits the model input limits.
@@ -230,6 +262,8 @@ pub fn prepare_image_for_llm(mime_type: &Mime, data: &bytes::Bytes) -> AppResult
         data: encoded.into_inner().into(),
         width: resized.width(),
         height: resized.height(),
+        original_width: image.width(),
+        original_height: image.height(),
     })
 }
 

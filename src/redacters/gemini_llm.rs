@@ -4,12 +4,14 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, LlmImageMode, NativeImageEditError, NormalizedPiiBox,
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    redact_image_with_mode, text_detection_prompt, Detection, LlmImageFinding, LlmImageMode,
+    LlmTextFinding, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, GEMINI_COORDS_DETECTION_PROMPT,
     GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
+use gcloud_sdk::google::ai::generativelanguage::v1beta as gemini_api;
 use gcloud_sdk::google::ai::generativelanguage::v1beta::generative_service_client::GenerativeServiceClient;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use mime::Mime;
@@ -26,6 +28,40 @@ pub struct GeminiLlmRedacterOptions {
 
 #[derive(Debug, Clone, ValueStruct)]
 pub struct GeminiLlmModelName(String);
+
+fn text_part(text: String) -> gemini_api::Part {
+    gemini_api::Part {
+        data: Some(gemini_api::part::Data::Text(text)),
+        ..std::default::Default::default()
+    }
+}
+
+fn schema_of(r#type: gemini_api::Type) -> gemini_api::Schema {
+    gemini_api::Schema {
+        r#type: r#type.into(),
+        ..std::default::Default::default()
+    }
+}
+
+/// Schema of an array of objects whose listed properties are all required.
+fn findings_schema(properties: Vec<(&str, gemini_api::Schema)>) -> gemini_api::Schema {
+    gemini_api::Schema {
+        r#type: gemini_api::Type::Array.into(),
+        items: Some(Box::new(gemini_api::Schema {
+            r#type: gemini_api::Type::Object.into(),
+            required: properties
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect(),
+            properties: properties
+                .into_iter()
+                .map(|(name, schema)| (name.to_string(), schema))
+                .collect(),
+            ..std::default::Default::default()
+        })),
+        ..std::default::Default::default()
+    }
+}
 
 #[derive(Clone)]
 pub struct GeminiLlmRedacter<'a> {
@@ -332,6 +368,126 @@ impl<'a> GeminiLlmRedacter<'a> {
         }
     }
 
+    /// Asks the text model for JSON conforming to `response_schema` and returns its answer.
+    async fn generate_json(
+        &self,
+        parts: Vec<gemini_api::Part>,
+        response_schema: gemini_api::Schema,
+    ) -> AppResult<String> {
+        let model_name = self
+            .gemini_llm_options
+            .gemini_model
+            .as_ref()
+            .map(|model_name| model_name.value().to_string())
+            .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
+        let mut request = tonic::Request::new(gemini_api::GenerateContentRequest {
+            model: model_name,
+            safety_settings: [
+                gemini_api::HarmCategory::HateSpeech,
+                gemini_api::HarmCategory::SexuallyExplicit,
+                gemini_api::HarmCategory::DangerousContent,
+                gemini_api::HarmCategory::Harassment,
+            ]
+            .into_iter()
+            .map(|category| gemini_api::SafetySetting {
+                category: category.into(),
+                threshold: gemini_api::safety_setting::HarmBlockThreshold::BlockNone.into(),
+            })
+            .collect(),
+            contents: vec![gemini_api::Content {
+                parts,
+                role: "user".to_string(),
+            }],
+            generation_config: Some(gemini_api::GenerationConfig {
+                candidate_count: Some(1),
+                temperature: Some(0.2),
+                response_mime_type: mime::APPLICATION_JSON.to_string(),
+                response_schema: Some(response_schema),
+                ..std::default::Default::default()
+            }),
+            ..std::default::Default::default()
+        });
+        request.metadata_mut().insert(
+            "x-goog-user-project",
+            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
+                self.gemini_llm_options.project_id.as_ref(),
+            )?,
+        );
+        let response = self.client.get().generate_content(request).await?;
+        let content = response
+            .into_inner()
+            .candidates
+            .into_iter()
+            .next()
+            .and_then(|candidate| candidate.content)
+            .ok_or_else(|| AppError::SystemError {
+                message: "No content item in the response".to_string(),
+            })?;
+        Ok(content
+            .parts
+            .into_iter()
+            .filter_map(|part| match part.data {
+                Some(gemini_api::part::Data::Text(text)) => Some(text),
+                _ => None,
+            })
+            .collect())
+    }
+
+    async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+        let separator = format!("---{}", rand::rng().random::<u64>());
+        let answer = self
+            .generate_json(
+                vec![
+                    text_part(text_detection_prompt(&separator)),
+                    text_part(format!("{separator}\n")),
+                    text_part(text.to_string()),
+                    text_part(format!("{separator}\n")),
+                ],
+                findings_schema(vec![
+                    ("text", schema_of(gemini_api::Type::String)),
+                    ("type", schema_of(gemini_api::Type::String)),
+                ]),
+            )
+            .await?;
+        LlmTextFinding::detections_from_answer(&answer, text)
+    }
+
+    async fn detect_in_image(
+        &self,
+        mime_type: &Mime,
+        data: &gcloud_sdk::prost::bytes::Bytes,
+    ) -> AppResult<Vec<Detection>> {
+        let prepared_image = prepare_image_for_llm(mime_type, data)?;
+        let answer = self
+            .generate_json(
+                vec![
+                    text_part(GEMINI_COORDS_DETECTION_PROMPT.to_string()),
+                    gemini_api::Part {
+                        data: Some(gemini_api::part::Data::InlineData(gemini_api::Blob {
+                            mime_type: mime_type.to_string(),
+                            data: prepared_image.data.to_vec(),
+                        })),
+                        ..std::default::Default::default()
+                    },
+                ],
+                findings_schema(vec![
+                    (
+                        "box_2d",
+                        gemini_api::Schema {
+                            r#type: gemini_api::Type::Array.into(),
+                            min_items: 4,
+                            items: Some(Box::new(schema_of(gemini_api::Type::Integer))),
+                            ..std::default::Default::default()
+                        },
+                    ),
+                    ("text", schema_of(gemini_api::Type::String)),
+                    ("type", schema_of(gemini_api::Type::String)),
+                ]),
+            )
+            .await?;
+        LlmImageFinding::detections_from_answer(&answer, &prepared_image)
+    }
+
     pub async fn redact_image_file_natively(
         &self,
         input: RedacterDataItem,
@@ -476,10 +632,18 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
         })
     }
 
-    async fn detect(&self, _input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
-        Err(AppError::DetectionNotSupported {
-            redacter_type: self.redacter_type(),
-        })
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
+            RedacterDataItemContent::Image { mime_type, data } => {
+                self.detect_in_image(mime_type, data).await
+            }
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::SystemError {
+                    message: "Attempt to detect in unsupported type".to_string(),
+                })
+            }
+        }
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -491,6 +655,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redacters::live_detection;
     use crate::redacters::test_support::{
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
@@ -582,5 +747,52 @@ mod tests {
     async fn redact_image_file_coords_mode_test(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         redact_image_file_test_with_mode(LlmImageMode::Coords, "gemini-coords.png").await
+    }
+
+    async fn detection_test_redacter<'a>(
+        reporter: &'a AppReporter<'a>,
+    ) -> Result<GeminiLlmRedacter<'a>, Box<dyn std::error::Error + Send + Sync>> {
+        initialize_crypto();
+        let test_gcp_project_id =
+            std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
+        Ok(GeminiLlmRedacter::new(
+            GeminiLlmRedacterOptions {
+                project_id: GcpProjectId::new(test_gcp_project_id),
+                gemini_model: None,
+                gemini_image_model: None,
+                image_mode: LlmImageMode::Auto,
+            },
+            reporter,
+        )
+        .await?)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp-llm"), ignore)]
+    async fn detect_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let redacter = detection_test_redacter(&reporter).await?;
+
+        let input = live_detection::note_item();
+        let detections = redacter.detect(&input).await?;
+
+        live_detection::assert_note_found(&input, &detections);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp-llm"), ignore)]
+    async fn detect_image_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let redacter = detection_test_redacter(&reporter).await?;
+
+        let detections = redacter
+            .detect(&live_detection::enlarged_form_item())
+            .await?;
+
+        live_detection::assert_form_found(&detections);
+        Ok(())
     }
 }
