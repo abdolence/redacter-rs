@@ -6,8 +6,9 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    unsupported_type_error, CharOffsets, Detection, DetectionLabel, DetectionLocation,
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    mask_detections, unsupported_type_error, CharOffsets, Detection, DetectionLabel,
+    DetectionLocation, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -97,6 +98,10 @@ impl<'a> MsPresidioRedacter<'a> {
         Ok(response.json().await?)
     }
 
+    async fn detect_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+        Self::detections_in(text, &self.analyze(text).await?)
+    }
+
     /// Turns the analyzer's items for `text` into detections, converting its character
     /// offsets to byte offsets and leaving out the disallowed entity types.
     fn detections_in(text: &str, items: &[MsPresidioAnalyzedItem]) -> AppResult<Vec<Detection>> {
@@ -138,25 +143,8 @@ impl<'a> MsPresidioRedacter<'a> {
             }),
         }?;
 
-        let response_items = self.analyze(&text_content).await?;
-        let redacted_text_content = response_items
-            .iter()
-            .filter(|item| !item.is_disallowed())
-            .fold(text_content, |acc, entity| {
-                match (entity.start, entity.end) {
-                    (Some(start), Some(end)) => [
-                        acc[..start].to_string(),
-                        "X".repeat(end - start),
-                        acc[end..].to_string(),
-                    ]
-                    .concat(),
-                    (Some(start), None) => {
-                        acc[..start].to_string() + "X".repeat(acc.len() - start).as_str()
-                    }
-                    (None, Some(end)) => ["X".repeat(end), acc[end..].to_string()].concat(),
-                    _ => acc,
-                }
-            });
+        let redacted_text_content =
+            mask_detections(&text_content, &self.detect_text(&text_content).await?);
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_text_content),
@@ -260,9 +248,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
-            RedacterDataItemContent::Value(text) => {
-                Self::detections_in(text, &self.analyze(text).await?)
-            }
+            RedacterDataItemContent::Value(text) => self.detect_text(text).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
             | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),

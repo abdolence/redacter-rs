@@ -44,33 +44,8 @@ impl<'a> AwsComprehendRedacter<'a> {
             }),
         }?;
 
-        let aws_request = self
-            .client
-            .detect_pii_entities()
-            .language_code(aws_sdk_comprehend::types::LanguageCode::En)
-            .text(text_content.clone());
-
-        let result = aws_request.send().await?;
-        let redacted_content = result.entities.iter().fold(text_content, |acc, entity| {
-            entity.iter().fold(acc, |acc, entity| {
-                match (entity.begin_offset, entity.end_offset) {
-                    (Some(start), Some(end)) => [
-                        acc[..start as usize].to_string(),
-                        "X".repeat((end - start) as usize),
-                        acc[end as usize..].to_string(),
-                    ]
-                    .concat(),
-                    (Some(start), None) => {
-                        acc[..start as usize].to_string()
-                            + "X".repeat(acc.len() - start as usize).as_str()
-                    }
-                    (None, Some(end)) => {
-                        ["X".repeat(end as usize), acc[end as usize..].to_string()].concat()
-                    }
-                    _ => acc,
-                }
-            })
-        });
+        let redacted_content =
+            mask_detections(&text_content, &self.detect_text(&text_content).await?);
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_content),
@@ -104,6 +79,33 @@ impl CharOffsets {
         }
         Some((*self.byte_starts.get(start)?, *self.byte_starts.get(end)?))
     }
+}
+
+/// `text` with every text range of `detections` replaced by one `X` per character. Ranges
+/// may overlap or arrive in any order.
+pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
+    let mut ranges: Vec<(usize, usize)> = detections
+        .iter()
+        .filter_map(|detection| match detection.location {
+            DetectionLocation::Text { start, end } => Some((start, end)),
+            _ => None,
+        })
+        .collect();
+    ranges.sort_unstable();
+
+    let mut masked = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        let start = start.max(cursor);
+        if end <= start {
+            continue;
+        }
+        masked.push_str(&text[cursor..start]);
+        masked.extend(text[start..end].chars().map(|_| 'X'));
+        cursor = end;
+    }
+    masked.push_str(&text[cursor..]);
+    masked
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
@@ -265,6 +267,34 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn masking_replaces_each_character_of_a_detected_range_on_multibyte_text() {
+        let text = "Grüße, Zoë Keller: zoe@example.com";
+        let detection = |needle: &str, len_in_bytes: usize| {
+            let start = text.find(needle).unwrap();
+            Detection {
+                label: DetectionLabel::new("PII"),
+                location: DetectionLocation::Text {
+                    start,
+                    end: start + len_in_bytes,
+                },
+                score: None,
+                value: needle.to_string(),
+            }
+        };
+
+        let masked = mask_detections(
+            text,
+            &[
+                detection("zoe@example.com", 15),
+                detection("Zoë Keller", "Zoë Keller".len()),
+                detection("Keller: zoe", "Keller: zoe".len()),
+            ],
+        );
+
+        assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
     }
 
     #[test]
