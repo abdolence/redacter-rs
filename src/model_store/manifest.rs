@@ -46,8 +46,7 @@ pub struct ModelManifest {
 macro_rules! ner_url {
     ($path:literal) => {
         concat!(
-            "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/",
-            "c2a4dbf593c57f47004c5bc2d3770d311aee9c43/",
+            "https://github.com/abdolence/redacter-rs/releases/download/models-ner-hrl-1/",
             $path
         )
     };
@@ -57,7 +56,7 @@ macro_rules! ner_url {
 static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
     ModelFile {
         name: "model_uint8.onnx",
-        url: ner_url!("onnx/model_uint8.onnx"),
+        url: ner_url!("model_uint8.onnx"),
         size: 135_115_742,
         sha256: "5b54455882ff2f242af18932b9da308d1f902f9f65d1d8f56ce9eb9bfcd5bf9e",
     },
@@ -85,8 +84,7 @@ pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
 macro_rules! gliner_url {
     ($path:literal) => {
         concat!(
-            "https://huggingface.co/onnx-community/gliner_multi_pii-v1/resolve/",
-            "2e0397a7e8a250d76c37122232b3cbde42c8d629/",
+            "https://github.com/abdolence/redacter-rs/releases/download/models-gliner-multi-pii-1/",
             $path
         )
     };
@@ -96,7 +94,7 @@ macro_rules! gliner_url {
 static GLINER_MULTI_PII_FILES: [ModelFile; 3] = [
     ModelFile {
         name: "model.onnx",
-        url: gliner_url!("onnx/model.onnx"),
+        url: gliner_url!("model.onnx"),
         size: 1_157_129_714,
         sha256: "7704865e414f24591da6aee08716a25677855bc8a84af81396d90e40df1e68d2",
     },
@@ -118,13 +116,13 @@ static GLINER_MULTI_PII_FILES: [ModelFile; 3] = [
 static OCRS_FILES: [ModelFile; 2] = [
     ModelFile {
         name: "text-detection.rten",
-        url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-detection.rten",
         size: 2_510_284,
         sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
     },
     ModelFile {
         name: "text-recognition.rten",
-        url: "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-recognition.rten",
         size: 9_716_568,
         sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
     },
@@ -151,7 +149,7 @@ fn ocrs_legacy_dirs() -> Vec<PathBuf> {
 static OCRS: ModelManifest = ModelManifest {
     dir_name: "ocrs",
     needed_by: "OCR",
-    source: "https://ocrs-models.s3-accelerate.amazonaws.com/",
+    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1 (ocrs models)",
     license: "ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets",
     files: &OCRS_FILES,
     legacy_dirs: ocrs_legacy_dirs,
@@ -161,8 +159,7 @@ static OCRS: ModelManifest = ModelManifest {
 static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
     dir_name: "distilbert-base-multilingual-cased-ner-hrl",
     needed_by: "The local-ner redacter",
-    source:
-        "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision c2a4dbf)",
+    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1 (Xenova/distilbert-base-multilingual-cased-ner-hrl, revision c2a4dbf)",
     license: "Academic Free License 3.0 (AFL-3.0), see the model card",
     files: &NER_MULTILINGUAL_HRL_FILES,
     legacy_dirs: no_legacy_dirs,
@@ -172,7 +169,7 @@ static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
 static GLINER_MULTI_PII: ModelManifest = ModelManifest {
     dir_name: "gliner_multi_pii-v1",
     needed_by: "The local-gliner redacter",
-    source: "https://huggingface.co/onnx-community/gliner_multi_pii-v1 (revision 2e0397a7)",
+    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1 (onnx-community/gliner_multi_pii-v1, revision 2e0397a7)",
     license: "Apache-2.0 (model and training data), backbone microsoft/mdeberta-v3-base MIT",
     files: &GLINER_MULTI_PII_FILES,
     legacy_dirs: no_legacy_dirs,
@@ -211,7 +208,7 @@ mod tests {
             assert_eq!(
                 file.url,
                 format!(
-                    "https://ocrs-models.s3-accelerate.amazonaws.com/{}",
+                    "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/{}",
                     file.name
                 )
             );
@@ -270,12 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn gliner_urls_pin_the_revision_and_digests_are_hex() {
+    fn gliner_urls_point_at_the_release_and_digests_are_hex() {
         let manifest = manifest(ModelId::GlinerMultiPii);
         for file in manifest.files {
             assert!(
                 file.url.starts_with(
-                    "https://huggingface.co/onnx-community/gliner_multi_pii-v1/resolve/2e0397a7e8a250d76c37122232b3cbde42c8d629/"
+                    "https://github.com/abdolence/redacter-rs/releases/download/models-gliner-multi-pii-1/"
                 ),
                 "{}",
                 file.url
@@ -291,12 +288,12 @@ mod tests {
     }
 
     #[test]
-    fn ner_urls_pin_the_revision_and_digests_are_hex() {
+    fn ner_urls_point_at_the_release_and_digests_are_hex() {
         let manifest = manifest(ModelId::NerMultilingualHrl);
         for file in manifest.files {
             assert!(
                 file.url.starts_with(
-                    "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/c2a4dbf593c57f47004c5bc2d3770d311aee9c43/"
+                    "https://github.com/abdolence/redacter-rs/releases/download/models-ner-hrl-1/"
                 ),
                 "{}",
                 file.url

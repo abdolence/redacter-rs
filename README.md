@@ -705,13 +705,14 @@ If library is detected correctly it will be reported in the tool output as.
 ## Models and downloads
 
 The OCR engine and the `local-ner` and `local-gliner` redacters need model files that are not bundled
-with the tool:
+with the tool. They are hosted as assets of GitHub releases in this repository, copied unmodified
+from the sources listed below:
 
 | Model | Files | Size | Source | Licence |
 |---|---|---|---|---|
-| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | https://ocrs-models.s3-accelerate.amazonaws.com/ | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
-| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision `c2a4dbf`) | AFL-3.0 |
-| `gliner_multi_pii-v1` (`local-gliner`) | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | https://huggingface.co/onnx-community/gliner_multi_pii-v1 (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
+| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
+| `gliner_multi_pii-v1` (`local-gliner`) | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 
 Nothing is downloaded without your consent. `--download-models` controls it:
 
