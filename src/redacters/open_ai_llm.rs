@@ -100,14 +100,30 @@ struct OpenAiLlmAnalyzeChoice {
 impl From<OpenAiLlmAnalyzeChoice> for ModelAnswer {
     fn from(choice: OpenAiLlmAnalyzeChoice) -> Self {
         let stop = match choice.finish_reason.as_deref() {
-            None | Some("stop") if choice.message.refusal.is_some() => {
+            Some("stop") if choice.message.refusal.is_some() => {
                 Some(ModelStop::Withheld("refusal".to_string()))
             }
-            None | Some("stop") => None,
+            Some("stop") => None,
             Some("length") => Some(ModelStop::MaxTokens),
             Some(other) => Some(ModelStop::Withheld(other.to_string())),
+            None => Some(ModelStop::Withheld("no finish_reason".to_string())),
         };
         ModelAnswer::new(choice.message.content.unwrap_or_default(), stop)
+    }
+}
+
+// A response without choices is a stop, not an empty answer that a retry might fill.
+impl From<OpenAiLlmAnalyzeResponse> for ModelAnswer {
+    fn from(mut response: OpenAiLlmAnalyzeResponse) -> Self {
+        response.choices.pop().map_or_else(
+            || {
+                ModelAnswer::new(
+                    String::new(),
+                    Some(ModelStop::Withheld("no_choices".to_string())),
+                )
+            },
+            ModelAnswer::from,
+        )
     }
 }
 
@@ -179,7 +195,6 @@ impl<'a> OpenAiLlmRedacter<'a> {
             }),
         }?;
 
-        let blank_input = text_content.trim().is_empty();
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
@@ -208,9 +223,9 @@ impl<'a> OpenAiLlmRedacter<'a> {
             response_format: None,
         };
         let redacted_content = self
-            .complete(&analyze_request)
+            .complete(&analyze_request, "redact the text")
             .await?
-            .into_redacted_text(blank_input)?;
+            .into_text()?;
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_content),
@@ -281,7 +296,10 @@ impl<'a> OpenAiLlmRedacter<'a> {
                 }
             })
         };
-        let answer = self.complete(&analyze_request).await?.into_text()?;
+        let answer = self
+            .complete(&analyze_request, "locate the personal information")
+            .await?
+            .into_text()?;
         let pii_image_coords: OpenAiLlmTextCoordsResponse = parse_answer(&answer)?;
         Ok(ImagePii {
             image: prepared_image,
@@ -332,7 +350,12 @@ impl<'a> OpenAiLlmRedacter<'a> {
     }
 
     /// Sends a chat completion request and returns its last choice with how it ended.
-    async fn complete(&self, request: &OpenAiLlmAnalyzeRequest) -> AppResult<ModelAnswer> {
+    /// `operation` names what the request was for in the error of a rejected one.
+    async fn complete(
+        &self,
+        request: &OpenAiLlmAnalyzeRequest,
+        operation: &str,
+    ) -> AppResult<ModelAnswer> {
         let response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")
@@ -353,17 +376,13 @@ impl<'a> OpenAiLlmRedacter<'a> {
             let response_status = response.status();
             let response_text = response.text().await.unwrap_or_default();
             return Err(Self::request_failure(
-                "analyze text",
+                operation,
                 response_status,
                 &response_text,
             ));
         }
-        let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-        Ok(open_ai_response
-            .choices
-            .pop()
-            .map(ModelAnswer::from)
-            .unwrap_or_else(|| ModelAnswer::new(String::new(), None)))
+        let open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
+        Ok(open_ai_response.into())
     }
 
     fn model_name(&self) -> String {
@@ -414,7 +433,10 @@ impl<'a> OpenAiLlmRedacter<'a> {
                 },
             }),
         };
-        let answer = self.complete(&request).await?.into_text()?;
+        let answer = self
+            .complete(&request, "find the personal information")
+            .await?
+            .into_text()?;
         OpenAiLlmTextFindings::detections_from_answer(&answer, text)
     }
 
@@ -698,8 +720,8 @@ mod tests {
     }
 
     fn answer_of(response: &str) -> AppResult<String> {
-        let mut response: OpenAiLlmAnalyzeResponse = serde_json::from_str(response).unwrap();
-        ModelAnswer::from(response.choices.pop().unwrap()).into_text()
+        let response: OpenAiLlmAnalyzeResponse = serde_json::from_str(response).unwrap();
+        ModelAnswer::from(response).into_text()
     }
 
     #[test]
@@ -721,15 +743,29 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_and_an_empty_answer_are_errors() {
+    fn a_refusal_is_an_error() {
         let refused = r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"No."},"finish_reason":"stop"}]}"#;
         assert!(matches!(
             answer_of(refused),
             Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
         ));
-        let empty =
-            r#"{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}"#;
-        assert!(matches!(answer_of(empty), Err(AppError::EmptyModelAnswer)));
+    }
+
+    #[test]
+    fn an_answer_without_a_finish_reason_is_an_error() {
+        let unfinished = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":null}]}"#;
+        assert!(matches!(
+            answer_of(unfinished),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+        ));
+    }
+
+    #[test]
+    fn a_response_without_choices_is_an_error() {
+        assert!(matches!(
+            answer_of(r#"{"choices":[]}"#),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+        ));
     }
 
     #[test]

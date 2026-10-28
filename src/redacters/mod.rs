@@ -627,7 +627,13 @@ pub trait Redacter {
 }
 
 impl<'a> Redacter for Redacters<'a> {
+    // Text with nothing in it is returned as it is, without asking the redacter: a model
+    // has nothing to answer for it, and any text it made up would be written to the file.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+        if matches!(&input.content, RedacterDataItemContent::Value(text) if text.trim().is_empty())
+        {
+            return Ok(input);
+        }
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
             Redacters::AwsComprehend(redacter) => redacter.redact(input).await,

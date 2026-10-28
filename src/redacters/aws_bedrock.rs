@@ -3,7 +3,7 @@ use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseApiOu
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, ConverseOutput, ImageBlock, ImageFormat, ImageSource,
-    InferenceConfiguration, Message,
+    InferenceConfiguration, Message, StopReason,
 };
 use rand::RngExt;
 use rvstruct::ValueStruct;
@@ -203,6 +203,24 @@ fn strip_echoed_separator(answer: &str, separator: &str) -> String {
     }
 }
 
+/// The text of a redaction answer once the echoed separator and the code fence are gone.
+/// What is left must say something: an answer made of nothing but the separators is not a
+/// redacted copy of a document that had content.
+fn redacted_text_from(
+    answer: ModelAnswer,
+    separator: &str,
+    input_starts_with_fence: bool,
+) -> AppResult<String> {
+    let text = strip_answer_fence(
+        &strip_echoed_separator(&answer.into_text()?, separator),
+        input_starts_with_fence,
+    );
+    if text.trim().is_empty() {
+        return Err(AppError::EmptyModelAnswer);
+    }
+    Ok(text)
+}
+
 /// Converts one Nova-style normalized bounding box (`[x1, y1, x2, y2]`, each in 0..=1000) to
 /// pixel coordinates, reusing [`normalized_box_to_image_coords`]'s clamping and ordering by
 /// translating Nova's corner order into the `[ymin, xmin, ymax, xmax]` order that function
@@ -298,7 +316,6 @@ pub fn claude_text_answer_to_image_coords(
         .collect())
 }
 
-/// The text blocks of a Converse answer, concatenated in order, with its stop reason.
 impl From<ConverseApiOutput> for ModelAnswer {
     fn from(response: ConverseApiOutput) -> Self {
         let text = match response.output() {
@@ -312,10 +329,12 @@ impl From<ConverseApiOutput> for ModelAnswer {
                 .collect(),
             _ => String::new(),
         };
-        let stop = match response.stop_reason().as_str() {
-            "end_turn" | "stop_sequence" => None,
-            "max_tokens" | "model_context_window_exceeded" => Some(ModelStop::MaxTokens),
-            other => Some(ModelStop::Withheld(other.to_string())),
+        let stop = match response.stop_reason() {
+            StopReason::EndTurn | StopReason::StopSequence => None,
+            StopReason::MaxTokens | StopReason::ModelContextWindowExceeded => {
+                Some(ModelStop::MaxTokens)
+            }
+            other => Some(ModelStop::Withheld(other.as_str().to_string())),
         };
         ModelAnswer::new(text, stop)
     }
@@ -376,7 +395,6 @@ impl<'a> AwsBedrockRedacter<'a> {
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
         let input_starts_with_fence = input_content.trim_start().starts_with("```");
-        let blank_input = input_content.trim().is_empty();
 
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -395,17 +413,17 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: format!("Failed to build the Bedrock request: {err}"),
             })?;
 
-        let redacted_content = self
+        let answer = self
             .converse_text(self.text_model_id(), message, "Failed to redact the text")
-            .await?
-            .into_redacted_text(blank_input)?;
+            .await?;
 
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
-            content: RedacterDataItemContent::Value(strip_answer_fence(
-                &strip_echoed_separator(&redacted_content, &generate_random_text_separator),
+            content: RedacterDataItemContent::Value(redacted_text_from(
+                answer,
+                &generate_random_text_separator,
                 input_starts_with_fence,
-            )),
+            )?),
         })
     }
 
@@ -619,7 +637,6 @@ mod tests {
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
     use crate::redacters::{DetectionLocation, NativeImageEditFailure};
-    use aws_sdk_bedrockruntime::types::StopReason;
     use console::Term;
 
     #[test]
@@ -988,13 +1005,18 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_answer_and_an_empty_one_are_errors() {
+    fn a_truncated_answer_is_an_error() {
         assert!(matches!(
             ModelAnswer::from(converse_response("[{", StopReason::MaxTokens)).into_text(),
             Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
         ));
+    }
+
+    #[test]
+    fn a_redaction_that_is_only_the_separators_is_an_error() {
+        let echoed = converse_response("---1234\n---1234\n", StopReason::EndTurn);
         assert!(matches!(
-            ModelAnswer::from(converse_response("", StopReason::EndTurn)).into_text(),
+            redacted_text_from(ModelAnswer::from(echoed), "---1234", false),
             Err(AppError::EmptyModelAnswer)
         ));
     }

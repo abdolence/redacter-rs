@@ -78,7 +78,11 @@ impl From<vertex_api::GenerateContentResponse> for ModelAnswer {
             .candidates
             .first()
             .map(|candidate| GeminiCandidate {
-                finish_reason: candidate.finish_reason().as_str_name(),
+                finish_reason: vertex_api::candidate::FinishReason::try_from(
+                    candidate.finish_reason,
+                )
+                .map(|reason| reason.as_str_name())
+                .map_err(|unknown| unknown.0),
                 blocked_categories: candidate
                     .safety_ratings
                     .iter()
@@ -173,7 +177,6 @@ impl<'a> GcpVertexAiRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {
-                let blank_input = input_content.trim().is_empty();
                 let request =
                     gcloud_sdk::google::cloud::aiplatform::v1::GenerateContentRequest {
                         model: model_path,
@@ -237,12 +240,9 @@ impl<'a> GcpVertexAiRedacter<'a> {
                         ),
                         ..std::default::Default::default()
                     };
-                let redacted_content_text = retrying_once(|| async {
-                    self.generate(request.clone())
-                        .await?
-                        .into_redacted_text(blank_input)
-                })
-                .await?;
+                let redacted_content_text =
+                    retrying_once(|| async { self.generate(request.clone()).await?.into_text() })
+                        .await?;
                 Ok(RedacterDataItem {
                     file_ref: input.file_ref,
                     content: RedacterDataItemContent::Value(redacted_content_text),
@@ -637,35 +637,14 @@ mod tests {
         }
     }
 
-    fn safety_stop() -> vertex_api::GenerateContentResponse {
-        response(
+    #[test]
+    fn a_safety_stop_without_content_names_the_blocked_categories() {
+        let stopped = response(
             vertex_api::candidate::FinishReason::Safety,
             "",
             &[vertex_api::HarmCategory::DangerousContent],
-        )
-    }
-
-    fn completed(text: &str) -> vertex_api::GenerateContentResponse {
-        response(vertex_api::candidate::FinishReason::Stop, text, &[])
-    }
-
-    /// The text taken from `responses` in turn, and how many of them were asked for.
-    async fn text_from(
-        responses: Vec<vertex_api::GenerateContentResponse>,
-    ) -> (AppResult<String>, usize) {
-        let asked = std::cell::Cell::new(0);
-        let text = retrying_once(|| {
-            let next = responses[asked.get()].clone();
-            asked.set(asked.get() + 1);
-            async move { ModelAnswer::from(next).into_text() }
-        })
-        .await;
-        (text, asked.get())
-    }
-
-    #[test]
-    fn a_safety_stop_without_content_names_the_blocked_categories() {
-        let error = ModelAnswer::from(safety_stop()).into_text().unwrap_err();
+        );
+        let error = ModelAnswer::from(stopped).into_text().unwrap_err();
         assert!(matches!(
             error,
             AppError::ModelAnswerStopped(ModelStop::Safety { ref categories })
@@ -689,33 +668,22 @@ mod tests {
     }
 
     #[test]
-    fn a_normal_stop_without_text_is_empty() {
+    fn a_finish_reason_this_build_does_not_know_is_a_stop() {
+        let mut unknown = response(vertex_api::candidate::FinishReason::Stop, "[]", &[]);
+        unknown.candidates[0].finish_reason = 9999;
         assert!(matches!(
-            ModelAnswer::from(completed("")).into_text(),
-            Err(AppError::EmptyModelAnswer)
+            ModelAnswer::from(unknown).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
         ));
     }
 
     #[test]
-    fn a_redaction_stopped_by_safety_is_an_error_and_not_an_empty_file() {
+    fn a_response_without_candidates_or_feedback_is_an_empty_answer() {
+        let nothing = vertex_api::GenerateContentResponse::default();
         assert!(matches!(
-            ModelAnswer::from(safety_stop()).into_redacted_text(false),
-            Err(AppError::ModelAnswerStopped(ModelStop::Safety { .. }))
+            ModelAnswer::from(nothing).into_text(),
+            Err(AppError::EmptyModelAnswer)
         ));
-    }
-
-    #[tokio::test]
-    async fn a_safety_stop_is_asked_once_more_and_a_truncated_answer_is_not() {
-        let (text, asked) = text_from(vec![safety_stop(), completed("[]")]).await;
-        assert_eq!((text.unwrap().as_str(), asked), ("[]", 2));
-
-        let truncated = response(vertex_api::candidate::FinishReason::MaxTokens, "[{", &[]);
-        let (text, asked) = text_from(vec![truncated, completed("[]")]).await;
-        assert!(matches!(
-            text,
-            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
-        ));
-        assert_eq!(asked, 1);
     }
 
     #[tokio::test]

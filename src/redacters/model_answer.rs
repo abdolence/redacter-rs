@@ -14,8 +14,8 @@ pub enum ModelStop {
     /// A safety filter stopped the answer. Whether the answer is blocked varies from one
     /// attempt to the next, so it is retried.
     Safety { categories: Vec<String> },
-    /// The provider gave no reason and stopped; retried.
-    Other,
+    /// The provider stopped without saying why; retried.
+    Unexplained,
     /// The answer reached the output limit and is cut short.
     MaxTokens,
     /// The provider withheld the answer for a reason another attempt does not change, named
@@ -26,22 +26,25 @@ pub enum ModelStop {
 }
 
 impl ModelStop {
-    /// The stop of a Gemini API candidate, or `None` when it finished normally.
-    /// `finish_reason` is the API's own name for it, which both Gemini endpoints share.
-    pub fn from_gemini(finish_reason: &str, blocked_categories: Vec<String>) -> Option<Self> {
+    /// The stop of a Gemini API candidate, or `None` when it finished with `STOP` and
+    /// nothing else. `finish_reason` is the API's own name for it, which both Gemini
+    /// endpoints share, or the number of a reason this build does not know.
+    fn from_gemini(
+        finish_reason: Result<&str, i32>,
+        blocked_categories: Vec<String>,
+    ) -> Option<Self> {
         match finish_reason {
-            "STOP" | "FINISH_REASON_UNSPECIFIED" => None,
-            "SAFETY" => Some(Self::Safety {
+            Ok("STOP") => None,
+            Ok("SAFETY") => Some(Self::Safety {
                 categories: blocked_categories,
             }),
-            "OTHER" => Some(Self::Other),
-            "MAX_TOKENS" => Some(Self::MaxTokens),
-            other => Some(Self::Withheld(other.to_string())),
+            Ok("OTHER") => Some(Self::Unexplained),
+            Ok("MAX_TOKENS") => Some(Self::MaxTokens),
+            Ok(other) => Some(Self::Withheld(other.to_string())),
+            Err(number) => Some(Self::Withheld(format!(
+                "unrecognised finish reason {number}"
+            ))),
         }
-    }
-
-    fn is_transient(&self) -> bool {
-        matches!(self, Self::Safety { .. } | Self::Other)
     }
 }
 
@@ -52,7 +55,7 @@ impl Display for ModelStop {
             Self::Safety { categories } => {
                 write!(f, "SAFETY (blocked: {})", categories.join(", "))
             }
-            Self::Other => f.write_str("OTHER"),
+            Self::Unexplained => f.write_str("OTHER"),
             Self::MaxTokens => f.write_str("the output limit was reached"),
             Self::Withheld(reason) => f.write_str(reason),
             Self::PromptBlocked(reason) => write!(f, "the prompt was blocked ({reason})"),
@@ -61,8 +64,8 @@ impl Display for ModelStop {
 }
 
 /// What a Gemini API candidate carried, as the two Gemini endpoints report it.
-pub struct GeminiCandidate<'a> {
-    pub finish_reason: &'a str,
+pub struct GeminiCandidate {
+    pub finish_reason: Result<&'static str, i32>,
     pub blocked_categories: Vec<String>,
     pub text: String,
 }
@@ -82,7 +85,7 @@ impl ModelAnswer {
     /// The first candidate of a Gemini API response, or when there is none, the reason the
     /// prompt was blocked.
     pub fn from_gemini(
-        candidate: Option<GeminiCandidate<'_>>,
+        candidate: Option<GeminiCandidate>,
         prompt_block_reason: Option<&str>,
     ) -> Self {
         match (candidate, prompt_block_reason) {
@@ -106,14 +109,6 @@ impl ModelAnswer {
             None => Ok(self.text),
         }
     }
-
-    /// The text of a redaction. Text that was blank to begin with may come back empty.
-    pub fn into_redacted_text(self, input_was_blank: bool) -> AppResult<String> {
-        match self.stop {
-            None if input_was_blank => Ok(self.text),
-            _ => self.into_text(),
-        }
-    }
 }
 
 /// The result of `attempt`, which runs a second time when the first failed in a way that
@@ -125,22 +120,17 @@ where
     Pending: Future<Output = AppResult<T>>,
 {
     match attempt().await {
-        Err(error) if error.is_transient_model_failure() => {
+        Err(error)
+            if matches!(
+                error,
+                AppError::ModelAnswerStopped(ModelStop::Safety { .. } | ModelStop::Unexplained)
+                    | AppError::EmptyModelAnswer
+            ) =>
+        {
             tracing::warn!(%error, "the model's answer failed, asking once more");
             attempt().await
         }
         result => result,
-    }
-}
-
-impl AppError {
-    /// The model's answer failed in a way that asking again can change.
-    pub fn is_transient_model_failure(&self) -> bool {
-        match self {
-            Self::ModelAnswerStopped(stop) => stop.is_transient(),
-            Self::EmptyModelAnswer => true,
-            _ => false,
-        }
     }
 }
 
@@ -149,7 +139,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    fn answer_stopped_by(finish_reason: &str) -> ModelAnswer {
+    fn answer_stopped_by(finish_reason: Result<&'static str, i32>) -> ModelAnswer {
         ModelAnswer::from_gemini(
             Some(GeminiCandidate {
                 finish_reason,
@@ -170,7 +160,7 @@ mod tests {
     #[test]
     fn a_safety_stop_names_the_blocked_categories() {
         assert_eq!(
-            stop_of(answer_stopped_by("SAFETY").into_text()),
+            stop_of(answer_stopped_by(Ok("SAFETY")).into_text()),
             ModelStop::Safety {
                 categories: vec!["DANGEROUS_CONTENT".to_string()]
             }
@@ -180,26 +170,25 @@ mod tests {
     #[test]
     fn other_finish_reasons_are_named_as_the_provider_names_them() {
         assert_eq!(
-            stop_of(answer_stopped_by("MAX_TOKENS").into_text()),
+            stop_of(answer_stopped_by(Ok("MAX_TOKENS")).into_text()),
             ModelStop::MaxTokens
         );
         assert_eq!(
-            stop_of(answer_stopped_by("PROHIBITED_CONTENT").into_text()),
+            stop_of(answer_stopped_by(Ok("PROHIBITED_CONTENT")).into_text()),
             ModelStop::Withheld("PROHIBITED_CONTENT".to_string())
         );
     }
 
     #[test]
-    fn a_stop_keeps_no_text_even_when_the_answer_had_some() {
-        let answer = ModelAnswer::from_gemini(
-            Some(GeminiCandidate {
-                finish_reason: "MAX_TOKENS",
-                blocked_categories: Vec::new(),
-                text: "[{\"text\": \"Ana".to_string(),
-            }),
-            None,
+    fn an_unspecified_or_unrecognised_finish_reason_is_a_stop() {
+        assert_eq!(
+            stop_of(answer_stopped_by(Ok("FINISH_REASON_UNSPECIFIED")).into_text()),
+            ModelStop::Withheld("FINISH_REASON_UNSPECIFIED".to_string())
         );
-        assert_eq!(stop_of(answer.into_text()), ModelStop::MaxTokens);
+        assert!(matches!(
+            stop_of(answer_stopped_by(Err(4242)).into_text()),
+            ModelStop::Withheld(_)
+        ));
     }
 
     #[test]
@@ -214,7 +203,7 @@ mod tests {
     #[test]
     fn a_normal_stop_without_text_is_an_empty_answer() {
         for answer in [
-            answer_stopped_by("STOP"),
+            answer_stopped_by(Ok("STOP")),
             ModelAnswer::from_gemini(None, None),
         ] {
             assert!(matches!(
@@ -224,33 +213,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_normal_stop_with_text_is_the_text() {
-        let answer = ModelAnswer::new("[]".to_string(), None);
-        assert_eq!(answer.into_text().unwrap(), "[]");
-    }
-
-    #[test]
-    fn a_redaction_of_blank_text_may_be_empty_and_any_other_may_not() {
-        assert_eq!(
-            ModelAnswer::new(String::new(), None)
-                .into_redacted_text(true)
-                .unwrap(),
-            ""
-        );
-        assert!(matches!(
-            ModelAnswer::new(String::new(), None).into_redacted_text(false),
-            Err(AppError::EmptyModelAnswer)
-        ));
-        assert_eq!(
-            stop_of(answer_stopped_by("SAFETY").into_redacted_text(true)),
-            ModelStop::Safety {
-                categories: vec!["DANGEROUS_CONTENT".to_string()]
-            }
-        );
-    }
-
-    async fn attempts_until_done(finish_reasons: &[&str]) -> (AppResult<String>, usize) {
+    async fn attempts_until_done(finish_reasons: &[&'static str]) -> (AppResult<String>, usize) {
         let attempts = Cell::new(0);
         let result = retrying_once(|| {
             let finish_reason = finish_reasons[attempts.get()];
@@ -259,7 +222,7 @@ mod tests {
                 let text = if finish_reason == "STOP" { "[]" } else { "" };
                 ModelAnswer::from_gemini(
                     Some(GeminiCandidate {
-                        finish_reason,
+                        finish_reason: Ok(finish_reason),
                         blocked_categories: Vec::new(),
                         text: text.to_string(),
                     }),
@@ -300,17 +263,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_truncated_or_withheld_answer_is_not_retried() {
-        for finish_reason in [
-            "MAX_TOKENS",
-            "PROHIBITED_CONTENT",
-            "BLOCKLIST",
-            "SPII",
-            "RECITATION",
-        ] {
-            let (result, attempts) = attempts_until_done(&[finish_reason, "STOP"]).await;
-            assert!(result.is_err(), "{finish_reason}");
-            assert_eq!(attempts, 1, "{finish_reason}");
-        }
+    async fn a_truncated_answer_is_not_retried() {
+        let (result, attempts) = attempts_until_done(&["MAX_TOKENS", "STOP"]).await;
+        assert_eq!(stop_of(result), ModelStop::MaxTokens);
+        assert_eq!(attempts, 1);
     }
 }

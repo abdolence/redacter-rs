@@ -77,7 +77,11 @@ impl From<gemini_api::GenerateContentResponse> for ModelAnswer {
             .candidates
             .first()
             .map(|candidate| GeminiCandidate {
-                finish_reason: candidate.finish_reason().as_str_name(),
+                finish_reason: gemini_api::candidate::FinishReason::try_from(
+                    candidate.finish_reason,
+                )
+                .map(|reason| reason.as_str_name())
+                .map_err(|unknown| unknown.0),
                 blocked_categories: candidate
                     .safety_ratings
                     .iter()
@@ -145,7 +149,6 @@ impl<'a> GeminiLlmRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {
-                let blank_input = input_content.trim().is_empty();
                 let request =
                     gcloud_sdk::google::ai::generativelanguage::v1beta::GenerateContentRequest {
                         model: model_name,
@@ -208,12 +211,9 @@ impl<'a> GeminiLlmRedacter<'a> {
                         ),
                         ..std::default::Default::default()
                     };
-                let redacted_content_text = retrying_once(|| async {
-                    self.generate(request.clone())
-                        .await?
-                        .into_redacted_text(blank_input)
-                })
-                .await?;
+                let redacted_content_text =
+                    retrying_once(|| async { self.generate(request.clone()).await?.into_text() })
+                        .await?;
                 Ok(RedacterDataItem {
                     file_ref: input.file_ref,
                     content: RedacterDataItemContent::Value(redacted_content_text),
@@ -603,11 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn a_redaction_that_stopped_normally_without_text_is_an_error() {
-        let empty = response(gemini_api::candidate::FinishReason::Stop, "", &[]);
+    fn a_finish_reason_this_build_does_not_know_is_a_stop() {
+        let mut unknown = response(gemini_api::candidate::FinishReason::Stop, "[]", &[]);
+        unknown.candidates[0].finish_reason = 9999;
         assert!(matches!(
-            ModelAnswer::from(empty).into_redacted_text(false),
-            Err(AppError::EmptyModelAnswer)
+            ModelAnswer::from(unknown).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
         ));
     }
 
