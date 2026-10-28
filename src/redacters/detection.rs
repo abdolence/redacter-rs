@@ -177,9 +177,6 @@ impl Detection {
     /// Every occurrence of every value in `text`, for providers that name the values they
     /// found but not where: each value is matched literally, as a whole string, and an empty
     /// value or a repeated `(value, label)` pair adds nothing. Sorted by position.
-    // TODO: drop the allow once the Bedrock Guardrails and LLM detectors call this; they name
-    // values without offsets.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> Vec<Self> {
         let mut located = std::collections::BTreeSet::new();
         let mut detections: Vec<(usize, Self)> = Vec::new();
@@ -213,6 +210,61 @@ impl Detection {
     pub fn meets_min_score(&self, min_score: Score) -> bool {
         self.score.is_none_or(|score| score >= min_score)
     }
+}
+
+/// Converts the character offsets that text analysis services report into byte offsets of
+/// the same text. Comprehend and Presidio count characters, while a detection's range counts
+/// bytes.
+pub(crate) struct CharOffsets {
+    /// The byte index of every character, then the length of the text.
+    byte_starts: Vec<usize>,
+}
+
+impl CharOffsets {
+    pub(crate) fn new(text: &str) -> Self {
+        Self {
+            byte_starts: text
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain([text.len()])
+                .collect(),
+        }
+    }
+
+    /// The byte range of the characters `start..end`, or `None` when it reaches past the text.
+    pub(crate) fn byte_range(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        if start > end {
+            return None;
+        }
+        Some((*self.byte_starts.get(start)?, *self.byte_starts.get(end)?))
+    }
+}
+
+/// `text` with every text range of `detections` replaced by one `X` per character. Ranges
+/// may overlap or arrive in any order.
+pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
+    let mut ranges: Vec<(usize, usize)> = detections
+        .iter()
+        .filter_map(|detection| match detection.location {
+            DetectionLocation::Text { start, end } => Some((start, end)),
+            _ => None,
+        })
+        .collect();
+    ranges.sort_unstable();
+
+    let mut masked = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        let start = start.max(cursor);
+        if end <= start {
+            continue;
+        }
+        masked.push_str(&text[cursor..start]);
+        masked.extend(text[start..end].chars().map(|_| 'X'));
+        cursor = end;
+    }
+    masked.push_str(&text[cursor..]);
+    masked
 }
 
 #[cfg(test)]
@@ -403,5 +455,33 @@ mod tests {
         assert!(detection(None).meets_min_score(floor));
         assert!(detection(Some(score(0.7))).meets_min_score(floor));
         assert!(!detection(Some(score(0.69))).meets_min_score(floor));
+    }
+
+    #[test]
+    fn masking_replaces_each_character_of_a_detected_range_on_multibyte_text() {
+        let text = "Grüße, Zoë Keller: zoe@example.com";
+        let detection = |needle: &str, len_in_bytes: usize| {
+            let start = text.find(needle).unwrap();
+            Detection {
+                label: DetectionLabel::new("PII"),
+                location: DetectionLocation::Text {
+                    start,
+                    end: start + len_in_bytes,
+                },
+                score: None,
+                value: needle.to_string(),
+            }
+        };
+
+        let masked = mask_detections(
+            text,
+            &[
+                detection("zoe@example.com", 15),
+                detection("Zoë Keller", "Zoë Keller".len()),
+                detection("Keller: zoe", "Keller: zoe".len()),
+            ],
+        );
+
+        assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
     }
 }

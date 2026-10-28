@@ -2,8 +2,9 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    unsupported_type_error, Detection, DetectionLabel, DetectionLocation, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    mask_detections, unsupported_type_error, CharOffsets, Detection, DetectionLabel,
+    DetectionLocation, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -51,61 +52,6 @@ impl<'a> AwsComprehendRedacter<'a> {
             content: RedacterDataItemContent::Value(redacted_content),
         })
     }
-}
-
-/// Converts the character offsets that text analysis services report into byte offsets of
-/// the same text. Comprehend and Presidio count characters, while a detection's range counts
-/// bytes.
-pub(crate) struct CharOffsets {
-    /// The byte index of every character, then the length of the text.
-    byte_starts: Vec<usize>,
-}
-
-impl CharOffsets {
-    pub(crate) fn new(text: &str) -> Self {
-        Self {
-            byte_starts: text
-                .char_indices()
-                .map(|(index, _)| index)
-                .chain([text.len()])
-                .collect(),
-        }
-    }
-
-    /// The byte range of the characters `start..end`, or `None` when it reaches past the text.
-    pub(crate) fn byte_range(&self, start: usize, end: usize) -> Option<(usize, usize)> {
-        if start > end {
-            return None;
-        }
-        Some((*self.byte_starts.get(start)?, *self.byte_starts.get(end)?))
-    }
-}
-
-/// `text` with every text range of `detections` replaced by one `X` per character. Ranges
-/// may overlap or arrive in any order.
-pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
-    let mut ranges: Vec<(usize, usize)> = detections
-        .iter()
-        .filter_map(|detection| match detection.location {
-            DetectionLocation::Text { start, end } => Some((start, end)),
-            _ => None,
-        })
-        .collect();
-    ranges.sort_unstable();
-
-    let mut masked = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for (start, end) in ranges {
-        let start = start.max(cursor);
-        if end <= start {
-            continue;
-        }
-        masked.push_str(&text[cursor..start]);
-        masked.extend(text[start..end].chars().map(|_| 'X'));
-        cursor = end;
-    }
-    masked.push_str(&text[cursor..]);
-    masked
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
@@ -267,34 +213,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn masking_replaces_each_character_of_a_detected_range_on_multibyte_text() {
-        let text = "Grüße, Zoë Keller: zoe@example.com";
-        let detection = |needle: &str, len_in_bytes: usize| {
-            let start = text.find(needle).unwrap();
-            Detection {
-                label: DetectionLabel::new("PII"),
-                location: DetectionLocation::Text {
-                    start,
-                    end: start + len_in_bytes,
-                },
-                score: None,
-                value: needle.to_string(),
-            }
-        };
-
-        let masked = mask_detections(
-            text,
-            &[
-                detection("zoe@example.com", 15),
-                detection("Zoë Keller", "Zoë Keller".len()),
-                detection("Keller: zoe", "Keller: zoe".len()),
-            ],
-        );
-
-        assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
     }
 
     #[test]

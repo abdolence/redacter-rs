@@ -23,7 +23,6 @@ pub struct MsPresidioRedacterOptions {
 pub struct MsPresidioRedacter<'a> {
     client: reqwest::Client,
     ms_presidio_options: MsPresidioRedacterOptions,
-    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
