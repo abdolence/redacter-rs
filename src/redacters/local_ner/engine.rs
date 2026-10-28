@@ -252,10 +252,8 @@ fn graph_node(model: &Model, name: &str) -> Result<NodeId, LocalNerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_store::{DownloadModels, ModelId, ModelStore, ModelStoreOptions};
+    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
     use crate::redacters::local_ner::pipeline::{Entity, Tag};
-    use crate::reporter::AppReporter;
-    use console::Term;
 
     const REAL_CONFIG: &str = r#"{
   "id2label": {"0": "O", "1": "B-DATE", "2": "I-DATE", "3": "B-PER", "4": "I-PER",
@@ -415,15 +413,12 @@ mod tests {
         assert_eq!(body, 65);
     }
 
-    async fn engine() -> NerEngine {
-        let term = Term::stdout();
-        let reporter = AppReporter::from(&term);
-        let options = ModelStoreOptions {
-            download: DownloadModels::Yes,
-            models_dir: None,
-        };
-        let store = ModelStore::new(&options, &reporter);
-        let files = store.resolve(ModelId::NerMultilingualHrl).await.unwrap();
+    /// The model is installed with `redacter setup-addons local-ner`; a test never
+    /// downloads it.
+    fn engine() -> NerEngine {
+        let files = ModelStore::new(&ModelStoreOptions::default())
+            .find(Addon::LocalNer)
+            .unwrap();
         NerEngine::load(&files).unwrap()
     }
 
@@ -437,7 +432,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
     async fn loads_the_pinned_model_and_scores_a_window() {
-        let engine = engine().await;
+        let engine = engine();
         assert_eq!(engine.labels().len(), 9);
         let tokens = engine.tokenize("John lives in London.").unwrap();
         let mut ids = vec![engine.cls];
@@ -451,7 +446,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
     async fn tokenizer_offsets_are_byte_offsets_on_char_boundaries() {
-        let engine = engine().await;
+        let engine = engine();
         let text = "Zürich liegt in der Schweiz.";
         let tokens = engine.tokenize(text).unwrap();
         assert_eq!(tokens.ids.len(), tokens.offsets.len());
@@ -475,7 +470,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
     async fn finds_people_organisations_and_locations() {
-        let engine = engine().await;
+        let engine = engine();
         let text = "Angela Merkel besuchte Siemens in München.";
         let findings = engine.find(text, &all_entities()).unwrap();
         let found: Vec<(&str, &str)> = findings
@@ -526,7 +521,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
     async fn long_text_runs_several_windows_end_to_end() {
-        let engine = engine().await;
+        let engine = engine();
         let sentence = "Der Kunde Hans Müller aus Berlin arbeitet bei der Siemens AG. ";
         let text = sentence.repeat(80);
         let tokens = engine.tokenize(&text).unwrap();

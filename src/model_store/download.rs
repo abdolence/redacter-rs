@@ -1,4 +1,4 @@
-use super::error::{ErrorPhase, ModelStoreError};
+use super::error::ModelStoreError;
 use super::manifest::ModelFile;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -6,8 +6,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use indicatif::ProgressBar;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -19,55 +19,30 @@ pub trait Fetcher: Send + Sync {
 }
 
 /// The production fetcher: reqwest with connect and read timeouts, following redirects
-/// (Hugging Face answers 302 to its CDN) and honouring the proxy environment variables.
+/// (GitHub answers a release asset with a redirect to its CDN) and honouring the proxy
+/// environment variables.
 pub struct HttpFetcher {
-    /// Built on the first fetch and kept for the rest of the run: a run that finds every
-    /// model it needs on disk never builds a client, so a system whose TLS backend cannot
-    /// be initialised still copies files.
-    client: Mutex<Option<reqwest::Client>>,
+    client: reqwest::Client,
 }
 
 impl HttpFetcher {
-    pub fn new() -> Self {
-        Self {
-            client: Mutex::new(None),
-        }
-    }
-
-    /// The shared client, built on first use. `reqwest::Client` is a handle around one
-    /// connection pool, so cloning it out of the lock costs an `Arc` bump.
-    fn client(&self) -> Result<reqwest::Client, ModelStoreError> {
-        let mut client = self
-            .client
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(client) = client.as_ref() {
-            return Ok(client.clone());
-        }
-        let built = reqwest::Client::builder()
+    pub fn new() -> Result<Self, ModelStoreError> {
+        let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .read_timeout(Duration::from_secs(60))
             .https_only(true)
             .user_agent(concat!("redacter/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|source| ModelStoreError::HttpClient { source })?;
-        *client = Some(built.clone());
-        Ok(built)
-    }
-}
-
-impl Default for HttpFetcher {
-    fn default() -> Self {
-        Self::new()
+        Ok(Self { client })
     }
 }
 
 impl Fetcher for HttpFetcher {
     fn fetch<'s>(&'s self, url: &'s str) -> BoxFuture<'s, Result<ByteStream, ModelStoreError>> {
         Box::pin(async move {
-            let client = self.client()?;
             let response =
-                client
+                self.client
                     .get(url)
                     .send()
                     .await
@@ -107,17 +82,17 @@ pub async fn download_file(
     dir: &Path,
     progress: &ProgressBar,
 ) -> Result<PathBuf, ModelStoreError> {
-    std::fs::create_dir_all(dir).map_err(|source| io_error(dir, source))?;
+    std::fs::create_dir_all(dir).map_err(|source| ModelStoreError::io(dir, source))?;
     remove_stale_parts(dir, file.name)?;
     let part = tempfile::Builder::new()
         .prefix(&format!("{}.", file.name))
         .suffix(".part")
         .tempfile_in(dir)
-        .map_err(|source| io_error(dir, source))?;
+        .map_err(|source| ModelStoreError::io(dir, source))?;
     let handle = part
         .as_file()
         .try_clone()
-        .map_err(|source| io_error(part.path(), source))?;
+        .map_err(|source| ModelStoreError::io(part.path(), source))?;
     let mut writer = tokio::fs::File::from_std(handle);
     let mut hasher = Sha256::new();
     let mut written: u64 = 0;
@@ -128,29 +103,27 @@ pub async fn download_file(
         writer
             .write_all(&chunk)
             .await
-            .map_err(|source| io_error(part.path(), source))?;
+            .map_err(|source| ModelStoreError::io(part.path(), source))?;
         written += chunk.len() as u64;
         progress.inc(chunk.len() as u64);
         if written > file.size {
             return Err(ModelStoreError::SizeMismatch {
-                location: file.url.to_string(),
+                url: file.url.to_string(),
                 expected: file.size,
                 actual: written,
-                phase: ErrorPhase::Download,
             });
         }
     }
     writer
         .flush()
         .await
-        .map_err(|source| io_error(part.path(), source))?;
+        .map_err(|source| ModelStoreError::io(part.path(), source))?;
     drop(writer);
     if written != file.size {
         return Err(ModelStoreError::SizeMismatch {
-            location: file.url.to_string(),
+            url: file.url.to_string(),
             expected: file.size,
             actual: written,
-            phase: ErrorPhase::Download,
         });
     }
     let actual = hex(hasher.finalize().as_slice());
@@ -165,40 +138,48 @@ pub async fn download_file(
     // two cannot leave a short file under the final, checked-by-size name.
     part.as_file()
         .sync_all()
-        .map_err(|source| io_error(part.path(), source))?;
+        .map_err(|source| ModelStoreError::io(part.path(), source))?;
     let target = dir.join(file.name);
     part.persist(&target)
-        .map_err(|err| io_error(&target, err.error))?;
+        .map_err(|err| ModelStoreError::io(&target, err.error))?;
     Ok(target)
 }
 
 /// Deletes `<name>.*.part` leftovers of a run that was killed mid-download.
 fn remove_stale_parts(dir: &Path, name: &str) -> Result<(), ModelStoreError> {
     let prefix = format!("{name}.");
-    let entries = std::fs::read_dir(dir).map_err(|source| io_error(dir, source))?;
+    let entries = std::fs::read_dir(dir).map_err(|source| ModelStoreError::io(dir, source))?;
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(dir, source))?;
+        let entry = entry.map_err(|source| ModelStoreError::io(dir, source))?;
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
         if file_name.starts_with(&prefix) && file_name.ends_with(".part") {
-            std::fs::remove_file(entry.path()).map_err(|source| io_error(&entry.path(), source))?;
+            std::fs::remove_file(entry.path())
+                .map_err(|source| ModelStoreError::io(&entry.path(), source))?;
         }
     }
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+/// The SHA-256 of the file at `path`, in lower-case hex like the manifests.
+pub(super) fn sha256_of_file(path: &Path) -> Result<String, ModelStoreError> {
+    let mut file = std::fs::File::open(path).map_err(|source| ModelStoreError::io(path, source))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1 << 16];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| ModelStoreError::io(path, source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex(hasher.finalize().as_slice()))
 }
 
-/// Every I/O failure in this file happens during a download the user has agreed to, so it
-/// carries `ErrorPhase::Download` and aborts the run.
-fn io_error(path: &Path, source: std::io::Error) -> ModelStoreError {
-    ModelStoreError::Io {
-        path: path.display().to_string(),
-        source,
-        phase: ErrorPhase::Download,
-    }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -325,12 +306,11 @@ mod tests {
             .unwrap_err();
         match err {
             ModelStoreError::SizeMismatch {
-                location,
+                url,
                 expected,
                 actual,
-                ..
             } => {
-                assert_eq!(location, "https://example.invalid/weights.bin");
+                assert_eq!(url, "https://example.invalid/weights.bin");
                 assert_eq!((expected, actual), (11, 5));
             }
             other => panic!("expected SizeMismatch, got {other}"),
@@ -379,12 +359,11 @@ mod tests {
             .unwrap_err();
         match err {
             ModelStoreError::SizeMismatch {
-                location,
+                url,
                 expected,
                 actual,
-                ..
             } => {
-                assert_eq!(location, "https://example.invalid/weights.bin");
+                assert_eq!(url, "https://example.invalid/weights.bin");
                 assert_eq!(expected, 11);
                 assert_eq!(actual, 12, "must abort at the first chunk that overshoots");
             }

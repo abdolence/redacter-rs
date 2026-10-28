@@ -115,7 +115,7 @@ impl Ocr for Ocrs<'_> {
 #[allow(unused_imports)]
 mod tests {
     use super::*;
-    use crate::model_store::{ModelId, ModelStore, ModelStoreOptions};
+    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
     use console::Term;
     use rten_imageproc::Rect;
 
@@ -124,8 +124,7 @@ mod tests {
     async fn test_recognise_png_file() -> AppResult<()> {
         let term = Term::stdout();
         let app_reporter = AppReporter::from(&term);
-        let store = ModelStore::new(&ModelStoreOptions::default(), &app_reporter);
-        let files = store.resolve(ModelId::Ocrs).await?;
+        let files = ModelStore::new(&ModelStoreOptions::default()).find(Addon::Ocr)?;
         let ocrs = Ocrs::new(&files, &app_reporter)?;
         let image = image::open("test-fixtures/media/form-example.png")?;
         let text_image_coords = ocrs.image_to_text(image)?;

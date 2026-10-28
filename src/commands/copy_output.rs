@@ -5,6 +5,7 @@
 //! line to print, so the layout is unit tested without running a copy.
 
 use crate::args::RedacterType;
+use crate::model_store::Addon;
 use crate::redacters::RedactionConversion;
 use console::{pad_str, Alignment, Style};
 
@@ -124,9 +125,17 @@ impl Default for CopyOutputStyles {
 #[derive(Debug, Clone)]
 pub struct CopyCapabilities {
     pub redacters: Vec<RedacterType>,
-    pub pdf_rendering: bool,
-    pub ocr: bool,
+    pub pdf_rendering: Capability,
+    pub ocr: Capability,
     pub sampling_size: Option<usize>,
+}
+
+/// A converter on the capabilities line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    Yes,
+    /// Off, with the addon that turns it on in a build that offers one.
+    No(Option<Addon>),
 }
 
 /// The counts and the size shown in the closing summary.
@@ -400,12 +409,12 @@ pub fn format_capabilities_line(
                 .join(", "),
         )
     };
-    let yes_no = |enabled: bool| {
-        if enabled {
-            styles.redacted.apply_to("yes".to_string())
-        } else {
-            styles.dimmed.apply_to("no".to_string())
-        }
+    let yes_no = |capability: Capability| match capability {
+        Capability::Yes => styles.redacted.apply_to("yes".to_string()),
+        Capability::No(None) => styles.dimmed.apply_to("no".to_string()),
+        Capability::No(Some(addon)) => styles
+            .dimmed
+            .apply_to(format!("no (redacter setup-addons {addon})")),
     };
     let sampling = match capabilities.sampling_size {
         Some(size) => styles.highlighted.apply_to(format!("{size} bytes")),
@@ -697,8 +706,8 @@ mod tests {
             format_capabilities_line(
                 &CopyCapabilities {
                     redacters: vec![RedacterType::GcpDlp],
-                    pdf_rendering: true,
-                    ocr: false,
+                    pdf_rendering: Capability::Yes,
+                    ocr: Capability::No(None),
                     sampling_size: None,
                 },
                 &styles
@@ -709,8 +718,8 @@ mod tests {
             format_capabilities_line(
                 &CopyCapabilities {
                     redacters: vec![],
-                    pdf_rendering: false,
-                    ocr: true,
+                    pdf_rendering: Capability::No(None),
+                    ocr: Capability::Yes,
                     sampling_size: Some(1024),
                 },
                 &styles
@@ -721,13 +730,30 @@ mod tests {
             format_capabilities_line(
                 &CopyCapabilities {
                     redacters: vec![RedacterType::GcpDlp, RedacterType::AwsComprehend],
-                    pdf_rendering: true,
-                    ocr: true,
+                    pdf_rendering: Capability::Yes,
+                    ocr: Capability::Yes,
                     sampling_size: None,
                 },
                 &styles
             ),
             "Redacting: gcp-dlp, aws-comprehend · PDF rendering: yes · OCR: yes · Sampling: off"
+        );
+    }
+
+    #[test]
+    fn capabilities_line_names_the_subcommand_that_installs_a_missing_addon() {
+        assert_eq!(
+            format_capabilities_line(
+                &CopyCapabilities {
+                    redacters: vec![RedacterType::LocalRules],
+                    pdf_rendering: Capability::No(Some(Addon::Pdf)),
+                    ocr: Capability::No(Some(Addon::Ocr)),
+                    sampling_size: None,
+                },
+                &CopyOutputStyles::plain()
+            ),
+            "Redacting: local-rules · PDF rendering: no (redacter setup-addons pdf) · \
+             OCR: no (redacter setup-addons ocr) · Sampling: off"
         );
     }
 

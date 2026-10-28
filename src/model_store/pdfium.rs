@@ -1,21 +1,32 @@
-//! The Pdfium shared library as a managed download: one build per supported platform, taken
-//! unchanged from bblanchon/pdfium-binaries and re-hosted as release assets of this
-//! repository. The pinned build is the one `pdfium-render` is compiled against; moving the
-//! `pdfium_*` feature of that crate means publishing a new models release and replacing this
-//! table together.
+//! The Pdfium shared library as an addon: one build per supported platform, taken unchanged
+//! from bblanchon/pdfium-binaries and re-hosted as release assets of this repository. The
+//! pinned build is the one `pdfium-render` is compiled against; moving the `pdfium_*` feature
+//! of that crate means publishing a new models release and replacing this table together. A
+//! platform missing from the table, such as FreeBSD or a static musl build, has no download.
 
 use super::manifest::{no_legacy_dirs, ModelFile, ModelManifest};
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+pub(super) static PDFIUM: Option<ModelManifest> = if LIBRARY.is_empty() {
+    None
+} else {
+    Some(ModelManifest {
+        dir_name: "pdfium-7881",
+        files: LIBRARY,
+        legacy_dirs: no_legacy_dirs,
+        native_code: true,
+    })
+};
+
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "libpdfium.so",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-x64.so",
     size: 7_645_184,
     sha256: "f728930966f503652b92acc89b9374a2eeca00ce42e26dccd3e4b5c5161b2d64",
 }];
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+#[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "libpdfium.so",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-arm64.so",
     size: 7_834_256,
@@ -23,7 +34,7 @@ static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "libpdfium.dylib",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-x64.dylib",
     size: 7_471_800,
@@ -31,7 +42,7 @@ static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "libpdfium.dylib",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-arm64.dylib",
     size: 7_732_336,
@@ -39,7 +50,7 @@ static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x64.dll",
     size: 7_211_520,
@@ -47,7 +58,7 @@ static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-arm64.dll",
     size: 6_658_048,
@@ -55,18 +66,26 @@ static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86"))]
-static PDFIUM_FILES: [ModelFile; 1] = [ModelFile {
+const LIBRARY: &[ModelFile] = &[ModelFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x86.dll",
     size: 6_710_272,
     sha256: "6c6a1efa0079a01395ae88c01b1f976223ee4d4018c4e5c077903d5f768e95e4",
 }];
 
-pub(super) static PDFIUM: ModelManifest = ModelManifest {
-    dir_name: "pdfium-7881",
-    needed_by: "PDF rendering",
-    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-7881 (Pdfium 151.0.7881.0 from bblanchon/pdfium-binaries chromium/7881)",
-    license: "Pdfium and the libraries it bundles, under their own licences, see the release",
-    files: &PDFIUM_FILES,
-    legacy_dirs: no_legacy_dirs,
-};
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")
+    ),
+)))]
+const LIBRARY: &[ModelFile] = &[];

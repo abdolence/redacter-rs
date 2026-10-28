@@ -10,7 +10,7 @@ pub use pipeline::Entity;
 
 use crate::args::RedacterType;
 use crate::file_systems::FileSystemRef;
-use crate::model_store::{ModelId, ModelStore};
+use crate::model_store::{Addon, ModelStore};
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
@@ -121,9 +121,9 @@ impl<'a> LocalNerRedacter<'a> {
     pub async fn new(
         options: LocalNerRedacterOptions,
         reporter: &'a AppReporter<'a>,
-        models: &ModelStore<'_>,
+        models: &ModelStore,
     ) -> AppResult<Self> {
-        let files = models.resolve(ModelId::NerMultilingualHrl).await?;
+        let files = models.find(Addon::LocalNer)?;
         reporter.report(format!(
             "Loading local NER model from {}",
             files.dir().to_string_lossy()
@@ -207,7 +207,7 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_store::{DownloadModels, ModelStoreOptions};
+    use crate::model_store::ModelStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
     use crate::redacters::text_spans::RuleName;
     use console::Term;
@@ -402,12 +402,10 @@ mod tests {
         assert_eq!(row, ["Madrid", "[REDACTED]"]);
     }
 
+    /// The model is installed with `redacter setup-addons local-ner`; a test never
+    /// downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalNerRedacter<'a> {
-        let options = ModelStoreOptions {
-            download: DownloadModels::Yes,
-            models_dir: None,
-        };
-        let store = ModelStore::new(&options, reporter);
+        let store = ModelStore::new(&ModelStoreOptions::default());
         let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
         LocalNerRedacter::new(options, reporter, &store)
             .await

@@ -84,7 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
     let model_store = ModelStoreOptions {
-        download: cli.download_models,
         models_dir: resolve_models_dir(cli.models_dir, std::env::var_os("REDACTER_MODELS_DIR")),
     };
     match cli.command {
@@ -133,6 +132,9 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
         } => {
             let options = LsCommandOptions::new(filename_filter, max_size_limit);
             command_ls(term, &source, options).await?;
+        }
+        CliCommand::SetupAddons { addons } => {
+            command_setup_addons(term, &addons, &model_store).await?;
         }
     }
 
