@@ -1130,7 +1130,8 @@ for AWS Comprehend.
   occurrence of each value, ignoring case, since the model may not copy a value letter for letter. An occurrence is
   reported wherever it is, so a short value is also found inside longer words: `John` is reported inside `Johnson`,
   which covers inflected words and scripts written without spaces. An occurrence inside a longer reported one is
-  dropped. Letters are compared one at a time, so `ß` and `SS` differ, while Greek `ς` and `Σ` match.
+  dropped. Letters are compared one at a time, so `ß` and `SS` differ, while Greek `ς` and `Σ` match. Accents are not
+  folded: `Müller` does not match `Muller`.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
 - An answer that the provider filtered, cut short or left empty fails the file, in `scan` and in `cp`; it is never

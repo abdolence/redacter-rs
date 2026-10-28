@@ -174,15 +174,16 @@ impl Detection {
         Ok(detections)
     }
 
-    /// Every occurrence of every value in `text`, for providers that name the values they
-    /// found but not where. Occurrences are found ignoring case, since a model may not copy a
-    /// value letter for letter, and wherever they occur, inside longer words too: `John` is
-    /// also reported inside `Johnson`, because text in scripts without spaces and inflected
-    /// words have no word boundary around a value, and a missed value is worse than an extra
-    /// one. An occurrence inside a longer one is dropped, so a name and its first word are
-    /// reported once; partial overlaps are all kept. When two values have the same span, the
-    /// first one's label is kept. An empty value or a repeated `(value, label)` pair adds
-    /// nothing. Sorted by position.
+    /// Every non-overlapping occurrence of every value in `text`, for providers that name the
+    /// values they found but not where. Occurrences are found ignoring case, since a model
+    /// may not copy a value letter for letter, but accents are not folded (`Müller` does not
+    /// match `Muller`). They are reported wherever they occur, inside longer words too:
+    /// `John` is also reported inside `Johnson`, because text in scripts without spaces and
+    /// inflected words have no word boundary around a value, and a missed value is worse than
+    /// an extra one. An occurrence inside a longer one is dropped, so a name and its first
+    /// word are reported once; partial overlaps are all kept. When two values have the same
+    /// span, the first one's label is kept. An empty value or a repeated `(value, label)`
+    /// pair adds nothing. Sorted by position.
     pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> Vec<Self> {
         let mut seen = HashSet::new();
         let mut findings = Vec::new();
@@ -247,7 +248,8 @@ impl FoldedText {
         }
     }
 
-    /// The byte ranges of the original text where `value` occurs ignoring case.
+    /// The byte ranges of the original text where `value` occurs ignoring case, not counting an
+    /// occurrence that starts inside the previous one.
     fn occurrences_of(&self, value: &str) -> Vec<(usize, usize)> {
         let folded_value: String = value.chars().map(fold_character).collect();
         self.folded
@@ -512,6 +514,12 @@ mod tests {
             values_found("Herr Müller und Müllers Adresse", "Müller"),
             ["Müller", "Müller"]
         );
+    }
+
+    #[test]
+    fn accents_are_not_folded() {
+        assert!(values_found("Herr Muller", "Müller").is_empty());
+        assert!(values_found("Herr Müller", "Muller").is_empty());
     }
 
     #[test]
