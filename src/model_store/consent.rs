@@ -92,7 +92,7 @@ mod tests {
             files: model.files.iter().collect(),
             total_bytes: model.files.iter().map(|f| f.size).sum(),
         };
-        let expected = "The local-ner redacter needs the model \"distilbert-base-multilingual-cased-ner-hrl\", which is not installed.\n  files    model_uint8.onnx, tokenizer.json, config.json (131.6 MiB)\n  from     https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl (revision c2a4dbf)\n  license  Academic Free License 3.0 (AFL-3.0), see the model card\n  to       /home/you/.cache/redacter/models/distilbert-base-multilingual-cased-ner-hrl\nDownload now? [y/N] ";
+        let expected = "The local-ner redacter needs the model \"distilbert-base-multilingual-cased-ner-hrl\", which is not installed.\n  files    model_uint8.onnx, tokenizer.json, config.json (131.6 MiB)\n  from     https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1 (Xenova/distilbert-base-multilingual-cased-ner-hrl, revision c2a4dbf)\n  license  Academic Free License 3.0 (AFL-3.0), see the model card\n  to       /home/you/.cache/redacter/models/distilbert-base-multilingual-cased-ner-hrl\nDownload now? [y/N] ";
         assert_eq!(format_consent_prompt(&request), expected);
     }
 
@@ -122,7 +122,7 @@ mod tests {
             files: model.files.iter().collect(),
             total_bytes: model.files.iter().map(|f| f.size).sum(),
         };
-        let expected = "OCR needs the model \"ocrs\", which is not installed.\n  files    text-detection.rten, text-recognition.rten (11.7 MiB)\n  from     https://ocrs-models.s3-accelerate.amazonaws.com/\n  license  ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets\n  to       /home/you/.cache/redacter/models/ocrs\nDownload now? [y/N] ";
+        let expected = "OCR needs the model \"ocrs\", which is not installed.\n  files    text-detection.rten, text-recognition.rten (11.7 MiB)\n  from     https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1 (ocrs models)\n  license  ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets\n  to       /home/you/.cache/redacter/models/ocrs\nDownload now? [y/N] ";
         assert_eq!(format_consent_prompt(&request), expected);
     }
 
