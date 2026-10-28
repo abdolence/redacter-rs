@@ -146,6 +146,28 @@ impl Detection {
         }
     }
 
+    /// The findings of `find_in_cell(column, cell)` on every cell of `rows`, placed in their
+    /// cell, for providers that read a table one cell at a time.
+    // Read by the model-backed redacters, which score a table cell by cell.
+    #[cfg_attr(
+        not(any(feature = "local-ner", feature = "local-gliner")),
+        allow(dead_code)
+    )]
+    pub fn in_table_cells<E>(
+        rows: &[Vec<String>],
+        mut find_in_cell: impl FnMut(usize, &str) -> Result<Vec<Finding>, E>,
+    ) -> Result<Vec<Self>, E> {
+        let mut detections = Vec::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            for (column, cell) in row.iter().enumerate() {
+                for finding in find_in_cell(column, cell)? {
+                    detections.push(Self::in_table_cell(row_index, column, cell, finding));
+                }
+            }
+        }
+        Ok(detections)
+    }
+
     /// Every occurrence of every value in `text`, for providers that name the values they
     /// found but not where. A value is matched literally and as a whole word, so `John` is
     /// not found in `Johnson`. A value with no exact occurrence is looked for ignoring case,

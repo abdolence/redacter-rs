@@ -206,9 +206,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported table type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }

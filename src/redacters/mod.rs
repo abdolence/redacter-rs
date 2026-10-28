@@ -605,11 +605,11 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
     }
 }
 
-/// Raised when a redacter that only handles strings is handed image or PDF bytes anyway:
-/// `redact_support` said no and the caller ignored it.
+/// Raised when a redacter is handed content of a type it does not support: `redact_support`
+/// said no and the caller ignored it.
 pub(crate) fn unsupported_type_error() -> AppError {
     AppError::SystemError {
-        message: "Attempt to redact of unsupported type".to_string(),
+        message: "The redacter does not support this type of content".to_string(),
     }
 }
 
@@ -818,6 +818,137 @@ pub mod test_support {
             .join(output_name);
         std::fs::write(&output_path, data).expect("the output directory is writable");
         output_path
+    }
+}
+
+/// Fixtures and assertions shared by the live `detect` tests of the LLM redacters.
+#[cfg(test)]
+pub mod live_detection {
+    use crate::redacters::test_support::test_image_item;
+    use crate::redacters::{
+        Detection, DetectionLocation, RedacterDataItem, RedacterDataItemContent,
+    };
+
+    pub const NOTE_FIXTURE: &str = "test-fixtures/documents/customer-note.txt";
+
+    /// Width the form fixture is enlarged to: not 1000, so a box scaled by the wrong factor
+    /// misses, and past the model input limit, so boxes must be mapped back to the original.
+    pub const FORM_WIDTH: u32 = 1500;
+
+    const FORM_FIXTURE_WIDTH: u32 = 1000;
+
+    /// Pixel boxes `[x1, y1, x2, y2]` of values in `form-example.png` at its own 1000 px
+    /// width, measured from the dark pixels of each field.
+    const FORM_VALUES: [(&str, [f32; 4], Option<&str>); 4] = [
+        (
+            "John Michael Smith",
+            [309.0, 125.0, 536.0, 147.0],
+            Some("name"),
+        ),
+        (
+            "john.smith@example.com",
+            [310.0, 195.0, 619.0, 217.0],
+            Some("email"),
+        ),
+        (
+            "+1 (555) 123-4567",
+            [313.0, 265.0, 537.0, 285.0],
+            Some("phone"),
+        ),
+        ("4111 1111 1111 1111", [311.0, 545.0, 574.0, 562.0], None),
+    ];
+
+    pub fn note_item() -> RedacterDataItem {
+        let text = std::fs::read_to_string(NOTE_FIXTURE).expect("the note fixture is committed");
+        RedacterDataItem {
+            file_ref: crate::file_systems::FileSystemRef {
+                relative_path: "customer-note.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text),
+        }
+    }
+
+    /// The form fixture enlarged to [`FORM_WIDTH`], with its height scaled alike.
+    pub fn enlarged_form_item() -> RedacterDataItem {
+        let mut item = test_image_item();
+        let RedacterDataItemContent::Image { data, .. } = &item.content else {
+            unreachable!("the fixture is an image");
+        };
+        let original = image::load_from_memory(data).expect("the fixture decodes");
+        let height = original.height() * FORM_WIDTH / original.width();
+        let enlarged =
+            original.resize_exact(FORM_WIDTH, height, image::imageops::FilterType::Lanczos3);
+        let mut png = std::io::Cursor::new(Vec::new());
+        enlarged
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("the image encodes");
+        item.content = RedacterDataItemContent::Image {
+            mime_type: mime::IMAGE_PNG,
+            data: png.into_inner().into(),
+        };
+        item
+    }
+
+    /// Asserts the note's name, email address and phone number are found at their own text
+    /// ranges under a label that names the kind of data.
+    pub fn assert_note_found(item: &RedacterDataItem, detections: &[Detection]) {
+        let RedacterDataItemContent::Value(text) = &item.content else {
+            panic!("the note is text");
+        };
+        for (value, label_word) in [
+            ("John Michael Smith", "name"),
+            ("john.smith@example.com", "email"),
+            ("+1 (555) 123-4567", "phone"),
+        ] {
+            let found = detections.iter().any(|detection| {
+                matches!(
+                    detection.location,
+                    DetectionLocation::Text { start, end } if text.get(start..end) == Some(value)
+                ) && detection
+                    .label
+                    .to_string()
+                    .to_lowercase()
+                    .contains(label_word)
+            });
+            assert!(
+                found,
+                "{value} not found as *{label_word}* in {detections:?}"
+            );
+        }
+    }
+
+    /// Asserts a box covers most of each value's pixels in the enlarged form without being
+    /// much larger than it.
+    pub fn assert_form_found(detections: &[Detection]) {
+        let scale = FORM_WIDTH as f32 / FORM_FIXTURE_WIDTH as f32;
+        for (value, expected, label_word) in FORM_VALUES {
+            let expected = expected.map(|pixel| pixel * scale);
+            let found = detections.iter().any(|detection| {
+                matches!(
+                    detection.location,
+                    DetectionLocation::Image { x1, y1, x2, y2, .. }
+                        if covers([x1, y1, x2, y2], expected)
+                ) && label_word
+                    .is_none_or(|word| detection.label.to_string().to_lowercase().contains(word))
+            });
+            assert!(
+                found,
+                "no box covers {value} at {expected:?} under a label with {label_word:?} in {detections:?}"
+            );
+        }
+    }
+
+    fn covers(found: [f32; 4], expected: [f32; 4]) -> bool {
+        let area = |[x1, y1, x2, y2]: [f32; 4]| (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+        let overlap = area([
+            found[0].max(expected[0]),
+            found[1].max(expected[1]),
+            found[2].min(expected[2]),
+            found[3].min(expected[3]),
+        ]);
+        overlap >= 0.6 * area(expected) && area(found) <= 3.0 * area(expected)
     }
 }
 

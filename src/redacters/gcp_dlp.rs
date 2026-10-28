@@ -120,9 +120,7 @@ impl<'a> GcpDlpRedacter<'a> {
                     content,
                 })
             }
-            _ => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported image type".to_string(),
-            }),
+            _ => Err(unsupported_type_error()),
         }
     }
 
@@ -367,9 +365,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
                 self.redact_image_file(input).await
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }

@@ -4,9 +4,10 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, text_detection_messages,
-    Detection, ImagePii, LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox,
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
-    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
+    unsupported_type_error, Detection, ImagePii, LlmImageMode, LlmTextFinding,
+    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, GEMINI_COORDS_REDACTION_PROMPT,
+    NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -483,9 +484,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }
@@ -510,9 +509,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
                     .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to detect in unsupported type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }

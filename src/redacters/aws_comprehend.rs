@@ -120,9 +120,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported type".to_string(),
-            }),
+            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
         }
     }
 

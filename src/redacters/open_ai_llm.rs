@@ -9,8 +9,8 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_messages, Detection, ImagePii, LlmImageMode,
-    LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
+    redact_image_with_mode, text_detection_messages, unsupported_type_error, Detection, ImagePii,
+    LlmImageMode, LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
@@ -484,9 +484,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported table type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }
@@ -511,9 +509,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
                     .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to detect in unsupported type".to_string(),
-                })
+                Err(unsupported_type_error())
             }
         }
     }

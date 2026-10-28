@@ -117,26 +117,6 @@ where
     Ok((redacted_rows, findings))
 }
 
-/// Every labelled span in the table, placed in its cell.
-fn detect_rows<F>(
-    headers: &[String],
-    rows: &[Vec<String>],
-    mut find_in: F,
-) -> Result<Vec<Detection>, LocalGlinerError>
-where
-    F: FnMut(&str) -> Result<Vec<Finding>, LocalGlinerError>,
-{
-    let mut detections = Vec::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        for (column, cell) in row.iter().enumerate() {
-            for finding in find_in_cell(headers, column, cell, &mut find_in)? {
-                detections.push(Detection::in_table_cell(row_index, column, cell, finding));
-            }
-        }
-    }
-    Ok(detections)
-}
-
 /// Maps findings on `"{prefix}{cell}"` back onto `cell`. A finding that ends inside the
 /// prefix is the model matching the header itself and is dropped; one that crosses the
 /// boundary keeps only the part that falls in the cell. `prefix_len` is a byte length and the
@@ -260,7 +240,11 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
             RedacterDataItemContent::Table { headers, rows } => {
                 let (headers, rows) = (headers.clone(), rows.clone());
                 self.run_blocking(move |engine, options| {
-                    detect_rows(&headers, &rows, |text| engine.find(text, options))
+                    Detection::in_table_cells(&rows, |column, cell| {
+                        find_in_cell(&headers, column, cell, &mut |text| {
+                            engine.find(text, options)
+                        })
+                    })
                 })
                 .await
             }
@@ -376,11 +360,13 @@ mod tests {
             vec!["1".to_string(), "Rainy".to_string()],
             vec!["2".to_string(), "Akira".to_string()],
         ];
-        let detections = detect_rows(&headers, &rows, |text| {
-            Ok(if text == "name: Akira" {
-                vec![finding(6, 11)]
-            } else {
-                Vec::new()
+        let detections = Detection::in_table_cells(&rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                Ok(if text == "name: Akira" {
+                    vec![finding(6, 11)]
+                } else {
+                    Vec::new()
+                })
             })
         })
         .unwrap();
