@@ -38,13 +38,14 @@ fn mask_value(value: &str) -> String {
 #[serde(rename_all = "snake_case")]
 enum ScanFileStatus {
     Scanned,
-    /// No selected redacter reads the file's media type.
+    /// No selected redacter can read the file, and no option changes that: its media type is
+    /// not read, or its image format is not one OCR reads.
     Unsupported,
     /// The file needs a converter this build or this run lacks, such as OCR or a PDF renderer.
     Blocked,
     /// `--max-size-limit` or `--filename-filter` left the file out.
     Skipped,
-    /// A redacter or a converter failed on the file.
+    /// The file could not be read, or a redacter or a converter failed on it.
     Failed,
 }
 
@@ -157,10 +158,14 @@ impl ScanFileReport {
     pub fn not_scanned(file_ref: &FileSystemRef, reason: SkipReason) -> Self {
         let status = match reason {
             SkipReason::OverSizeLimit | SkipReason::NameFilter => ScanFileStatus::Skipped,
-            SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported) => {
-                ScanFileStatus::Unsupported
-            }
-            SkipReason::NotRedacted(_) => ScanFileStatus::Blocked,
+            SkipReason::NotRedacted(
+                NotRedactedReason::TypeNotSupported
+                | NotRedactedReason::NoRedacterApplied
+                | NotRedactedReason::OcrImageFormatNotSupported,
+            ) => ScanFileStatus::Unsupported,
+            SkipReason::NotRedacted(
+                NotRedactedReason::PdfRendererUnavailable | NotRedactedReason::OcrUnavailable,
+            ) => ScanFileStatus::Blocked,
         };
         Self::new(
             file_ref,
@@ -689,25 +694,38 @@ mod tests {
 
     #[test]
     fn a_blocked_file_makes_the_scan_incomplete_and_an_unsupported_one_does_not() {
-        let scan_of = |reason| {
+        let scan_of = |file: FileSystemRef, reason| {
             let mut result = ScanCommandResult::default();
             result.push(ScanFileReport::not_scanned(
-                &file_ref("scan.png", mime::IMAGE_PNG),
+                &file,
                 SkipReason::NotRedacted(reason),
             ));
             result
         };
 
-        let blocked = scan_of(NotRedactedReason::OcrUnavailable);
+        let scan = file_ref("scan.png", mime::IMAGE_PNG);
+        let blocked = scan_of(scan, NotRedactedReason::OcrUnavailable);
         assert_eq!((blocked.files_blocked, blocked.files_unsupported), (1, 0));
         assert_eq!(blocked.exit_code(false), 1);
         assert_eq!(blocked.exit_code(true), 1);
 
-        let unsupported = scan_of(NotRedactedReason::TypeNotSupported);
-        assert_eq!(
-            (unsupported.files_blocked, unsupported.files_unsupported),
-            (0, 1)
-        );
-        assert_eq!(unsupported.exit_code(false), 0);
+        for (file, reason) in [
+            (
+                file_ref("blob.bin", mime::APPLICATION_OCTET_STREAM),
+                NotRedactedReason::TypeNotSupported,
+            ),
+            (
+                file_ref("logo.svg", mime::IMAGE_SVG),
+                NotRedactedReason::OcrImageFormatNotSupported,
+            ),
+        ] {
+            let unsupported = scan_of(file, reason);
+            assert_eq!(
+                (unsupported.files_blocked, unsupported.files_unsupported),
+                (0, 1),
+                "{reason:?}"
+            );
+            assert_eq!(unsupported.exit_code(false), 0, "{reason:?}");
+        }
     }
 }
