@@ -1,4 +1,5 @@
 use aws_config::Region;
+use aws_sdk_bedrockruntime::operation::apply_guardrail::ApplyGuardrailOutput;
 use aws_sdk_bedrockruntime::types::{
     GuardrailAction, GuardrailContentBlock, GuardrailContentSource, GuardrailTextBlock,
 };
@@ -8,8 +9,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, Detection, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters,
+    bedrock_error, unsupported_type_error, Detection, DetectionLabel, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -45,7 +46,7 @@ pub struct AwsBedrockGuardrailsRedacter<'a> {
 /// message rather than redacted text - that must never be handed back as if it were redacted
 /// content, so a blocked entity or regex match is treated as a configuration error.
 fn interpret_guardrail_output(
-    output: &aws_sdk_bedrockruntime::operation::apply_guardrail::ApplyGuardrailOutput,
+    output: &ApplyGuardrailOutput,
     guardrail_id: &str,
 ) -> Result<Option<String>, AppError> {
     use aws_sdk_bedrockruntime::types::GuardrailSensitiveInformationPolicyAction as PolicyAction;
@@ -103,6 +104,51 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
         })
     }
 
+    async fn apply_guardrail(&self, text: &str) -> AppResult<ApplyGuardrailOutput> {
+        let text_block = GuardrailTextBlock::builder()
+            .text(text)
+            .build()
+            .map_err(|err| AppError::AwsBedrockError {
+                message: format!("Failed to build the guardrail text block: {err}"),
+            })?;
+
+        self.client
+            .apply_guardrail()
+            .guardrail_identifier(self.options.guardrail_id.value().clone())
+            .guardrail_version(self.options.guardrail_version.value().clone())
+            .source(GuardrailContentSource::Input)
+            .content(GuardrailContentBlock::Text(text_block))
+            .send()
+            .await
+            .map_err(|err| bedrock_error("Failed to apply the guardrail", &err))
+    }
+
+    /// The sensitive values the guardrail reported for `text`, found wherever they occur in
+    /// it: the service names the matched strings but gives no offsets. Reads the assessments
+    /// whatever the filters' actions are, since detection does not need the text anonymized.
+    fn detections_in(text: &str, output: &ApplyGuardrailOutput) -> Vec<Detection> {
+        let mut values = Vec::new();
+        for policy in output
+            .assessments()
+            .iter()
+            .filter_map(|assessment| assessment.sensitive_information_policy())
+        {
+            values.extend(policy.pii_entities().iter().map(|entity| {
+                (
+                    entity.r#match().to_string(),
+                    DetectionLabel::new(entity.r#type().as_str()),
+                )
+            }));
+            values.extend(policy.regexes().iter().filter_map(|regex| {
+                Some((
+                    regex.r#match()?.to_string(),
+                    DetectionLabel::new(regex.name().unwrap_or("regex")),
+                ))
+            }));
+        }
+        Detection::locate_values(text, &values)
+    }
+
     pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
@@ -111,23 +157,7 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
             }),
         }?;
 
-        let text_block = GuardrailTextBlock::builder()
-            .text(text_content.clone())
-            .build()
-            .map_err(|err| AppError::AwsBedrockError {
-                message: format!("Failed to build the guardrail text block: {err}"),
-            })?;
-
-        let result = self
-            .client
-            .apply_guardrail()
-            .guardrail_identifier(self.options.guardrail_id.value().clone())
-            .guardrail_version(self.options.guardrail_version.value().clone())
-            .source(GuardrailContentSource::Input)
-            .content(GuardrailContentBlock::Text(text_block))
-            .send()
-            .await
-            .map_err(|err| bedrock_error("Failed to apply the guardrail", &err))?;
+        let result = self.apply_guardrail(&text_content).await?;
 
         let redacted_content =
             interpret_guardrail_output(&result, self.options.guardrail_id.value())?
@@ -159,10 +189,16 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
         })
     }
 
-    async fn detect(&self, _input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
-        Err(AppError::DetectionNotSupported {
-            redacter_type: self.redacter_type(),
-        })
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => Ok(Self::detections_in(
+                text,
+                &self.apply_guardrail(text).await?,
+            )),
+            RedacterDataItemContent::Table { .. }
+            | RedacterDataItemContent::Image { .. }
+            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+        }
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -173,7 +209,7 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_sdk_bedrockruntime::operation::apply_guardrail::ApplyGuardrailOutput;
+    use crate::redacters::DetectionLocation;
     use aws_sdk_bedrockruntime::types::{
         GuardrailAssessment, GuardrailOutputContent, GuardrailPiiEntityFilter,
         GuardrailPiiEntityType, GuardrailRegexFilter,
@@ -197,6 +233,100 @@ mod tests {
             .set_assessments(Some(Vec::new()))
             .build()
             .expect("action, outputs and assessments are set above")
+    }
+
+    fn output_with_assessment(
+        pii_entities: Vec<GuardrailPiiEntityFilter>,
+        regexes: Vec<GuardrailRegexFilter>,
+    ) -> ApplyGuardrailOutput {
+        ApplyGuardrailOutput::builder()
+            .action(GuardrailAction::GuardrailIntervened)
+            .assessments(
+                GuardrailAssessment::builder()
+                    .sensitive_information_policy(
+                        GuardrailSensitiveInformationPolicyAssessment::builder()
+                            .set_pii_entities(Some(pii_entities))
+                            .set_regexes(Some(regexes))
+                            .build()
+                            .expect("pii_entities and regexes are set above"),
+                    )
+                    .build(),
+            )
+            .set_outputs(Some(Vec::new()))
+            .build()
+            .expect("action, outputs and assessments are set above")
+    }
+
+    fn pii_entity(
+        entity_type: GuardrailPiiEntityType,
+        matched: &str,
+        action: PolicyAction,
+    ) -> GuardrailPiiEntityFilter {
+        GuardrailPiiEntityFilter::builder()
+            .r#match(matched)
+            .r#type(entity_type)
+            .action(action)
+            .build()
+            .expect("match, type and action are set above")
+    }
+
+    #[test]
+    fn reported_values_are_located_everywhere_they_occur_in_the_text() {
+        let text = "Grüße John Müller, mail john@example.com. Order AB-1234 for John Müller.";
+        let output = output_with_assessment(
+            vec![
+                pii_entity(
+                    GuardrailPiiEntityType::Name,
+                    "John Müller",
+                    PolicyAction::Anonymized,
+                ),
+                pii_entity(
+                    GuardrailPiiEntityType::Email,
+                    "john@example.com",
+                    PolicyAction::Blocked,
+                ),
+            ],
+            vec![GuardrailRegexFilter::builder()
+                .name("order-id")
+                .r#match("AB-1234")
+                .action(PolicyAction::Anonymized)
+                .build()
+                .expect("action is set above")],
+        );
+
+        let detections = AwsBedrockGuardrailsRedacter::detections_in(text, &output);
+
+        let located: Vec<(String, DetectionLocation, &str)> = detections
+            .iter()
+            .map(|detection| {
+                (
+                    detection.label.to_string(),
+                    detection.location,
+                    detection.value.as_str(),
+                )
+            })
+            .collect();
+        let range = |needle: &str, nth: usize| {
+            let start = text.match_indices(needle).nth(nth).unwrap().0;
+            DetectionLocation::Text {
+                start,
+                end: start + needle.len(),
+            }
+        };
+        assert_eq!(
+            located,
+            vec![
+                ("NAME".to_string(), range("John Müller", 0), "John Müller"),
+                (
+                    "EMAIL".to_string(),
+                    range("john@example.com", 0),
+                    "john@example.com"
+                ),
+                ("order-id".to_string(), range("AB-1234", 0), "AB-1234"),
+                ("NAME".to_string(), range("John Müller", 1), "John Müller"),
+            ]
+        );
+        assert!(detections.iter().all(|detection| detection.score.is_none()));
     }
 
     #[test]
@@ -335,5 +465,56 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn detect_text_locates_the_values_the_guardrail_reports() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let test_guardrail_id = std::env::var("TEST_AWS_BEDROCK_GUARDRAIL_ID")
+            .expect("TEST_AWS_BEDROCK_GUARDRAIL_ID required");
+        let redacter = AwsBedrockGuardrailsRedacter::new(
+            AwsBedrockGuardrailsRedacterOptions {
+                region: Some(Region::new(test_aws_region)),
+                guardrail_id: AwsBedrockGuardrailId::from(test_guardrail_id),
+                guardrail_version: AwsBedrockGuardrailVersion::from("DRAFT".to_string()),
+            },
+            &reporter,
+        )
+        .await
+        .unwrap();
+        let item = |text: &str| RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        };
+
+        let text = "Grüße aus Köln, Zoë Keller schreibt an zoe.keller@example.com";
+        let detections = redacter.detect(&item(text)).await.unwrap();
+
+        let email = text.find("zoe.keller@example.com").unwrap();
+        assert!(
+            detections.iter().any(|detection| {
+                detection.label == DetectionLabel::new("EMAIL")
+                    && detection.location
+                        == DetectionLocation::Text {
+                            start: email,
+                            end: email + "zoe.keller@example.com".len(),
+                        }
+                    && detection.value == "zoe.keller@example.com"
+                    && detection.score.is_none()
+            }),
+            "{detections:?}"
+        );
+        assert!(redacter
+            .detect(&item("Nothing sensitive here."))
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
