@@ -199,6 +199,7 @@ pub struct ScanCommandResult {
     pub files_with_findings: usize,
     pub files_skipped: usize,
     pub files_unsupported: usize,
+    pub files_blocked: usize,
     pub files_failed: usize,
     pub findings: usize,
     pub findings_by_label: FindingsByLabel,
@@ -206,7 +207,7 @@ pub struct ScanCommandResult {
 }
 
 impl ScanCommandResult {
-    /// Adds one file and counts it. Blocked files count as unsupported: neither was read.
+    /// Adds one file and counts it.
     pub fn push(&mut self, file: ScanFileReport) {
         match file.status {
             ScanFileStatus::Scanned => {
@@ -215,7 +216,8 @@ impl ScanCommandResult {
                     self.files_with_findings += 1;
                 }
             }
-            ScanFileStatus::Unsupported | ScanFileStatus::Blocked => self.files_unsupported += 1,
+            ScanFileStatus::Unsupported => self.files_unsupported += 1,
+            ScanFileStatus::Blocked => self.files_blocked += 1,
             ScanFileStatus::Skipped => self.files_skipped += 1,
             ScanFileStatus::Failed => self.files_failed += 1,
         }
@@ -230,10 +232,11 @@ impl ScanCommandResult {
         self.files.push(file);
     }
 
-    /// The process exit code: 1 when a file could not be scanned, since the scan is then
-    /// incomplete; 2 when something was found, unless `no_fail`; 0 otherwise.
+    /// The process exit code: 1 when a file that should have been scanned was not, because it
+    /// failed or because the run lacks a converter it needs; 2 when something was found,
+    /// unless `no_fail`; 0 otherwise.
     pub fn exit_code(&self, no_fail: bool) -> i32 {
-        if self.files_failed > 0 {
+        if self.files_failed > 0 || self.files_blocked > 0 {
             1
         } else if self.findings > 0 && !no_fail {
             2
@@ -424,6 +427,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &ScanOutputStyles
     let total = result.files_scanned
         + result.files_skipped
         + result.files_unsupported
+        + result.files_blocked
         + result.files_failed;
     let mut line = format!(
         "{} {}: {} with findings, {} clean, {} skipped, {} unsupported",
@@ -436,6 +440,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &ScanOutputStyles
         styles.highlighted.apply_to(result.files_skipped),
         styles.highlighted.apply_to(result.files_unsupported),
     );
+    if result.files_blocked > 0 {
+        line.push_str(&format!(
+            ", {} blocked",
+            styles.error.apply_to(result.files_blocked)
+        ));
+    }
     if result.files_failed > 0 {
         line.push_str(&format!(
             ", {} failed",
@@ -596,7 +606,8 @@ mod tests {
                 "files_scanned": 4,
                 "files_with_findings": 3,
                 "files_skipped": 1,
-                "files_unsupported": 2,
+                "files_unsupported": 1,
+                "files_blocked": 1,
                 "files_failed": 0,
                 "findings": 3,
                 "findings_by_label": {"email": 2, "person": 1},
@@ -642,7 +653,7 @@ mod tests {
              archive.bin  unsupported: type not supported\n\
              huge.txt  skipped: over size limit\n\
              \n\
-             7 files: 3 with findings, 1 clean, 1 skipped, 2 unsupported. 3 findings: email 2, person 1.\n"
+             7 files: 3 with findings, 1 clean, 1 skipped, 1 unsupported, 1 blocked. 3 findings: email 2, person 1.\n"
         );
         assert!(
             !text.contains('\u{1b}'),
@@ -651,20 +662,52 @@ mod tests {
     }
 
     #[test]
-    fn the_exit_code_says_whether_anything_was_found_or_failed() {
+    fn the_exit_code_says_whether_anything_was_found_or_a_file_failed() {
         let clean = ScanCommandResult::default();
         assert_eq!(clean.exit_code(false), 0);
 
-        let found = sample_result();
+        let mut found = ScanCommandResult::default();
+        found.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![finding(
+                "email",
+                DetectionLocation::Text { start: 0, end: 6 },
+                None,
+                "a@b.io",
+            )],
+        ));
         assert_eq!(found.exit_code(false), 2);
         assert_eq!(found.exit_code(true), 0);
 
-        let mut failed = sample_result();
-        failed.push(ScanFileReport::failed(
+        found.push(ScanFileReport::failed(
             &file_ref("broken.txt", mime::TEXT_PLAIN),
             "provider unavailable".to_string(),
         ));
-        assert_eq!(failed.exit_code(false), 1);
-        assert_eq!(failed.exit_code(true), 1);
+        assert_eq!(found.exit_code(false), 1);
+        assert_eq!(found.exit_code(true), 1);
+    }
+
+    #[test]
+    fn a_blocked_file_makes_the_scan_incomplete_and_an_unsupported_one_does_not() {
+        let scan_of = |reason| {
+            let mut result = ScanCommandResult::default();
+            result.push(ScanFileReport::not_scanned(
+                &file_ref("scan.png", mime::IMAGE_PNG),
+                SkipReason::NotRedacted(reason),
+            ));
+            result
+        };
+
+        let blocked = scan_of(NotRedactedReason::OcrUnavailable);
+        assert_eq!((blocked.files_blocked, blocked.files_unsupported), (1, 0));
+        assert_eq!(blocked.exit_code(false), 1);
+        assert_eq!(blocked.exit_code(true), 1);
+
+        let unsupported = scan_of(NotRedactedReason::TypeNotSupported);
+        assert_eq!(
+            (unsupported.files_blocked, unsupported.files_unsupported),
+            (0, 1)
+        );
+        assert_eq!(unsupported.exit_code(false), 0);
     }
 }

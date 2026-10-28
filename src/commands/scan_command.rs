@@ -8,6 +8,7 @@ use crate::commands::scan_output::{
     format_file_lines, format_scan_header, format_scan_summary, FindingReport, ScanCommandResult,
     ScanFileReport, ScanOutputStyles, ValueDisplay,
 };
+use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
@@ -18,9 +19,11 @@ use crate::redacters::{
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::Term;
+use futures::Stream;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::error::Error;
 use std::time::{Duration, Instant};
+use tokio_util::bytes;
 
 #[derive(Debug, Clone)]
 pub struct ScanCommandOptions {
@@ -175,86 +178,38 @@ pub async fn command_scan(
     Ok(result)
 }
 
-/// Scans one file and prints its lines. A failure of a redacter on the file is part of the
-/// report, not an error of the scan: the other files are still scanned.
+/// Scans one file and prints its lines. A failure on the file, in reading it or in a
+/// redacter, is part of the report, not an error of the scan: the other files are still
+/// scanned.
 async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     context: &ScanContext<'_>,
     source_file_ref: Option<&FileSystemRef>,
     source_fs: &mut SFS,
     throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<ScanFileReport> {
-    let (base_file_ref, reader) = source_fs.download(source_file_ref).await?;
-    let file_ref = context
-        .options
-        .file_mime_override
-        .override_for_file_ref(source_file_ref.unwrap_or(&base_file_ref).clone());
-
-    let skip_reason = match context.options.file_matcher.matches(&base_file_ref) {
-        FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
-        FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-        FileMatcherResult::Matched => None,
-    };
-    let report = match skip_reason {
-        Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
-        None => {
-            let plan = context
-                .detector
-                .create_detect_plan(context.redacters, &file_ref)
-                .await?;
-            if plan.is_empty() {
-                ScanFileReport::not_scanned(
-                    &file_ref,
-                    SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
-                )
-            } else {
-                if let Some(throttler) = throttler {
-                    *throttler = throttler.update(Instant::now());
-                    let delay = *throttler.delay();
-                    if !delay.is_zero() {
-                        context.bar.println(
-                            context
-                                .styles
-                                .dimmed
-                                .apply_to(format!(
-                                    "⧗ Delaying detection for {} seconds",
-                                    delay.as_secs()
-                                ))
-                                .to_string(),
-                        );
-                        tokio::time::sleep(delay).await;
-                    }
-                }
-                match context
-                    .detector
-                    .detect_stream(reader, &plan, &file_ref)
-                    .await
-                {
-                    Ok(DetectStreamResult {
-                        blocked: Some(blocked),
-                        ..
-                    }) => ScanFileReport::not_scanned(
-                        &file_ref,
-                        SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
-                    ),
-                    Ok(scanned) => ScanFileReport::scanned(
-                        &file_ref,
-                        scanned
-                            .detections
-                            .iter()
-                            .filter(|scanned| {
-                                context.options.min_score.is_none_or(|min_score| {
-                                    scanned.detection().meets_min_score(min_score)
-                                })
-                            })
-                            .map(|scanned| FindingReport::new(scanned, context.options.values))
-                            .collect(),
-                    ),
-                    Err(error) => {
-                        tracing::debug!(error = %error, source = ?error.source(), "detection failed");
-                        ScanFileReport::failed(&file_ref, error.to_string())
-                    }
-                }
+    let report = match source_fs.download(source_file_ref).await {
+        Ok((base_file_ref, reader)) => {
+            let file_ref = context
+                .options
+                .file_mime_override
+                .override_for_file_ref(source_file_ref.unwrap_or(&base_file_ref).clone());
+            let skip_reason = match context.options.file_matcher.matches(&base_file_ref) {
+                FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
+                FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
+                FileMatcherResult::Matched => None,
+            };
+            match skip_reason {
+                Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
+                None => detect_in_file(context, reader, &file_ref, throttler).await,
             }
+        }
+        Err(error) => {
+            let file_ref = source_file_ref.cloned().unwrap_or_else(|| FileSystemRef {
+                relative_path: source_fs.resolve(None).file_path.into(),
+                media_type: None,
+                file_size: None,
+            });
+            failed_report(&file_ref, &error)
         }
     };
     // Written to the terminal rather than through the bar, which drops what it is given to
@@ -267,4 +222,140 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     })?;
     context.bar.inc(1);
     Ok(report)
+}
+
+fn failed_report(file_ref: &FileSystemRef, error: &AppError) -> ScanFileReport {
+    tracing::debug!(error = %error, source = ?error.source(), "scan of a file failed");
+    ScanFileReport::failed(file_ref, error.to_string())
+}
+
+/// What the redacters found in the file's content, or why they could not read it.
+async fn detect_in_file(
+    context: &ScanContext<'_>,
+    reader: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
+    file_ref: &FileSystemRef,
+    throttler: &mut Option<RedacterThrottler>,
+) -> ScanFileReport {
+    let plan = match context
+        .detector
+        .create_detect_plan(context.redacters, file_ref)
+        .await
+    {
+        Ok(plan) => plan,
+        Err(error) => return failed_report(file_ref, &error),
+    };
+    if plan.is_empty() {
+        return ScanFileReport::not_scanned(
+            file_ref,
+            SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
+        );
+    }
+    if let Some(throttler) = throttler {
+        *throttler = throttler.update(Instant::now());
+        let delay = *throttler.delay();
+        if !delay.is_zero() {
+            context.bar.println(
+                context
+                    .styles
+                    .dimmed
+                    .apply_to(format!(
+                        "⧗ Delaying detection for {} seconds",
+                        delay.as_secs()
+                    ))
+                    .to_string(),
+            );
+            tokio::time::sleep(delay).await;
+        }
+    }
+    match context
+        .detector
+        .detect_stream(reader, &plan, file_ref)
+        .await
+    {
+        Ok(DetectStreamResult {
+            blocked: Some(blocked),
+            ..
+        }) => ScanFileReport::not_scanned(
+            file_ref,
+            SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
+        ),
+        Ok(scanned) => ScanFileReport::scanned(
+            file_ref,
+            scanned
+                .detections
+                .iter()
+                .filter(|scanned| {
+                    context
+                        .options
+                        .min_score
+                        .is_none_or(|min_score| scanned.detection().meets_min_score(min_score))
+                })
+                .map(|scanned| FindingReport::new(scanned, context.options.values))
+                .collect(),
+        ),
+        Err(error) => failed_report(file_ref, &error),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::redacters::{
+        LocalRulesRedacterOptions, RedacterBaseOptions, RedacterProviderOptions, RuleGroup,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    fn email_rules() -> RedacterOptions {
+        RedacterOptions {
+            provider_options: vec![RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: [RuleGroup::Email].into_iter().collect(),
+                    user_rules: Vec::new(),
+                },
+            )],
+            base_options: RedacterBaseOptions {
+                allow_unsupported_copies: false,
+                csv_headers_disable: false,
+                csv_delimiter: None,
+                sampling_size: None,
+                limit_dlp_requests: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_is_reported_failed_and_the_scan_goes_on() {
+        let dir = tempfile::TempDir::with_prefix("scan_unreadable_file").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "mail a@b.io").unwrap();
+        let unreadable = dir.path().join("b.txt");
+        std::fs::write(&unreadable, "mail c@d.io").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&unreadable).is_ok() {
+            // Permissions do not stop this user, such as root, so no file can fail to open.
+            return;
+        }
+
+        let result = command_scan(
+            &Term::stdout(),
+            &format!("{}/", dir.path().display()),
+            ScanCommandOptions::new(
+                None,
+                None,
+                None,
+                Vec::new(),
+                ModelStoreOptions::default(),
+                None,
+                ValueDisplay::Masked,
+            ),
+            email_rules(),
+        )
+        .await
+        .expect("one unreadable file does not abort the scan");
+
+        assert_eq!(
+            (result.files_scanned, result.files_failed, result.findings),
+            (1, 1, 1)
+        );
+        assert_eq!(result.exit_code(false), 1);
+    }
 }

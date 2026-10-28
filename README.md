@@ -982,9 +982,10 @@ reported when its score reaches them (0.5 by default).
 
 - `0`: nothing was found, or `--no-fail` is set;
 - `2`: at least one finding was reported;
-- `1`: an error. A file that a redacter failed on is reported with the status `failed`, the other files are still
-  scanned, and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command
-  line exits with 1 as well, so that 2 always means findings.
+- `1`: an error. A file that a redacter failed on is reported with the status `failed`, and a file that needs a
+  converter the run lacks, such as OCR or PDF rendering, with the status `blocked`. The other files are still scanned,
+  and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command line exits
+  with 1 as well, for every command, so that 2 always means findings.
 
 Skipped and unsupported files do not change the exit code. `--no-fail` does not change an error exit code.
 
@@ -1009,6 +1010,7 @@ whatever the report options are; there is no mode that prints the JSON to stdout
   "files_with_findings": 1,
   "files_skipped": 0,
   "files_unsupported": 0,
+  "files_blocked": 0,
   "files_failed": 0,
   "findings": 2,
   "findings_by_label": {
@@ -1059,15 +1061,15 @@ At the top level:
 - `files_scanned`: files read by the redacters, with or without findings;
 - `files_with_findings`, `findings`: how many files and how many findings the report has;
 - `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`;
-- `files_unsupported`: files that no selected redacter reads, or that need a converter the run lacks, such as OCR or
-  PDF rendering;
+- `files_unsupported`: files that no selected redacter reads;
+- `files_blocked`: files that need a converter the run lacks, such as OCR or PDF rendering;
 - `files_failed`: files that a redacter failed on;
 - `findings_by_label`: the number of findings for each label;
 - `files`: one entry for every file that was scanned, unsupported or failed. Files that the filters leave out of a
   directory listing are only counted in `files_skipped`.
 
 Each entry of `files` has the `path` relative to the source, the `mime_type`, the `status` and the `findings` of the
-file. The `status` is `scanned`, `unsupported`, `blocked` (a converter is missing, counted in `files_unsupported`),
+file. The `status` is `scanned`, `unsupported`, `blocked` (a converter is missing, counted in `files_blocked`),
 `skipped` or `failed`. The `reason` is `null` for a scanned file and says why for the others.
 
 Each finding has the `redacter` that found it, the `label`, the `score` (`null` when the redacter gives none), the
