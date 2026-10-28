@@ -1121,7 +1121,7 @@ for AWS Comprehend.
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.
 - The LLM redacters ask the model for the sensitive values in the text with a type for each, and report every
-  occurrence of each value. Findings from a model can overlap, for example a full name and the first name in it.
+  occurrence of each value as a whole word, ignoring case when the model did not copy the value letter for letter.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
 - AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by

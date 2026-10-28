@@ -1,7 +1,9 @@
 use super::error::LocalRulesError;
 use super::user_rules::{UserMatcher, UserRule};
 use super::validators::Validator;
-use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
+use crate::redacters::text_spans::{
+    apply_redaction, is_word_boundary, merge_findings, Finding, RuleName, REDACTED,
+};
 use clap::ValueEnum;
 use regex::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
@@ -145,22 +147,6 @@ fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, L
             rule: name.to_string(),
             reason: err.to_string(),
         })
-}
-
-/// True if the characters immediately outside `start..end` (if any) are not word
-/// characters, matching `\b` semantics without requiring the matched text itself to
-/// start or end on a word character. Lets a dictionary entry like `#tag` or `C++` match
-/// even though its first or last character is not alphanumeric.
-fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
-    let before_is_word = text[..start]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let after_is_word = text[end..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
-    !before_is_word && !after_is_word
 }
 
 impl RuleSet {

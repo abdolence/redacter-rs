@@ -48,6 +48,22 @@ pub fn merge_findings(mut findings: Vec<Finding>) -> Vec<Finding> {
     merged
 }
 
+/// True if the characters immediately outside `start..end` (if any) are not word
+/// characters, matching `\b` semantics without requiring the matched text itself to
+/// start or end on a word character. Lets a dictionary entry like `#tag` or `C++` match
+/// even though its first or last character is not alphanumeric.
+pub fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before_is_word = text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let after_is_word = text[end..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    !before_is_word && !after_is_word
+}
+
 /// Rebuilds `text` with every finding replaced by `replacement`. Findings must be merged
 /// (sorted, non-overlapping); the function walks them front to back.
 pub fn apply_redaction(text: &str, findings: &[Finding], replacement: &str) -> String {

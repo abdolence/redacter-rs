@@ -2,9 +2,11 @@
 //! detection never changes the item; redaction is a separate path.
 
 use crate::errors::AppError;
-use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::text_spans::{is_word_boundary, merge_findings, Finding, RuleName};
 use crate::redacters::RedacterDataItemContent;
+use regex::RegexBuilder;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::str::FromStr;
 
@@ -175,34 +177,41 @@ impl Detection {
     }
 
     /// Every occurrence of every value in `text`, for providers that name the values they
-    /// found but not where: each value is matched literally, as a whole string, and an empty
-    /// value or a repeated `(value, label)` pair adds nothing. Sorted by position.
+    /// found but not where. A value is matched literally and as a whole word, so `John` is
+    /// not found in `Johnson`. A value with no exact occurrence is looked for ignoring case,
+    /// since a model may not copy a value letter for letter. Where occurrences overlap the
+    /// longest is kept, so a name and its first word are reported once. An empty value or a
+    /// repeated `(value, label)` pair adds nothing. Sorted by position.
     pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> Vec<Self> {
-        let mut located = std::collections::BTreeSet::new();
-        let mut detections: Vec<(usize, Self)> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut findings = Vec::new();
+        let mut unmatched = 0_usize;
         for (value, label) in values {
-            if value.is_empty() || !located.insert((value, label)) {
+            if value.is_empty() || !seen.insert((value, label)) {
                 continue;
             }
-            for (start, matched) in text.match_indices(value.as_str()) {
-                detections.push((
-                    start,
-                    Self {
-                        label: label.clone(),
-                        location: DetectionLocation::Text {
-                            start,
-                            end: start + matched.len(),
-                        },
-                        score: None,
-                        value: matched.to_string(),
-                    },
-                ));
+            let ranges = whole_word_ranges(text, value);
+            if ranges.is_empty() {
+                unmatched += 1;
             }
+            let rule = RuleName::new(&label.to_string());
+            findings.extend(ranges.into_iter().map(|(start, end)| Finding {
+                start,
+                end,
+                rule: rule.clone(),
+                score: None,
+            }));
         }
-        detections.sort_by_key(|(start, _)| *start);
-        detections
+        if unmatched > 0 {
+            // Counted, never named: the values are the sensitive data.
+            tracing::warn!(
+                unmatched,
+                "values named by the provider were not found in the text"
+            );
+        }
+        merge_findings(findings)
             .into_iter()
-            .map(|(_, detection)| detection)
+            .map(|finding| Self::in_text(text, finding))
             .collect()
     }
 
@@ -210,6 +219,31 @@ impl Detection {
     pub fn meets_min_score(&self, min_score: Score) -> bool {
         self.score.is_none_or(|score| score >= min_score)
     }
+}
+
+/// The byte ranges of the whole-word occurrences of `value` in `text`: the exact ones, or
+/// when there are none, those that differ only in case.
+fn whole_word_ranges(text: &str, value: &str) -> Vec<(usize, usize)> {
+    let whole_words = |(start, end): &(usize, usize)| is_word_boundary(text, *start, *end);
+    let exact: Vec<(usize, usize)> = text
+        .match_indices(value)
+        .map(|(start, matched)| (start, start + matched.len()))
+        .filter(whole_words)
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let Ok(pattern) = RegexBuilder::new(&regex::escape(value))
+        .case_insensitive(true)
+        .build()
+    else {
+        return Vec::new();
+    };
+    pattern
+        .find_iter(text)
+        .map(|found| (found.start(), found.end()))
+        .filter(whole_words)
+        .collect()
 }
 
 /// Converts the character offsets that text analysis services report into byte offsets of
@@ -428,6 +462,71 @@ mod tests {
         assert!(detections
             .iter()
             .all(|detection| detection.label == person && detection.score.is_none()));
+    }
+
+    #[test]
+    fn a_value_inside_a_longer_reported_value_is_not_reported_again() {
+        let text = "John Michael Smith met John";
+        let person = DetectionLabel::new("PERSON");
+        let detections = Detection::locate_values(
+            text,
+            &[
+                ("John".to_string(), person.clone()),
+                ("John Michael Smith".to_string(), person),
+            ],
+        );
+        let located: Vec<(DetectionLocation, &str)> = detections
+            .iter()
+            .map(|detection| (detection.location, detection.value.as_str()))
+            .collect();
+        assert_eq!(
+            located,
+            vec![
+                (
+                    DetectionLocation::Text { start: 0, end: 18 },
+                    "John Michael Smith"
+                ),
+                (DetectionLocation::Text { start: 23, end: 27 }, "John"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_is_matched_as_a_whole_word_only() {
+        let person = DetectionLabel::new("PERSON");
+        let found = |text: &str, value: &str| {
+            Detection::locate_values(text, &[(value.to_string(), person.clone())]).len()
+        };
+        assert_eq!(found("Johnson called John", "John"), 1);
+        assert_eq!(found("ticket 4242 and 42", "42"), 1);
+        assert_eq!(found("John's mail: John.", "John"), 2);
+    }
+
+    #[test]
+    fn a_value_without_an_exact_match_is_located_ignoring_case() {
+        let person = DetectionLabel::new("PERSON");
+        let detections =
+            Detection::locate_values("Ask JOHN SMITH.", &[("john smith".to_string(), person)]);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(
+            detections[0].location,
+            DetectionLocation::Text { start: 4, end: 14 }
+        );
+        assert_eq!(detections[0].value, "JOHN SMITH");
+    }
+
+    #[test]
+    fn an_exact_match_rules_out_the_case_insensitive_search() {
+        let person = DetectionLabel::new("PERSON");
+        let detections = Detection::locate_values("john and John", &[("john".to_string(), person)]);
+        let values: Vec<&str> = detections.iter().map(|d| d.value.as_str()).collect();
+        assert_eq!(values, ["john"]);
+    }
+
+    #[test]
+    fn a_value_that_is_nowhere_in_the_text_is_not_reported() {
+        let person = DetectionLabel::new("PERSON");
+        assert!(Detection::locate_values("Ask Ana.", &[("Zoe".to_string(), person)]).is_empty());
     }
 
     #[test]
