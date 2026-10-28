@@ -90,6 +90,15 @@ pub enum AppError {
     },
 }
 
+impl AppError {
+    pub fn incomplete_result(redacter_type: RedacterType, missing: &'static str) -> Self {
+        Self::IncompleteResult {
+            redacter_type,
+            missing,
+        }
+    }
+}
+
 impl<
         O: std::error::Error + std::fmt::Debug + Send + Sync + 'static,
         H: std::fmt::Debug + Send + Sync + 'static,

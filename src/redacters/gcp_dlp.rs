@@ -158,7 +158,15 @@ impl<'a> GcpDlpRedacter<'a> {
             ..dlp::InspectContentRequest::default()
         })?;
         let response = self.client.get().inspect_content(request).await?;
-        Ok(response.into_inner().result.unwrap_or_default())
+        Self::inspect_result(response.into_inner())
+    }
+
+    /// The result of an inspect response. A response without one is an error: reading it as
+    /// "no findings" would report the item clean.
+    fn inspect_result(response: dlp::InspectContentResponse) -> AppResult<dlp::InspectResult> {
+        response
+            .result
+            .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "an inspect result"))
     }
 
     /// Turns the findings DLP returned for `content` into detections. `field_names` are the
@@ -176,14 +184,14 @@ impl<'a> GcpDlpRedacter<'a> {
         }
         let mut detections = Vec::new();
         for finding in result.findings {
+            let score = likelihood_score(finding.likelihood());
             let label = finding
                 .info_type
                 .map(|info_type| DetectionLabel::new(info_type.name))
-                .ok_or_else(|| missing_in_finding("an info type"))?;
-            let score = Option::<Score>::try_from(FindingLikelihood(finding.likelihood))?;
+                .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "an info type"))?;
             let location = finding
                 .location
-                .ok_or_else(|| missing_in_finding("a location"))?;
+                .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a location"))?;
             match content {
                 RedacterDataItemContent::Value(text) => {
                     let (start, end) = byte_span(&location)?;
@@ -200,7 +208,9 @@ impl<'a> GcpDlpRedacter<'a> {
                     let cell = rows
                         .get(row)
                         .and_then(|cells| cells.get(column))
-                        .ok_or_else(|| missing_in_finding("a cell of the table"))?;
+                        .ok_or_else(|| {
+                            AppError::incomplete_result(RedacterType::GcpDlp, "a cell of the table")
+                        })?;
                     detections.push(Detection {
                         label,
                         location: DetectionLocation::TableCell {
@@ -404,31 +414,19 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
     }
 }
 
-/// A finding's likelihood as DLP reports it, read as a score. DLP gives five buckets and no
-/// number, so each gets a fixed score: very unlikely 0.1, unlikely 0.3, possible 0.5, likely
-/// 0.7, very likely 0.9. An unspecified or unknown bucket has no score.
-struct FindingLikelihood(i32);
-
-impl TryFrom<FindingLikelihood> for Option<Score> {
-    type Error = AppError;
-
-    fn try_from(likelihood: FindingLikelihood) -> Result<Self, Self::Error> {
-        let value = match dlp::Likelihood::try_from(likelihood.0) {
-            Ok(dlp::Likelihood::VeryUnlikely) => 0.1,
-            Ok(dlp::Likelihood::Unlikely) => 0.3,
-            Ok(dlp::Likelihood::Possible) => 0.5,
-            Ok(dlp::Likelihood::Likely) => 0.7,
-            Ok(dlp::Likelihood::VeryLikely) => 0.9,
-            Ok(dlp::Likelihood::Unspecified) | Err(_) => return Ok(None),
-        };
-        Score::try_from(value).map(Some)
-    }
-}
-
-fn missing_in_finding(what: &str) -> AppError {
-    AppError::SystemError {
-        message: format!("A GCP DLP finding came without {what}"),
-    }
+/// A finding's likelihood read as a score. DLP gives five buckets and no number, so each gets a
+/// fixed score: very unlikely 0.1, unlikely 0.3, possible 0.5, likely 0.7, very likely 0.9. An
+/// unspecified bucket has no score.
+fn likelihood_score(likelihood: dlp::Likelihood) -> Option<Score> {
+    let value = match likelihood {
+        dlp::Likelihood::VeryUnlikely => 0.1,
+        dlp::Likelihood::Unlikely => 0.3,
+        dlp::Likelihood::Possible => 0.5,
+        dlp::Likelihood::Likely => 0.7,
+        dlp::Likelihood::VeryLikely => 0.9,
+        dlp::Likelihood::Unspecified => return None,
+    };
+    Some(Score::try_from(value).expect("the bucket scores are constants between 0 and 1"))
 }
 
 /// The finding's byte range within its containing text or table cell. DLP counts UTF-8 bytes.
@@ -436,7 +434,7 @@ fn byte_span(location: &dlp::Location) -> AppResult<(usize, usize)> {
     let range = location
         .byte_range
         .as_ref()
-        .ok_or_else(|| missing_in_finding("a byte range"))?;
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a byte range"))?;
     match (usize::try_from(range.start), usize::try_from(range.end)) {
         (Ok(start), Ok(end)) => Ok((start, end)),
         _ => Err(AppError::SystemError {
@@ -466,17 +464,17 @@ fn table_cell(location: &dlp::Location, field_names: &[String]) -> AppResult<(us
             Some(dlp::content_location::Location::RecordLocation(record)) => Some(record),
             _ => None,
         })
-        .ok_or_else(|| missing_in_finding("a record location"))?;
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a record location"))?;
     let row = record
         .table_location
         .as_ref()
         .and_then(|table| usize::try_from(table.row_index).ok())
-        .ok_or_else(|| missing_in_finding("a row"))?;
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a row"))?;
     let column = record
         .field_id
         .as_ref()
         .and_then(|field| field_names.iter().position(|name| *name == field.name))
-        .ok_or_else(|| missing_in_finding("a known column"))?;
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a known column"))?;
     Ok((row, column))
 }
 
@@ -769,19 +767,20 @@ mod tests {
 
     #[test]
     fn likelihood_buckets_map_to_the_fixed_score_table() {
-        let score_of = |likelihood: dlp::Likelihood| {
-            Option::<Score>::try_from(FindingLikelihood(likelihood.into())).unwrap()
+        let score_of = |likelihood: i32| {
+            let finding = dlp::Finding {
+                likelihood,
+                ..dlp::Finding::default()
+            };
+            likelihood_score(finding.likelihood())
         };
-        assert_eq!(score_of(dlp::Likelihood::VeryUnlikely), score(0.1));
-        assert_eq!(score_of(dlp::Likelihood::Unlikely), score(0.3));
-        assert_eq!(score_of(dlp::Likelihood::Possible), score(0.5));
-        assert_eq!(score_of(dlp::Likelihood::Likely), score(0.7));
-        assert_eq!(score_of(dlp::Likelihood::VeryLikely), score(0.9));
-        assert_eq!(score_of(dlp::Likelihood::Unspecified), None);
-        assert_eq!(
-            Option::<Score>::try_from(FindingLikelihood(99)).unwrap(),
-            None
-        );
+        assert_eq!(score_of(dlp::Likelihood::VeryUnlikely.into()), score(0.1));
+        assert_eq!(score_of(dlp::Likelihood::Unlikely.into()), score(0.3));
+        assert_eq!(score_of(dlp::Likelihood::Possible.into()), score(0.5));
+        assert_eq!(score_of(dlp::Likelihood::Likely.into()), score(0.7));
+        assert_eq!(score_of(dlp::Likelihood::VeryLikely.into()), score(0.9));
+        assert_eq!(score_of(dlp::Likelihood::Unspecified.into()), None);
+        assert_eq!(score_of(99), None);
     }
 
     fn cell_location(field_name: &str, row_index: i64, start: usize, end: usize) -> dlp::Location {
@@ -940,6 +939,19 @@ mod tests {
             .iter()
             .all(|detection| detection.value == "john.smith@example.com"
                 && detection.score == score(0.7)));
+    }
+
+    #[test]
+    fn a_response_without_a_result_is_an_error_not_a_clean_item() {
+        let error = GcpDlpRedacter::inspect_result(dlp::InspectContentResponse { result: None })
+            .expect_err("a response without a result says nothing about the item");
+        assert!(matches!(
+            error,
+            AppError::IncompleteResult {
+                redacter_type: RedacterType::GcpDlp,
+                ..
+            }
+        ));
     }
 
     #[test]
