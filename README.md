@@ -9,9 +9,9 @@ files removing it, across various sources and destinations and utilising Data Le
 `redacter cp` copies files and redacts them on the way; `redacter scan` only reads them and reports what was found and
 where, with an exit code a CI pipeline can gate on.
 
-The tool ships two redacters that run entirely on your machine, a rule-based one with checksum validation and a
-small multilingual named-entity model, and can also delegate to cloud DLP services and LLMs such as Google Cloud
-Platform's DLP API. Local redaction keeps the data on the host and costs nothing per file; the cloud providers
+The tool ships three redacters that run entirely on your machine, a rule-based one with checksum validation, a
+small multilingual named-entity model and a zero-shot span model that looks for labels you choose, and can also
+delegate to cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redaction keeps the data on the host and costs nothing per file; the cloud providers
 find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
 
 ![redacter-demo](media/redacter-demo.gif)
@@ -913,7 +913,9 @@ A finding is one line: the location, the label, the redacter that found it, the 
 findings has no line, as with `grep`. The location depends on the content:
 
 - text: `path:line:column`, both counted from 1, the column in characters;
-- a cell of a CSV table: `path:row:column`, both counted from 1, the header row not counted;
+- a cell of a CSV table: `path:row:column`, both counted from 1, the header row not counted. A redacter that reads
+  text but not tables, such as Microsoft Presidio, gets the CSV file as plain text and reports `path:line:column` of
+  the file instead, where the header is line 1;
 - an image: `path:[x1,y1,x2,y2]`, a box in pixels of the image;
 - a page of a PDF file: `path:page:[x1,y1,x2,y2]`, the page counted from 1 and the box in pixels of the rendered page.
 
@@ -1128,7 +1130,6 @@ for AWS Comprehend.
   `--llm-image-mode` has no effect on `scan`.
 - AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by
   searching the text for the value.
-- The Gemini API and OpenAI detection paths have no live test.
 
 ## List (LS) command
 
