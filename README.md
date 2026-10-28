@@ -1133,6 +1133,10 @@ for AWS Comprehend.
   dropped. Letters are compared one at a time, so `ß` and `SS` differ, while Greek `ς` and `Σ` match.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
+- An answer that the provider filtered, cut short or left empty fails the file, in `scan` and in `cp`; it is never
+  reported as a clean file or written out as redacted text. `gcp-vertex-ai` and `gemini-llm` ask once more after a
+  `SAFETY` or `OTHER` stop or an empty answer. The safety threshold of `gcp-vertex-ai` is set by
+  `--gcp-vertex-ai-block-none-harmful`.
 - AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by
   searching the text for the value in the same way.
 
