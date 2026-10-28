@@ -29,23 +29,28 @@ impl<'a> FileConverters<'a> {
     /// Binds the converters this run can use. `needs_ocr` says whether the files it is
     /// about to copy can reach the OCR engine at all: the OCR model is only looked up —
     /// and only offered for download — when they can, so a run over text files never
-    /// prompts for it.
+    /// prompts for it. `needs_pdf_rendering` says the same for Pdfium: without it an
+    /// already installed Pdfium is still bound, but none is downloaded.
     // `mut self` is only mutated inside the pdf-render/ocr blocks below; unused when neither
-    // feature is enabled. `app_reporter`, `models` and `needs_ocr` are only read inside the
-    // ocr block; unused whenever the ocr feature is off, pdf-render-only builds included.
+    // feature is enabled. `needs_ocr` is only read inside the ocr block and
+    // `needs_pdf_rendering` inside the pdf-render block; `app_reporter` and `models` are read
+    // by both.
     #[cfg_attr(not(any(feature = "pdf-render", feature = "ocr")), allow(unused_mut))]
     #[cfg_attr(not(feature = "ocr"), allow(unused_variables))]
+    #[cfg_attr(not(feature = "pdf-render"), allow(unused_variables))]
     pub async fn init(
         mut self,
         app_reporter: &'a AppReporter<'a>,
         models: &ModelStore<'_>,
         needs_ocr: bool,
+        needs_pdf_rendering: bool,
     ) -> AppResult<Self> {
         #[cfg(feature = "pdf-render")]
+        if let Some(pdf_image_converter) =
+            pdf_image_converter::PdfImageConverter::new(models, app_reporter, needs_pdf_rendering)
+                .await?
         {
-            if let Ok(pdf_image_converter) = pdf_image_converter::PdfImageConverter::new() {
-                self.pdf_image_converter = Some(Box::new(pdf_image_converter));
-            }
+            self.pdf_image_converter = Some(Box::new(pdf_image_converter));
         }
         #[cfg(feature = "ocr")]
         if needs_ocr {
@@ -118,7 +123,7 @@ mod tests {
             &reporter,
         );
         let converters = FileConverters::new()
-            .init(&reporter, &store, true)
+            .init(&reporter, &store, true, false)
             .await
             .expect("a lookup failure must not fail the run");
         assert!(converters.ocr.is_none());
@@ -149,7 +154,10 @@ mod tests {
             Box::new(fetcher),
             &reporter,
         );
-        let err = match FileConverters::new().init(&reporter, &store, true).await {
+        let err = match FileConverters::new()
+            .init(&reporter, &store, true, false)
+            .await
+        {
             Err(err) => err,
             Ok(_) => panic!("a failed download must abort the run"),
         };
@@ -180,7 +188,7 @@ mod tests {
             &reporter,
         );
         let converters = FileConverters::new()
-            .init(&reporter, &store, false)
+            .init(&reporter, &store, false, false)
             .await
             .unwrap();
         assert!(converters.ocr.is_none());
@@ -189,5 +197,98 @@ mod tests {
             "a run that cannot use OCR must not prompt for it"
         );
         assert_eq!(*fetches.lock().unwrap(), 0);
+    }
+
+    /// The Pdfium download is offered only to a run that is about to render a PDF.
+    #[cfg(all(feature = "pdf-render", pdfium_download))]
+    #[tokio::test]
+    async fn a_run_without_pdfs_never_asks_for_pdfium() {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let root = TempDir::new().unwrap();
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let consent = FakeConsent::new(true);
+        let asked = consent.asked();
+        let fetcher = FakeFetcher::new(&[]);
+        let fetches = fetcher.counter();
+        let store = ModelStore::with_parts(
+            fixed_root(root.path().to_path_buf()),
+            no_manual_dirs(),
+            DownloadPolicy::Ask,
+            Box::new(consent),
+            Box::new(fetcher),
+            &reporter,
+        );
+        FileConverters::new()
+            .init(&reporter, &store, false, false)
+            .await
+            .unwrap();
+        assert!(asked.lock().unwrap().is_empty());
+        assert_eq!(*fetches.lock().unwrap(), 0);
+    }
+
+    /// Declining leaves PDF rendering off and the run going, with nothing fetched.
+    #[cfg(all(feature = "pdf-render", pdfium_download))]
+    #[tokio::test]
+    async fn a_declined_pdfium_download_does_not_fail_the_run() {
+        use crate::model_store::{manifest, ModelId};
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let root = TempDir::new().unwrap();
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let consent = FakeConsent::new(false);
+        let asked = consent.asked();
+        let fetcher = FakeFetcher::new(&[]);
+        let fetches = fetcher.counter();
+        let store = ModelStore::with_parts(
+            fixed_root(root.path().to_path_buf()),
+            no_manual_dirs(),
+            DownloadPolicy::Ask,
+            Box::new(consent),
+            Box::new(fetcher),
+            &reporter,
+        );
+        FileConverters::new()
+            .init(&reporter, &store, false, true)
+            .await
+            .unwrap();
+        let library: Vec<String> = manifest(ModelId::Pdfium)
+            .files
+            .iter()
+            .map(|file| file.name.to_string())
+            .collect();
+        assert_eq!(*asked.lock().unwrap(), [library]);
+        assert_eq!(*fetches.lock().unwrap(), 0);
+    }
+
+    /// A Pdfium download the user agreed to that goes wrong stops the run, like any model.
+    #[cfg(all(feature = "pdf-render", pdfium_download))]
+    #[tokio::test]
+    async fn a_failed_download_of_pdfium_aborts_the_run() {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let root = TempDir::new().unwrap();
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let fetcher = FakeFetcher::new(&[]);
+        let fetches = fetcher.counter();
+        let store = ModelStore::with_parts(
+            fixed_root(root.path().to_path_buf()),
+            no_manual_dirs(),
+            DownloadPolicy::Yes,
+            Box::new(FakeConsent::new(true)),
+            Box::new(fetcher),
+            &reporter,
+        );
+        let result = FileConverters::new()
+            .init(&reporter, &store, false, true)
+            .await;
+        assert!(result.is_err());
+        assert_eq!(*fetches.lock().unwrap(), 1);
     }
 }

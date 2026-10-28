@@ -686,32 +686,43 @@ Only if such redacters are not available, the tool will try to redact the file u
 ## PDF redaction
 
 PDF redaction is supported by rendering PDF files as images and redacting them.
-To render and convert PDF files the tool uses external library `Pdfium` (the C++ PDF library used by the Google Chromium
-project).
-This library needs to be installed separately on your system.
+To render and convert PDF files the tool uses the external library `Pdfium` (the C++ PDF library used by the Google
+Chromium project). The tool downloads the build it was made for the first time a run redacts a PDF:
 
-Installation instructions:
+- The library is stored with the models, in `<models dir>/pdfium-7881/`, and is loaded from there by full path.
+  A different Pdfium installed on your system never replaces it.
+- `--download-models` works as for the models: `ask` prompts before downloading, `yes` downloads without asking,
+  `no` never downloads. See [Models and downloads](#models-and-downloads).
+- Downloads are available for Linux (glibc) on x86_64 and aarch64, macOS on x86_64 and aarch64, and Windows on x86,
+  x86_64 and aarch64. Other platforms, such as FreeBSD and the static musl builds, have no download: install Pdfium
+  manually.
 
-- Download the latest release from, for example,
-  here [Pdfium releases](https://github.com/bblanchon/pdfium-binaries/releases) for your system.
-- Extract the archive and copy library file `libpdfium.so` to the one of the following directory:
-    - The path the redacter tool installed (such as `/usr/local/bin`)
-    - The path that resides with redacter tool `/usr/local/lib/` if you have installed the tool in `/usr/local/bin`
-    - The path with system libs like `/usr/lib/`.
+If no downloaded copy is installed and none is downloaded, the tool looks for a Pdfium installed by hand, in this
+order: the current directory and `./lib`, the `lib` directory beside the directory of the tool (for example
+`/usr/local/lib` for `/usr/local/bin/redacter`), the directory of the tool itself, then the system library path.
 
-If library is detected correctly it will be reported in the tool output as.
-> PDF to image support: ✓ Yes
+Manual installation:
+
+- Download the Pdfium build of
+  [release chromium/7881](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7881) for your system
+  from the bblanchon/pdfium-binaries project. Other builds may not match the library the tool is compiled against.
+- Extract the archive and copy the library file (`libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`) to
+  `<models dir>/pdfium-7881/`, or to one of the directories listed above.
+
+If the library is detected correctly it is reported in the tool output as:
+> PDF rendering: yes
 
 ## Models and downloads
 
-The OCR engine and the `local-ner` and `local-gliner` redacters need model files that are not bundled
-with the tool. They are hosted as assets of GitHub releases in this repository, copied unmodified
+The OCR engine, PDF rendering and the `local-ner` and `local-gliner` redacters need files that are not
+bundled with the tool. They are hosted as assets of GitHub releases in this repository, copied unmodified
 from the sources listed below:
 
 | Model | Files | Size | Source | Licence |
 |---|---|---|---|---|
 | `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
 | `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
+| `pdfium-7881` (PDF rendering) | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.3 to 7.5 MiB | [release `models-pdfium-7881`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-7881), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/7881` (Pdfium 151.0.7881.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
 | `gliner_multi_pii-v1` (`local-gliner`) | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 
 Nothing is downloaded without your consent. `--download-models` controls it:

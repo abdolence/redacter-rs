@@ -112,20 +112,30 @@ pub async fn command_copy(
     } else {
         None
     };
-    let needs_ocr = match &source_listing {
-        Some(listing) => run_needs_ocr(
-            redacter_options.is_some(),
-            &listing.files,
-            &options.file_mime_override,
+    let has_redacters = redacter_options.is_some();
+    let (needs_ocr, needs_pdf_rendering) = match &source_listing {
+        Some(listing) => (
+            run_needs_ocr(has_redacters, &listing.files, &options.file_mime_override),
+            run_needs_pdf_rendering(has_redacters, &listing.files, &options.file_mime_override),
         ),
-        None => single_source_needs_ocr(
-            redacter_options.is_some(),
-            source_fs.resolve(None).file_path.as_str(),
-            &options.file_mime_override,
-        ),
+        None => {
+            let source_path = source_fs.resolve(None).file_path;
+            (
+                single_source_needs_ocr(
+                    has_redacters,
+                    source_path.as_str(),
+                    &options.file_mime_override,
+                ),
+                single_source_needs_pdf_rendering(
+                    has_redacters,
+                    source_path.as_str(),
+                    &options.file_mime_override,
+                ),
+            )
+        }
     };
     let file_converters = FileConverters::new()
-        .init(&term_reporter, &models, needs_ocr)
+        .init(&term_reporter, &models, needs_ocr, needs_pdf_rendering)
         .await?;
 
     report_copy_info(
@@ -307,17 +317,23 @@ fn media_type_needs_ocr(media_type: Option<&mime::Mime>) -> bool {
     })
 }
 
-/// Whether this run can reach the OCR engine at all, over the files it has just listed. Only
-/// a redacting run can: a copy of a directory of text files must not resolve the OCR model,
-/// let alone offer to download it.
-fn run_needs_ocr(
+/// Only a PDF is rendered to images.
+fn media_type_needs_pdf_rendering(media_type: Option<&mime::Mime>) -> bool {
+    media_type.is_some_and(Redacters::is_mime_pdf)
+}
+
+/// Whether any listed file satisfies `needs`. Only a redacting run can need anything: a
+/// copy of a directory of text files must not resolve the OCR model or Pdfium, let alone
+/// offer to download them.
+fn run_needs(
     has_redacters: bool,
     files: &[FileSystemRef],
     mime_override: &FileMimeOverride,
+    needs: fn(Option<&mime::Mime>) -> bool,
 ) -> bool {
     has_redacters
         && files.iter().any(|file| {
-            media_type_needs_ocr(
+            needs(
                 mime_override
                     .override_for_file_ref(file.clone())
                     .media_type
@@ -326,19 +342,66 @@ fn run_needs_ocr(
         })
 }
 
+/// Whether this run can reach the OCR engine at all, over the files it has just listed.
+fn run_needs_ocr(
+    has_redacters: bool,
+    files: &[FileSystemRef],
+    mime_override: &FileMimeOverride,
+) -> bool {
+    run_needs(has_redacters, files, mime_override, media_type_needs_ocr)
+}
+
+/// Whether this run can render a PDF, over the files it has just listed.
+fn run_needs_pdf_rendering(
+    has_redacters: bool,
+    files: &[FileSystemRef],
+    mime_override: &FileMimeOverride,
+) -> bool {
+    run_needs(
+        has_redacters,
+        files,
+        mime_override,
+        media_type_needs_pdf_rendering,
+    )
+}
+
 /// The same question for a single-file source, which is never listed: what it holds is
 /// guessed from its path, the way the file systems guess it when they hand the file over.
-/// A path that says nothing is taken as one that may need OCR — `clipboard://` carries an
+/// A path that says nothing is taken as one that may need `needs` — `clipboard://` carries an
 /// image or text and only says which once it is read, and guessing "text" there would turn
 /// OCR off for a clipboard image without a word.
+fn single_source_needs(
+    has_redacters: bool,
+    path: &str,
+    mime_override: &FileMimeOverride,
+    needs: fn(Option<&mime::Mime>) -> bool,
+) -> bool {
+    let file_ref = mime_override.override_for_file_ref(single_source_file_ref(path));
+    has_redacters && (file_ref.media_type.is_none() || needs(file_ref.media_type.as_ref()))
+}
+
 fn single_source_needs_ocr(
     has_redacters: bool,
     path: &str,
     mime_override: &FileMimeOverride,
 ) -> bool {
-    let file_ref = mime_override.override_for_file_ref(single_source_file_ref(path));
-    has_redacters
-        && (file_ref.media_type.is_none() || media_type_needs_ocr(file_ref.media_type.as_ref()))
+    single_source_needs(has_redacters, path, mime_override, media_type_needs_ocr)
+}
+
+/// The clipboard holds an image or text, never a PDF, so it is the one path with no
+/// extension that cannot need Pdfium.
+fn single_source_needs_pdf_rendering(
+    has_redacters: bool,
+    path: &str,
+    mime_override: &FileMimeOverride,
+) -> bool {
+    !path.starts_with("clipboard://")
+        && single_source_needs(
+            has_redacters,
+            path,
+            mime_override,
+            media_type_needs_pdf_rendering,
+        )
 }
 
 /// The one file a single-file source stands for, named and typed from its path.
@@ -689,6 +752,54 @@ mod tests {
         }
     }
 
+    /// Images go to OCR directly; only a PDF is rendered, so only a PDF needs Pdfium.
+    #[test]
+    fn only_a_pdf_in_the_listing_needs_pdf_rendering() {
+        let without_pdf = [
+            listed("form.png", Some(mime::IMAGE_PNG)),
+            listed("customer-note.txt", Some(mime::TEXT_PLAIN)),
+        ];
+        assert!(!run_needs_pdf_rendering(
+            true,
+            &without_pdf,
+            &no_mime_override()
+        ));
+
+        let with_pdf = [
+            listed("form.png", Some(mime::IMAGE_PNG)),
+            listed("scan.pdf", Some(mime::APPLICATION_PDF)),
+        ];
+        assert!(run_needs_pdf_rendering(
+            true,
+            &with_pdf,
+            &no_mime_override()
+        ));
+        assert!(!run_needs_pdf_rendering(
+            false,
+            &with_pdf,
+            &no_mime_override()
+        ));
+    }
+
+    /// A single path that says nothing may still be a PDF, except the clipboard, which only
+    /// ever holds an image or text.
+    #[test]
+    fn a_single_source_needs_pdf_rendering_unless_it_is_known_not_to_be_a_pdf() {
+        for (path, expected) in [
+            ("gs://bucket/scan.pdf", true),
+            ("/tmp/scan-without-an-extension", true),
+            ("/tmp/scans/form-example.png", false),
+            ("customer-note.txt", false),
+            ("clipboard://", false),
+        ] {
+            assert_eq!(
+                single_source_needs_pdf_rendering(true, path, &no_mime_override()),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
     /// A copy is not a redaction: nothing it does can reach the OCR engine.
     #[test]
     fn a_copy_without_a_redacter_never_needs_ocr() {
@@ -997,7 +1108,9 @@ mod tests {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
         let store = ModelStore::new(&ModelStoreOptions::default(), &reporter);
-        let converters = FileConverters::new().init(&reporter, &store, true).await?;
+        let converters = FileConverters::new()
+            .init(&reporter, &store, true, true)
+            .await?;
         let ocr = converters
             .ocr
             .as_deref()

@@ -15,6 +15,11 @@ pub enum ModelId {
     // Only the local-gliner feature resolves this one; gated for the same reason as `Ocrs`.
     #[cfg(any(feature = "local-gliner", test))]
     GlinerMultiPii,
+    // Only the pdf-render feature resolves this one, and only on the platforms that have a
+    // build in the release (see build.rs); anywhere else PDF rendering keeps the search for a
+    // Pdfium the user installed.
+    #[cfg(all(pdfium_download, any(feature = "pdf-render", test)))]
+    Pdfium,
 }
 
 /// One file of a model: where it comes from and what it must look like on disk.
@@ -75,7 +80,12 @@ static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
 ];
 
 /// A model that has never lived anywhere but the managed root.
-#[cfg(any(feature = "local-ner", feature = "local-gliner", test))]
+#[cfg(any(
+    feature = "local-ner",
+    feature = "local-gliner",
+    all(pdfium_download, any(feature = "pdf-render", test)),
+    test
+))]
 pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -183,6 +193,8 @@ pub fn manifest(id: ModelId) -> &'static ModelManifest {
         ModelId::NerMultilingualHrl => &NER_MULTILINGUAL_HRL,
         #[cfg(any(feature = "local-gliner", test))]
         ModelId::GlinerMultiPii => &GLINER_MULTI_PII,
+        #[cfg(all(pdfium_download, any(feature = "pdf-render", test)))]
+        ModelId::Pdfium => &super::pdfium::PDFIUM,
     }
 }
 
@@ -306,5 +318,27 @@ mod tests {
                 file.name
             );
         }
+    }
+
+    #[cfg(pdfium_download)]
+    #[test]
+    fn pdfium_manifest_pins_one_library_from_the_release_of_its_build() {
+        let manifest = manifest(ModelId::Pdfium);
+        let build = manifest
+            .dir_name
+            .strip_prefix("pdfium-")
+            .expect("the directory is named after the build");
+        let [file] = manifest.files else {
+            panic!("expected one library file, got {:?}", manifest.files);
+        };
+        assert_eq!(
+            file.url
+                .strip_prefix("https://github.com/abdolence/redacter-rs/releases/download/")
+                .and_then(|rest| rest.split('/').next()),
+            Some(format!("models-pdfium-{build}").as_str())
+        );
+        assert_eq!(file.sha256.len(), 64, "{}", file.name);
+        assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!((manifest.legacy_dirs)().is_empty());
     }
 }

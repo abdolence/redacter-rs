@@ -1,10 +1,12 @@
 //! Finds the model files a run needs and, with the user's consent, downloads and verifies the
-//! ones that are missing. Serves the OCR engine and the local NER redacter.
+//! ones that are missing. Serves the OCR engine, the local redacters and PDF rendering.
 
 mod consent;
 mod download;
 mod error;
 mod manifest;
+#[cfg(all(pdfium_download, any(feature = "pdf-render", test)))]
+mod pdfium;
 
 pub use consent::{is_interactive, ConsentSource, DownloadRequest, TerminalConsent};
 // `ByteStream` joins this list once something outside `download.rs` names it (Task 4's OCR
@@ -33,17 +35,23 @@ pub struct ModelFiles {
     dir: PathBuf,
 }
 
-// Only the ocr and local-ner features read a resolved model's files; a `--no-default-features`
-// (or pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a
-// future consumer just adds its feature to the list below. ocrs takes the whole directory
-// (it loads its own files by name), local-ner names it in the line it reports before loading
-// and opens each file by name.
-#[cfg(any(feature = "ocr", feature = "local-ner", test))]
 impl ModelFiles {
+    // Only the ocr and local-ner features open a resolved model's files by name; a
+    // `--no-default-features` (or pdf-render-only) build has no caller. Gated rather than
+    // `#[allow(dead_code)]`'d so a future consumer just adds its feature to the list.
+    #[cfg(any(feature = "ocr", feature = "local-ner", test))]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
 
+    // ocrs takes the whole directory (it loads its own files by name), local-ner names it in
+    // the line it reports before loading, and PDF rendering loads its library from it.
+    #[cfg(any(
+        feature = "ocr",
+        feature = "local-ner",
+        all(pdfium_download, feature = "pdf-render"),
+        test
+    ))]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -180,12 +188,28 @@ impl<'a> ModelStore<'a> {
         self.resolve_manifest(manifest(id)).await
     }
 
+    /// Finds a model that is already installed and never downloads, whatever the policy of
+    /// this run. For a caller that can use the model when it is there but whose run does not
+    /// need it enough to ask for it.
+    #[cfg(all(pdfium_download, feature = "pdf-render"))]
+    pub async fn resolve_installed(&self, id: ModelId) -> Result<ModelFiles, ModelStoreError> {
+        self.resolve_under(manifest(id), DownloadPolicy::No).await
+    }
+
     /// Lookup order: the managed directory (every file present with its manifest size), the
     /// manual directories (every file present, sizes not checked), then a download of the
     /// missing or stale files into the managed directory under the download policy.
     pub async fn resolve_manifest(
         &self,
         manifest: &'static ModelManifest,
+    ) -> Result<ModelFiles, ModelStoreError> {
+        self.resolve_under(manifest, self.policy).await
+    }
+
+    async fn resolve_under(
+        &self,
+        manifest: &'static ModelManifest,
+        policy: DownloadPolicy,
     ) -> Result<ModelFiles, ModelStoreError> {
         if let Some(files) = self.cached(manifest.dir_name) {
             return Ok(files);
@@ -221,7 +245,7 @@ impl<'a> ModelStore<'a> {
             ModelFiles { dir: managed }
         } else {
             match stale {
-                Some((path, expected, actual)) if self.policy == DownloadPolicy::No => {
+                Some((path, expected, actual)) if policy == DownloadPolicy::No => {
                     return Err(ModelStoreError::SizeMismatch {
                         location: path.display().to_string(),
                         expected,
@@ -229,10 +253,10 @@ impl<'a> ModelStore<'a> {
                         phase: ErrorPhase::Lookup,
                     });
                 }
-                Some(_) => self.download(manifest, &managed, wanted).await?,
+                Some(_) => self.download(manifest, &managed, wanted, policy).await?,
                 None => match self.find_manual_dir(manifest) {
                     Some(dir) => ModelFiles { dir },
-                    None => self.download(manifest, &managed, wanted).await?,
+                    None => self.download(manifest, &managed, wanted, policy).await?,
                 },
             }
         };
@@ -254,6 +278,7 @@ impl<'a> ModelStore<'a> {
         manifest: &'static ModelManifest,
         dir: &Path,
         files: Vec<&'static ModelFile>,
+        policy: DownloadPolicy,
     ) -> Result<ModelFiles, ModelStoreError> {
         let request = DownloadRequest {
             model: manifest,
@@ -261,13 +286,13 @@ impl<'a> ModelStore<'a> {
             total_bytes: files.iter().map(|file| file.size).sum(),
             files,
         };
-        let allowed = match self.policy {
+        let allowed = match policy {
             DownloadPolicy::Yes => true,
             DownloadPolicy::No => false,
             DownloadPolicy::Ask => self.consent.ask(&request)?,
         };
         if !allowed {
-            return Err(match self.policy {
+            return Err(match policy {
                 DownloadPolicy::No => ModelStoreError::NotInstalled {
                     model: manifest.dir_name.to_string(),
                     dir: dir.display().to_string(),
@@ -538,6 +563,27 @@ mod tests {
             other => panic!("expected NotInstalled, got {other}"),
         }
         assert!(err.to_string().contains("--download-models yes"), "{err}");
+    }
+
+    /// `resolve_installed` is this lookup with the policy forced to `No`: whatever the run
+    /// allows, nothing is prompted for or fetched.
+    #[tokio::test]
+    async fn an_installed_only_lookup_never_prompts_or_downloads() {
+        let fx = Fixture::new();
+        let reporter = AppReporter::from(&fx.term);
+        let consent = FakeConsent::new(true);
+        let asked = consent.asked();
+        let fetcher = FakeFetcher::good();
+        let fetches = fetcher.counter();
+        let store = fx.store(DownloadPolicy::Yes, consent, fetcher, &reporter);
+        let err = store
+            .resolve_under(&TEST_MANIFEST, DownloadPolicy::No)
+            .await
+            .unwrap_err();
+        assert!(err.is_pre_consent_lookup_failure(), "{err}");
+        assert!(asked.lock().unwrap().is_empty());
+        assert_eq!(*fetches.lock().unwrap(), 0);
+        assert!(!fx.managed.exists(), "nothing may be written");
     }
 
     #[tokio::test]
