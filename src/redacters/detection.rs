@@ -2,8 +2,7 @@
 //! detection never changes the item; redaction is a separate path.
 
 use crate::errors::AppError;
-use crate::redacters::text_spans::{is_word_boundary, merge_findings, Finding, RuleName};
-use regex::RegexBuilder;
+use crate::redacters::text_spans::{is_word_boundary, Finding, RuleName};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -40,6 +39,13 @@ impl Display for DetectionLabel {
 pub struct Score(f32);
 
 impl Score {
+    /// A score fixed in the source. Evaluated in a `const` item, an out-of-range value fails
+    /// the build.
+    pub const fn from_static(value: f32) -> Self {
+        assert!(value >= 0.0 && value <= 1.0, "a score is between 0 and 1");
+        Self(value)
+    }
+
     // Read by the model-backed redacters, which compare a score with their f32 floor.
     #[cfg_attr(
         not(any(feature = "local-ner", feature = "local-gliner")),
@@ -148,7 +154,7 @@ impl Detection {
 
     /// The findings of `find_in_cell(column, cell)` on every cell of `rows`, placed in their
     /// cell, for providers that read a table one cell at a time.
-    // Read by the model-backed redacters, which score a table cell by cell.
+    // Only the model-backed redacters read a table cell by cell.
     #[cfg_attr(
         not(any(feature = "local-ner", feature = "local-gliner")),
         allow(dead_code)
@@ -169,20 +175,25 @@ impl Detection {
     }
 
     /// Every occurrence of every value in `text`, for providers that name the values they
-    /// found but not where. A value is matched literally and as a whole word, so `John` is
-    /// not found in `Johnson`. A value with no exact occurrence is looked for ignoring case,
-    /// since a model may not copy a value letter for letter. Where occurrences overlap the
-    /// longest is kept, so a name and its first word are reported once. An empty value or a
-    /// repeated `(value, label)` pair adds nothing. Sorted by position.
+    /// found but not where. Occurrences are found ignoring case, since a model may not copy a
+    /// value letter for letter; the comparison lowercases each character on its own, with the
+    /// dotted `İ` taken as `i`, so `ß` and `SS` stay different. A value with whole-word
+    /// occurrences is reported there only (`John` is not reported inside `Johnson` when it
+    /// also stands alone); a value with none is reported wherever it occurs, because text in
+    /// scripts without spaces and inflected words have no word boundary around a value, and a
+    /// missed value is worse than an extra one. An occurrence inside a longer one is dropped, so
+    /// a name and its first word are reported once; partial overlaps are all kept. An empty
+    /// value or a repeated `(value, label)` pair adds nothing. Sorted by position.
     pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> Vec<Self> {
         let mut seen = HashSet::new();
         let mut findings = Vec::new();
         let mut unmatched = 0_usize;
+        let folded_text = FoldedText::new(text);
         for (value, label) in values {
             if value.is_empty() || !seen.insert((value, label)) {
                 continue;
             }
-            let ranges = whole_word_ranges(text, value);
+            let ranges = folded_text.occurrences_of(value);
             if ranges.is_empty() {
                 unmatched += 1;
             }
@@ -201,36 +212,91 @@ impl Detection {
                 "values named by the provider were not found in the text"
             );
         }
-        merge_findings(findings)
+        without_contained(findings)
             .into_iter()
             .map(|finding| Self::in_text(text, finding))
             .collect()
     }
 }
 
-/// The byte ranges of the whole-word occurrences of `value` in `text`: the exact ones, or
-/// when there are none, those that differ only in case.
-fn whole_word_ranges(text: &str, value: &str) -> Vec<(usize, usize)> {
-    let whole_words = |(start, end): &(usize, usize)| is_word_boundary(text, *start, *end);
-    let exact: Vec<(usize, usize)> = text
-        .match_indices(value)
-        .map(|(start, matched)| (start, start + matched.len()))
-        .filter(whole_words)
-        .collect();
-    if !exact.is_empty() {
-        return exact;
+/// A text lowercased one character at a time, with the byte offsets that map a position in
+/// the lowercased copy back to the original.
+struct FoldedText<'a> {
+    text: &'a str,
+    folded: String,
+    /// The byte index in `folded` of every character, then the length of `folded`.
+    folded_starts: Vec<usize>,
+    /// The byte index in `text` of the same characters, then the length of `text`.
+    original_starts: Vec<usize>,
+}
+
+impl<'a> FoldedText<'a> {
+    fn new(text: &'a str) -> Self {
+        let mut folded = String::with_capacity(text.len());
+        let mut folded_starts = Vec::with_capacity(text.len() + 1);
+        let mut original_starts = Vec::with_capacity(text.len() + 1);
+        for (index, character) in text.char_indices() {
+            original_starts.push(index);
+            folded_starts.push(folded.len());
+            folded.push(fold_character(character));
+        }
+        original_starts.push(text.len());
+        folded_starts.push(folded.len());
+        Self {
+            text,
+            folded,
+            folded_starts,
+            original_starts,
+        }
     }
-    let Ok(pattern) = RegexBuilder::new(&regex::escape(value))
-        .case_insensitive(true)
-        .build()
-    else {
-        return Vec::new();
-    };
-    pattern
-        .find_iter(text)
-        .map(|found| (found.start(), found.end()))
-        .filter(whole_words)
-        .collect()
+
+    /// The byte ranges of the original text where `value` occurs ignoring case: the
+    /// whole-word ones, or when there are none, all of them.
+    fn occurrences_of(&self, value: &str) -> Vec<(usize, usize)> {
+        let folded_value: String = value.chars().map(fold_character).collect();
+        let all: Vec<(usize, usize)> = self
+            .folded
+            .match_indices(&folded_value)
+            .filter_map(|(start, matched)| {
+                let first = self.folded_starts.binary_search(&start).ok()?;
+                let end = self
+                    .folded_starts
+                    .binary_search(&(start + matched.len()))
+                    .ok()?;
+                Some((self.original_starts[first], self.original_starts[end]))
+            })
+            .collect();
+        let whole_words: Vec<(usize, usize)> = all
+            .iter()
+            .copied()
+            .filter(|&(start, end)| is_word_boundary(self.text, start, end))
+            .collect();
+        if whole_words.is_empty() {
+            all
+        } else {
+            whole_words
+        }
+    }
+}
+
+/// The lowercase of `character` as a single character: the first one when the lowercase is
+/// longer, which turns `İ` into `i`.
+fn fold_character(character: char) -> char {
+    character.to_lowercase().next().unwrap_or(character)
+}
+
+/// `findings` sorted by position, without those that lie inside a longer one. Findings that
+/// only overlap are all kept: two providers' values can share words, and dropping either
+/// would leave part of the sensitive data unreported.
+fn without_contained(mut findings: Vec<Finding>) -> Vec<Finding> {
+    findings.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    let mut furthest_end = 0;
+    findings.retain(|finding| {
+        let contained = finding.end <= furthest_end;
+        furthest_end = furthest_end.max(finding.end);
+        !contained
+    });
+    findings
 }
 
 /// Converts the character offsets that text analysis services report into byte offsets of
@@ -460,11 +526,99 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_match_rules_out_the_case_insensitive_search() {
+    fn every_occurrence_is_found_whatever_its_case() {
         let person = DetectionLabel::new("PERSON");
         let detections = Detection::locate_values("john and John", &[("john".to_string(), person)]);
         let values: Vec<&str> = detections.iter().map(|d| d.value.as_str()).collect();
-        assert_eq!(values, ["john"]);
+        assert_eq!(values, ["john", "John"]);
+    }
+
+    #[test]
+    fn a_dotted_capital_i_matches_the_letter_i() {
+        let place = DetectionLabel::new("LOCATION");
+        let values_found = |text: &str, value: &str| -> Vec<String> {
+            Detection::locate_values(text, &[(value.to_string(), place.clone())])
+                .into_iter()
+                .map(|detection| detection.value)
+                .collect()
+        };
+        assert_eq!(
+            values_found("Flights to İstanbul", "istanbul"),
+            ["İstanbul"]
+        );
+        assert_eq!(
+            values_found("Flights to ISTANBUL", "İstanbul"),
+            ["ISTANBUL"]
+        );
+    }
+
+    #[test]
+    fn the_range_of_a_case_insensitive_match_is_in_bytes_of_the_original_text() {
+        let place = DetectionLabel::new("LOCATION");
+        let text = "Kelvin K, then İstanbul";
+        let detections = Detection::locate_values(text, &[("istanbul".to_string(), place)]);
+        let start = text.find('İ').unwrap();
+        assert_eq!(
+            detections[0].location,
+            DetectionLocation::Text {
+                start,
+                end: text.len()
+            }
+        );
+    }
+
+    #[test]
+    fn a_value_in_text_without_word_breaks_is_found() {
+        let person = DetectionLabel::new("PERSON");
+        let found = |text: &str, value: &str| -> Vec<String> {
+            Detection::locate_values(text, &[(value.to_string(), person.clone())])
+                .into_iter()
+                .map(|detection| detection.value)
+                .collect()
+        };
+        assert_eq!(
+            found("田中太郎さんに連絡してください", "田中太郎"),
+            ["田中太郎"]
+        );
+        assert_eq!(
+            found("電話は09012345678です", "09012345678"),
+            ["09012345678"]
+        );
+    }
+
+    #[test]
+    fn a_value_inside_an_inflected_word_is_found_when_it_has_no_whole_word_occurrence() {
+        let person = DetectionLabel::new("PERSON");
+        let detections =
+            Detection::locate_values("Herrn Müllers Adresse", &[("Müller".to_string(), person)]);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].value, "Müller");
+    }
+
+    #[test]
+    fn partially_overlapping_values_are_both_reported() {
+        let text = "Ana Lima Street 5";
+        let detections = Detection::locate_values(
+            text,
+            &[
+                ("Ana Lima".to_string(), DetectionLabel::new("PERSON")),
+                ("Lima Street 5".to_string(), DetectionLabel::new("ADDRESS")),
+            ],
+        );
+        let located: Vec<(DetectionLocation, &str)> = detections
+            .iter()
+            .map(|detection| (detection.location, detection.value.as_str()))
+            .collect();
+        assert_eq!(
+            located,
+            vec![
+                (DetectionLocation::Text { start: 0, end: 8 }, "Ana Lima"),
+                (
+                    DetectionLocation::Text { start: 4, end: 17 },
+                    "Lima Street 5"
+                ),
+            ]
+        );
     }
 
     #[test]

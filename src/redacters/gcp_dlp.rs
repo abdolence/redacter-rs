@@ -3,8 +3,8 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    unsupported_type_error, Detection, DetectionLabel, DetectionLocation, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    Detection, DetectionLabel, DetectionLocation, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -120,7 +120,7 @@ impl<'a> GcpDlpRedacter<'a> {
                     content,
                 })
             }
-            _ => Err(unsupported_type_error()),
+            _ => Err(AppError::unsupported_content()),
         }
     }
 
@@ -244,7 +244,7 @@ impl<'a> GcpDlpRedacter<'a> {
                         });
                     }
                 }
-                RedacterDataItemContent::Pdf { .. } => return Err(unsupported_type_error()),
+                RedacterDataItemContent::Pdf { .. } => return Err(AppError::unsupported_content()),
             }
         }
         Ok(detections)
@@ -365,7 +365,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
                 self.redact_image_file(input).await
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -397,7 +397,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
                 }
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(unsupported_type_error());
+                return Err(AppError::unsupported_content());
             }
         };
         let field_names = unique_field_names(&mut item);
@@ -410,19 +410,23 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
     }
 }
 
+const VERY_UNLIKELY_SCORE: Score = Score::from_static(0.1);
+const UNLIKELY_SCORE: Score = Score::from_static(0.3);
+const POSSIBLE_SCORE: Score = Score::from_static(0.5);
+const LIKELY_SCORE: Score = Score::from_static(0.7);
+const VERY_LIKELY_SCORE: Score = Score::from_static(0.9);
+
 /// A finding's likelihood read as a score. DLP gives five buckets and no number, so each gets a
-/// fixed score: very unlikely 0.1, unlikely 0.3, possible 0.5, likely 0.7, very likely 0.9. An
-/// unspecified bucket has no score.
+/// fixed score. An unspecified bucket has no score.
 fn likelihood_score(likelihood: dlp::Likelihood) -> Option<Score> {
-    let value = match likelihood {
-        dlp::Likelihood::VeryUnlikely => 0.1,
-        dlp::Likelihood::Unlikely => 0.3,
-        dlp::Likelihood::Possible => 0.5,
-        dlp::Likelihood::Likely => 0.7,
-        dlp::Likelihood::VeryLikely => 0.9,
-        dlp::Likelihood::Unspecified => return None,
-    };
-    Some(Score::try_from(value).expect("the bucket scores are constants between 0 and 1"))
+    match likelihood {
+        dlp::Likelihood::VeryUnlikely => Some(VERY_UNLIKELY_SCORE),
+        dlp::Likelihood::Unlikely => Some(UNLIKELY_SCORE),
+        dlp::Likelihood::Possible => Some(POSSIBLE_SCORE),
+        dlp::Likelihood::Likely => Some(LIKELY_SCORE),
+        dlp::Likelihood::VeryLikely => Some(VERY_LIKELY_SCORE),
+        dlp::Likelihood::Unspecified => None,
+    }
 }
 
 /// The finding's byte range within its containing text or table cell. DLP counts UTF-8 bytes.
