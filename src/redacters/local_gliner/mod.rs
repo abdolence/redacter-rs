@@ -10,11 +10,12 @@ pub use error::LocalGlinerError;
 
 use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
+use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, Detection, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent,
+    text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -204,7 +205,7 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
                 (RedacterDataItemContent::Table { headers, rows }, findings)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(unsupported_type_error())
+                return Err(AppError::unsupported_content())
             }
         };
         if findings > 0 {
@@ -249,7 +250,7 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }

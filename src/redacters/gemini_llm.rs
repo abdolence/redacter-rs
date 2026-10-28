@@ -3,11 +3,10 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, text_detection_messages,
-    unsupported_type_error, Detection, ImagePii, LlmImageMode, LlmTextFinding,
-    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters, GEMINI_COORDS_REDACTION_PROMPT,
-    NATIVE_IMAGE_REDACTION_PROMPT,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, Detection, ImagePii,
+    LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
+    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -345,7 +344,10 @@ impl<'a> GeminiLlmRedacter<'a> {
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
         let answer = self
             .generate_json(
-                text_detection_messages(text).map(text_part).into(),
+                TextDetectionPrompt::new(text)
+                    .messages()
+                    .map(text_part)
+                    .into(),
                 findings_schema(vec![
                     ("text", schema_of(gemini_api::Type::String)),
                     ("type", schema_of(gemini_api::Type::String)),
@@ -484,7 +486,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -509,7 +511,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
                     .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }

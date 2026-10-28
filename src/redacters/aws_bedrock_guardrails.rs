@@ -9,8 +9,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, unsupported_type_error, Detection, DetectionLabel, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters,
+    bedrock_error, Detection, DetectionLabel, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -176,7 +176,7 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 
@@ -195,7 +195,7 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
             )),
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 

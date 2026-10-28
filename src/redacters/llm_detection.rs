@@ -20,19 +20,32 @@ pub fn parse_answer<T: DeserializeOwned>(answer: &str) -> AppResult<T> {
     })
 }
 
-/// The four messages of a text detection request, in order: the instruction, the separator that
-/// opens the text, the text, and the separator that closes it. The text is untrusted, so it is
-/// fenced by a random separator the instruction tells the model to treat as data. The
-/// container of the answer is described by the API's response schema, or by the caller where
-/// the API has none.
-pub fn text_detection_messages(text: &str) -> [String; 4] {
-    let separator = format!("---{}", rand::rng().random::<u64>());
-    [
-        text_detection_instruction(&separator),
-        format!("{separator}\n"),
-        text.to_string(),
-        format!("{separator}\n"),
-    ]
+/// A text detection request: the instruction, the text, and the fence that surrounds the
+/// text. The text is untrusted, so it is fenced by a random separator the instruction tells
+/// the model to treat as data. The container of the answer is described by the API's response
+/// schema, or by the caller where the API has none.
+pub struct TextDetectionPrompt {
+    pub instruction: String,
+    /// Sent before and after the text.
+    pub fence: String,
+    pub text: String,
+}
+
+impl TextDetectionPrompt {
+    pub fn new(text: &str) -> Self {
+        let separator = format!("---{}", rand::rng().random::<u64>());
+        Self {
+            instruction: text_detection_instruction(&separator),
+            fence: format!("{separator}\n"),
+            text: text.to_string(),
+        }
+    }
+
+    /// The four messages in the order they are sent: the instruction, the fence that opens the
+    /// text, the text, and the fence that closes it.
+    pub fn messages(self) -> [String; 4] {
+        [self.instruction, self.fence.clone(), self.text, self.fence]
+    }
 }
 
 fn text_detection_instruction(separator: &str) -> String {
@@ -178,12 +191,13 @@ mod tests {
 
     #[test]
     fn the_text_is_fenced_by_the_separator_the_instruction_names() {
-        let [instruction, opening, text, closing] = text_detection_messages("John Smith");
+        let prompt = TextDetectionPrompt::new("John Smith");
 
+        assert!(prompt.fence.ends_with('\n'));
+        assert!(prompt.instruction.contains(prompt.fence.trim_end()));
+        let [_, opening, text, closing] = prompt.messages();
         assert_eq!(text, "John Smith");
         assert_eq!(opening, closing);
-        assert!(opening.ends_with('\n'));
-        assert!(instruction.contains(opening.trim_end()));
     }
 
     fn found_boxes(texts: &[Option<&str>]) -> ImagePii {

@@ -605,14 +605,6 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
     }
 }
 
-/// Raised when a redacter is handed content of a type it does not support: `redact_support`
-/// said no and the caller ignored it.
-pub(crate) fn unsupported_type_error() -> AppError {
-    AppError::SystemError {
-        message: "The redacter does not support this type of content".to_string(),
-    }
-}
-
 pub trait Redacter {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem>;
 

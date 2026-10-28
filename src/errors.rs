@@ -91,6 +91,14 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// A redacter was handed content of a type it does not support: `redact_support` said no
+    /// and the caller ignored it.
+    pub fn unsupported_content() -> Self {
+        Self::SystemError {
+            message: "The redacter does not support this type of content".to_string(),
+        }
+    }
+
     pub fn incomplete_result(redacter_type: RedacterType, missing: &'static str) -> Self {
         Self::IncompleteResult {
             redacter_type,

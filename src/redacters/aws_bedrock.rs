@@ -13,9 +13,9 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_messages, unsupported_type_error, Detection, ImagePii,
-    LlmImageMode, LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding,
+    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -509,15 +509,14 @@ impl<'a> AwsBedrockRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
-        let [instruction, opening_separator, content, closing_separator] =
-            text_detection_messages(text);
+        let prompt = TextDetectionPrompt::new(text);
         let message = Message::builder()
             .role(ConversationRole::User)
             .content(ContentBlock::Text(TEXT_DETECTION_ANSWER_FORMAT.to_string()))
-            .content(ContentBlock::Text(instruction))
-            .content(ContentBlock::Text(opening_separator))
-            .content(ContentBlock::Text(content))
-            .content(ContentBlock::Text(closing_separator))
+            .content(ContentBlock::Text(prompt.instruction))
+            .content(ContentBlock::Text(prompt.fence.clone()))
+            .content(ContentBlock::Text(prompt.text))
+            .content(ContentBlock::Text(prompt.fence))
             .build()
             .map_err(|err| AppError::AwsBedrockError {
                 message: format!("Failed to build the Bedrock request: {err}"),
@@ -568,7 +567,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -593,7 +592,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
                     .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }

@@ -6,9 +6,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, unsupported_type_error, CharOffsets, Detection, DetectionLabel,
-    DetectionLocation, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters, Score,
+    mask_detections, CharOffsets, Detection, DetectionLabel, DetectionLocation, RedactSupport,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -47,6 +46,15 @@ impl MsPresidioAnalyzedItem {
 }
 
 impl<'a> MsPresidioRedacter<'a> {
+    /// The error of a rejected request. The body is only logged at debug level: it can quote
+    /// the scanned text, and the error reaches the terminal and the scan report.
+    fn request_failure(status: reqwest::StatusCode, body: &str) -> AppError {
+        tracing::debug!(%status, body, "MS Presidio rejected the request");
+        AppError::SystemError {
+            message: format!("Failed to analyze text. HTTP status: {status}."),
+        }
+    }
+
     /// List of entity types that should be disallowed for redacting
     /// since they produce a lot of false positives
     const DISALLOW_ENTITY_TYPES: [&'static str; 1] = ["US_DRIVER_LICENSE"];
@@ -88,11 +96,7 @@ impl<'a> MsPresidioRedacter<'a> {
         {
             let response_status = response.status();
             let response_text = response.text().await.unwrap_or_default();
-            return Err(AppError::SystemError {
-                message: format!(
-                    "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                ),
-            });
+            return Err(Self::request_failure(response_status, &response_text));
         }
         Ok(response.json().await?)
     }
@@ -206,7 +210,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -248,7 +252,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
             RedacterDataItemContent::Value(text) => self.detect_text(text).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 
@@ -262,6 +266,16 @@ mod tests {
     use console::Term;
 
     use super::*;
+
+    #[test]
+    fn a_failed_request_does_not_repeat_the_response_body() {
+        let planted_value = "jane.doe@example.com";
+        let error = MsPresidioRedacter::request_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            &format!("Invalid text: {planted_value}"),
+        );
+        assert!(!error.to_string().contains(planted_value));
+    }
 
     /// An analyzer response as the Presidio service sends it: offsets count characters.
     const ANALYZER_RESPONSE: &str = r#"[

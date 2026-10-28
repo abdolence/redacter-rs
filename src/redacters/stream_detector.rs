@@ -56,11 +56,6 @@ impl<'a> DetectPlan<'a> {
         route: DetectRoute,
         item: &RedacterDataItem,
     ) -> AppResult<Vec<ScannedDetection>> {
-        let RedacterDataItemContent::Value(_) = &item.content else {
-            return Err(AppError::SystemError {
-                message: "Text detection needs a text item".to_string(),
-            });
-        };
         let mut detections = Vec::new();
         for redacter in self.routed(route) {
             detections.extend(redacter.checked_detect(item).await?);

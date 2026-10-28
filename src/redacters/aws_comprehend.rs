@@ -2,9 +2,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, unsupported_type_error, CharOffsets, Detection, DetectionLabel,
-    DetectionLocation, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters, Score,
+    mask_detections, CharOffsets, Detection, DetectionLabel, DetectionLocation, RedactSupport,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -120,7 +119,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 
@@ -136,7 +135,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             RedacterDataItemContent::Value(text) => self.detect_text(text).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(unsupported_type_error()),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 

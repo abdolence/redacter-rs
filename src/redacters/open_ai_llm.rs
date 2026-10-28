@@ -9,9 +9,9 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_messages, unsupported_type_error, Detection, ImagePii,
-    LlmImageMode, LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
+    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding,
+    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -71,6 +71,18 @@ enum OpenAiLlmAnalyzeMessageContent {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeMessageContentUrl {
     url: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiErrorResponse {
+    error: OpenAiErrorBody,
+}
+
+/// The identifying fields of an API error; its `message` is left out on purpose.
+#[derive(Deserialize)]
+struct OpenAiErrorBody {
+    r#type: Option<String>,
+    code: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -283,6 +295,22 @@ impl<'a> OpenAiLlmRedacter<'a> {
         }
     }
 
+    /// The error of a rejected request. It carries the status and OpenAI's error type and code
+    /// but not the body: the message of an API error can quote the scanned text, and the error
+    /// reaches the terminal and the scan report. The body is logged at debug level.
+    fn request_failure(status: reqwest::StatusCode, body: &str) -> AppError {
+        tracing::debug!(%status, body, "OpenAI rejected the request");
+        let identifiers = serde_json::from_str::<OpenAiErrorResponse>(body)
+            .map(|response| [response.error.r#type, response.error.code])
+            .unwrap_or_default();
+        let identifiers: Vec<String> = identifiers.into_iter().flatten().collect();
+        let mut message = format!("Failed to analyze text. HTTP status: {status}.");
+        if !identifiers.is_empty() {
+            message.push_str(&format!(" OpenAI error: {}.", identifiers.join(", ")));
+        }
+        AppError::SystemError { message }
+    }
+
     /// Sends a chat completion request and returns the content of its last choice.
     async fn complete(&self, request: &OpenAiLlmAnalyzeRequest) -> AppResult<String> {
         let response = self
@@ -304,11 +332,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         {
             let response_status = response.status();
             let response_text = response.text().await.unwrap_or_default();
-            return Err(AppError::SystemError {
-                message: format!(
-                    "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                ),
-            });
+            return Err(Self::request_failure(response_status, &response_text));
         }
         let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
         open_ai_response
@@ -333,18 +357,17 @@ impl<'a> OpenAiLlmRedacter<'a> {
             role: "system".to_string(),
             content: vec![OpenAiLlmAnalyzeMessageContent::Text { text }],
         };
-        let [instruction, opening_separator, content, closing_separator] =
-            text_detection_messages(text);
+        let prompt = TextDetectionPrompt::new(text);
         let request = OpenAiLlmAnalyzeRequest {
             model: self.model_name(),
             messages: vec![
-                system_message(instruction),
-                system_message(opening_separator),
+                system_message(prompt.instruction),
+                system_message(prompt.fence.clone()),
                 OpenAiLlmAnalyzeMessageRequest {
                     role: "user".to_string(),
-                    content: vec![OpenAiLlmAnalyzeMessageContent::Text { text: content }],
+                    content: vec![OpenAiLlmAnalyzeMessageContent::Text { text: prompt.text }],
                 },
-                system_message(closing_separator),
+                system_message(prompt.fence),
             ],
             response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
                 json_schema: OpenAiLlmJsonSchema {
@@ -484,7 +507,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -509,7 +532,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
                     .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -531,6 +554,22 @@ mod tests {
     use crate::redacters::{DetectionLocation, RedacterProviderOptions};
 
     use super::*;
+
+    const PLANTED_VALUE: &str = "jane.doe@example.com";
+
+    #[test]
+    fn a_failed_request_does_not_repeat_the_response_body() {
+        let bodies = [
+            format!(
+                r#"{{"error": {{"message": "Invalid input {PLANTED_VALUE}", "type": "invalid_request_error", "code": "string_above_max_length"}}}}"#
+            ),
+            format!("upstream said: {PLANTED_VALUE}"),
+        ];
+        for body in bodies {
+            let error = OpenAiLlmRedacter::request_failure(reqwest::StatusCode::BAD_REQUEST, &body);
+            assert!(!error.to_string().contains(PLANTED_VALUE), "{body}");
+        }
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-open-ai"), ignore)]

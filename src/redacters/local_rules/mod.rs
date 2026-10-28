@@ -13,10 +13,11 @@ pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
 pub use user_rules::UserMatcher;
 
 use crate::args::RedacterType;
+use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, Detection, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent,
+    text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -87,7 +88,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
                     .collect(),
             },
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(unsupported_type_error())
+                return Err(AppError::unsupported_content())
             }
         };
         if total_findings > 0 {
@@ -127,7 +128,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
                 Ok(detections)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(unsupported_type_error())
+                Err(AppError::unsupported_content())
             }
         }
     }
