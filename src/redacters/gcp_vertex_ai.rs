@@ -665,10 +665,14 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
-            RedacterDataItemContent::Image { mime_type, data } => Ok(self
-                .find_image_pii(mime_type, data)
-                .await?
-                .into_detections()),
+            RedacterDataItemContent::Image { mime_type, data } => {
+                self.find_image_pii(mime_type, data)
+                    .await?
+                    .into_labelled_detections(
+                        |text| async move { self.detect_in_text(&text).await },
+                    )
+                    .await
+            }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::SystemError {
                     message: "Attempt to detect in unsupported type".to_string(),

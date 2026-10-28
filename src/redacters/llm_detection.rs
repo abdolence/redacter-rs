@@ -2,9 +2,11 @@
 //! shape of the model's answer. A model names the values it found and their kind, so text
 //! offsets are located locally and image boxes are scaled back to the image as given.
 
-use crate::redacters::{Detection, DetectionLabel};
+use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImagePii};
 use crate::AppResult;
 use serde::Deserialize;
+use std::future::Future;
+use std::ops::Range;
 
 /// Instruction for the text detection pass. The input is untrusted text, so it is fenced by a
 /// random separator the model is told to treat as data. The container of the answer is
@@ -50,10 +52,70 @@ impl LlmTextFinding {
     }
 }
 
+impl ImagePii {
+    /// The boxes as detections, each labelled with the kind the text detection gives the
+    /// text in it. The box texts go through `detect_text` as one text, a line per box, in a
+    /// single call made only when some box has text. A box whose text no finding overlaps
+    /// keeps the label of [`ImagePii::into_detections`].
+    pub async fn into_labelled_detections<DetectText, DetectTextFuture>(
+        self,
+        detect_text: DetectText,
+    ) -> AppResult<Vec<Detection>>
+    where
+        DetectText: FnOnce(String) -> DetectTextFuture,
+        DetectTextFuture: Future<Output = AppResult<Vec<Detection>>>,
+    {
+        let mut joined = String::new();
+        let box_ranges: Vec<Option<Range<usize>>> = self
+            .coords
+            .iter()
+            .map(|coords| {
+                let text = coords.text.as_deref().filter(|text| !text.is_empty())?;
+                if !joined.is_empty() {
+                    joined.push('\n');
+                }
+                let start = joined.len();
+                joined.push_str(text);
+                Some(start..joined.len())
+            })
+            .collect();
+        let mut detections = self.into_detections();
+        if joined.is_empty() {
+            return Ok(detections);
+        }
+        let findings: Vec<(Range<usize>, DetectionLabel)> = detect_text(joined)
+            .await?
+            .into_iter()
+            .filter_map(|finding| match finding.location {
+                DetectionLocation::Text { start, end } => Some((start..end, finding.label)),
+                _ => None,
+            })
+            .collect();
+        for (detection, box_range) in detections.iter_mut().zip(box_ranges) {
+            let Some(box_range) = box_range else {
+                continue;
+            };
+            let overlap = |finding: &Range<usize>| {
+                finding
+                    .end
+                    .min(box_range.end)
+                    .saturating_sub(finding.start.max(box_range.start))
+            };
+            if let Some((_, label)) = findings
+                .iter()
+                .filter(|(finding, _)| overlap(finding) > 0)
+                .max_by_key(|(finding, _)| overlap(finding))
+            {
+                detection.label = label.clone();
+            }
+        }
+        Ok(detections)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::DetectionLocation;
 
     #[test]
     fn text_findings_are_located_at_every_occurrence() {
@@ -88,6 +150,97 @@ mod tests {
             ]
         );
         assert!(detections.iter().all(|d| d.score.is_none()));
+    }
+
+    fn found_boxes(texts: &[Option<&str>]) -> ImagePii {
+        ImagePii {
+            image: crate::redacters::PreparedImage {
+                format: image::ImageFormat::Png,
+                data: Default::default(),
+                width: 100,
+                height: 100,
+                original_width: 100,
+                original_height: 100,
+            },
+            coords: texts
+                .iter()
+                .map(|text| crate::common_types::TextImageCoords {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 10.0,
+                    y2: 10.0,
+                    text: text.map(str::to_string),
+                    line: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn text_detection(label: &str, start: usize, end: usize) -> Detection {
+        Detection {
+            label: DetectionLabel::new(label),
+            location: DetectionLocation::Text { start, end },
+            score: None,
+            value: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_box_takes_the_kind_of_the_finding_that_covers_most_of_its_text() {
+        let found = found_boxes(&[
+            Some("John Michael Smith"),
+            Some("a@b.com"),
+            Some("unclassified"),
+            None,
+        ]);
+        let asked = std::cell::RefCell::new(None);
+
+        let detections = found
+            .into_labelled_detections(|text| {
+                *asked.borrow_mut() = Some(text);
+                // The joined text is "John Michael Smith\na@b.com\nunclassified": the
+                // findings are the whole name, its first word, and the email address.
+                async {
+                    Ok(vec![
+                        text_detection("person_name", 0, 18),
+                        text_detection("given_name", 0, 4),
+                        text_detection("email_address", 19, 26),
+                    ])
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            asked.into_inner().as_deref(),
+            Some("John Michael Smith\na@b.com\nunclassified")
+        );
+        let labels: Vec<_> = detections.iter().map(|d| d.label.to_string()).collect();
+        assert_eq!(
+            labels,
+            [
+                "person_name",
+                "email_address",
+                "personal_information",
+                "personal_information"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_text_detection_is_made_when_no_box_has_text() {
+        let called = std::cell::Cell::new(false);
+
+        let detections = found_boxes(&[None, Some("")])
+            .into_labelled_detections(|_| {
+                called.set(true);
+                async { Ok(Vec::new()) }
+            })
+            .await
+            .unwrap();
+
+        assert!(!called.get());
+        assert_eq!(detections.len(), 2);
     }
 
     #[test]
@@ -125,11 +278,23 @@ pub mod live_detection {
 
     /// Pixel boxes `[x1, y1, x2, y2]` of values in `form-example.png` at its own 1000 px
     /// width, measured from the dark pixels of each field.
-    const FORM_VALUES: [(&str, [f32; 4]); 4] = [
-        ("John Michael Smith", [309.0, 125.0, 536.0, 147.0]),
-        ("john.smith@example.com", [310.0, 195.0, 619.0, 217.0]),
-        ("+1 (555) 123-4567", [313.0, 265.0, 537.0, 285.0]),
-        ("4111 1111 1111 1111", [311.0, 545.0, 574.0, 562.0]),
+    const FORM_VALUES: [(&str, [f32; 4], Option<&str>); 4] = [
+        (
+            "John Michael Smith",
+            [309.0, 125.0, 536.0, 147.0],
+            Some("name"),
+        ),
+        (
+            "john.smith@example.com",
+            [310.0, 195.0, 619.0, 217.0],
+            Some("email"),
+        ),
+        (
+            "+1 (555) 123-4567",
+            [313.0, 265.0, 537.0, 285.0],
+            Some("phone"),
+        ),
+        ("4111 1111 1111 1111", [311.0, 545.0, 574.0, 562.0], None),
     ];
 
     pub fn note_item() -> RedacterDataItem {
@@ -197,14 +362,19 @@ pub mod live_detection {
     /// much larger than it.
     pub fn assert_form_found(detections: &[Detection]) {
         let scale = FORM_WIDTH as f32 / FORM_FIXTURE_WIDTH as f32;
-        for (value, expected) in FORM_VALUES {
+        for (value, expected, label_word) in FORM_VALUES {
             let expected = expected.map(|pixel| pixel * scale);
-            let found = detections
-                .iter()
-                .any(|detection| matches!(detection.location, DetectionLocation::Image { x1, y1, x2, y2, .. } if covers([x1, y1, x2, y2], expected)));
+            let found = detections.iter().any(|detection| {
+                matches!(
+                    detection.location,
+                    DetectionLocation::Image { x1, y1, x2, y2, .. }
+                        if covers([x1, y1, x2, y2], expected)
+                ) && label_word
+                    .is_none_or(|word| detection.label.to_string().to_lowercase().contains(word))
+            });
             assert!(
                 found,
-                "no box covers {value} at {expected:?} in {detections:?}"
+                "no box covers {value} at {expected:?} under a label with {label_word:?} in {detections:?}"
             );
         }
     }

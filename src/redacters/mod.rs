@@ -217,8 +217,8 @@ pub struct PreparedImage {
     pub original_height: u32,
 }
 
-/// The kind a detection in an image carries: the coordinate pass locates text a model takes
-/// for personal information, and does not classify it.
+/// The kind of a box in an image whose text no text detection classified: the coordinate pass
+/// locates text a model takes for personal information, and does not classify it.
 const IMAGE_DETECTION_LABEL: &str = "personal_information";
 
 /// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
