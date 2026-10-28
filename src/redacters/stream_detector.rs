@@ -826,6 +826,32 @@ mod tests {
             .all(|scanned| scanned.redacter() == RedacterType::LocalRules));
     }
 
+    #[tokio::test]
+    async fn an_image_format_ocr_cannot_decode_is_blocked_and_reports_nothing() {
+        let mut converters = FileConverters::new();
+        converters.ocr = Some(Box::new(FakeOcr {
+            words: form_words(),
+        }));
+        let redacters = vec![email_and_phone_rules().await];
+
+        for media_type in [mime::IMAGE_SVG, "image/heic".parse().unwrap()] {
+            let result = scan(
+                &converters,
+                &redacters,
+                &file_ref("picture", media_type.clone()),
+                white_png(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.blocked,
+                Some(RedactionBlocked::OcrImageFormatNotSupported),
+                "{media_type}"
+            );
+            assert!(result.detections.is_empty(), "{media_type}");
+        }
+    }
+
     #[cfg(feature = "pdf-render")]
     #[tokio::test]
     async fn every_page_of_a_pdf_is_read_and_named() {

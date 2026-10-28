@@ -410,21 +410,15 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
     }
 }
 
-const VERY_UNLIKELY_SCORE: Score = Score::from_static(0.1);
-const UNLIKELY_SCORE: Score = Score::from_static(0.3);
-const POSSIBLE_SCORE: Score = Score::from_static(0.5);
-const LIKELY_SCORE: Score = Score::from_static(0.7);
-const VERY_LIKELY_SCORE: Score = Score::from_static(0.9);
-
 /// A finding's likelihood read as a score. DLP gives five buckets and no number, so each gets a
 /// fixed score. An unspecified bucket has no score.
 fn likelihood_score(likelihood: dlp::Likelihood) -> Option<Score> {
     match likelihood {
-        dlp::Likelihood::VeryUnlikely => Some(VERY_UNLIKELY_SCORE),
-        dlp::Likelihood::Unlikely => Some(UNLIKELY_SCORE),
-        dlp::Likelihood::Possible => Some(POSSIBLE_SCORE),
-        dlp::Likelihood::Likely => Some(LIKELY_SCORE),
-        dlp::Likelihood::VeryLikely => Some(VERY_LIKELY_SCORE),
+        dlp::Likelihood::VeryUnlikely => Some(const { Score::from_static(0.1) }),
+        dlp::Likelihood::Unlikely => Some(const { Score::from_static(0.3) }),
+        dlp::Likelihood::Possible => Some(const { Score::from_static(0.5) }),
+        dlp::Likelihood::Likely => Some(const { Score::from_static(0.7) }),
+        dlp::Likelihood::VeryLikely => Some(const { Score::from_static(0.9) }),
         dlp::Likelihood::Unspecified => None,
     }
 }

@@ -309,12 +309,15 @@ impl<'a> GcpVertexAiRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+        let prompt = TextDetectionPrompt::new(text);
         let answer = self
             .generate_json(
-                TextDetectionPrompt::new(text)
-                    .messages()
-                    .map(text_part)
-                    .into(),
+                vec![
+                    text_part(prompt.instruction),
+                    text_part(prompt.fence.clone()),
+                    text_part(prompt.text),
+                    text_part(prompt.fence),
+                ],
                 findings_schema(vec![
                     ("text", schema_of(vertex_api::Type::String)),
                     ("type", schema_of(vertex_api::Type::String)),

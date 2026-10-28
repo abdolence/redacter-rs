@@ -40,12 +40,6 @@ impl TextDetectionPrompt {
             text: text.to_string(),
         }
     }
-
-    /// The four messages in the order they are sent: the instruction, the fence that opens the
-    /// text, the text, and the fence that closes it.
-    pub fn messages(self) -> [String; 4] {
-        [self.instruction, self.fence.clone(), self.text, self.fence]
-    }
 }
 
 fn text_detection_instruction(separator: &str) -> String {
@@ -195,9 +189,6 @@ mod tests {
 
         assert!(prompt.fence.ends_with('\n'));
         assert!(prompt.instruction.contains(prompt.fence.trim_end()));
-        let [_, opening, text, closing] = prompt.messages();
-        assert_eq!(text, "John Smith");
-        assert_eq!(opening, closing);
     }
 
     fn found_boxes(texts: &[Option<&str>]) -> ImagePii {

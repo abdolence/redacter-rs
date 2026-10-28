@@ -718,6 +718,10 @@ mod tests {
                 file_ref("logo.svg", mime::IMAGE_SVG),
                 NotRedactedReason::OcrImageFormatNotSupported,
             ),
+            (
+                file_ref("photo.heic", "image/heic".parse().unwrap()),
+                NotRedactedReason::OcrImageFormatNotSupported,
+            ),
         ] {
             let unsupported = scan_of(file, reason);
             assert_eq!(
