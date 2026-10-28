@@ -4,8 +4,10 @@
 
 # Redacter
 
-Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII)
-across various sources and destinations and utilizing Data Leak/Loss Prevention (DLP) capabilities.
+Detect & Redact cli tool to find Personal Identifiable Information (PII) in files, and to securely copy and redact
+files removing it, across various sources and destinations and utilising Data Leak/Loss Prevention (DLP) capabilities.
+`redacter cp` copies files and redacts them on the way; `redacter scan` only reads them and reports what was found and
+where, with an exit code a CI pipeline can gate on.
 
 The tool ships two redacters that run entirely on your machine, a rule-based one with checksum validation and a
 small multilingual named-entity model, and can also delegate to cloud DLP services and LLMs such as Google Cloud
@@ -17,6 +19,8 @@ find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for 
 ## Features
 
 * **Copy & Redact:**  copy files while applying DLP redaction to protect sensitive information.
+* **Scan:** detect sensitive information in files without changing them, with the same providers, and report what was
+  found and where as text or JSON. See [Scan command](#scan-command).
 * **Multiple Sources & Destinations:** interact with:
     * Local filesystem
     * Google Cloud Storage (GCS)
@@ -241,8 +245,14 @@ Options:
       --mime-override <MIME_OVERRIDE>
           Override media type detection using glob patterns such as 'text/plain=*.md'
 
-      --save-json-results <SAVE_JSON_RESULTS>
-          Save redacted results in JSON format to the specified file
+      --report-file <REPORT_FILE>
+          Write the report to this file
+
+      --report-format <REPORT_FORMAT>
+          Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'
+          
+          [default: json]
+          [possible values: json, text]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -251,6 +261,11 @@ Options:
 DLP is optional and should be enabled with `--redact` (`-d`) option.
 Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
+
+`--report-file` saves the result of the command to a file: `files_copied`, `files_redacted` and `files_skipped`
+as JSON by default, or the same three counts as text with `--report-format text`. The terminal output is the same
+with or without it. `--report-file` and `--report-format` replace `--save-json-results` of earlier versions, which
+is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
 
 ## Source and destinations
 
@@ -401,7 +416,8 @@ aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
 
 The `local-rules` redacter runs entirely on your machine. It finds pattern-shaped personal information
 with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
-national checks for identifiers) and replaces each match with `[REDACTED]`.
+national checks for identifiers) and replaces each match with `[REDACTED]`. With `redacter scan` it reports
+the matches instead, labelled with the name of the rule, see [Scan command](#scan-command).
 
 On an image or a PDF, the file first goes through the OCR engine: every word it recognises is passed
 to the redacter (and, with more than one `-d`, to the whole chain in turn) as if it were reading the
@@ -675,6 +691,8 @@ When multiple redacters are specified, the tool first tries to redact the file u
 files natively.
 Only if such redacters are not available, the tool will try to redact the file using the redacters using conversions.
 
+`scan` does not chain the redacters: each one reads the original file and reports its own findings.
+
 ## PDF redaction
 
 PDF redaction is supported by rendering PDF files as images and redacting them.
@@ -851,6 +869,265 @@ Redact an image from clipboard:
 redacter cp clipboard:// tmp/image/ ...
 ```
 
+## Scan command
+
+The `scan` command runs the selected redacters in detect-only mode. It reads every file of the source and reports each
+piece of sensitive data it detects and where it is, called a finding. Nothing is copied or changed, so there is no
+destination.
+
+```
+redacter scan [OPTIONS] --redact <REDACT> <SOURCE>
+```
+
+The source is anything `cp` reads: a local file or directory, GCS, S3 or a zip archive. The options that select and
+configure the redacters are the ones of `cp`. Specific to `scan`, or worth knowing about:
+
+- `-d`, `--redact`: the redacters to run, at least one; repeat the option for more. Every redacter reads the same
+  original file on its own, with no chain and no merge between them, so a value found by two redacters is reported
+  twice, once for each;
+- `-m`, `-n`, `-f`, `--mime-override`, `--sampling-size`, `--csv-headers-disable`, `--csv-delimiter`: as in `cp`;
+- `--report-file <FILE>`: write the report to a file, besides the terminal output;
+- `--report-format <json|text>`: the format of that file, `json` by default; requires `--report-file`;
+- `--show-values`: show the matched values instead of masking them;
+- `--min-score <0..1>`: drop the findings that have a score below this value;
+- `--no-fail`: exit with 0 when there are findings.
+
+```sh
+redacter scan tmp/source/ -d local-rules
+```
+
+```
+Redacter v0.20.0 (https://github.com/abdolence/redacter-rs)
+Scanning tmp/source/ with local-rules. PDF rendering: no · OCR: no
+
+customers.csv:1:2  email  local-rules  -  j***m
+customers.csv:2:2  email  local-rules  -  j***g
+notes.txt:1:10  email  local-rules  -  j***m
+notes.txt:2:8  phone-international  local-rules  -  +***8
+notes.txt:3:7  payment-card  local-rules  -  4***1
+
+3 files: 2 with findings, 1 clean, 0 skipped, 0 unsupported. 5 findings: email 3, payment-card 1, phone-international 1.
+```
+
+A finding is one line: the location, the label, the redacter that found it, the score and the value. A file without
+findings has no line, as with `grep`. The location depends on the content:
+
+- text: `path:line:column`, both counted from 1, the column in characters;
+- a cell of a CSV table: `path:row:column`, both counted from 1, the header row not counted;
+- an image: `path:[x1,y1,x2,y2]`, a box in pixels of the image;
+- a page of a PDF file: `path:page:[x1,y1,x2,y2]`, the page counted from 1 and the box in pixels of the rendered page.
+
+On an image or a PDF page the box covers the words OCR recognised for the matched text. A redacter that reads
+images itself reports the box it found.
+
+A file that is not scanned or failed gets a line with the reason instead, such as
+`customer-form.pdf  blocked: pdf renderer unavailable` or `blob.bin  unsupported: type not supported`.
+
+### Masking
+
+Values are masked by default, so a report can be shared without spreading what it found: the first and the last
+character with `***` between them for a value of 6 or more characters, and `***` for a shorter one. There is no
+hash of the value, since a hash of a phone number or an ID can be reversed by trying every candidate.
+
+`--show-values` shows the values as found, in the terminal output and in the report file.
+Be aware that a report written with `--show-values` contains the sensitive data itself.
+
+### Scores
+
+A score is the confidence of the redacter that the value is what the label says, between 0 and 1. The local-ner,
+local-gliner, AWS Comprehend, Microsoft Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
+redacters and AWS Bedrock Guardrails do not: their findings show `-` in the terminal and `null` in the JSON report.
+
+`--min-score` drops the findings below the given score. A finding without a score is kept, so the option never hides
+what a rule-based or an LLM redacter found.
+
+```sh
+redacter scan test-fixtures/documents/customer-note.txt -d local-rules -d local-ner --min-score 0.9
+```
+
+```
+customer-note.txt:4:8  email  local-rules  -  j***m
+customer-note.txt:5:8  phone-international  local-rules  -  +***7
+customer-note.txt:6:16  birth-date  local-rules  -  1***5
+customer-note.txt:7:36  uk-postcode  local-rules  -  N***E
+customer-note.txt:10:14  phone-international  local-rules  -  +***7
+customer-note.txt:10:57  email  local-rules  -  j***m
+customer-note.txt:11:34  payment-card  local-rules  -  4***1
+customer-note.txt:3:11  per  local-ner  1.00  J***h
+customer-note.txt:7:15  loc  local-ner  0.96  B***t
+customer-note.txt:7:29  loc  local-ner  1.00  L***n
+customer-note.txt:9:1  per  local-ner  0.99  ***
+```
+
+Without `--min-score` the same scan also reports `customer-note.txt:7:10  loc  local-ner  0.59  ***`. Every
+local-rules finding is kept in both runs.
+
+GCP DLP does not give a number. It rates each finding with a likelihood, one of five levels of how likely the
+value is to be of the reported info type, and `scan` turns it into a fixed score:
+
+| DLP likelihood | Score |
+|---|---|
+| `VERY_UNLIKELY` | 0.1 |
+| `UNLIKELY` | 0.3 |
+| `POSSIBLE` | 0.5 |
+| `LIKELY` | 0.7 |
+| `VERY_LIKELY` | 0.9 |
+
+A finding with an unspecified likelihood has no score.
+
+`--local-ner-min-score` and `--local-gliner-min-score` work as in `cp`: a local-ner or local-gliner finding is only
+reported when its score reaches them (0.5 by default).
+
+### Exit codes
+
+- `0`: nothing was found, or `--no-fail` is set;
+- `2`: at least one finding was reported;
+- `1`: an error. A file that a redacter failed on is reported with the status `failed`, the other files are still
+  scanned, and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command
+  line exits with 1 as well, so that 2 always means findings.
+
+Skipped and unsupported files do not change the exit code. `--no-fail` does not change an error exit code.
+
+A gate in a CI pipeline is the command itself, as the job fails on a non-zero exit code:
+
+```sh
+# Exits with 2 and fails the job when anything is found
+redacter scan ./docs -d local-rules --report-file scan-report.json
+
+# Writes the same report and always exits with 0, for a first run over an existing tree
+redacter scan ./docs -d local-rules --report-file scan-report.json --no-fail
+```
+
+### JSON report
+
+`--report-file <FILE>` writes the report to a file in JSON by default. The terminal always shows the usual output,
+whatever the report options are; there is no mode that prints the JSON to stdout.
+
+```json
+{
+  "files_scanned": 1,
+  "files_with_findings": 1,
+  "files_skipped": 0,
+  "files_unsupported": 0,
+  "files_failed": 0,
+  "findings": 2,
+  "findings_by_label": {
+    "email": 1,
+    "payment-card": 1
+  },
+  "files": [
+    {
+      "path": "notes.txt",
+      "mime_type": "text/plain",
+      "status": "scanned",
+      "reason": null,
+      "findings": [
+        {
+          "redacter": "local-rules",
+          "label": "email",
+          "score": null,
+          "location": {
+            "kind": "text",
+            "start": 9,
+            "end": 29,
+            "line": 1,
+            "column": 10
+          },
+          "value": "j***m"
+        },
+        {
+          "redacter": "local-rules",
+          "label": "payment-card",
+          "score": null,
+          "location": {
+            "kind": "text",
+            "start": 36,
+            "end": 55,
+            "line": 2,
+            "column": 7
+          },
+          "value": "4***1"
+        }
+      ]
+    }
+  ]
+}
+```
+
+At the top level:
+
+- `files_scanned`: files read by the redacters, with or without findings;
+- `files_with_findings`, `findings`: how many files and how many findings the report has;
+- `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`;
+- `files_unsupported`: files that no selected redacter reads, or that need a converter the run lacks, such as OCR or
+  PDF rendering;
+- `files_failed`: files that a redacter failed on;
+- `findings_by_label`: the number of findings for each label;
+- `files`: one entry for every file that was scanned, unsupported or failed. Files that the filters leave out of a
+  directory listing are only counted in `files_skipped`.
+
+Each entry of `files` has the `path` relative to the source, the `mime_type`, the `status` and the `findings` of the
+file. The `status` is `scanned`, `unsupported`, `blocked` (a converter is missing, counted in `files_unsupported`),
+`skipped` or `failed`. The `reason` is `null` for a scanned file and says why for the others.
+
+Each finding has the `redacter` that found it, the `label`, the `score` (`null` when the redacter gives none), the
+`location` and the `value`, masked unless `--show-values` is set. The `location` has a `kind`:
+
+- `text`: `start` and `end` are byte offsets in the text of the file, with the `line` and `column` of the start;
+- `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
+  cell, for example `{"kind":"table_cell","row":1,"column":2,"start":0,"end":20}`;
+- `image`: the box `x1`, `y1`, `x2`, `y2` in pixels, and the `page` of a PDF file counted from 1 (`null` for an image),
+  for example `{"kind":"image","page":null,"x1":308.0,"y1":192.0,"x2":621.0,"y2":219.0}`.
+
+Fields are only ever added to the report, never renamed or removed.
+
+### Text report
+
+`--report-format text` writes what the terminal shows for the files and the summary, without colours.
+
+```sh
+redacter scan tmp/source/ -d local-rules --report-file scan-report.txt --report-format text
+```
+
+```
+notes.txt:1:10  email  local-rules  -  j***m
+notes.txt:2:7  payment-card  local-rules  -  4***1
+
+1 file: 1 with findings, 0 clean, 0 skipped, 0 unsupported. 2 findings: email 1, payment-card 1.
+```
+
+### Detection per redacter
+
+Each redacter detects in its own way and names the data with its own labels. The labels are not translated between
+redacters: an email address is `email` for local-rules, `EMAIL_ADDRESS` for GCP DLP and Microsoft Presidio and `EMAIL`
+for AWS Comprehend.
+
+| Redacter | Label | Score | Images and PDF pages |
+|---|---|---|---|
+| `local-rules` | The rule name, such as `email` or `payment-card`, see [docs/local-rules.md](docs/local-rules.md) | None | OCR |
+| `local-ner` | `per`, `org` or `loc` | Model confidence | OCR |
+| `local-gliner` | The label from `--local-gliner-labels`, such as `person` | Model confidence | OCR |
+| `gcp-dlp` | The info type, such as `EMAIL_ADDRESS` | From the likelihood, see [Scores](#scores) | Read by DLP, which reports the boxes |
+| `aws-comprehend` | The PII entity type, such as `EMAIL` | Model confidence | OCR |
+| `ms-presidio` | The entity type, such as `EMAIL_ADDRESS` | Presidio score | OCR |
+| `aws-bedrock-guardrails` | The PII type of the guardrail, or the name of its regex | None | OCR |
+| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
+
+- Images and PDF pages go through OCR for the redacters that cannot read images, and need the OCR models and, for PDF
+  files, Pdfium, as for redaction. Without them the file is reported as `blocked`.
+- A CSV file is read as a table by the redacters that support tables, and the findings have a `table_cell` location.
+  A redacter that reads text but not tables, such as Microsoft Presidio, gets the file as plain text.
+- Microsoft Presidio needs `--ms-presidio-text-analyze-url` to detect. The image redaction endpoint reports no
+  locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
+  as unsupported.
+- The LLM redacters ask the model for the sensitive values in the text with a type for each, and report every
+  occurrence of each value. Findings from a model can overlap, for example a full name and the first name in it.
+  For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
+  `--llm-image-mode` has no effect on `scan`.
+- AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by
+  searching the text for the value.
+- The Gemini API and OpenAI detection paths have no live test.
+
 ## List (LS) command
 
 For convenience, the tool also supports listing files in the source directory so you can see what files will be copied:
@@ -875,7 +1152,9 @@ redacter ls gs://my-little-bucket/my-big-files/
 
 ## Security considerations
 
-- Your file contents are sent to the DLP API for redaction. Make sure you trust the DLP API provider.
+- Your file contents are sent to the DLP API for redaction or scanning. Make sure you trust the DLP API provider.
+- A scan report masks the values it found unless `--show-values` is set. A report written with `--show-values` contains
+  the sensitive data itself, so store it as you would the files it came from.
 - The local redacters (`local-rules`, `local-ner`, `local-gliner`) send nothing anywhere. Their model
   files are fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
