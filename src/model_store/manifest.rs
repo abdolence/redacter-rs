@@ -1,23 +1,50 @@
 use std::path::PathBuf;
 
-/// A model the tool can install.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelId {
-    // Only the ocr feature resolves this today; gated so a `--no-default-features` (or
-    // pdf-render-only) build does not carry an unreachable variant.
+/// An optional part of the tool that only `redacter setup-addons` downloads. Each variant
+/// exists only in builds with its feature, so the subcommand never offers an addon the build
+/// cannot use; test builds keep them all so every manifest is checked in every build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Addon {
+    /// The OCR models.
     #[cfg(any(feature = "ocr", test))]
-    Ocrs,
-    // Only the local-ner feature resolves this one; gated for the same reason as `Ocrs`, so
-    // a build without either feature carries an unreachable variant rather than an
-    // `#[allow(dead_code)]` that would also hide a real regression.
+    Ocr,
+    /// The Pdfium library that renders PDF pages.
+    #[cfg(any(feature = "pdf-render", test))]
+    Pdf,
+    /// The model of the local-ner redacter.
     #[cfg(any(feature = "local-ner", test))]
-    NerMultilingualHrl,
-    // Only the local-gliner feature resolves this one; gated for the same reason as `Ocrs`.
+    LocalNer,
+    /// The model of the local-gliner redacter.
     #[cfg(any(feature = "local-gliner", test))]
-    GlinerMultiPii,
+    LocalGliner,
 }
 
-/// One file of a model: where it comes from and what it must look like on disk.
+impl Addon {
+    /// The files this addon installs, or `None` on a platform it has no build for.
+    pub fn manifest(self) -> Option<&'static ModelManifest> {
+        match self {
+            #[cfg(any(feature = "ocr", test))]
+            Addon::Ocr => Some(&OCRS),
+            #[cfg(any(feature = "pdf-render", test))]
+            Addon::Pdf => super::pdfium::PDFIUM.as_ref(),
+            #[cfg(any(feature = "local-ner", test))]
+            Addon::LocalNer => Some(&NER_MULTILINGUAL_HRL),
+            #[cfg(any(feature = "local-gliner", test))]
+            Addon::LocalGliner => Some(&GLINER_MULTI_PII),
+        }
+    }
+}
+
+/// The name `setup-addons` takes.
+impl std::fmt::Display for Addon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = clap::ValueEnum::to_possible_value(self)
+            .expect("no addon is hidden from the command line");
+        f.write_str(value.get_name())
+    }
+}
+
+/// One file of an addon: where it comes from and what it must look like on disk.
 #[derive(Debug)]
 pub struct ModelFile {
     pub name: &'static str,
@@ -26,20 +53,17 @@ pub struct ModelFile {
     pub sha256: &'static str,
 }
 
-/// Everything the store knows about one model, declared once.
+/// Everything the store knows about the files of one addon, declared once.
 #[derive(Debug)]
 pub struct ModelManifest {
-    /// Directory name under the models root; also the model's name in messages.
+    /// Directory name under the models root.
     pub dir_name: &'static str,
-    /// Subject of the consent prompt, e.g. "OCR" or "The local-ner redacter".
-    pub needed_by: &'static str,
-    /// The `from` line of the consent prompt.
-    pub source: &'static str,
-    /// The `license` line of the consent prompt.
-    pub license: &'static str,
     pub files: &'static [ModelFile],
     /// Directories from earlier versions where a manual copy may still live; never verified.
     pub legacy_dirs: fn() -> Vec<PathBuf>,
+    /// Native code the process loads and runs. A lookup checks its SHA-256 every time; a
+    /// model is only data and is checked by size, so a run never hashes a gigabyte.
+    pub native_code: bool,
 }
 
 #[cfg(any(feature = "local-ner", test))]
@@ -74,8 +98,13 @@ static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
     },
 ];
 
-/// A model that has never lived anywhere but the managed root.
-#[cfg(any(feature = "local-ner", feature = "local-gliner", test))]
+/// An addon that has never lived anywhere but the models root.
+#[cfg(any(
+    feature = "local-ner",
+    feature = "local-gliner",
+    feature = "pdf-render",
+    test
+))]
 pub(super) fn no_legacy_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -148,43 +177,26 @@ fn ocrs_legacy_dirs() -> Vec<PathBuf> {
 #[cfg(any(feature = "ocr", test))]
 static OCRS: ModelManifest = ModelManifest {
     dir_name: "ocrs",
-    needed_by: "OCR",
-    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1 (ocrs models)",
-    license: "ocrs, MIT OR Apache-2.0; weights trained on open, liberally licensed datasets",
     files: &OCRS_FILES,
     legacy_dirs: ocrs_legacy_dirs,
+    native_code: false,
 };
 
 #[cfg(any(feature = "local-ner", test))]
 static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
     dir_name: "distilbert-base-multilingual-cased-ner-hrl",
-    needed_by: "The local-ner redacter",
-    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1 (Xenova/distilbert-base-multilingual-cased-ner-hrl, revision c2a4dbf)",
-    license: "Academic Free License 3.0 (AFL-3.0), see the model card",
     files: &NER_MULTILINGUAL_HRL_FILES,
     legacy_dirs: no_legacy_dirs,
+    native_code: false,
 };
 
 #[cfg(any(feature = "local-gliner", test))]
 static GLINER_MULTI_PII: ModelManifest = ModelManifest {
     dir_name: "gliner_multi_pii-v1",
-    needed_by: "The local-gliner redacter",
-    source: "https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1 (onnx-community/gliner_multi_pii-v1, revision 2e0397a7)",
-    license: "Apache-2.0 (model and training data), backbone microsoft/mdeberta-v3-base MIT",
     files: &GLINER_MULTI_PII_FILES,
     legacy_dirs: no_legacy_dirs,
+    native_code: false,
 };
-
-pub fn manifest(id: ModelId) -> &'static ModelManifest {
-    match id {
-        #[cfg(any(feature = "ocr", test))]
-        ModelId::Ocrs => &OCRS,
-        #[cfg(any(feature = "local-ner", test))]
-        ModelId::NerMultilingualHrl => &NER_MULTILINGUAL_HRL,
-        #[cfg(any(feature = "local-gliner", test))]
-        ModelId::GlinerMultiPii => &GLINER_MULTI_PII,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -193,9 +205,8 @@ mod tests {
 
     #[test]
     fn ocrs_manifest_lists_both_rten_files_with_pinned_sizes() {
-        let manifest = manifest(ModelId::Ocrs);
+        let manifest = Addon::Ocr.manifest().unwrap();
         assert_eq!(manifest.dir_name, "ocrs");
-        assert_eq!(manifest.needed_by, "OCR");
         let files: Vec<(&str, u64)> = manifest.files.iter().map(|f| (f.name, f.size)).collect();
         assert_eq!(
             files,
@@ -223,7 +234,7 @@ mod tests {
 
     #[test]
     fn ocrs_legacy_dirs_are_share_ocrs_and_cache_ocrs() {
-        let dirs = (manifest(ModelId::Ocrs).legacy_dirs)();
+        let dirs = (Addon::Ocr.manifest().unwrap().legacy_dirs)();
         assert!(
             dirs.iter()
                 .any(|d| d.ends_with(Path::new("share").join("ocrs"))),
@@ -238,12 +249,11 @@ mod tests {
 
     #[test]
     fn ner_manifest_lists_the_three_pinned_files() {
-        let manifest = manifest(ModelId::NerMultilingualHrl);
+        let manifest = Addon::LocalNer.manifest().unwrap();
         assert_eq!(
             manifest.dir_name,
             "distilbert-base-multilingual-cased-ner-hrl"
         );
-        assert_eq!(manifest.needed_by, "The local-ner redacter");
         let names: Vec<&str> = manifest.files.iter().map(|f| f.name).collect();
         assert_eq!(names, ["model_uint8.onnx", "tokenizer.json", "config.json"]);
         let total: u64 = manifest.files.iter().map(|f| f.size).sum();
@@ -253,9 +263,8 @@ mod tests {
 
     #[test]
     fn gliner_manifest_lists_the_three_pinned_files() {
-        let manifest = manifest(ModelId::GlinerMultiPii);
+        let manifest = Addon::LocalGliner.manifest().unwrap();
         assert_eq!(manifest.dir_name, "gliner_multi_pii-v1");
-        assert_eq!(manifest.needed_by, "The local-gliner redacter");
         let names: Vec<&str> = manifest.files.iter().map(|f| f.name).collect();
         assert_eq!(
             names,
@@ -268,7 +277,7 @@ mod tests {
 
     #[test]
     fn gliner_urls_point_at_the_release_and_digests_are_hex() {
-        let manifest = manifest(ModelId::GlinerMultiPii);
+        let manifest = Addon::LocalGliner.manifest().unwrap();
         for file in manifest.files {
             assert!(
                 file.url.starts_with(
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn ner_urls_point_at_the_release_and_digests_are_hex() {
-        let manifest = manifest(ModelId::NerMultilingualHrl);
+        let manifest = Addon::LocalNer.manifest().unwrap();
         for file in manifest.files {
             assert!(
                 file.url.starts_with(
@@ -306,5 +315,28 @@ mod tests {
                 file.name
             );
         }
+    }
+
+    #[test]
+    fn pdfium_manifest_pins_one_library_from_the_release_of_its_build() {
+        let Some(manifest) = Addon::Pdf.manifest() else {
+            return;
+        };
+        let build = manifest
+            .dir_name
+            .strip_prefix("pdfium-")
+            .expect("the directory is named after the build");
+        let [file] = manifest.files else {
+            panic!("expected one library file, got {:?}", manifest.files);
+        };
+        assert_eq!(
+            file.url
+                .strip_prefix("https://github.com/abdolence/redacter-rs/releases/download/")
+                .and_then(|rest| rest.split('/').next()),
+            Some(format!("models-pdfium-{build}").as_str())
+        );
+        assert_eq!(file.sha256.len(), 64, "{}", file.name);
+        assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!((manifest.legacy_dirs)().is_empty());
     }
 }

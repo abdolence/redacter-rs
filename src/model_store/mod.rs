@@ -1,108 +1,65 @@
-//! Finds the model files a run needs and, with the user's consent, downloads and verifies the
-//! ones that are missing. Serves the OCR engine and the local NER redacter.
+//! Where the addons live: the OCR and local redacter models and the Pdfium library. Commands
+//! only look them up; `redacter setup-addons` is the one place that downloads, and it
+//! verifies every file before it takes its final name.
 
-mod consent;
+// A build without any addon feature keeps `setup-addons`, but nothing in it looks an addon up.
+#![cfg_attr(
+    not(any(
+        feature = "ocr",
+        feature = "pdf-render",
+        feature = "local-ner",
+        feature = "local-gliner"
+    )),
+    allow(dead_code)
+)]
+
 mod download;
 mod error;
 mod manifest;
+#[cfg(any(feature = "pdf-render", test))]
+mod pdfium;
 
-pub use consent::{is_interactive, ConsentSource, DownloadRequest, TerminalConsent};
-// `ByteStream` joins this list once something outside `download.rs` names it (Task 4's OCR
-// migration); re-exporting it before then is a warning, same reasoning as the note it replaces.
 pub use download::{download_file, Fetcher, HttpFetcher};
-pub use error::{ErrorPhase, ModelStoreError};
-pub use manifest::{manifest, ModelFile, ModelId, ModelManifest};
+pub use error::ModelStoreError;
+pub use manifest::{Addon, ModelFile, ModelManifest};
 
-use crate::reporter::AppReporter;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-/// Whether a missing model may be downloaded in this run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DownloadPolicy {
-    Ask,
-    Yes,
-    No,
-}
-
-/// The directory of one installed model; every file of its manifest lives here.
+/// The directory of one installed addon; every file of its manifest lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelFiles {
     dir: PathBuf,
 }
 
-// Only the ocr and local-ner features read a resolved model's files; a `--no-default-features`
-// (or pdf-render-only) build has no caller. Gated rather than `#[allow(dead_code)]`'d so a
-// future consumer just adds its feature to the list below. ocrs takes the whole directory
-// (it loads its own files by name), local-ner names it in the line it reports before loading
-// and opens each file by name.
-#[cfg(any(feature = "ocr", feature = "local-ner", test))]
 impl ModelFiles {
+    // Only the ocr and local-ner features open an addon's files by name; a
+    // `--no-default-features` (or pdf-render-only) build has no caller. Gated rather than
+    // `#[allow(dead_code)]`'d so a future consumer just adds its feature to the list.
+    #[cfg(any(feature = "ocr", feature = "local-ner", test))]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
 
+    // ocrs takes the whole directory (it loads its own files by name), local-ner names it in
+    // the line it reports before loading, and PDF rendering loads its library from it.
+    #[cfg(any(feature = "ocr", feature = "local-ner", feature = "pdf-render", test))]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 }
 
-/// Where manually placed copies of a model may live besides the managed root, in lookup
+/// Where manually placed copies of an addon may live besides the models root, in lookup
 /// order. Injected so tests can point it at a temporary directory.
 pub type ManualDirs = Box<dyn Fn(&ModelManifest) -> Vec<PathBuf> + Send + Sync>;
 
-/// The managed models root, looked up only when a model has to be found there. A system
-/// with no cache directory and no `--models-dir` fails here rather than at start-up, so a
-/// run that needs no managed model never fails for the lack of one. Injected, like
-/// `ManualDirs`, so a test can exercise that system without touching the environment.
-pub type ManagedRoot = Box<dyn Fn() -> Result<PathBuf, ModelStoreError> + Send + Sync>;
-
-/// `<platform cache>/redacter/models`, or `NoCacheDir` where the platform has no cache
-/// directory to put it in.
-pub fn platform_models_root() -> Result<PathBuf, ModelStoreError> {
-    dirs::cache_dir()
-        .map(|cache| cache.join("redacter").join("models"))
-        .ok_or(ModelStoreError::NoCacheDir)
-}
-
-/// The `--download-models` flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum DownloadModels {
-    Ask,
-    Yes,
-    No,
-}
-
-/// What the command line decided about models. `Default` is the offline choice tests and
-/// library callers want: never download, use the platform cache directory.
-#[derive(Debug, Clone)]
+/// `--models-dir`, or `REDACTER_MODELS_DIR`; without either, the platform cache directory.
+#[derive(Debug, Clone, Default)]
 pub struct ModelStoreOptions {
-    pub download: DownloadModels,
     pub models_dir: Option<PathBuf>,
 }
 
-impl Default for ModelStoreOptions {
-    fn default() -> Self {
-        Self {
-            download: DownloadModels::No,
-            models_dir: None,
-        }
-    }
-}
-
-/// `ask` can only be honoured on a terminal; anywhere else it means `no`.
-pub fn resolve_policy(download: DownloadModels, interactive: bool) -> DownloadPolicy {
-    match download {
-        DownloadModels::Yes => DownloadPolicy::Yes,
-        DownloadModels::No => DownloadPolicy::No,
-        DownloadModels::Ask if interactive => DownloadPolicy::Ask,
-        DownloadModels::Ask => DownloadPolicy::No,
-    }
-}
-
-/// `<exe dir>/models/<dir_name>` for models bundled next to the binary, then the model's own
+/// `<exe dir>/models/<dir_name>` for addons bundled next to the binary, then the addon's own
 /// legacy directories. None of these is verified.
 pub fn default_manual_dirs(manifest: &ModelManifest) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -116,217 +73,156 @@ pub fn default_manual_dirs(manifest: &ModelManifest) -> Vec<PathBuf> {
     dirs
 }
 
-pub struct ModelStore<'a> {
-    root: ManagedRoot,
+/// What `setup-addons` did with one addon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Installation {
+    /// Every file was already in this directory and matched its digest.
+    Found(PathBuf),
+    /// The missing or damaged files were downloaded into this directory.
+    Downloaded(PathBuf),
+}
+
+pub struct ModelStore {
+    /// `None` on a system with no cache directory and no `--models-dir`: lookups still find
+    /// manual copies, and only an install fails for the lack of it.
+    root: Option<PathBuf>,
     manual_dirs: ManualDirs,
-    policy: DownloadPolicy,
-    consent: Box<dyn ConsentSource + 'a>,
-    fetcher: Box<dyn Fetcher + 'a>,
-    reporter: &'a AppReporter<'a>,
-    /// Models resolved in this run, by manifest `dir_name`. The lock only guards the map and
-    /// is never held across an `.await`.
-    resolved: Mutex<HashMap<&'static str, ModelFiles>>,
 }
 
 enum FileState {
-    Present,
+    Verified,
     Missing,
-    Stale(u64),
+    Damaged,
 }
 
-impl<'a> ModelStore<'a> {
-    /// The production store: platform cache root unless overridden, terminal consent,
-    /// reqwest. Never fails: the cache directory and the HTTP client are only needed by a
-    /// run that has to find or download a model, and both are looked up there.
-    pub fn new(options: &ModelStoreOptions, reporter: &'a AppReporter<'a>) -> Self {
-        let models_dir = options.models_dir.clone();
-        let policy = resolve_policy(options.download, is_interactive());
-        Self::with_parts(
-            Box::new(move || match &models_dir {
-                Some(dir) => Ok(dir.clone()),
-                None => platform_models_root(),
-            }),
-            Box::new(default_manual_dirs),
-            policy,
-            Box::new(TerminalConsent),
-            Box::new(HttpFetcher::new()),
-            reporter,
-        )
-    }
-
-    /// Builds a store from its parts. Production code uses `ModelStore::new`; tests inject a
-    /// temporary root, a fixed consent answer and canned downloads.
-    pub fn with_parts(
-        root: ManagedRoot,
-        manual_dirs: ManualDirs,
-        policy: DownloadPolicy,
-        consent: Box<dyn ConsentSource + 'a>,
-        fetcher: Box<dyn Fetcher + 'a>,
-        reporter: &'a AppReporter<'a>,
-    ) -> Self {
+impl ModelStore {
+    pub fn new(options: &ModelStoreOptions) -> Self {
         Self {
-            root,
-            manual_dirs,
-            policy,
-            consent,
-            fetcher,
-            reporter,
-            resolved: Mutex::new(HashMap::new()),
+            root: options
+                .models_dir
+                .clone()
+                .or_else(|| dirs::cache_dir().map(|cache| cache.join("redacter").join("models"))),
+            manual_dirs: Box::new(default_manual_dirs),
         }
     }
 
-    /// Finds or installs a model and returns where its files are.
-    pub async fn resolve(&self, id: ModelId) -> Result<ModelFiles, ModelStoreError> {
-        self.resolve_manifest(manifest(id)).await
+    #[cfg(test)]
+    pub fn with_parts(root: Option<PathBuf>, manual_dirs: ManualDirs) -> Self {
+        Self { root, manual_dirs }
     }
 
-    /// Lookup order: the managed directory (every file present with its manifest size), the
-    /// manual directories (every file present, sizes not checked), then a download of the
-    /// missing or stale files into the managed directory under the download policy.
-    pub async fn resolve_manifest(
+    /// Finds an installed addon and never downloads. Lookup order: the models root, where
+    /// every file must match its pinned size (and its SHA-256 for native code), then the
+    /// manual directories, where every file only has to exist.
+    pub fn find(&self, addon: Addon) -> Result<ModelFiles, ModelStoreError> {
+        let manifest = addon
+            .manifest()
+            .ok_or(ModelStoreError::NotAvailableForPlatform)?;
+        self.find_manifest(addon, manifest)
+    }
+
+    /// Downloads the files of an addon that are missing in the models root or differ from
+    /// their pinned SHA-256 there.
+    pub async fn install(
         &self,
-        manifest: &'static ModelManifest,
-    ) -> Result<ModelFiles, ModelStoreError> {
-        if let Some(files) = self.cached(manifest.dir_name) {
-            return Ok(files);
-        }
-        let managed = match (self.root)() {
-            Ok(root) => root.join(manifest.dir_name),
-            // Nowhere to install this model: a manual copy is the only way it can still be
-            // found, and the missing root is only reported when there is none.
-            Err(no_root) => {
-                let dir = match self.find_manual_dir(manifest) {
-                    Some(dir) => dir,
-                    None => return Err(no_root),
-                };
-                let files = ModelFiles { dir };
-                self.remember(manifest.dir_name, files.clone());
-                return Ok(files);
-            }
-        };
-        let mut wanted: Vec<&'static ModelFile> = Vec::new();
-        let mut stale: Option<(PathBuf, u64, u64)> = None;
-        for file in manifest.files {
-            let path = managed.join(file.name);
-            match file_state(&path, file.size)? {
-                FileState::Present => {}
-                FileState::Missing => wanted.push(file),
-                FileState::Stale(actual) => {
-                    stale.get_or_insert((path, file.size, actual));
-                    wanted.push(file);
-                }
-            }
-        }
-        let files = if wanted.is_empty() {
-            ModelFiles { dir: managed }
-        } else {
-            match stale {
-                Some((path, expected, actual)) if self.policy == DownloadPolicy::No => {
-                    return Err(ModelStoreError::SizeMismatch {
-                        location: path.display().to_string(),
-                        expected,
-                        actual,
-                        phase: ErrorPhase::Lookup,
-                    });
-                }
-                Some(_) => self.download(manifest, &managed, wanted).await?,
-                None => match self.find_manual_dir(manifest) {
-                    Some(dir) => ModelFiles { dir },
-                    None => self.download(manifest, &managed, wanted).await?,
-                },
-            }
-        };
-        self.remember(manifest.dir_name, files.clone());
-        Ok(files)
+        addon: Addon,
+        fetcher: &dyn Fetcher,
+    ) -> Result<Installation, ModelStoreError> {
+        let manifest = addon
+            .manifest()
+            .ok_or(ModelStoreError::NotAvailableForPlatform)?;
+        self.install_manifest(manifest, fetcher).await
     }
 
-    fn find_manual_dir(&self, manifest: &ModelManifest) -> Option<PathBuf> {
-        (self.manual_dirs)(manifest).into_iter().find(|dir| {
+    fn find_manifest(
+        &self,
+        addon: Addon,
+        manifest: &ModelManifest,
+    ) -> Result<ModelFiles, ModelStoreError> {
+        if let Some(root) = &self.root {
+            let dir = root.join(manifest.dir_name);
+            if manifest.is_installed_in(addon, &dir)? {
+                return Ok(ModelFiles { dir });
+            }
+        }
+        let manual = (self.manual_dirs)(manifest).into_iter().find(|dir| {
             manifest
                 .files
                 .iter()
                 .all(|file| dir.join(file.name).is_file())
-        })
+        });
+        match manual {
+            Some(dir) => Ok(ModelFiles { dir }),
+            None => Err(ModelStoreError::NotInstalled { addon }),
+        }
     }
 
-    async fn download(
+    async fn install_manifest(
         &self,
-        manifest: &'static ModelManifest,
-        dir: &Path,
-        files: Vec<&'static ModelFile>,
-    ) -> Result<ModelFiles, ModelStoreError> {
-        let request = DownloadRequest {
-            model: manifest,
-            dir: dir.to_path_buf(),
-            total_bytes: files.iter().map(|file| file.size).sum(),
-            files,
-        };
-        let allowed = match self.policy {
-            DownloadPolicy::Yes => true,
-            DownloadPolicy::No => false,
-            DownloadPolicy::Ask => self.consent.ask(&request)?,
-        };
-        if !allowed {
-            return Err(match self.policy {
-                DownloadPolicy::No => ModelStoreError::NotInstalled {
-                    model: manifest.dir_name.to_string(),
-                    dir: dir.display().to_string(),
-                    files: request
-                        .files
-                        .iter()
-                        .map(|file| file.name)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                },
-                _ => ModelStoreError::Declined {
-                    model: manifest.dir_name.to_string(),
-                },
-            });
-        }
-        for file in &request.files {
+        manifest: &ModelManifest,
+        fetcher: &dyn Fetcher,
+    ) -> Result<Installation, ModelStoreError> {
+        let root = self.root.as_ref().ok_or(ModelStoreError::NoCacheDir)?;
+        let dir = root.join(manifest.dir_name);
+        let mut downloaded = false;
+        for file in manifest.files {
+            if let FileState::Verified = file.state_in(&dir, true)? {
+                continue;
+            }
             let bar = progress_bar(file)?;
-            let result = download_file(self.fetcher.as_ref(), file, dir, &bar).await;
+            let result = download_file(fetcher, file, &dir, &bar).await;
             bar.finish_and_clear();
             result?;
-            self.reporter
-                .report(format!("Downloaded {} to {}", file.name, dir.display()))
-                .map_err(|err| ModelStoreError::Report {
-                    reason: err.to_string(),
-                })?;
+            downloaded = true;
         }
-        Ok(ModelFiles {
-            dir: dir.to_path_buf(),
+        Ok(if downloaded {
+            Installation::Downloaded(dir)
+        } else {
+            Installation::Found(dir)
         })
-    }
-
-    fn cached(&self, key: &str) -> Option<ModelFiles> {
-        let resolved = self
-            .resolved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        resolved.get(key).cloned()
-    }
-
-    fn remember(&self, key: &'static str, files: ModelFiles) {
-        let mut resolved = self
-            .resolved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        resolved.insert(key, files);
     }
 }
 
-fn file_state(path: &Path, expected: u64) -> Result<FileState, ModelStoreError> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() && metadata.len() == expected => Ok(FileState::Present),
-        Ok(metadata) if metadata.is_file() => Ok(FileState::Stale(metadata.len())),
-        Ok(_) => Ok(FileState::Missing),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(FileState::Missing),
-        Err(source) => Err(ModelStoreError::Io {
-            path: path.display().to_string(),
-            source,
-            phase: ErrorPhase::Lookup,
-        }),
+impl ModelManifest {
+    /// Whether every file is in `dir` as pinned. A file that is there but differs is an
+    /// error rather than a miss, so that a damaged install is never passed over for an
+    /// unverified manual copy.
+    fn is_installed_in(&self, addon: Addon, dir: &Path) -> Result<bool, ModelStoreError> {
+        for file in self.files {
+            match file.state_in(dir, self.native_code)? {
+                FileState::Verified => {}
+                FileState::Missing => return Ok(false),
+                FileState::Damaged => {
+                    return Err(ModelStoreError::Damaged {
+                        addon,
+                        path: dir.join(file.name).display().to_string(),
+                    })
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+impl ModelFile {
+    /// Checks the copy of this file in `dir` against its pinned size and, when asked, its
+    /// pinned SHA-256.
+    fn state_in(&self, dir: &Path, check_digest: bool) -> Result<FileState, ModelStoreError> {
+        let path = dir.join(self.name);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(FileState::Missing),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FileState::Missing)
+            }
+            Err(source) => return Err(ModelStoreError::io(&path, source)),
+        };
+        if metadata.len() != self.size
+            || (check_digest && download::sha256_of_file(&path)? != self.sha256)
+        {
+            return Ok(FileState::Damaged);
+        }
+        Ok(FileState::Verified)
     }
 }
 
@@ -342,77 +238,27 @@ fn progress_bar(file: &ModelFile) -> Result<ProgressBar, ModelStoreError> {
     Ok(bar)
 }
 
-/// Fakes for every test that resolves a model, here and in the modules that call the store.
-#[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use std::sync::Arc;
-
-    pub use super::download::test_support::{part_files, FakeFetcher, TEST_FILES};
-
-    /// Answers every prompt the same way and records the file names it was asked about. The
-    /// record is shared so a test can read it after the store has taken ownership.
-    pub struct FakeConsent {
-        answer: bool,
-        asked: Arc<Mutex<Vec<Vec<String>>>>,
-    }
-
-    impl FakeConsent {
-        pub fn new(answer: bool) -> Self {
-            Self {
-                answer,
-                asked: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        pub fn asked(&self) -> Arc<Mutex<Vec<Vec<String>>>> {
-            self.asked.clone()
-        }
-    }
-
-    impl ConsentSource for FakeConsent {
-        fn ask(&self, request: &DownloadRequest) -> Result<bool, ModelStoreError> {
-            self.asked
-                .lock()
-                .unwrap()
-                .push(request.files.iter().map(|f| f.name.to_string()).collect());
-            Ok(self.answer)
-        }
-    }
-
-    /// A managed root that is simply this directory.
-    pub fn fixed_root(dir: PathBuf) -> ManagedRoot {
-        Box::new(move || Ok(dir.clone()))
-    }
-
-    /// A system with nowhere to install a model.
-    pub fn no_root() -> ManagedRoot {
-        Box::new(|| Err(ModelStoreError::NoCacheDir))
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::download::test_support::{part_files, FakeFetcher, TEST_FILES};
     use super::manifest::no_legacy_dirs;
-    use super::test_support::*;
     use super::*;
-    use console::Term;
     use tempfile::TempDir;
 
     static TEST_MANIFEST: ModelManifest = ModelManifest {
         dir_name: "test-model",
-        needed_by: "A test",
-        source: "https://example.invalid/",
-        license: "none",
         files: &TEST_FILES,
         legacy_dirs: no_legacy_dirs,
+        native_code: false,
     };
+
+    /// The tests' stand-in for whichever addon `TEST_MANIFEST` is installed as.
+    const TEST_ADDON: Addon = Addon::LocalGliner;
 
     struct Fixture {
         _root: TempDir,
         managed: PathBuf,
         manual: PathBuf,
-        term: Term,
     }
 
     impl Fixture {
@@ -424,42 +270,18 @@ mod tests {
                 _root: root,
                 managed,
                 manual,
-                term: Term::stdout(),
             }
         }
 
-        fn store<'a>(
-            &'a self,
-            policy: DownloadPolicy,
-            consent: FakeConsent,
-            fetcher: FakeFetcher,
-            reporter: &'a AppReporter<'a>,
-        ) -> ModelStore<'a> {
-            self.store_rooted(
-                fixed_root(self.managed.parent().unwrap().to_path_buf()),
-                policy,
-                consent,
-                fetcher,
-                reporter,
-            )
+        fn store(&self) -> ModelStore {
+            self.store_rooted(Some(self.managed.parent().unwrap().to_path_buf()))
         }
 
-        fn store_rooted<'a>(
-            &'a self,
-            root: ManagedRoot,
-            policy: DownloadPolicy,
-            consent: FakeConsent,
-            fetcher: FakeFetcher,
-            reporter: &'a AppReporter<'a>,
-        ) -> ModelStore<'a> {
+        fn store_rooted(&self, root: Option<PathBuf>) -> ModelStore {
             let manual_root = self.manual.parent().unwrap().to_path_buf();
             ModelStore::with_parts(
                 root,
                 Box::new(move |m: &ModelManifest| vec![manual_root.join(m.dir_name)]),
-                policy,
-                Box::new(consent),
-                Box::new(fetcher),
-                reporter,
             )
         }
 
@@ -467,114 +289,121 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join(name), bytes).unwrap();
         }
+
+        fn write_installed(&self) {
+            self.write(&self.managed, "weights.bin", b"hello world");
+            self.write(&self.managed, "config.json", b"abc");
+        }
     }
 
-    #[tokio::test]
-    async fn complete_managed_dir_is_a_hit_without_fetching() {
+    #[test]
+    fn an_installed_addon_is_found_in_the_models_root() {
         let fx = Fixture::new();
-        fx.write(&fx.managed, "weights.bin", b"hello world");
-        fx.write(&fx.managed, "config.json", b"abc");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::No,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        let files = store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
+        fx.write_installed();
+        let files = fx
+            .store()
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap();
         assert_eq!(files.dir(), fx.managed);
         assert_eq!(files.path("weights.bin"), fx.managed.join("weights.bin"));
     }
 
-    #[tokio::test]
-    async fn manual_dir_is_a_hit_without_a_size_check() {
+    #[test]
+    fn manual_dir_is_a_hit_without_a_size_check() {
         let fx = Fixture::new();
         fx.write(&fx.manual, "weights.bin", b"a different size");
         fx.write(&fx.manual, "config.json", b"x");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::No,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
+        let files = fx
+            .store()
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap();
+        assert_eq!(files.dir(), fx.manual);
+    }
+
+    #[test]
+    fn a_missing_addon_is_not_installed_and_nothing_is_written() {
+        let fx = Fixture::new();
+        fx.write(&fx.manual, "weights.bin", b"hello world");
+        let err = fx
+            .store()
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap_err();
+        assert!(
+            matches!(err, ModelStoreError::NotInstalled { addon } if addon == TEST_ADDON),
+            "{err}"
         );
-        let files = store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
+        assert!(!fx.managed.exists());
+    }
+
+    #[test]
+    fn a_damaged_file_in_the_models_root_is_an_error_not_a_miss() {
+        let fx = Fixture::new();
+        fx.write(&fx.managed, "weights.bin", b"stale");
+        fx.write(&fx.managed, "config.json", b"abc");
+        fx.write(&fx.manual, "weights.bin", b"hello world");
+        fx.write(&fx.manual, "config.json", b"abc");
+        let err = fx
+            .store()
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap_err();
+        match err {
+            ModelStoreError::Damaged { addon, path } => {
+                assert_eq!(addon, TEST_ADDON);
+                assert_eq!(path, fx.managed.join("weights.bin").display().to_string());
+            }
+            other => panic!("expected Damaged, got {other}"),
+        }
+    }
+
+    /// Pdfium is native code the process loads and runs, so a copy of the right size with
+    /// other bytes in it must never be handed to the loader.
+    #[test]
+    fn a_pdfium_copy_with_other_bytes_is_not_found() {
+        let Some(manifest) = Addon::Pdf.manifest() else {
+            return;
+        };
+        let fx = Fixture::new();
+        let root = fx.managed.parent().unwrap().to_path_buf();
+        let library = &manifest.files[0];
+        fx.write(
+            &root.join(manifest.dir_name),
+            library.name,
+            &vec![0; library.size as usize],
+        );
+        let err = fx.store_rooted(Some(root)).find(Addon::Pdf).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModelStoreError::Damaged {
+                    addon: Addon::Pdf,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn without_a_models_root_a_manual_copy_is_still_found() {
+        let fx = Fixture::new();
+        fx.write(&fx.manual, "weights.bin", b"hello world");
+        fx.write(&fx.manual, "config.json", b"abc");
+        let files = fx
+            .store_rooted(None)
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap();
         assert_eq!(files.dir(), fx.manual);
     }
 
     #[tokio::test]
-    async fn incomplete_manual_dir_is_not_a_hit() {
+    async fn install_downloads_and_verifies_the_missing_files() {
         let fx = Fixture::new();
-        fx.write(&fx.manual, "weights.bin", b"hello world");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::No,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
-        assert!(matches!(err, ModelStoreError::NotInstalled { .. }), "{err}");
-    }
-
-    #[tokio::test]
-    async fn missing_under_no_names_dir_files_and_the_flag() {
-        let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
-        let fetcher = FakeFetcher::good();
-        let store = fx.store(
-            DownloadPolicy::No,
-            FakeConsent::new(true),
-            fetcher,
-            &reporter,
-        );
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
-        match &err {
-            ModelStoreError::NotInstalled { model, dir, files } => {
-                assert_eq!(model, "test-model");
-                assert_eq!(dir, &fx.managed.display().to_string());
-                assert_eq!(files, "weights.bin, config.json");
-            }
-            other => panic!("expected NotInstalled, got {other}"),
-        }
-        assert!(err.to_string().contains("--download-models yes"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn ask_with_declined_consent_is_declined_and_lists_only_missing_files() {
-        let fx = Fixture::new();
-        fx.write(&fx.managed, "weights.bin", b"hello world");
-        let reporter = AppReporter::from(&fx.term);
-        let consent = FakeConsent::new(false);
-        let asked = consent.asked();
-        let fetcher = FakeFetcher::good();
-        let fetches = fetcher.counter();
-        let store = fx.store(DownloadPolicy::Ask, consent, fetcher, &reporter);
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
-        assert!(
-            matches!(err, ModelStoreError::Declined { ref model } if model == "test-model"),
-            "{err}"
-        );
-        assert_eq!(
-            *asked.lock().unwrap(),
-            vec![vec!["config.json".to_string()]]
-        );
-        assert_eq!(*fetches.lock().unwrap(), 0);
-        assert!(!fx.managed.join("config.json").exists());
-    }
-
-    #[tokio::test]
-    async fn yes_downloads_missing_files_and_leaves_no_part_files() {
-        let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::Yes,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        let files = store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
-        assert_eq!(files.dir(), fx.managed);
+        let installation = fx
+            .store()
+            .install_manifest(&TEST_MANIFEST, &FakeFetcher::good())
+            .await
+            .unwrap();
+        assert_eq!(installation, Installation::Downloaded(fx.managed.clone()));
         assert_eq!(
             std::fs::read(fx.managed.join("weights.bin")).unwrap(),
             b"hello world"
@@ -587,86 +416,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_with_consent_downloads() {
+    async fn an_installed_addon_is_not_downloaded_again() {
         let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::Ask,
-            FakeConsent::new(true),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
-        assert_eq!(
-            std::fs::read(fx.managed.join("config.json")).unwrap(),
-            b"abc"
-        );
+        fx.write_installed();
+        let fetcher = FakeFetcher::good();
+        let fetches = fetcher.counter();
+        let installation = fx
+            .store()
+            .install_manifest(&TEST_MANIFEST, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(installation, Installation::Found(fx.managed.clone()));
+        assert_eq!(*fetches.lock().unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn stale_managed_file_is_redownloaded_under_yes() {
+    async fn install_replaces_a_damaged_file() {
         let fx = Fixture::new();
-        fx.write(&fx.managed, "weights.bin", b"stale");
+        fx.write(&fx.managed, "weights.bin", b"hello worle");
         fx.write(&fx.managed, "config.json", b"abc");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::Yes,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
+        let fetcher = FakeFetcher::good();
+        let fetches = fetcher.counter();
+        fx.store()
+            .install_manifest(&TEST_MANIFEST, &fetcher)
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read(fx.managed.join("weights.bin")).unwrap(),
             b"hello world"
         );
-    }
-
-    #[tokio::test]
-    async fn stale_managed_file_under_no_is_a_size_mismatch() {
-        let fx = Fixture::new();
-        fx.write(&fx.managed, "weights.bin", b"stale");
-        fx.write(&fx.managed, "config.json", b"abc");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store(
-            DownloadPolicy::No,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
+        assert_eq!(
+            *fetches.lock().unwrap(),
+            1,
+            "only the damaged file is fetched"
         );
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
-        match err {
-            ModelStoreError::SizeMismatch {
-                location,
-                expected,
-                actual,
-                ..
-            } => {
-                assert_eq!(
-                    location,
-                    fx.managed.join("weights.bin").display().to_string()
-                );
-                assert_eq!((expected, actual), (11, 5));
-            }
-            other => panic!("expected SizeMismatch, got {other}"),
-        }
     }
 
     #[tokio::test]
-    async fn failed_download_leaves_no_final_file() {
+    async fn a_failed_download_leaves_no_final_file() {
         let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
         let fetcher = FakeFetcher::new(&[
             ("https://example.invalid/weights.bin", b"hello worle"),
             ("https://example.invalid/config.json", b"abc"),
         ]);
-        let store = fx.store(
-            DownloadPolicy::Yes,
-            FakeConsent::new(false),
-            fetcher,
-            &reporter,
-        );
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
+        let err = fx
+            .store()
+            .install_manifest(&TEST_MANIFEST, &fetcher)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ModelStoreError::ChecksumMismatch { .. }),
             "{err}"
@@ -676,152 +473,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_resolve_is_served_from_the_cache() {
+    async fn install_without_a_models_root_is_the_cache_dir_failure() {
         let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
-        let fetcher = FakeFetcher::good();
-        let fetches = fetcher.counter();
-        let store = fx.store(
-            DownloadPolicy::Yes,
-            FakeConsent::new(false),
-            fetcher,
-            &reporter,
-        );
-        store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
-        assert_eq!(*fetches.lock().unwrap(), 2);
-        store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
-        assert_eq!(
-            *fetches.lock().unwrap(),
-            2,
-            "the second resolve must not fetch"
-        );
-    }
-
-    #[tokio::test]
-    async fn without_a_managed_root_a_manual_copy_is_still_a_hit() {
-        let fx = Fixture::new();
-        fx.write(&fx.manual, "weights.bin", b"hello world");
-        fx.write(&fx.manual, "config.json", b"abc");
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store_rooted(
-            no_root(),
-            DownloadPolicy::No,
-            FakeConsent::new(false),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        let files = store.resolve_manifest(&TEST_MANIFEST).await.unwrap();
-        assert_eq!(files.dir(), fx.manual);
-    }
-
-    #[tokio::test]
-    async fn without_a_managed_root_and_without_a_manual_copy_the_cache_dir_is_the_failure() {
-        let fx = Fixture::new();
-        let reporter = AppReporter::from(&fx.term);
-        let store = fx.store_rooted(
-            no_root(),
-            DownloadPolicy::Yes,
-            FakeConsent::new(true),
-            FakeFetcher::good(),
-            &reporter,
-        );
-        let err = store.resolve_manifest(&TEST_MANIFEST).await.unwrap_err();
+        let err = fx
+            .store_rooted(None)
+            .install_manifest(&TEST_MANIFEST, &FakeFetcher::good())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ModelStoreError::NoCacheDir), "{err}");
-        assert!(
-            err.is_pre_consent_lookup_failure(),
-            "a missing cache directory is a lookup failure: {err}"
-        );
-    }
-
-    /// The split that decides whether a caller which can run without the model carries on
-    /// (OCR) or the whole run stops: everything found on the way to a download is a lookup
-    /// failure, everything raised by an authorised download is not.
-    #[test]
-    fn lookup_failures_are_told_apart_from_download_failures() {
-        let lookup = [
-            ModelStoreError::NotInstalled {
-                model: "ocrs".to_string(),
-                dir: "/models/ocrs".to_string(),
-                files: "text-detection.rten".to_string(),
-            },
-            ModelStoreError::Declined {
-                model: "ocrs".to_string(),
-            },
-            ModelStoreError::NoCacheDir,
-            ModelStoreError::SizeMismatch {
-                location: "/models/ocrs/text-detection.rten".to_string(),
-                expected: 2_510_284,
-                actual: 4,
-                phase: ErrorPhase::Lookup,
-            },
-            ModelStoreError::Io {
-                path: "/models/ocrs".to_string(),
-                source: std::io::Error::other("not a directory"),
-                phase: ErrorPhase::Lookup,
-            },
-        ];
-        for err in lookup {
-            assert!(err.is_pre_consent_lookup_failure(), "{err}");
-        }
-
-        let fatal = [
-            ModelStoreError::HttpStatus {
-                url: "https://example.invalid/x".to_string(),
-                status: 500,
-            },
-            ModelStoreError::ChecksumMismatch {
-                url: "https://example.invalid/x".to_string(),
-                expected: "a".to_string(),
-                actual: "b".to_string(),
-            },
-            ModelStoreError::SizeMismatch {
-                location: "https://example.invalid/x".to_string(),
-                expected: 2_510_284,
-                actual: 12,
-                phase: ErrorPhase::Download,
-            },
-            ModelStoreError::Io {
-                path: "/models/ocrs/text-detection.rten.part".to_string(),
-                source: std::io::Error::other("disk full"),
-                phase: ErrorPhase::Download,
-            },
-            ModelStoreError::Prompt {
-                source: std::io::Error::other("no terminal"),
-            },
-            ModelStoreError::Progress {
-                reason: "bad template".to_string(),
-            },
-            ModelStoreError::Report {
-                reason: "closed".to_string(),
-            },
-        ];
-        for err in fatal {
-            assert!(!err.is_pre_consent_lookup_failure(), "{err}");
-        }
-    }
-
-    #[test]
-    fn ask_degrades_to_no_without_a_terminal() {
-        assert_eq!(
-            resolve_policy(DownloadModels::Ask, true),
-            DownloadPolicy::Ask
-        );
-        assert_eq!(
-            resolve_policy(DownloadModels::Ask, false),
-            DownloadPolicy::No
-        );
-        assert_eq!(
-            resolve_policy(DownloadModels::Yes, false),
-            DownloadPolicy::Yes
-        );
-        assert_eq!(resolve_policy(DownloadModels::No, true), DownloadPolicy::No);
-    }
-
-    #[test]
-    fn default_options_are_offline() {
-        let options = ModelStoreOptions::default();
-        assert_eq!(options.download, DownloadModels::No);
-        assert_eq!(options.models_dir, None);
     }
 
     #[test]
@@ -831,11 +490,9 @@ mod tests {
         }
         static WITH_LEGACY: ModelManifest = ModelManifest {
             dir_name: "test-model",
-            needed_by: "A test",
-            source: "https://example.invalid/",
-            license: "none",
             files: &TEST_FILES,
             legacy_dirs: legacy,
+            native_code: false,
         };
         let dirs = default_manual_dirs(&WITH_LEGACY);
         assert_eq!(dirs.len(), 3, "{dirs:?}");
@@ -850,18 +507,13 @@ mod tests {
 
     #[test]
     fn new_uses_the_models_dir_override_as_root() {
-        let term = Term::stdout();
-        let reporter = AppReporter::from(&term);
         let options = ModelStoreOptions {
-            download: DownloadModels::No,
             models_dir: Some(PathBuf::from("/override/models")),
         };
-        let store = ModelStore::new(&options, &reporter);
         assert_eq!(
-            (store.root)().unwrap(),
-            PathBuf::from("/override/models"),
-            "--models-dir is the managed root"
+            ModelStore::new(&options).root,
+            Some(PathBuf::from("/override/models")),
+            "--models-dir is the models root"
         );
-        assert_eq!(store.policy, DownloadPolicy::No);
     }
 }

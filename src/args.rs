@@ -1,6 +1,6 @@
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
-use crate::model_store::DownloadModels;
+use crate::model_store::Addon;
 #[cfg(feature = "local-gliner")]
 use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{
@@ -28,16 +28,7 @@ pub struct CliArgs {
     #[arg(
         long,
         global = true,
-        value_enum,
-        default_value = "ask",
-        help = "Whether missing model files (OCR, local-ner, local-gliner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'"
-    )]
-    pub download_models: DownloadModels,
-
-    #[arg(
-        long,
-        global = true,
-        help = "Directory holding downloaded and manually placed models, one subdirectory per model. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models"
+        help = "Directory holding the addons that setup-addons installs and manually placed models, one subdirectory per addon. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models"
     )]
     pub models_dir: Option<PathBuf>,
 
@@ -113,6 +104,18 @@ pub enum CliCommand {
             help = "Filter by name using glob patterns such as *.txt"
         )]
         filename_filter: Option<globset::Glob>,
+    },
+    #[command(
+        about = "Download and verify addons: the OCR models, the Pdfium library for PDF rendering and the local-ner and local-gliner models"
+    )]
+    SetupAddons {
+        #[arg(
+            value_enum,
+            value_delimiter = ',',
+            required = true,
+            help = "Addons to install, comma separated, such as ocr,pdf"
+        )]
+        addons: Vec<Addon>,
     },
 }
 
@@ -581,51 +584,32 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    use crate::model_store::DownloadModels;
-
     #[test]
-    fn download_models_defaults_to_ask_and_models_dir_to_none() {
-        let cli = CliArgs::try_parse_from(["redacter", "cp", "a", "b"]).unwrap();
-        assert_eq!(cli.download_models, DownloadModels::Ask);
-        assert_eq!(cli.models_dir, None);
+    fn setup_addons_takes_a_comma_separated_list() {
+        let cli = CliArgs::try_parse_from(["redacter", "setup-addons", "ocr,pdf"]).unwrap();
+        match cli.command {
+            CliCommand::SetupAddons { addons } => assert_eq!(addons, [Addon::Ocr, Addon::Pdf]),
+            other => panic!("expected setup-addons, got {other:?}"),
+        }
     }
 
     #[test]
-    fn global_model_flags_are_accepted_before_and_after_the_subcommand() {
-        let before = CliArgs::try_parse_from([
-            "redacter",
-            "--download-models",
-            "no",
-            "--models-dir",
-            "/m",
-            "cp",
-            "a",
-            "b",
-        ])
-        .unwrap();
-        let after = CliArgs::try_parse_from([
-            "redacter",
-            "cp",
-            "a",
-            "b",
-            "--download-models",
-            "yes",
-            "--models-dir",
-            "/m",
-        ])
-        .unwrap();
-        assert_eq!(before.download_models, DownloadModels::No);
-        assert_eq!(after.download_models, DownloadModels::Yes);
+    fn setup_addons_rejects_an_unknown_addon() {
+        let err = CliArgs::try_parse_from(["redacter", "setup-addons", "ocr,fonts"])
+            .expect_err("fonts is not an addon");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+    }
+
+    #[test]
+    fn models_dir_is_accepted_before_and_after_the_subcommand() {
+        let before =
+            CliArgs::try_parse_from(["redacter", "--models-dir", "/m", "setup-addons", "ocr"])
+                .unwrap();
+        let after =
+            CliArgs::try_parse_from(["redacter", "setup-addons", "ocr", "--models-dir", "/m"])
+                .unwrap();
         assert_eq!(before.models_dir, Some(PathBuf::from("/m")));
         assert_eq!(after.models_dir, Some(PathBuf::from("/m")));
-    }
-
-    #[test]
-    fn download_models_rejects_unknown_values() {
-        let err =
-            CliArgs::try_parse_from(["redacter", "cp", "a", "b", "--download-models", "maybe"])
-                .expect_err("unknown value must fail");
-        assert!(err.to_string().contains("maybe"), "{err}");
     }
 
     #[test]

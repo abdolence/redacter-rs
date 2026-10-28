@@ -55,6 +55,8 @@ pub enum AppError {
     OcrImageError(#[from] ocrs::ImageSourceError),
     #[error("Model store error: {0}")]
     ModelStoreError(#[from] crate::model_store::ModelStoreError),
+    #[error("{failed} of {requested} addons are not installed")]
+    AddonsNotInstalled { failed: usize, requested: usize },
     #[cfg(feature = "local-ner")]
     #[error("Local NER error: {0}")]
     LocalNerError(#[from] crate::redacters::local_ner::LocalNerError),

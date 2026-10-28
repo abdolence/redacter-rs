@@ -1,5 +1,5 @@
 use crate::commands::copy_output::{
-    format_capabilities_line, format_file_row, format_legend, format_summary_line,
+    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capability,
     CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
     SkipReason,
 };
@@ -7,7 +7,7 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
-use crate::model_store::{DownloadModels, ModelStore, ModelStoreOptions};
+use crate::model_store::{ModelStore, ModelStoreOptions};
 use crate::redacters::{
     RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
@@ -73,15 +73,12 @@ pub async fn command_copy(
     redacter_options: Option<RedacterOptions>,
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
-    let models = ModelStore::new(
-        &store_options_for(&options.model_store, redacter_options.is_some()),
-        &term_reporter,
-    );
+    let models = ModelStore::new(&options.model_store);
     let styles = CopyOutputStyles::new();
 
     // The bar exists from here on because the file systems report through it, but it is
-    // not drawn until every model this run needs has been resolved: a consent prompt or a
-    // download bar must never land under a live progress bar.
+    // not drawn until the converters have been bound: they report straight to the terminal,
+    // and those lines must not land under a live progress bar.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -95,8 +92,6 @@ pub async fn command_copy(
     let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
-    // The source is listed before the models are resolved: the listing is what says whether
-    // this run can use OCR at all, and a run that cannot must never be asked to download it.
     let source_listing = if source_fs.has_multiple_files().await? {
         if !destination_fs.accepts_multiple_files().await? {
             return Err(AppError::DestinationDoesNotSupportMultipleFiles {
@@ -112,21 +107,7 @@ pub async fn command_copy(
     } else {
         None
     };
-    let needs_ocr = match &source_listing {
-        Some(listing) => run_needs_ocr(
-            redacter_options.is_some(),
-            &listing.files,
-            &options.file_mime_override,
-        ),
-        None => single_source_needs_ocr(
-            redacter_options.is_some(),
-            source_fs.resolve(None).file_path.as_str(),
-            &options.file_mime_override,
-        ),
-    };
-    let file_converters = FileConverters::new()
-        .init(&term_reporter, &models, needs_ocr)
-        .await?;
+    let file_converters = FileConverters::new().init(&term_reporter, &models).await?;
 
     report_copy_info(
         term,
@@ -136,16 +117,6 @@ pub async fn command_copy(
         &file_converters,
         &styles,
     )?;
-
-    // Every model the redacters need is resolved while the bar is still hidden, for the
-    // same reason.
-    if let Some(ref redacter_options) = redacter_options {
-        for provider in &redacter_options.provider_options {
-            for id in provider.required_models() {
-                models.resolve(id).await?;
-            }
-        }
-    }
 
     bar.set_draw_target(ProgressDrawTarget::stderr());
     bar.enable_steady_tick(Duration::from_millis(100));
@@ -284,72 +255,6 @@ impl CopySummary {
     }
 }
 
-/// The model options this run may act on. A plain copy redacts nothing and so needs no
-/// model: whatever `--download-models` says, it is forced to `no` there, so a copy can
-/// never be interrupted by a consent prompt or a download.
-fn store_options_for(options: &ModelStoreOptions, has_redacters: bool) -> ModelStoreOptions {
-    ModelStoreOptions {
-        download: if has_redacters {
-            options.download
-        } else {
-            DownloadModels::No
-        },
-        models_dir: options.models_dir.clone(),
-    }
-}
-
-/// OCR only ever runs on images and, through the PDF renderer, on PDF pages. A listed file
-/// of any other type — a file the listing could not type included, since the redact plan
-/// reads the very same media type — can never reach it.
-fn media_type_needs_ocr(media_type: Option<&mime::Mime>) -> bool {
-    media_type.is_some_and(|media_type| {
-        Redacters::is_mime_image(media_type) || Redacters::is_mime_pdf(media_type)
-    })
-}
-
-/// Whether this run can reach the OCR engine at all, over the files it has just listed. Only
-/// a redacting run can: a copy of a directory of text files must not resolve the OCR model,
-/// let alone offer to download it.
-fn run_needs_ocr(
-    has_redacters: bool,
-    files: &[FileSystemRef],
-    mime_override: &FileMimeOverride,
-) -> bool {
-    has_redacters
-        && files.iter().any(|file| {
-            media_type_needs_ocr(
-                mime_override
-                    .override_for_file_ref(file.clone())
-                    .media_type
-                    .as_ref(),
-            )
-        })
-}
-
-/// The same question for a single-file source, which is never listed: what it holds is
-/// guessed from its path, the way the file systems guess it when they hand the file over.
-/// A path that says nothing is taken as one that may need OCR — `clipboard://` carries an
-/// image or text and only says which once it is read, and guessing "text" there would turn
-/// OCR off for a clipboard image without a word.
-fn single_source_needs_ocr(
-    has_redacters: bool,
-    path: &str,
-    mime_override: &FileMimeOverride,
-) -> bool {
-    let file_ref = mime_override.override_for_file_ref(single_source_file_ref(path));
-    has_redacters
-        && (file_ref.media_type.is_none() || media_type_needs_ocr(file_ref.media_type.as_ref()))
-}
-
-/// The one file a single-file source stands for, named and typed from its path.
-fn single_source_file_ref(path: &str) -> FileSystemRef {
-    FileSystemRef {
-        relative_path: path.rsplit('/').next().unwrap_or(path).into(),
-        media_type: mime_guess::from_path(path).first(),
-        file_size: None,
-    }
-}
-
 fn report_copy_info(
     term: &Term,
     source: &str,
@@ -369,8 +274,20 @@ fn report_copy_info(
                     .collect()
             })
             .unwrap_or_default(),
-        pdf_rendering: file_converters.pdf_image_converter.is_some(),
-        ocr: file_converters.ocr.is_some(),
+        pdf_rendering: match file_converters.pdf_image_converter {
+            Some(_) => Capability::Yes,
+            #[cfg(feature = "pdf-render")]
+            None => Capability::No(Some(crate::model_store::Addon::Pdf)),
+            #[cfg(not(feature = "pdf-render"))]
+            None => Capability::No(None),
+        },
+        ocr: match file_converters.ocr {
+            Some(_) => Capability::Yes,
+            #[cfg(feature = "ocr")]
+            None => Capability::No(Some(crate::model_store::Addon::Ocr)),
+            #[cfg(not(feature = "ocr"))]
+            None => Capability::No(None),
+        },
         sampling_size: redacter_options
             .as_ref()
             .and_then(|o| o.base_options.sampling_size),
@@ -649,141 +566,6 @@ mod tests {
     const SAMPLE_EMAIL: &str = TEST_DOCUMENT_SAMPLE_EMAIL;
     const SAMPLE_PHONE: &str = TEST_DOCUMENT_SAMPLE_PHONE;
 
-    fn listed(name: &str, media_type: Option<mime::Mime>) -> FileSystemRef {
-        FileSystemRef {
-            relative_path: name.into(),
-            media_type,
-            file_size: Some(10),
-        }
-    }
-
-    fn no_mime_override() -> FileMimeOverride {
-        FileMimeOverride::new(vec![])
-    }
-
-    /// The listing is what decides whether the OCR model is looked up at all, so the rule
-    /// it is read by is asserted on its own: text in, no OCR.
-    #[test]
-    fn a_listing_without_an_image_or_a_pdf_never_needs_ocr() {
-        let text_only = [
-            listed("customer-note.txt", Some(mime::TEXT_PLAIN)),
-            listed("customers.csv", Some(mime::TEXT_CSV)),
-            listed("customer.json", Some(mime::APPLICATION_JSON)),
-            listed("notes", None),
-        ];
-        assert!(!run_needs_ocr(true, &text_only, &no_mime_override()));
-        assert!(!run_needs_ocr(true, &[], &no_mime_override()));
-    }
-
-    #[test]
-    fn one_image_or_pdf_in_the_listing_is_enough_to_need_ocr() {
-        for media_type in [mime::IMAGE_PNG, mime::IMAGE_JPEG, mime::APPLICATION_PDF] {
-            let files = [
-                listed("customer-note.txt", Some(mime::TEXT_PLAIN)),
-                listed("scan", Some(media_type.clone())),
-            ];
-            assert!(
-                run_needs_ocr(true, &files, &no_mime_override()),
-                "{media_type}"
-            );
-        }
-    }
-
-    /// A copy is not a redaction: nothing it does can reach the OCR engine.
-    #[test]
-    fn a_copy_without_a_redacter_never_needs_ocr() {
-        let files = [listed("form.png", Some(mime::IMAGE_PNG))];
-        assert!(!run_needs_ocr(false, &files, &no_mime_override()));
-    }
-
-    /// `--mime-override` is what the redacters read, so it is what this rule reads too.
-    #[test]
-    fn the_mime_override_decides_whether_a_file_needs_ocr() {
-        let to_png = FileMimeOverride::new(vec![(
-            mime::IMAGE_PNG,
-            globset::Glob::new("*.dat").expect("valid glob"),
-        )]);
-        let files = [listed("scan.dat", Some(mime::TEXT_PLAIN))];
-        assert!(!run_needs_ocr(true, &files, &no_mime_override()));
-        assert!(run_needs_ocr(true, &files, &to_png));
-    }
-
-    /// A single-file source is never listed, so its one file is typed from its path.
-    #[test]
-    fn a_single_file_source_is_typed_from_its_path() {
-        let png = single_source_file_ref("/tmp/scans/form-example.png");
-        assert_eq!(png.relative_path.value(), "form-example.png");
-        assert_eq!(png.media_type, Some(mime::IMAGE_PNG));
-
-        let text = single_source_file_ref("customer-note.txt");
-        assert_eq!(text.relative_path.value(), "customer-note.txt");
-        assert_eq!(text.media_type, Some(mime::TEXT_PLAIN));
-
-        assert!(single_source_needs_ocr(
-            true,
-            "/tmp/scans/form-example.png",
-            &no_mime_override()
-        ));
-        assert!(single_source_needs_ocr(
-            true,
-            "gs://bucket/scan.pdf",
-            &no_mime_override()
-        ));
-        assert!(!single_source_needs_ocr(
-            true,
-            "customer-note.txt",
-            &no_mime_override()
-        ));
-        assert!(!single_source_needs_ocr(
-            false,
-            "/tmp/scans/form-example.png",
-            &no_mime_override()
-        ));
-    }
-
-    /// A source whose path says nothing about what it holds may still hold an image:
-    /// `clipboard://` decides that when it is read, long after this question is asked.
-    #[test]
-    fn a_single_file_source_of_an_unknown_type_may_need_ocr() {
-        assert_eq!(single_source_file_ref("clipboard://").media_type, None);
-        assert!(single_source_needs_ocr(
-            true,
-            "clipboard://",
-            &no_mime_override()
-        ));
-        assert!(single_source_needs_ocr(
-            true,
-            "/tmp/scan-without-an-extension",
-            &no_mime_override()
-        ));
-        assert!(!single_source_needs_ocr(
-            false,
-            "clipboard://",
-            &no_mime_override()
-        ));
-    }
-
-    /// A plain copy needs no model, so it may never prompt for one however the flag was
-    /// set. Everything else about the options is passed through untouched.
-    #[test]
-    fn a_plain_copy_is_forced_offline_whatever_the_flag_says() {
-        let asked = ModelStoreOptions {
-            download: DownloadModels::Ask,
-            models_dir: Some(std::path::PathBuf::from("/models")),
-        };
-        let for_copy = store_options_for(&asked, false);
-        assert_eq!(for_copy.download, DownloadModels::No);
-        assert_eq!(for_copy.models_dir, asked.models_dir);
-
-        for download in [DownloadModels::Ask, DownloadModels::Yes, DownloadModels::No] {
-            let options = ModelStoreOptions {
-                download,
-                models_dir: None,
-            };
-            assert_eq!(store_options_for(&options, true).download, download);
-        }
-    }
-
     fn base_redacter_options(provider_options: RedacterProviderOptions) -> RedacterOptions {
         RedacterOptions {
             provider_options: vec![provider_options],
@@ -830,14 +612,51 @@ mod tests {
         Ok(())
     }
 
-    /// A models directory left half-written by an interrupted download is not a reason to
-    /// copy nothing: the files are looked at before anything is downloaded, so the run goes
-    /// on without OCR. Reproduces `cp --models-dir <stale> --download-models no in out`.
+    /// Only `setup-addons` installs anything: a redacting copy of a PDF over an empty models
+    /// directory runs without the addons and leaves the directory as it found it.
+    #[tokio::test]
+    async fn a_redacting_copy_never_downloads_an_addon(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let term = Term::stdout();
+        let temp_dir = TempDir::with_prefix("copy_command_tests_no_addons")?;
+        let models_dir = temp_dir.path().join("models");
+        command_copy(
+            &term,
+            "test-fixtures/documents/customer-form.pdf",
+            &temp_dir.path().join("out.pdf").to_string_lossy(),
+            CopyCommandOptions::new(
+                None,
+                None,
+                None,
+                vec![],
+                ModelStoreOptions {
+                    models_dir: Some(models_dir.clone()),
+                },
+            ),
+            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: vec![],
+                },
+            ))),
+        )
+        .await?;
+        assert!(
+            !models_dir.exists(),
+            "nothing may be written to {models_dir:?}"
+        );
+        Ok(())
+    }
+
+    /// A damaged OCR install is not a reason to copy nothing: the run goes on without OCR.
     #[cfg(feature = "ocr")]
     #[tokio::test]
     async fn copies_over_a_stale_models_directory(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::model_store::{manifest, ModelId};
+        use crate::model_store::Addon;
         let lock = pdfium_test_lock();
         let _guard = lock.lock().await;
 
@@ -846,20 +665,19 @@ mod tests {
         let models_dir = temp_dir.path().join("models");
         let ocrs_dir = models_dir.join("ocrs");
         std::fs::create_dir_all(&ocrs_dir)?;
-        for file in manifest(ModelId::Ocrs).files {
+        for file in Addon::Ocr.manifest().unwrap().files {
             std::fs::write(ocrs_dir.join(file.name), b"junk")?;
         }
         let destination = temp_dir.path().join("out");
         std::fs::create_dir_all(&destination)?;
 
-        let offline_over_stale_models = || {
+        let with_stale_models = || {
             CopyCommandOptions::new(
                 None,
                 None,
                 None,
                 vec![],
                 ModelStoreOptions {
-                    download: DownloadModels::No,
                     models_dir: Some(models_dir.clone()),
                 },
             )
@@ -869,21 +687,20 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &destination.to_string_lossy(),
-            offline_over_stale_models(),
+            with_stale_models(),
             None,
         )
         .await?;
         assert_eq!(result.files_copied, SAMPLE_FILE_NAMES.len());
 
-        // The same directory with a redacter and an image, which is the run that does look
-        // the OCR model up: it must report OCR unavailable and skip the file, not abort.
+        // With a redacter and an image, which only OCR could read, the image is skipped.
         let image_destination = temp_dir.path().join("images");
         std::fs::create_dir_all(&image_destination)?;
         let result = command_copy(
             &term,
             "test-fixtures/media/",
             &image_destination.to_string_lossy(),
-            offline_over_stale_models(),
+            with_stale_models(),
             Some(base_redacter_options(RedacterProviderOptions::LocalRules(
                 LocalRulesRedacterOptions {
                     groups: RuleGroup::all(),
@@ -996,8 +813,8 @@ mod tests {
 
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
-        let store = ModelStore::new(&ModelStoreOptions::default(), &reporter);
-        let converters = FileConverters::new().init(&reporter, &store, true).await?;
+        let store = ModelStore::new(&ModelStoreOptions::default());
+        let converters = FileConverters::new().init(&reporter, &store).await?;
         let ocr = converters
             .ocr
             .as_deref()

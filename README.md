@@ -89,11 +89,9 @@ cargo install redacter
 
 ### Optional capabilities installation
 
-- If you are planning to use PDF redaction, please follow additional steps in
-the [PDF redaction](#pdf-redaction)
-- OCR (for the DLP providers that can't read images) and the `local-ner` and `local-gliner` redacters
-  need model files that are downloaded on request or installed by hand, see
-  [Models and downloads](#models-and-downloads).
+PDF redaction, OCR (for the DLP providers that can't read images) and the `local-ner` and `local-gliner`
+redacters need addons that are not bundled with the tool. Install the ones you need with
+`redacter setup-addons`, see [Addons](#addons).
 
 ## Command line options
 
@@ -110,17 +108,11 @@ Arguments:
           Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
 Options:
-      --download-models <DOWNLOAD_MODELS>
-          Whether missing model files (OCR, local-ner, local-gliner) may be downloaded: 'ask' prompts on the terminal and behaves as 'no' when stdin or stderr is not a terminal, 'yes' downloads without asking, 'no' never downloads. Default is 'ask'
-          
-          [default: ask]
-          [possible values: ask, yes, no]
-
   -m, --max-size-limit <MAX_SIZE_LIMIT>
           Maximum size of files to copy in bytes
 
       --models-dir <MODELS_DIR>
-          Directory holding downloaded and manually placed models, one subdirectory per model. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models
+          Directory holding the addons that setup-addons installs and manually placed models, one subdirectory per addon. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models
 
   -n, --max-files-limit <MAX_FILES_LIMIT>
           Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
@@ -502,8 +494,8 @@ The `local-ner` redacter finds names of people (`per`), organisations (`org`) an
 with a multilingual named-entity model running entirely on your machine, and replaces each of them
 with `[REDACTED]`. It uses the `distilbert-base-multilingual-cased-ner-hrl` model, trained on ten
 high-resource languages: Arabic, German, English, Spanish, French, Italian, Latvian, Dutch,
-Portuguese and Chinese. Nothing leaves your computer; the only network access is the one-time,
-opt-in download of the model files described in [Models and downloads](#models-and-downloads).
+Portuguese and Chinese. Nothing leaves your computer; the only network access is
+`redacter setup-addons local-ner`, which installs the model files described in [Addons](#addons).
 
 Like `local-rules`, an image or a PDF first goes through the OCR engine: every recognised word is
 passed to the model as if it were reading the page as text, and every word the chain redacts is
@@ -523,7 +515,7 @@ redacter cp -d local-rules -d local-ner tmp/source/ tmp/redacted/
 Use a release binary (or `cargo run --release`) for `local-ner`: a debug build spends about 12
 seconds per 512-token window of text, against about 95 ms in release. In release, loading the model
 takes about 100 ms and it holds about 232 MiB of peak memory; the download in
-[Models and downloads](#models-and-downloads) is about 131.6 MiB in total. A table costs one forward
+[Addons](#addons) is about 131.6 MiB in total. A table costs one forward
 pass per cell that holds a letter, so a CSV of many short rows is far slower than a text file of the
 same size. These numbers are approximate and depend on your hardware and the amount of text.
 
@@ -555,8 +547,8 @@ and handles and usernames written as free text, none of which `local-rules` or `
 their own. It uses [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
 (the [onnx-community](https://huggingface.co/onnx-community/gliner_multi_pii-v1) ONNX export),
 trained on six languages: English, French, German, Spanish, Italian and Portuguese. Nothing leaves your
-computer; the only network access is the one-time, opt-in download of the model files described in
-[Models and downloads](#models-and-downloads).
+computer; the only network access is `redacter setup-addons local-gliner`, which installs the model files
+described in [Addons](#addons).
 
 Like `local-rules` and `local-ner`, an image or a PDF first goes through the OCR engine: every recognised
 word is passed to the model as if it were reading the page as text, and every word the chain redacts is
@@ -586,7 +578,7 @@ are well separated in practice, so lowering the threshold rarely changes the res
 Use a release binary (or `cargo run --release`) for `local-gliner`: like `local-ner`, a debug build is
 far slower than release. In release, on an Intel i7-10700K (16 threads), loading the model takes about
 0.6 s and it holds about 1.5 GB of peak memory while redacting a small text corpus; the download in
-[Models and downloads](#models-and-downloads) is about 1.17 GB, almost all of it the fp32 model weights
+[Addons](#addons) is about 1.17 GB, almost all of it the fp32 model weights
 (the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
 support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 834 ms per file and
 2.8 s over the whole 8-file corpus. The per-file figure includes process start and the ~0.6 s model
@@ -686,60 +678,76 @@ Only if such redacters are not available, the tool will try to redact the file u
 ## PDF redaction
 
 PDF redaction is supported by rendering PDF files as images and redacting them.
-To render and convert PDF files the tool uses external library `Pdfium` (the C++ PDF library used by the Google Chromium
-project).
-This library needs to be installed separately on your system.
+To render and convert PDF files the tool uses the external library `Pdfium` (the C++ PDF library used by the Google
+Chromium project). `redacter setup-addons pdf` installs the build the tool is compiled against:
 
-Installation instructions:
+- The library is stored with the other addons, in `<models dir>/pdfium-7881/`, and is checked against its pinned
+  SHA-256 every time it is loaded. It is tried before any other Pdfium on the machine.
+- The addon is available for Linux (glibc) on x86_64 and aarch64, macOS on x86_64 and aarch64, and Windows on x86,
+  x86_64 and aarch64. Other platforms, such as FreeBSD and the static musl builds, need Pdfium installed by hand.
 
-- Download the latest release from, for example,
-  here [Pdfium releases](https://github.com/bblanchon/pdfium-binaries/releases) for your system.
-- Extract the archive and copy library file `libpdfium.so` to the one of the following directory:
-    - The path the redacter tool installed (such as `/usr/local/bin`)
-    - The path that resides with redacter tool `/usr/local/lib/` if you have installed the tool in `/usr/local/bin`
-    - The path with system libs like `/usr/lib/`.
+Without the addon the tool looks for a Pdfium installed by hand, in this order: the current directory and `./lib`,
+the `lib` directory beside the directory of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`),
+the directory of the tool itself, then the system library path.
 
-If library is detected correctly it will be reported in the tool output as.
-> PDF to image support: ✓ Yes
+Manual installation:
 
-## Models and downloads
+- Download the Pdfium build of
+  [release chromium/7881](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7881) for your system
+  from the bblanchon/pdfium-binaries project. Other builds may not match the library the tool is compiled against.
+- Extract the archive and copy the library file (`libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`) to one of the
+  directories listed above.
 
-The OCR engine and the `local-ner` and `local-gliner` redacters need model files that are not bundled
-with the tool. They are hosted as assets of GitHub releases in this repository, copied unmodified
-from the sources listed below:
+If the library is detected correctly it is reported in the tool output as:
+> PDF rendering: yes
 
-| Model | Files | Size | Source | Licence |
+## Addons
+
+The OCR engine, PDF rendering and the `local-ner` and `local-gliner` redacters need files that are not
+bundled with the tool. `redacter setup-addons` installs them and is the only command that downloads anything:
+`cp` uses what is installed, and a capability whose addon is missing is off for the run, reported for example
+as `OCR: no (redacter setup-addons ocr)`.
+
+```sh
+# OCR and PDF rendering
+redacter setup-addons ocr,pdf
+# The local-ner model, into a directory of your choice
+redacter --models-dir /opt/redacter/models setup-addons local-ner
+```
+
+The files are hosted as assets of GitHub releases in this repository, copied unmodified from the sources listed
+below:
+
+| Addon | Files | Size | Source | Licence |
 |---|---|---|---|---|
-| `ocrs` (OCR) | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
-| `distilbert-base-multilingual-cased-ner-hrl` (`local-ner`) | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
-| `gliner_multi_pii-v1` (`local-gliner`) | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
+| `ocr`, in `ocrs/` | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `pdf`, in `pdfium-7881/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.3 to 7.5 MiB | [release `models-pdfium-7881`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-7881), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/7881` (Pdfium 151.0.7881.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
+| `local-ner`, in `distilbert-base-multilingual-cased-ner-hrl/` | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
+| `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 
-Nothing is downloaded without your consent. `--download-models` controls it:
+Every downloaded file is verified against a SHA-256 digest pinned in the tool before it takes its final name.
+The addons are stored under `~/.cache/redacter/models/` on Linux, `~/Library/Caches/redacter/models/` on macOS
+and `%LOCALAPPDATA%\redacter\models\` on Windows, one directory per addon:
 
-- `ask` (default): when a run needs a model that is not installed and the tool runs in a terminal,
-  it prints what it would download (files, size, source, licence, destination) and asks
-  `Download now? [y/N]`. Without a terminal it behaves as `no`.
-- `yes`: downloads without asking, for scripts and CI.
-- `no`: never downloads; a missing model is reported with the manual installation instructions.
+- `setup-addons` checks an installed addon against its digests and skips it when it matches;
+- a run checks the Pdfium library against its digest every time it loads it, and a model against its pinned size;
+- `--models-dir <DIR>` (or the `REDACTER_MODELS_DIR` environment variable) moves that directory, for
+  `setup-addons` and `cp` alike;
+- downloads honour the `HTTPS_PROXY` environment variable.
 
-Downloaded files are verified against SHA-256 digests pinned in the tool and stored under
-`~/.cache/redacter/models/<model>/` on Linux, `~/Library/Caches/redacter/models/<model>/` on macOS and
-`%LOCALAPPDATA%\redacter\models\<model>\` on Windows. Only downloads are checksummed: a file already
-in that directory is checked against its pinned size, and a copy you place in `models/<model>/` next
-to the executable or in the legacy OCR directories is used as it is, checked against nothing.
-`--models-dir <DIR>` (or the `REDACTER_MODELS_DIR` environment variable) moves that directory.
-Downloads honour the `HTTPS_PROXY` environment variable.
+For air-gapped machines, download the files listed above on another computer and copy them into the addon's
+directory under the names in the table, for example `~/.cache/redacter/models/ocrs/text-detection.rten`. The tool
+also looks in `models/<addon directory>/` next to its own executable, and the OCR models are still found in
+`~/.cache/ocrs` and `../share/ocrs` as in earlier versions; these copies are used as they are, checked against
+nothing.
 
-For air-gapped machines, download the files listed above on another computer and copy them into
-`<models dir>/<model>/`, for example `~/.cache/redacter/models/ocrs/text-detection.rten`. The tool
-also looks in `models/<model>/` next to its own executable, and the OCR models are still found in
-`~/.cache/ocrs` and `../share/ocrs` as in earlier versions.
+`--download-models` and its download prompt are removed: install the addons with `setup-addons` instead.
 
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
-The OCR models are downloaded on request or installed by hand as described in
-[Models and downloads](#models-and-downloads); `~/.cache/ocrs` from earlier versions keeps working.
+Install the OCR models with `redacter setup-addons ocr`, see [Addons](#addons); `~/.cache/ocrs` from earlier
+versions keeps working.
 
 ## Examples:
 

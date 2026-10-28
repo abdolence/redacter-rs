@@ -1,15 +1,17 @@
 use crate::errors::AppError;
 use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
+use crate::model_store::{Addon, ModelStore};
 use crate::AppResult;
 use bytes::Bytes;
 use pdfium_render::prelude::*;
+use std::path::{Path, PathBuf};
 
 pub struct PdfImageConverter {
     pdfium: Pdfium,
 }
 
 impl PdfImageConverter {
-    pub fn new() -> AppResult<Self> {
+    pub fn new(models: &ModelStore) -> AppResult<Self> {
         let executable = std::env::current_exe()?;
         let current_dir = executable
             .parent()
@@ -17,28 +19,42 @@ impl PdfImageConverter {
                 message: "No parent directory for executable".to_string(),
             })?
             .to_path_buf();
+        let installed = match models.find(Addon::Pdf) {
+            Ok(files) => Some(files.dir().to_path_buf()),
+            Err(err) => {
+                tracing::debug!(%err, "no Pdfium from setup-addons");
+                None
+            }
+        };
 
-        let bindings = Pdfium::bind_to_library(
-            // Attempt to bind to a pdfium library in the current working directory...
-            Pdfium::pdfium_platform_library_name_at_path("./"),
-        )
-        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./lib")))
-        .or_else(|_| {
-            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
-                &current_dir
-                    .parent()
-                    .map(|p| p.join("lib"))
-                    .unwrap_or(current_dir.clone()),
-            ))
-        })
-        .or_else(|_| {
-            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&current_dir))
-        })
-        .or_else(|_| Pdfium::bind_to_system_library())?;
+        let bindings = library_dirs(installed, &current_dir)
+            .iter()
+            .find_map(|dir| {
+                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir)).ok()
+            })
+            .map_or_else(Pdfium::bind_to_system_library, Ok)?;
 
         let pdfium = Pdfium::new(bindings);
         Ok(Self { pdfium })
     }
+}
+
+/// The directories a Pdfium library is loaded from, in order: the verified copy
+/// `setup-addons` installed, then where a Pdfium installed by hand has always been looked for.
+/// The system library path is tried after all of them.
+fn library_dirs(installed: Option<PathBuf>, executable_dir: &Path) -> Vec<PathBuf> {
+    installed
+        .into_iter()
+        .chain([
+            PathBuf::from("./"),
+            PathBuf::from("./lib"),
+            executable_dir
+                .parent()
+                .map(|parent| parent.join("lib"))
+                .unwrap_or_else(|| executable_dir.to_path_buf()),
+            executable_dir.to_path_buf(),
+        ])
+        .collect()
 }
 
 impl PdfToImage for PdfImageConverter {
@@ -83,11 +99,12 @@ impl PdfToImage for PdfImageConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_store::ModelStoreOptions;
 
     /// pdfium is bound to a native library that is not committed to the repo (see
     /// `lib/libpdfium.so`, gitignored). Machines without it should skip rather than fail.
     fn converter_or_skip(test_name: &str) -> Option<PdfImageConverter> {
-        match PdfImageConverter::new() {
+        match PdfImageConverter::new(&ModelStore::new(&ModelStoreOptions::default())) {
             Ok(converter) => Some(converter),
             Err(error) => {
                 println!("Skipping {test_name}: pdfium is not available ({error})");
@@ -127,5 +144,38 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// The copy `setup-addons` installed is the build the tool is compiled against, so it
+    /// comes before any Pdfium installed by hand.
+    #[test]
+    fn the_installed_pdfium_is_tried_before_any_installed_by_hand() {
+        let installed = PathBuf::from("/models/pdfium-7881");
+        assert_eq!(
+            library_dirs(Some(installed.clone()), Path::new("/opt/redacter/bin")),
+            [
+                installed,
+                PathBuf::from("./"),
+                PathBuf::from("./lib"),
+                PathBuf::from("/opt/redacter/lib"),
+                PathBuf::from("/opt/redacter/bin"),
+            ]
+        );
+    }
+
+    /// The installed copy is bound by the platform's library name, so the table has to
+    /// store it under that name.
+    #[test]
+    fn the_installed_pdfium_is_stored_under_the_name_it_is_loaded_by() {
+        let Some(manifest) = Addon::Pdf.manifest() else {
+            return;
+        };
+        let names: Vec<&str> = manifest.files.iter().map(|file| file.name).collect();
+        assert_eq!(
+            names,
+            [Pdfium::pdfium_platform_library_name()
+                .to_str()
+                .expect("a library name is UTF-8")]
+        );
     }
 }

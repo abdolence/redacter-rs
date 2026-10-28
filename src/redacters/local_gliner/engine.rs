@@ -443,21 +443,14 @@ mod tests {
         }
     }
 
-    use crate::model_store::{DownloadModels, ModelId, ModelStore, ModelStoreOptions};
-    use crate::reporter::AppReporter;
-    use console::Term;
+    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
 
-    /// `DownloadModels::No`: the 1.16 GB model is placed in the cache by hand for these tests
-    /// and must never be fetched over the network by a test run.
-    async fn engine() -> GlinerEngine {
-        let term = Term::stdout();
-        let reporter = AppReporter::from(&term);
-        let options = ModelStoreOptions {
-            download: DownloadModels::No,
-            models_dir: None,
-        };
-        let store = ModelStore::new(&options, &reporter);
-        let files = store.resolve(ModelId::GlinerMultiPii).await.unwrap();
+    /// The 1.16 GB model is installed with `redacter setup-addons local-gliner`; a test
+    /// never downloads it.
+    fn engine() -> GlinerEngine {
+        let files = ModelStore::new(&ModelStoreOptions::default())
+            .find(Addon::LocalGliner)
+            .unwrap();
         GlinerEngine::load(&files).unwrap()
     }
 
@@ -471,7 +464,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-local-gliner"), ignore)]
     async fn loads_the_pinned_model_and_scores_a_window() {
-        let engine = engine().await;
+        let engine = engine();
         assert_eq!(engine.max_width, 12);
         assert_eq!(engine.max_types, 25);
         let findings = engine
