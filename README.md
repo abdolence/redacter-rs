@@ -9,10 +9,11 @@ files removing it, across various sources and destinations and utilising Data Le
 `redacter cp` copies files and redacts them on the way; `redacter scan` only reads them and reports what was found and
 where, with an exit code a CI pipeline can gate on.
 
-The tool ships three redacters that run entirely on your machine, a rule-based one with checksum validation, a
-small multilingual named-entity model and a zero-shot span model that looks for labels you choose, and can also
-delegate to cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redaction keeps the data on the host and costs nothing per file; the cloud providers
-find more. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
+The tool ships three redacters that run entirely on your machine, a rule-based one with checksum validation, a small
+multilingual named-entity model and a zero-shot span model that looks for labels you choose, and can also delegate to
+cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redaction keeps the data on the host and
+costs nothing per file; the cloud providers find more. See [Local or
+cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
 
 ![redacter-demo](media/redacter-demo.gif)
 
@@ -984,7 +985,7 @@ reported when its score reaches them (0.5 by default).
 
 - `0`: nothing was found, or `--no-fail` is set;
 - `2`: at least one finding was reported;
-- `1`: an error. A file that a redacter failed on is reported with the status `failed`, and a file that needs a
+- `1`: an error. A file that could not be read or scanned is reported with the status `failed`, and a file that needs a
   converter the run lacks, such as OCR or PDF rendering, with the status `blocked`. The other files are still scanned,
   and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command line exits
   with 1 as well, for every command, so that 2 always means findings.
@@ -1063,9 +1064,10 @@ At the top level:
 - `files_scanned`: files read by the redacters, with or without findings;
 - `files_with_findings`, `findings`: how many files and how many findings the report has;
 - `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`;
-- `files_unsupported`: files that no selected redacter reads;
+- `files_unsupported`: files that no selected redacter reads, including image formats that OCR cannot read, such as
+  SVG;
 - `files_blocked`: files that need a converter the run lacks, such as OCR or PDF rendering;
-- `files_failed`: files that a redacter failed on;
+- `files_failed`: files that could not be read or scanned;
 - `findings_by_label`: the number of findings for each label;
 - `files`: one entry for every file that was scanned, unsupported or failed. Files that the filters leave out of a
   directory listing are only counted in `files_skipped`.
@@ -1125,11 +1127,13 @@ for AWS Comprehend.
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.
 - The LLM redacters ask the model for the sensitive values in the text with a type for each, and report every
-  occurrence of each value as a whole word, ignoring case when the model did not copy the value letter for letter.
+  occurrence of each value, ignoring case, since the model may not copy a value letter for letter. A value that stands
+  alone as a word is reported there only; a value that never does, such as a name inside a Japanese sentence or an
+  inflected word, is reported wherever it occurs. Letters are compared one at a time, so `ß` and `SS` differ.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
 - AWS Bedrock Guardrails reports the matched value and its type but no position, so the findings are located by
-  searching the text for the value.
+  searching the text for the value in the same way.
 
 ## List (LS) command
 
