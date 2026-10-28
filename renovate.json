@@ -3,9 +3,10 @@
   "extends": [
     "group:allNonMajor"
   ],
-  "ignoreDeps": [
-    "rten",
-    "ocrs",
-    "rten-imageproc"
+  "packageRules": [
+    {
+      "matchPackageNames": ["ocrs", "rten", "rten-imageproc", "rten-tensor"],
+      "groupName": "rten and ocrs"
+    }
   ]
 }
