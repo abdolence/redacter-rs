@@ -66,8 +66,6 @@ mod simple_image_redacter;
 pub use simple_image_redacter::*;
 mod stream_redacter;
 pub use stream_redacter::*;
-mod stream_detector;
-pub use stream_detector::*;
 
 mod redacter_throttler;
 pub use redacter_throttler::*;

@@ -14,7 +14,7 @@ use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef}
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::model_store::{ModelStore, ModelStoreOptions};
 use crate::redacters::{
-    DetectStreamResult, RedacterOptions, RedacterThrottler, Redacters, Score, StreamDetector,
+    DetectStreamResult, RedacterOptions, RedacterThrottler, Redacters, Score, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -64,7 +64,7 @@ struct ScanContext<'s> {
     term: &'s Term,
     options: &'s ScanCommandOptions,
     redacters: &'s [Redacters<'s>],
-    detector: &'s StreamDetector<'s>,
+    stream_redacter: &'s StreamRedacter<'s>,
     styles: &'s ScanOutputStyles,
     bar: &'s ProgressBar,
 }
@@ -144,12 +144,12 @@ pub async fn command_scan(
     for provider_options in redacter_options.provider_options {
         redacters.push(Redacters::new_redacter(provider_options, &app_reporter, &models).await?);
     }
-    let detector = StreamDetector::new(&redacter_options.base_options, &file_converters);
+    let stream_redacter = StreamRedacter::new(&redacter_options.base_options, &file_converters);
     let context = ScanContext {
         term,
         options: &options,
         redacters: &redacters,
-        detector: &detector,
+        stream_redacter: &stream_redacter,
         styles: &styles,
         bar: &bar,
     };
@@ -237,14 +237,14 @@ async fn detect_in_file(
     throttler: &mut Option<RedacterThrottler>,
 ) -> ScanFileReport {
     let plan = match context
-        .detector
+        .stream_redacter
         .create_detect_plan(context.redacters, file_ref)
         .await
     {
         Ok(plan) => plan,
         Err(error) => return failed_report(file_ref, &error),
     };
-    if plan.is_empty() {
+    if plan.supported_redacters.is_empty() {
         return ScanFileReport::not_scanned(
             file_ref,
             SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
@@ -268,7 +268,7 @@ async fn detect_in_file(
         }
     }
     match context
-        .detector
+        .stream_redacter
         .detect_stream(reader, &plan, file_ref)
         .await
     {
