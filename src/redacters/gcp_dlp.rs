@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Detection, DetectionLabel, DetectionLocation, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters, Score,
+    RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -14,7 +14,9 @@ use gcloud_sdk::tonic::metadata::MetadataValue;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use mime::Mime;
 use rvstruct::ValueStruct;
+use std::cell::OnceCell;
 use std::collections::HashSet;
+use std::ops::Range;
 use tokio_util::bytes;
 
 #[derive(Clone)]
@@ -180,6 +182,7 @@ impl<'a> GcpDlpRedacter<'a> {
                     .to_string(),
             });
         }
+        let text_lines = OnceCell::new();
         let mut detections = Vec::new();
         for finding in result.findings {
             let score = likelihood_score(finding.likelihood());
@@ -192,16 +195,10 @@ impl<'a> GcpDlpRedacter<'a> {
                 .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a location"))?;
             match content {
                 RedacterDataItemContent::Value(text) => {
-                    let (start, end) = byte_span(&location)?;
-                    detections.push(Detection {
-                        label,
-                        location: DetectionLocation::Text { start, end },
-                        score,
-                        value: text_in_range(text, start, end)?,
-                    });
+                    let lines = text_lines.get_or_init(|| TextLines::new(text));
+                    detections.push(lines.detection(byte_span(&location)?, label, score)?);
                 }
                 RedacterDataItemContent::Table { rows, .. } => {
-                    let (start, end) = byte_span(&location)?;
                     let (row, column) = table_cell(&location, field_names)?;
                     let cell = rows
                         .get(row)
@@ -209,17 +206,14 @@ impl<'a> GcpDlpRedacter<'a> {
                         .ok_or_else(|| {
                             AppError::incomplete_result(RedacterType::GcpDlp, "a cell of the table")
                         })?;
-                    detections.push(Detection {
+                    detections.push(Detection::in_table_cell(
+                        row,
+                        column,
+                        cell,
+                        byte_span(&location)?,
                         label,
-                        location: DetectionLocation::TableCell {
-                            row,
-                            column,
-                            start,
-                            end,
-                        },
                         score,
-                        value: text_in_range(cell, start, end)?,
-                    });
+                    )?);
                 }
                 RedacterDataItemContent::Image { .. } => {
                     for bounding_box in location.content_locations.iter().flat_map(|content| {
@@ -424,13 +418,13 @@ fn likelihood_score(likelihood: dlp::Likelihood) -> Option<Score> {
 }
 
 /// The finding's byte range within its containing text or table cell. DLP counts UTF-8 bytes.
-fn byte_span(location: &dlp::Location) -> AppResult<(usize, usize)> {
+fn byte_span(location: &dlp::Location) -> AppResult<Range<usize>> {
     let range = location
         .byte_range
         .as_ref()
         .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a byte range"))?;
     match (usize::try_from(range.start), usize::try_from(range.end)) {
-        (Ok(start), Ok(end)) => Ok((start, end)),
+        (Ok(start), Ok(end)) => Ok(start..end),
         _ => Err(AppError::SystemError {
             message: format!(
                 "A GCP DLP finding has the invalid byte range {}..{}",
@@ -438,15 +432,6 @@ fn byte_span(location: &dlp::Location) -> AppResult<(usize, usize)> {
             ),
         }),
     }
-}
-
-fn text_in_range(text: &str, start: usize, end: usize) -> AppResult<String> {
-    text.get(start..end)
-        .map(str::to_string)
-        .ok_or(AppError::DetectionOutsideContent {
-            redacter_type: RedacterType::GcpDlp,
-            location: DetectionLocation::Text { start, end },
-        })
 }
 
 /// The row and column a table finding sits in, the column found by the name of its field.
@@ -717,7 +702,9 @@ mod tests {
                     label: DetectionLabel::new("EMAIL_ADDRESS"),
                     location: DetectionLocation::Text {
                         start: email,
-                        end: email + 16
+                        end: email + 16,
+                        line: 1,
+                        column: 22,
                     },
                     score: score(0.9),
                     value: "john@example.com".to_string(),
@@ -726,7 +713,9 @@ mod tests {
                     label: DetectionLabel::new("PHONE_NUMBER"),
                     location: DetectionLocation::Text {
                         start: phone,
-                        end: phone + 8
+                        end: phone + 8,
+                        line: 1,
+                        column: 47,
                     },
                     score: score(0.5),
                     value: "555-0100".to_string(),
@@ -824,8 +813,8 @@ mod tests {
             vec![Detection {
                 label: DetectionLabel::new("EMAIL_ADDRESS"),
                 location: DetectionLocation::TableCell {
-                    row: 1,
-                    column: 1,
+                    row: 2,
+                    column: 2,
                     start: email_start,
                     end: "mail zoë@example.org".len()
                 },
@@ -1045,6 +1034,8 @@ mod tests {
                         == DetectionLocation::Text {
                             start: email,
                             end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
                         }
                     && detection.value == "zoe.keller@example.com"
                     && detection.score.is_some()
@@ -1089,8 +1080,8 @@ mod tests {
                 detection.label == DetectionLabel::new("EMAIL_ADDRESS")
                     && detection.location
                         == DetectionLocation::TableCell {
-                            row: 1,
-                            column: 2,
+                            row: 2,
+                            column: 3,
                             start: email,
                             end: email + "zoë.keller@example.com".len(),
                         }

@@ -2,8 +2,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, DetectionLocation, RedactSupport,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    mask_detections, CharOffsets, Detection, DetectionLabel, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -58,6 +58,7 @@ impl<'a> AwsComprehendRedacter<'a> {
     /// character offsets to byte offsets.
     fn detections_in(text: &str, entities: &[PiiEntity]) -> AppResult<Vec<Detection>> {
         let offsets = CharOffsets::new(text);
+        let lines = TextLines::new(text);
         entities
             .iter()
             .map(|entity| {
@@ -81,22 +82,14 @@ impl<'a> AwsComprehendRedacter<'a> {
                         })
                     }
                 };
-                let (byte_start, byte_end) =
-                    offsets
-                        .byte_range(start, end)
-                        .ok_or(AppError::DetectionOutsideContent {
-                            redacter_type: RedacterType::AwsComprehend,
-                            location: DetectionLocation::Text { start, end },
-                        })?;
-                Ok(Detection {
-                    label: DetectionLabel::new(entity_type.as_str()),
-                    location: DetectionLocation::Text {
-                        start: byte_start,
-                        end: byte_end,
-                    },
-                    score: entity.score.map(Score::try_from).transpose()?,
-                    value: text[byte_start..byte_end].to_string(),
-                })
+                let range = offsets
+                    .byte_range(start, end)
+                    .ok_or(AppError::DetectionOutsideContent { start, end })?;
+                lines.detection(
+                    range,
+                    DetectionLabel::new(entity_type.as_str()),
+                    entity.score.map(Score::try_from).transpose()?,
+                )
             })
             .collect()
     }
@@ -147,6 +140,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redacters::DetectionLocation;
     use aws_sdk_comprehend::types::PiiEntityType;
     use console::Term;
 
@@ -194,7 +188,9 @@ mod tests {
                     label: DetectionLabel::new("NAME"),
                     location: DetectionLocation::Text {
                         start: name,
-                        end: name + "Zoë Keller".len()
+                        end: name + "Zoë Keller".len(),
+                        line: 1,
+                        column: 8,
                     },
                     score: score(0.99),
                     value: "Zoë Keller".to_string(),
@@ -203,7 +199,9 @@ mod tests {
                     label: DetectionLabel::new("EMAIL"),
                     location: DetectionLocation::Text {
                         start: email,
-                        end: email + "zoe@example.com".len()
+                        end: email + "zoe@example.com".len(),
+                        line: 1,
+                        column: 20,
                     },
                     score: score(0.97),
                     value: "zoe@example.com".to_string(),
@@ -304,6 +302,8 @@ mod tests {
                         == DetectionLocation::Text {
                             start: email,
                             end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
                         }
                     && detection.value == "zoe.keller@example.com"
                     && detection.score.is_some()

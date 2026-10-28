@@ -6,8 +6,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, DetectionLocation, RedactSupport,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    mask_detections, CharOffsets, Detection, DetectionLabel, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -107,6 +107,7 @@ impl<'a> MsPresidioRedacter<'a> {
     /// offsets to byte offsets and leaving out the disallowed entity types.
     fn detections_in(text: &str, items: &[MsPresidioAnalyzedItem]) -> AppResult<Vec<Detection>> {
         let offsets = CharOffsets::new(text);
+        let lines = TextLines::new(text);
         items
             .iter()
             .filter(|item| !item.is_disallowed())
@@ -116,22 +117,14 @@ impl<'a> MsPresidioRedacter<'a> {
                         message: format!("MS Presidio returned an item without offsets: {item:?}"),
                     });
                 };
-                let (byte_start, byte_end) =
-                    offsets
-                        .byte_range(start, end)
-                        .ok_or(AppError::DetectionOutsideContent {
-                            redacter_type: RedacterType::MsPresidio,
-                            location: DetectionLocation::Text { start, end },
-                        })?;
-                Ok(Detection {
-                    label: DetectionLabel::new(&item.entity_type),
-                    location: DetectionLocation::Text {
-                        start: byte_start,
-                        end: byte_end,
-                    },
-                    score: item.score.map(Score::try_from).transpose()?,
-                    value: text[byte_start..byte_end].to_string(),
-                })
+                let range = offsets
+                    .byte_range(start, end)
+                    .ok_or(AppError::DetectionOutsideContent { start, end })?;
+                lines.detection(
+                    range,
+                    DetectionLabel::new(&item.entity_type),
+                    item.score.map(Score::try_from).transpose()?,
+                )
             })
             .collect()
     }
@@ -258,6 +251,7 @@ mod tests {
     use console::Term;
 
     use super::*;
+    use crate::redacters::DetectionLocation;
 
     /// An analyzer response as the Presidio service sends it: offsets count characters.
     const ANALYZER_RESPONSE: &str = r#"[
@@ -291,7 +285,9 @@ mod tests {
                     label: DetectionLabel::new("PERSON"),
                     location: DetectionLocation::Text {
                         start: name,
-                        end: name + "Zoë Keller".len()
+                        end: name + "Zoë Keller".len(),
+                        line: 1,
+                        column: 8,
                     },
                     score: score(0.85),
                     value: "Zoë Keller".to_string(),
@@ -300,7 +296,9 @@ mod tests {
                     label: DetectionLabel::new("EMAIL_ADDRESS"),
                     location: DetectionLocation::Text {
                         start: email,
-                        end: email + "zoe@example.com".len()
+                        end: email + "zoe@example.com".len(),
+                        line: 1,
+                        column: 20,
                     },
                     score: score(1.0),
                     value: "zoe@example.com".to_string(),
@@ -452,6 +450,8 @@ mod tests {
                         == DetectionLocation::Text {
                             start: email,
                             end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
                         }
                     && detection.value == "zoe.keller@example.com"
                     && detection.score.is_some()

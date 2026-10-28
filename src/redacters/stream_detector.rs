@@ -7,14 +7,13 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    DetectionLabel, DetectionLocation, OcrText, RedactSupport, Redacter, RedacterBaseOptions,
-    RedacterDataItem, RedacterDataItemContent, Redacters, RedactionBlocked, Score, StreamRedacter,
+    Detection, DetectionLocation, OcrText, RedactSupport, Redacter, RedacterBaseOptions,
+    RedacterDataItem, RedacterDataItemContent, Redacters, RedactionBlocked, StreamRedacter,
 };
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
 use image::ImageFormat;
 use mime::Mime;
-use serde::Serialize;
 
 /// How one redacter reads a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +54,10 @@ impl<'a> DetectPlan<'a> {
         &self,
         route: DetectRoute,
         item: &RedacterDataItem,
-    ) -> AppResult<Vec<ScannedDetection>> {
+    ) -> AppResult<Vec<(RedacterType, Detection)>> {
         let mut detections = Vec::new();
         for redacter in self.routed(route) {
-            detections.extend(redacter.checked_detect(item).await?);
+            detections.extend(redacter.tagged_detect(item).await?);
         }
         Ok(detections)
     }
@@ -67,18 +66,18 @@ impl<'a> DetectPlan<'a> {
         &self,
         item: &RedacterDataItem,
         page: Option<usize>,
-    ) -> AppResult<Vec<ScannedDetection>> {
+    ) -> AppResult<Vec<(RedacterType, Detection)>> {
         let mut detections = Vec::new();
         for redacter in self.routed(DetectRoute::Native) {
-            for mut scanned in redacter.checked_detect(item).await? {
-                if let ScannedLocation::Image {
+            for (redacter_type, mut detection) in redacter.tagged_detect(item).await? {
+                if let DetectionLocation::Image {
                     page: ref mut detected_page,
                     ..
-                } = scanned.location
+                } = detection.location
                 {
                     *detected_page = page;
                 }
-                detections.push(scanned);
+                detections.push((redacter_type, detection));
             }
         }
         Ok(detections)
@@ -96,211 +95,23 @@ impl Redacters<'_> {
         Ok(support == RedactSupport::Supported)
     }
 
-    /// The redacter's detections in `item`, refusing any that do not point into it: a report
-    /// would otherwise place them somewhere they are not.
-    async fn checked_detect(&self, item: &RedacterDataItem) -> AppResult<Vec<ScannedDetection>> {
-        let line_starts = LineStarts::from(match &item.content {
-            RedacterDataItemContent::Value(text) => text.as_str(),
-            _ => "",
-        });
-        self.detect(item)
+    async fn tagged_detect(
+        &self,
+        item: &RedacterDataItem,
+    ) -> AppResult<Vec<(RedacterType, Detection)>> {
+        Ok(self
+            .detect(item)
             .await?
             .into_iter()
-            .map(|detection| {
-                let location =
-                    ScannedLocation::in_content(detection.location, &item.content, &line_starts)
-                        .ok_or(AppError::DetectionOutsideContent {
-                            redacter_type: self.redacter_type(),
-                            location: detection.location,
-                        })?;
-                Ok(ScannedDetection {
-                    redacter: self.redacter_type(),
-                    label: detection.label,
-                    score: detection.score,
-                    location,
-                    value: detection.value,
-                })
-            })
-            .collect()
-    }
-}
-
-/// Where a text detection starts, as an editor shows it: a 1-based line and a 1-based column
-/// counted in characters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct TextPosition {
-    pub line: usize,
-    pub column: usize,
-}
-
-/// Where a detection sits in the item it was found in. Indexes count from 0, as in
-/// [`DetectionLocation`], except that a text location also carries the line and column of its
-/// start: it exists only for a detection in text, which is the only place they are known.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ScannedLocation {
-    Text {
-        start: usize,
-        end: usize,
-        position: TextPosition,
-    },
-    TableCell {
-        row: usize,
-        column: usize,
-        start: usize,
-        end: usize,
-    },
-    Image {
-        page: Option<usize>,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-    },
-}
-
-impl ScannedLocation {
-    /// The location as placed in `content`: a text range on character boundaries of a text
-    /// item, an existing cell's range for a table, an ordered box for an image. `None` when
-    /// `location` does not point into `content`.
-    fn in_content(
-        location: DetectionLocation,
-        content: &RedacterDataItemContent,
-        line_starts: &LineStarts,
-    ) -> Option<Self> {
-        match (location, content) {
-            (DetectionLocation::Text { start, end }, RedacterDataItemContent::Value(text)) => {
-                text.get(start..end)?;
-                Some(Self::Text {
-                    start,
-                    end,
-                    position: line_starts.position(text, start),
-                })
-            }
-            (
-                DetectionLocation::TableCell {
-                    row,
-                    column,
-                    start,
-                    end,
-                },
-                RedacterDataItemContent::Table { rows, .. },
-            ) => {
-                rows.get(row)?.get(column)?.get(start..end)?;
-                Some(Self::TableCell {
-                    row,
-                    column,
-                    start,
-                    end,
-                })
-            }
-            (
-                DetectionLocation::Image {
-                    page,
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                },
-                RedacterDataItemContent::Image { .. },
-            ) => (x1 <= x2 && y1 <= y2).then_some(Self::Image {
-                page,
-                x1,
-                y1,
-                x2,
-                y2,
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// A detection and the redacter that made it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScannedDetection {
-    redacter: RedacterType,
-    label: DetectionLabel,
-    score: Option<Score>,
-    location: ScannedLocation,
-    /// The matched text, which is the sensitive value itself.
-    value: String,
-}
-
-impl ScannedDetection {
-    pub fn redacter(&self) -> RedacterType {
-        self.redacter
-    }
-
-    pub fn label(&self) -> &DetectionLabel {
-        &self.label
-    }
-
-    pub fn score(&self) -> Option<Score> {
-        self.score
-    }
-
-    pub fn location(&self) -> ScannedLocation {
-        self.location
-    }
-
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    /// Whether the detection is kept under `--min-score`: an unscored one always is.
-    pub fn meets_min_score(&self, min_score: Score) -> bool {
-        self.score.is_none_or(|score| score >= min_score)
-    }
-}
-
-#[cfg(test)]
-impl ScannedDetection {
-    pub fn at(
-        redacter: RedacterType,
-        label: DetectionLabel,
-        location: ScannedLocation,
-        value: &str,
-    ) -> Self {
-        Self {
-            redacter,
-            label,
-            score: None,
-            location,
-            value: value.to_string(),
-        }
+            .map(|detection| (self.redacter_type(), detection))
+            .collect())
     }
 }
 
 pub struct DetectStreamResult {
-    pub detections: Vec<ScannedDetection>,
+    pub detections: Vec<(RedacterType, Detection)>,
     /// Set when no redacter ran because OCR cannot read the image format.
     pub blocked: Option<RedactionBlocked>,
-}
-
-/// The byte offset each line of a text starts at, so many detections are placed without
-/// reading the text from the start for each one.
-struct LineStarts(Vec<usize>);
-
-impl From<&str> for LineStarts {
-    fn from(text: &str) -> Self {
-        Self(
-            std::iter::once(0)
-                .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
-                .collect(),
-        )
-    }
-}
-
-impl LineStarts {
-    /// `offset` must be a character boundary of `text`.
-    fn position(&self, text: &str, offset: usize) -> TextPosition {
-        // The first line starts at 0 and `offset` is at least 0, so `line` is at least 1.
-        let line = self.0.partition_point(|&start| start <= offset);
-        let line_start = self.0[line - 1];
-        TextPosition {
-            line,
-            column: text[line_start..offset].chars().count() + 1,
-        }
-    }
 }
 
 pub struct StreamDetector<'a> {
@@ -454,7 +265,7 @@ impl<'a> StreamDetector<'a> {
                 )
                 .await?;
             for redacter in plan.routed(DetectRoute::Native) {
-                detections.extend(redacter.checked_detect(&table).await?);
+                detections.extend(redacter.tagged_detect(&table).await?);
             }
         }
         if plan.routed(DetectRoute::TableAsText).next().is_some() {
@@ -520,7 +331,7 @@ impl<'a> StreamDetector<'a> {
         {
             if plan.routed(DetectRoute::Ocr).next().is_some() {
                 detections.extend(
-                    self.detect_with_ocr(&page_info.page_as_images, Some(page), plan, file_ref)
+                    self.detect_with_ocr(&page_info.page_as_images, Some(page + 1), plan, file_ref)
                         .await?,
                 );
             }
@@ -536,7 +347,7 @@ impl<'a> StreamDetector<'a> {
                     },
                     file_ref: file_ref.clone(),
                 };
-                detections.extend(plan.detect_in_image(&item, Some(page)).await?);
+                detections.extend(plan.detect_in_image(&item, Some(page + 1)).await?);
             }
         }
         Ok(DetectStreamResult {
@@ -554,7 +365,7 @@ impl<'a> StreamDetector<'a> {
         page: Option<usize>,
         plan: &DetectPlan<'_>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<Vec<ScannedDetection>> {
+    ) -> AppResult<Vec<(RedacterType, Detection)>> {
         let ocr = self
             .file_converters
             .ocr
@@ -569,15 +380,18 @@ impl<'a> StreamDetector<'a> {
         };
         let mut detections = Vec::new();
         for redacter in plan.routed(DetectRoute::Ocr) {
-            for scanned in redacter.checked_detect(&item).await? {
-                let ScannedLocation::Text { start, end, .. } = scanned.location else {
+            for (redacter_type, detection) in redacter.tagged_detect(&item).await? {
+                let DetectionLocation::Text { start, end, .. } = detection.location else {
                     continue;
                 };
                 match ocr_text.image_location(start, end, page) {
-                    Some(location) => detections.push(ScannedDetection {
-                        location,
-                        ..scanned
-                    }),
+                    Some(location) => detections.push((
+                        redacter_type,
+                        Detection {
+                            location,
+                            ..detection
+                        },
+                    )),
                     None => tracing::debug!(
                         redacter = %redacter.redacter_type(),
                         start,
@@ -599,7 +413,7 @@ impl OcrText {
         start: usize,
         end: usize,
         page: Option<usize>,
-    ) -> Option<ScannedLocation> {
+    ) -> Option<DetectionLocation> {
         self.words
             .iter()
             .filter(|word| word.span.start < end && start < word.span.end)
@@ -615,7 +429,7 @@ impl OcrText {
                     ),
                 })
             })
-            .map(|(x1, y1, x2, y2)| ScannedLocation::Image {
+            .map(|(x1, y1, x2, y2)| DetectionLocation::Image {
                 page,
                 x1,
                 y1,
@@ -770,11 +584,11 @@ mod tests {
             .await
     }
 
-    fn located(result: &DetectStreamResult) -> Vec<(ScannedLocation, &str)> {
+    fn located(result: &DetectStreamResult) -> Vec<(DetectionLocation, &str)> {
         result
             .detections
             .iter()
-            .map(|scanned| (scanned.location(), scanned.value()))
+            .map(|(_, detection)| (detection.location, detection.value.as_str()))
             .collect()
     }
 
@@ -799,7 +613,7 @@ mod tests {
             located(&result),
             vec![
                 (
-                    ScannedLocation::Image {
+                    DetectionLocation::Image {
                         page: None,
                         x1: 310.0,
                         y1: 193.0,
@@ -809,7 +623,7 @@ mod tests {
                     "john.smith@example.com"
                 ),
                 (
-                    ScannedLocation::Image {
+                    DetectionLocation::Image {
                         page: None,
                         x1: 310.0,
                         y1: 262.0,
@@ -823,7 +637,7 @@ mod tests {
         assert!(result
             .detections
             .iter()
-            .all(|scanned| scanned.redacter() == RedacterType::LocalRules));
+            .all(|(redacter, _)| *redacter == RedacterType::LocalRules));
     }
 
     #[tokio::test]
@@ -874,41 +688,12 @@ mod tests {
         let pages: Vec<Option<usize>> = result
             .detections
             .iter()
-            .map(|scanned| match scanned.location() {
-                ScannedLocation::Image { page, .. } => page,
+            .map(|(_, detection)| match detection.location {
+                DetectionLocation::Image { page, .. } => page,
                 other => panic!("a PDF page yields image locations, got {other:?}"),
             })
             .collect();
-        assert_eq!(pages, vec![Some(0), Some(1)]);
-    }
-
-    #[tokio::test]
-    async fn a_text_detection_is_placed_by_line_and_character_column() {
-        let converters = FileConverters::new();
-        let redacters = vec![local_rules([RuleGroup::Email].into_iter().collect(), &[]).await];
-        let text = "Grüße\nÜber a@b.io";
-
-        let result = scan(
-            &converters,
-            &redacters,
-            &file_ref("note.txt", mime::TEXT_PLAIN),
-            bytes::Bytes::from(text),
-        )
-        .await
-        .unwrap();
-
-        let start = text.find("a@b.io").unwrap();
-        assert_eq!(
-            located(&result),
-            vec![(
-                ScannedLocation::Text {
-                    start,
-                    end: start + 6,
-                    position: TextPosition { line: 2, column: 6 }
-                },
-                "a@b.io"
-            )]
-        );
+        assert_eq!(pages, vec![Some(1), Some(2)]);
     }
 
     /// Redaction chains redacters, so the second one sees the first one's `[REDACTED]`;
@@ -933,7 +718,7 @@ mod tests {
         let labels: Vec<&DetectionLabel> = result
             .detections
             .iter()
-            .map(|scanned| scanned.label())
+            .map(|(_, detection)| &detection.label)
             .collect();
         assert_eq!(
             labels,
@@ -961,9 +746,9 @@ mod tests {
         assert_eq!(
             located(&result),
             vec![(
-                ScannedLocation::TableCell {
-                    row: 1,
-                    column: 1,
+                DetectionLocation::TableCell {
+                    row: 2,
+                    column: 2,
                     start: 0,
                     end: 6
                 },
@@ -990,13 +775,13 @@ mod tests {
         ),
         (
             "test-fixtures/documents/customer-form.pdf",
-            Some(0),
+            Some(1),
             "email",
             [97.0, 148.0, 234.0, 159.0],
         ),
         (
             "test-fixtures/documents/customer-form.pdf",
-            Some(0),
+            Some(1),
             "phone-international",
             [102.0, 173.0, 200.0, 184.0],
         ),
@@ -1031,18 +816,18 @@ mod tests {
             )
             .await
             .unwrap();
-            let found = result
+            let (_, found) = result
                 .detections
                 .iter()
-                .find(|scanned| *scanned.label() == DetectionLabel::new(label))
+                .find(|(_, detection)| detection.label == DetectionLabel::new(label))
                 .unwrap_or_else(|| panic!("{path}: no {label} found"));
-            let ScannedLocation::Image {
+            let DetectionLocation::Image {
                 page: found_page,
                 x1,
                 y1,
                 x2,
                 y2,
-            } = found.location()
+            } = found.location
             else {
                 panic!("{path}: an image location is expected, got {found:?}");
             };
@@ -1061,86 +846,6 @@ mod tests {
                 (x1, y1, x2, y2)
             );
         }
-    }
-
-    #[test]
-    fn a_location_is_placed_only_when_it_points_into_the_content() {
-        let text = RedacterDataItemContent::Value("Grüße a@b.io".to_string());
-        let table = RedacterDataItemContent::Table {
-            headers: vec!["email".to_string()],
-            rows: vec![vec!["a@b.io".to_string()]],
-        };
-        let image = RedacterDataItemContent::Image {
-            mime_type: mime::IMAGE_PNG,
-            data: bytes::Bytes::new(),
-        };
-        let lines = LineStarts::from("Grüße a@b.io");
-        let place = |location, content: &RedacterDataItemContent| {
-            ScannedLocation::in_content(location, content, &lines)
-        };
-        let text_range = |start, end| DetectionLocation::Text { start, end };
-        let cell = |row, column, end| DetectionLocation::TableCell {
-            row,
-            column,
-            start: 0,
-            end,
-        };
-        let image_box = |x1, x2| DetectionLocation::Image {
-            page: None,
-            x1,
-            y1: 0.0,
-            x2,
-            y2: 1.0,
-        };
-
-        assert_eq!(
-            place(text_range(8, 14), &text),
-            Some(ScannedLocation::Text {
-                start: 8,
-                end: 14,
-                position: TextPosition { line: 1, column: 7 }
-            })
-        );
-        assert!(place(text_range(8, 15), &text).is_none(), "past the end");
-        assert!(place(text_range(3, 7), &text).is_none(), "inside `ü`");
-        assert!(place(text_range(10, 9), &text).is_none(), "reversed");
-        assert!(place(cell(0, 0, 6), &table).is_some());
-        assert!(place(cell(1, 0, 6), &table).is_none(), "no such row");
-        assert!(place(cell(0, 1, 6), &table).is_none(), "no such column");
-        assert!(place(cell(0, 0, 7), &table).is_none(), "past the cell");
-        assert!(place(image_box(1.0, 2.0), &image).is_some());
-        assert!(place(image_box(2.0, 1.0), &image).is_none(), "reversed");
-        assert!(
-            place(text_range(0, 1), &image).is_none(),
-            "a range on an image"
-        );
-        assert!(
-            place(image_box(1.0, 2.0), &text).is_none(),
-            "a box on a text"
-        );
-    }
-
-    #[test]
-    fn the_min_score_drops_weaker_scored_detections_and_keeps_unscored_ones() {
-        let detection = |score: Option<f32>| ScannedDetection {
-            score: score.map(|score| Score::try_from(score).unwrap()),
-            ..ScannedDetection::at(
-                RedacterType::LocalRules,
-                DetectionLabel::new("email"),
-                ScannedLocation::Image {
-                    page: None,
-                    x1: 0.0,
-                    y1: 0.0,
-                    x2: 1.0,
-                    y2: 1.0,
-                },
-                "a",
-            )
-        };
-        let floor = Score::try_from(0.7).unwrap();
-        assert!(detection(None).meets_min_score(floor));
-        assert!(detection(Some(0.7)).meets_min_score(floor));
-        assert!(!detection(Some(0.69)).meets_min_score(floor));
     }
 
     #[tokio::test]

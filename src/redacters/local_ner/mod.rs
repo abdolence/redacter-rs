@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    RedacterDataItemContent, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -158,7 +158,7 @@ impl<'a> LocalNerRedacter<'a> {
     async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
     where
         T: Send + 'static,
-        F: FnOnce(&NerEngine, &NerOptions) -> Result<T, LocalNerError> + Send + 'static,
+        F: FnOnce(&NerEngine, &NerOptions) -> AppResult<T> + Send + 'static,
     {
         let engine = Arc::clone(&self.engine);
         let options = self.options.clone();
@@ -167,7 +167,7 @@ impl<'a> LocalNerRedacter<'a> {
             .map_err(|err| LocalNerError::InferenceTask {
                 reason: err.to_string(),
             })?;
-        Ok(result?)
+        result
     }
 }
 
@@ -219,11 +219,18 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
             RedacterDataItemContent::Value(text) => {
                 let text = text.clone();
                 self.run_blocking(move |engine, options| {
-                    Ok(engine
+                    let lines = TextLines::new(&text);
+                    engine
                         .find(&text, options)?
                         .into_iter()
-                        .map(|finding| Detection::in_text(&text, finding))
-                        .collect())
+                        .map(|finding| {
+                            lines.detection(
+                                finding.start..finding.end,
+                                finding.rule.into(),
+                                finding.score,
+                            )
+                        })
+                        .collect()
                 })
                 .await
             }
@@ -455,8 +462,8 @@ mod tests {
             vec![Detection {
                 label: DetectionLabel::new("loc"),
                 location: DetectionLocation::TableCell {
-                    row: 0,
-                    column: 1,
+                    row: 1,
+                    column: 2,
                     start: 0,
                     end: 6
                 },
@@ -575,7 +582,7 @@ mod tests {
             person.score.is_some_and(|score| score.value() >= 0.5),
             "{person:?}"
         );
-        let DetectionLocation::Text { start, end } = person.location else {
+        let DetectionLocation::Text { start, end, .. } = person.location else {
             panic!("a text item yields text locations: {person:?}");
         };
         assert_eq!(&text[start..end], "John Michael Smith");

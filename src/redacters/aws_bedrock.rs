@@ -1183,7 +1183,12 @@ mod tests {
         assert_eq!(detections[0].label.to_string(), "email_address");
         assert_eq!(
             detections[0].location,
-            DetectionLocation::Text { start: 5, end: 27 }
+            DetectionLocation::Text {
+                start: 5,
+                end: 27,
+                line: 1,
+                column: 6,
+            }
         );
     }
 

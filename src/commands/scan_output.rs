@@ -8,7 +8,7 @@ use crate::args::RedacterType;
 use crate::commands::copy_output::{NotRedactedReason, SkipReason};
 use crate::commands::report::Report;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{DetectionLabel, ScannedDetection, ScannedLocation, Score, TextPosition};
+use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
 use console::Style;
 use rvstruct::ValueStruct;
 use serde::Serialize;
@@ -49,91 +49,25 @@ enum ScanFileStatus {
     Failed,
 }
 
-/// A detection's location as a report shows it. Byte offsets count from 0; lines, columns,
-/// table rows and columns, and PDF pages count from 1, as editors and spreadsheets do.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ReportLocation {
-    Text {
-        start: usize,
-        end: usize,
-        #[serde(flatten)]
-        position: TextPosition,
-    },
-    TableCell {
-        row: usize,
-        column: usize,
-        start: usize,
-        end: usize,
-    },
-    Image {
-        page: Option<usize>,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-    },
-}
-
-impl From<ScannedLocation> for ReportLocation {
-    fn from(location: ScannedLocation) -> Self {
-        match location {
-            ScannedLocation::Text {
-                start,
-                end,
-                position,
-            } => ReportLocation::Text {
-                start,
-                end,
-                position,
-            },
-            ScannedLocation::TableCell {
-                row,
-                column,
-                start,
-                end,
-            } => ReportLocation::TableCell {
-                row: row + 1,
-                column: column + 1,
-                start,
-                end,
-            },
-            ScannedLocation::Image {
-                page,
-                x1,
-                y1,
-                x2,
-                y2,
-            } => ReportLocation::Image {
-                page: page.map(|page| page + 1),
-                x1,
-                y1,
-                x2,
-                y2,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FindingReport {
     redacter: RedacterType,
     label: DetectionLabel,
     score: Option<Score>,
-    location: ReportLocation,
+    location: DetectionLocation,
     value: String,
 }
 
 impl FindingReport {
-    pub fn new(scanned: &ScannedDetection, values: ValueDisplay) -> Self {
+    pub fn new(redacter: RedacterType, detection: &Detection, values: ValueDisplay) -> Self {
         Self {
-            redacter: scanned.redacter(),
-            label: scanned.label().clone(),
-            score: scanned.score(),
-            location: scanned.location().into(),
+            redacter,
+            label: detection.label.clone(),
+            score: detection.score,
+            location: detection.location,
             value: match values {
-                ValueDisplay::Masked => mask_value(scanned.value()),
-                ValueDisplay::Raw => scanned.value().to_string(),
+                ValueDisplay::Masked => mask_value(&detection.value),
+                ValueDisplay::Raw => detection.value.clone(),
             },
         }
     }
@@ -151,7 +85,10 @@ pub struct ScanFileReport {
 }
 
 impl ScanFileReport {
-    pub fn scanned(file_ref: &FileSystemRef, findings: Vec<FindingReport>) -> Self {
+    /// A scanned file, its findings in the order a reader meets them; findings at the same
+    /// place keep the order they are given in.
+    pub fn scanned(file_ref: &FileSystemRef, mut findings: Vec<FindingReport>) -> Self {
+        findings.sort_by(|a, b| a.location.reading_order(&b.location));
         Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
     }
 
@@ -353,13 +290,11 @@ pub fn format_scan_header(
 
 /// Where a finding is, grep-style: `path:line:column` for text, `path:row:column` for a
 /// table cell, `path:[x1,y1,x2,y2]` for an image and `path:page:[x1,y1,x2,y2]` for a PDF page.
-fn format_location(path: &str, location: &ReportLocation) -> String {
+fn format_location(path: &str, location: &DetectionLocation) -> String {
     match location {
-        ReportLocation::Text { position, .. } => {
-            format!("{path}:{}:{}", position.line, position.column)
-        }
-        ReportLocation::TableCell { row, column, .. } => format!("{path}:{row}:{column}"),
-        ReportLocation::Image {
+        DetectionLocation::Text { line, column, .. } => format!("{path}:{line}:{column}"),
+        DetectionLocation::TableCell { row, column, .. } => format!("{path}:{row}:{column}"),
+        DetectionLocation::Image {
             page,
             x1,
             y1,
@@ -490,7 +425,7 @@ mod tests {
 
     fn finding(
         label: &str,
-        location: ScannedLocation,
+        location: DetectionLocation,
         score: Option<f32>,
         value: &str,
     ) -> FindingReport {
@@ -498,7 +433,7 @@ mod tests {
             redacter: RedacterType::LocalRules,
             label: DetectionLabel::new(label),
             score: score.map(|score| Score::try_from(score).unwrap()),
-            location: location.into(),
+            location,
             value: mask_value(value),
         }
     }
@@ -509,13 +444,11 @@ mod tests {
             &file_ref("customer-note.txt", mime::TEXT_PLAIN),
             vec![finding(
                 "email",
-                ScannedLocation::Text {
+                DetectionLocation::Text {
                     start: 40,
                     end: 62,
-                    position: TextPosition {
-                        line: 3,
-                        column: 15,
-                    },
+                    line: 3,
+                    column: 15,
                 },
                 None,
                 "john.smith@example.com",
@@ -525,9 +458,9 @@ mod tests {
             &file_ref("customers.csv", mime::TEXT_CSV),
             vec![finding(
                 "person",
-                ScannedLocation::TableCell {
-                    row: 0,
-                    column: 1,
+                DetectionLocation::TableCell {
+                    row: 1,
+                    column: 2,
                     start: 0,
                     end: 4,
                 },
@@ -539,8 +472,8 @@ mod tests {
             &file_ref("form.pdf", mime::APPLICATION_PDF),
             vec![finding(
                 "email",
-                ScannedLocation::Image {
-                    page: Some(0),
+                DetectionLocation::Image {
+                    page: Some(1),
                     x1: 310.2,
                     y1: 193.0,
                     x2: 621.6,
@@ -579,19 +512,19 @@ mod tests {
 
     #[test]
     fn raw_values_are_reported_only_when_asked_for() {
-        let scanned = |values| {
-            let detection = ScannedDetection::at(
-                RedacterType::LocalRules,
-                DetectionLabel::new("email"),
-                ScannedLocation::Text {
-                    start: 5,
-                    end: 27,
-                    position: TextPosition { line: 1, column: 6 },
-                },
-                "john.smith@example.com",
-            );
-            FindingReport::new(&detection, values).value
+        let detection = Detection {
+            label: DetectionLabel::new("email"),
+            location: DetectionLocation::Text {
+                start: 5,
+                end: 27,
+                line: 1,
+                column: 6,
+            },
+            score: None,
+            value: "john.smith@example.com".to_string(),
         };
+        let scanned =
+            |values| FindingReport::new(RedacterType::LocalRules, &detection, values).value;
         assert_eq!(scanned(ValueDisplay::Masked), "j***m");
         assert_eq!(scanned(ValueDisplay::Raw), "john.smith@example.com");
     }
@@ -663,6 +596,37 @@ mod tests {
     }
 
     #[test]
+    fn the_findings_of_a_file_are_listed_in_reading_order() {
+        let at = |line, column, start| DetectionLocation::Text {
+            start,
+            end: start + 6,
+            line,
+            column,
+        };
+        let file = ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![
+                finding("email", at(2, 1, 20), None, "c@d.io"),
+                finding("email", at(1, 5, 4), None, "a@b.io"),
+                finding("person", at(1, 5, 4), Some(0.9), "a@b.io"),
+            ],
+        );
+        let order: Vec<(&DetectionLocation, &DetectionLabel)> = file
+            .findings
+            .iter()
+            .map(|finding| (&finding.location, &finding.label))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (&at(1, 5, 4), &DetectionLabel::new("email")),
+                (&at(1, 5, 4), &DetectionLabel::new("person")),
+                (&at(2, 1, 20), &DetectionLabel::new("email")),
+            ]
+        );
+    }
+
+    #[test]
     fn the_exit_code_says_whether_anything_was_found_or_a_file_failed() {
         let clean = ScanCommandResult::default();
         assert_eq!(clean.exit_code(false), 0);
@@ -672,10 +636,11 @@ mod tests {
             &file_ref("note.txt", mime::TEXT_PLAIN),
             vec![finding(
                 "email",
-                ScannedLocation::Text {
+                DetectionLocation::Text {
                     start: 0,
                     end: 6,
-                    position: TextPosition { line: 1, column: 1 },
+                    line: 1,
+                    column: 1,
                 },
                 None,
                 "a@b.io",

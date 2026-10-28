@@ -17,7 +17,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    RedacterDataItemContent, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -110,22 +110,22 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
-            RedacterDataItemContent::Value(text) => Ok(self
-                .rules
-                .find(text)
-                .into_iter()
-                .map(|finding| Detection::in_text(text, finding))
-                .collect()),
+            RedacterDataItemContent::Value(text) => {
+                let lines = TextLines::new(text);
+                self.rules
+                    .find(text)
+                    .into_iter()
+                    .map(|finding| {
+                        lines.detection(
+                            finding.start..finding.end,
+                            finding.rule.into(),
+                            finding.score,
+                        )
+                    })
+                    .collect()
+            }
             RedacterDataItemContent::Table { rows, .. } => {
-                let mut detections = Vec::new();
-                for (row_index, row) in rows.iter().enumerate() {
-                    for (column, cell) in row.iter().enumerate() {
-                        detections.extend(self.rules.find(cell).into_iter().map(|finding| {
-                            Detection::in_table_cell(row_index, column, cell, finding)
-                        }));
-                    }
-                }
-                Ok(detections)
+                Detection::in_table_cells(rows, |_, cell| Ok::<_, AppError>(self.rules.find(cell)))
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::unsupported_content())
@@ -256,7 +256,12 @@ mod tests {
             detections,
             vec![Detection {
                 label: DetectionLabel::new("email"),
-                location: DetectionLocation::Text { start: 5, end: 11 },
+                location: DetectionLocation::Text {
+                    start: 5,
+                    end: 11,
+                    line: 1,
+                    column: 6,
+                },
                 score: None,
                 value: "a@b.io".to_string(),
             }]
@@ -283,8 +288,8 @@ mod tests {
         assert_eq!(
             locations,
             vec![DetectionLocation::TableCell {
-                row: 1,
-                column: 1,
+                row: 2,
+                column: 2,
                 start: 5,
                 end: 11
             }]

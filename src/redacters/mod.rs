@@ -915,7 +915,7 @@ pub mod live_detection {
             let found = detections.iter().any(|detection| {
                 matches!(
                     detection.location,
-                    DetectionLocation::Text { start, end } if text.get(start..end) == Some(value)
+                    DetectionLocation::Text { start, end, .. } if text.get(start..end) == Some(value)
                 ) && detection
                     .label
                     .to_string()

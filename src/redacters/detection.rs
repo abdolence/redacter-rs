@@ -3,9 +3,12 @@
 
 use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
+use crate::AppResult;
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::ops::Range;
 use std::str::FromStr;
 
 /// The provider's own name for the kind of data it found: `email` from local-rules,
@@ -99,13 +102,20 @@ pub struct Detection {
     pub value: String,
 }
 
-/// Where a detection sits in the item the provider was given. Indexes count from 0.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Where a detection sits, as a report shows it. Byte offsets count from 0; lines, columns,
+/// table rows and columns, and PDF pages count from 1, as editors and spreadsheets do.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetectionLocation {
-    /// A half-open byte range of the item's text, on character boundaries.
-    Text { start: usize, end: usize },
-    /// A half-open byte range of one table cell. `row` indexes the data rows, the header row
-    /// excluded, and `column` the cells of that row.
+    /// A half-open byte range of the item's text on character boundaries, and the line and
+    /// character column its start is on.
+    Text {
+        start: usize,
+        end: usize,
+        line: usize,
+        column: usize,
+    },
+    /// A half-open byte range of one cell. `row` counts the data rows, the header row excluded.
     TableCell {
         row: usize,
         column: usize,
@@ -123,51 +133,159 @@ pub enum DetectionLocation {
     },
 }
 
-impl Detection {
-    /// A finding of a local provider on `text`, the text its offsets index into.
-    pub fn in_text(text: &str, finding: Finding) -> Self {
-        Self {
-            value: text[finding.start..finding.end].to_string(),
-            location: DetectionLocation::Text {
-                start: finding.start,
-                end: finding.end,
-            },
-            label: finding.rule.into(),
-            score: finding.score,
+impl DetectionLocation {
+    /// The order a reader meets locations in: text by offset, cells by row and column, image
+    /// boxes by page, then top to bottom and left to right.
+    pub fn reading_order(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (
+                Self::Text { start, end, .. },
+                Self::Text {
+                    start: other_start,
+                    end: other_end,
+                    ..
+                },
+            ) => (start, end).cmp(&(other_start, other_end)),
+            (
+                Self::TableCell {
+                    row,
+                    column,
+                    start,
+                    end,
+                },
+                Self::TableCell {
+                    row: other_row,
+                    column: other_column,
+                    start: other_start,
+                    end: other_end,
+                },
+            ) => (row, column, start, end).cmp(&(other_row, other_column, other_start, other_end)),
+            (
+                Self::Image { page, x1, y1, .. },
+                Self::Image {
+                    page: other_page,
+                    x1: other_x1,
+                    y1: other_y1,
+                    ..
+                },
+            ) => page
+                .cmp(other_page)
+                .then(y1.total_cmp(other_y1))
+                .then(x1.total_cmp(other_x1)),
+            _ => self.kind_order().cmp(&other.kind_order()),
         }
     }
 
-    /// A finding of a local provider on one table cell, whose text its offsets index into.
-    pub fn in_table_cell(row: usize, column: usize, cell: &str, finding: Finding) -> Self {
-        Self {
-            value: cell[finding.start..finding.end].to_string(),
-            location: DetectionLocation::TableCell {
-                row,
-                column,
-                start: finding.start,
-                end: finding.end,
-            },
-            label: finding.rule.into(),
-            score: finding.score,
+    fn kind_order(&self) -> u8 {
+        match self {
+            Self::Text { .. } => 0,
+            Self::TableCell { .. } => 1,
+            Self::Image { .. } => 2,
         }
+    }
+}
+
+/// A text with the byte offset of each line start, so many detections are placed in it without
+/// rescanning it for each one.
+pub struct TextLines<'a> {
+    text: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> TextLines<'a> {
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            line_starts: std::iter::once(0)
+                .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
+                .collect(),
+        }
+    }
+
+    /// The detection of `range`, with its value copied out of the text. An error when the range
+    /// is not inside the text on character boundaries: a report would otherwise place it where
+    /// it is not.
+    pub fn detection(
+        &self,
+        range: Range<usize>,
+        label: DetectionLabel,
+        score: Option<Score>,
+    ) -> AppResult<Detection> {
+        let value = value_at(self.text, &range)?;
+        // The first line starts at 0, so at least one line start is not after `range.start`.
+        let line = self
+            .line_starts
+            .partition_point(|&line_start| line_start <= range.start);
+        let line_start = self.line_starts[line - 1];
+        Ok(Detection {
+            label,
+            location: DetectionLocation::Text {
+                start: range.start,
+                end: range.end,
+                line,
+                column: self.text[line_start..range.start].chars().count() + 1,
+            },
+            score,
+            value,
+        })
+    }
+}
+
+/// The text of `range` in `text`, or an error when the range is not inside it on character
+/// boundaries.
+fn value_at(text: &str, range: &Range<usize>) -> AppResult<String> {
+    text.get(range.clone())
+        .map(str::to_string)
+        .ok_or(AppError::DetectionOutsideContent {
+            start: range.start,
+            end: range.end,
+        })
+}
+
+impl Detection {
+    /// The detection of `range` in `cell`, at 0-based `row` and `column` as the caller indexes
+    /// its rows; the location stores them as a report shows them. An error when the range is
+    /// not inside the cell on character boundaries.
+    pub fn in_table_cell(
+        row: usize,
+        column: usize,
+        cell: &str,
+        range: Range<usize>,
+        label: DetectionLabel,
+        score: Option<Score>,
+    ) -> AppResult<Self> {
+        let value = value_at(cell, &range)?;
+        Ok(Self {
+            label,
+            location: DetectionLocation::TableCell {
+                row: row + 1,
+                column: column + 1,
+                start: range.start,
+                end: range.end,
+            },
+            score,
+            value,
+        })
     }
 
     /// The findings of `find_in_cell(column, cell)` on every cell of `rows`, placed in their
     /// cell, for providers that read a table one cell at a time.
-    // Only the model-backed redacters read a table cell by cell.
-    #[cfg_attr(
-        not(any(feature = "local-ner", feature = "local-gliner")),
-        allow(dead_code)
-    )]
-    pub fn in_table_cells<E>(
+    pub fn in_table_cells<E: Into<AppError>>(
         rows: &[Vec<String>],
         mut find_in_cell: impl FnMut(usize, &str) -> Result<Vec<Finding>, E>,
-    ) -> Result<Vec<Self>, E> {
+    ) -> AppResult<Vec<Self>> {
         let mut detections = Vec::new();
         for (row_index, row) in rows.iter().enumerate() {
             for (column, cell) in row.iter().enumerate() {
-                for finding in find_in_cell(column, cell)? {
-                    detections.push(Self::in_table_cell(row_index, column, cell, finding));
+                for finding in find_in_cell(column, cell).map_err(Into::into)? {
+                    detections.push(Self::in_table_cell(
+                        row_index,
+                        column,
+                        cell,
+                        finding.start..finding.end,
+                        finding.rule.into(),
+                        finding.score,
+                    )?);
                 }
             }
         }
@@ -184,9 +302,9 @@ impl Detection {
     /// word are reported once; partial overlaps are all kept. When two values have the same
     /// span, the first one's label is kept. An empty value or a repeated `(value, label)`
     /// pair adds nothing. Sorted by position.
-    pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> Vec<Self> {
+    pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> AppResult<Vec<Self>> {
         let mut seen = HashSet::new();
-        let mut findings = Vec::new();
+        let mut occurrences = Vec::new();
         let mut unmatched = 0_usize;
         let folded_text = FoldedText::new(text);
         for (value, label) in values {
@@ -197,13 +315,7 @@ impl Detection {
             if ranges.is_empty() {
                 unmatched += 1;
             }
-            let rule = RuleName::new(&label.to_string());
-            findings.extend(ranges.into_iter().map(|(start, end)| Finding {
-                start,
-                end,
-                rule: rule.clone(),
-                score: None,
-            }));
+            occurrences.extend(ranges.into_iter().map(|range| (range, label)));
         }
         if unmatched > 0 {
             // Counted, never named: the values are the sensitive data.
@@ -212,9 +324,10 @@ impl Detection {
                 "values named by the provider were not found in the text"
             );
         }
-        without_contained(findings)
+        let lines = TextLines::new(text);
+        without_contained(occurrences)
             .into_iter()
-            .map(|finding| Self::in_text(text, finding))
+            .map(|(range, label)| lines.detection(range, label.clone(), None))
             .collect()
     }
 }
@@ -250,7 +363,7 @@ impl FoldedText {
 
     /// The byte ranges of the original text where `value` occurs ignoring case, not counting an
     /// occurrence that starts inside the previous one.
-    fn occurrences_of(&self, value: &str) -> Vec<(usize, usize)> {
+    fn occurrences_of(&self, value: &str) -> Vec<Range<usize>> {
         let folded_value: String = value.chars().map(fold_character).collect();
         self.folded
             .match_indices(&folded_value)
@@ -260,7 +373,7 @@ impl FoldedText {
                     .folded_starts
                     .binary_search(&(start + matched.len()))
                     .ok()?;
-                Some((self.original_starts[first], self.original_starts[end]))
+                Some(self.original_starts[first]..self.original_starts[end])
             })
             .collect()
     }
@@ -280,18 +393,20 @@ fn fold_character(character: char) -> char {
     base.to_lowercase().next().unwrap_or(base)
 }
 
-/// `findings` sorted by position, without those that lie inside a longer one. Findings that
-/// only overlap are all kept: two values can share words, and dropping either
-/// would leave part of the sensitive data unreported.
-fn without_contained(mut findings: Vec<Finding>) -> Vec<Finding> {
-    findings.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+/// `occurrences` sorted by position, without those that lie inside a longer one. Occurrences
+/// that only overlap are all kept: two values can share words, and dropping either would leave
+/// part of the sensitive data unreported.
+fn without_contained(
+    mut occurrences: Vec<(Range<usize>, &DetectionLabel)>,
+) -> Vec<(Range<usize>, &DetectionLabel)> {
+    occurrences.sort_by(|(a, _), (b, _)| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut furthest_end = 0;
-    findings.retain(|finding| {
-        let contained = finding.end <= furthest_end;
-        furthest_end = furthest_end.max(finding.end);
+    occurrences.retain(|(range, _)| {
+        let contained = range.end <= furthest_end;
+        furthest_end = furthest_end.max(range.end);
         !contained
     });
-    findings
+    occurrences
 }
 
 /// Converts the character offsets that text analysis services report into byte offsets of
@@ -314,11 +429,11 @@ impl CharOffsets {
     }
 
     /// The byte range of the characters `start..end`, or `None` when it reaches past the text.
-    pub(crate) fn byte_range(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+    pub(crate) fn byte_range(&self, start: usize, end: usize) -> Option<Range<usize>> {
         if start > end {
             return None;
         }
-        Some((*self.byte_starts.get(start)?, *self.byte_starts.get(end)?))
+        Some(*self.byte_starts.get(start)?..*self.byte_starts.get(end)?)
     }
 }
 
@@ -328,7 +443,7 @@ pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
     let mut ranges: Vec<(usize, usize)> = detections
         .iter()
         .filter_map(|detection| match detection.location {
-            DetectionLocation::Text { start, end } => Some((start, end)),
+            DetectionLocation::Text { start, end, .. } => Some((start, end)),
             _ => None,
         })
         .collect();
@@ -361,13 +476,17 @@ mod tests {
         DetectionLabel::new("email")
     }
 
-    fn email_finding(start: usize, end: usize) -> Finding {
-        Finding {
-            start,
-            end,
-            rule: RuleName::new("email"),
-            score: None,
-        }
+    /// The text range and the value of each detection, in order.
+    fn located(detections: &[Detection]) -> Vec<(Range<usize>, &str)> {
+        detections
+            .iter()
+            .map(|detection| match detection.location {
+                DetectionLocation::Text { start, end, .. } => {
+                    (start..end, detection.value.as_str())
+                }
+                other => panic!("a text detection is expected, got {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
@@ -395,36 +514,62 @@ mod tests {
     }
 
     #[test]
-    fn a_text_finding_carries_its_matched_value_and_byte_range() {
-        let text = "Grüße an a@b.io";
+    fn a_text_detection_is_placed_by_line_and_character_column() {
+        let text = "Grüße\nÜber a@b.io";
+        let lines = TextLines::new(text);
         let start = text.find("a@b.io").unwrap();
-        let detection = Detection::in_text(text, email_finding(start, start + 6));
+
         assert_eq!(
-            detection,
+            lines
+                .detection(start..start + 6, email(), Some(score(0.9)))
+                .unwrap(),
             Detection {
                 label: email(),
                 location: DetectionLocation::Text {
                     start,
-                    end: start + 6
+                    end: start + 6,
+                    line: 2,
+                    column: 6,
                 },
-                score: None,
+                score: Some(score(0.9)),
                 value: "a@b.io".to_string(),
             }
         );
+        assert_eq!(
+            lines.detection(0..2, email(), None).unwrap().location,
+            DetectionLocation::Text {
+                start: 0,
+                end: 2,
+                line: 1,
+                column: 1,
+            }
+        );
+        for (outside, why) in [
+            (start..text.len() + 1, "past the end"),
+            (2..3, "inside `ü`"),
+        ] {
+            assert!(
+                matches!(
+                    lines.detection(outside, email(), None),
+                    Err(AppError::DetectionOutsideContent { .. })
+                ),
+                "{why}"
+            );
+        }
     }
 
     #[test]
     fn a_table_cell_finding_names_its_row_and_column() {
-        let mut finding = email_finding(5, 11);
-        finding.score = Some(score(0.9));
-        let detection = Detection::in_table_cell(2, 1, "mail a@b.io", finding);
+        let detection =
+            Detection::in_table_cell(2, 1, "mail a@b.io", 5..11, email(), Some(score(0.9)))
+                .unwrap();
         assert_eq!(
             detection,
             Detection {
                 label: email(),
                 location: DetectionLocation::TableCell {
-                    row: 2,
-                    column: 1,
+                    row: 3,
+                    column: 2,
                     start: 5,
                     end: 11
                 },
@@ -444,24 +589,15 @@ mod tests {
                 ("Ana".to_string(), person.clone()),
                 ("Jörg".to_string(), person.clone()),
             ],
-        );
-        let located: Vec<(DetectionLocation, &str)> = detections
-            .iter()
-            .map(|detection| (detection.location, detection.value.as_str()))
-            .collect();
+        )
+        .unwrap();
         let second = text.rfind("Jörg").unwrap();
         assert_eq!(
-            located,
+            located(&detections),
             vec![
-                (DetectionLocation::Text { start: 0, end: 5 }, "Jörg"),
-                (DetectionLocation::Text { start: 15, end: 18 }, "Ana"),
-                (
-                    DetectionLocation::Text {
-                        start: second,
-                        end: second + 5
-                    },
-                    "Jörg"
-                ),
+                (0..5, "Jörg"),
+                (15..18, "Ana"),
+                (second..second + 5, "Jörg")
             ]
         );
         assert!(detections
@@ -479,25 +615,17 @@ mod tests {
                 ("John".to_string(), person.clone()),
                 ("John Michael Smith".to_string(), person),
             ],
-        );
-        let located: Vec<(DetectionLocation, &str)> = detections
-            .iter()
-            .map(|detection| (detection.location, detection.value.as_str()))
-            .collect();
+        )
+        .unwrap();
         assert_eq!(
-            located,
-            vec![
-                (
-                    DetectionLocation::Text { start: 0, end: 18 },
-                    "John Michael Smith"
-                ),
-                (DetectionLocation::Text { start: 23, end: 27 }, "John"),
-            ]
+            located(&detections),
+            vec![(0..18, "John Michael Smith"), (23..27, "John")]
         );
     }
 
     fn values_found(text: &str, value: &str) -> Vec<String> {
         Detection::locate_values(text, &[(value.to_string(), DetectionLabel::new("PERSON"))])
+            .unwrap()
             .into_iter()
             .map(|detection| detection.value)
             .collect()
@@ -539,19 +667,16 @@ mod tests {
     fn a_value_without_an_exact_match_is_located_ignoring_case() {
         let person = DetectionLabel::new("PERSON");
         let detections =
-            Detection::locate_values("Ask JOHN SMITH.", &[("john smith".to_string(), person)]);
-        assert_eq!(detections.len(), 1);
-        assert_eq!(
-            detections[0].location,
-            DetectionLocation::Text { start: 4, end: 14 }
-        );
-        assert_eq!(detections[0].value, "JOHN SMITH");
+            Detection::locate_values("Ask JOHN SMITH.", &[("john smith".to_string(), person)])
+                .unwrap();
+        assert_eq!(located(&detections), vec![(4..14, "JOHN SMITH")]);
     }
 
     #[test]
     fn every_occurrence_is_found_whatever_its_case() {
         let person = DetectionLabel::new("PERSON");
-        let detections = Detection::locate_values("john and John", &[("john".to_string(), person)]);
+        let detections =
+            Detection::locate_values("john and John", &[("john".to_string(), person)]).unwrap();
         let values: Vec<&str> = detections.iter().map(|d| d.value.as_str()).collect();
         assert_eq!(values, ["john", "John"]);
     }
@@ -561,6 +686,7 @@ mod tests {
         let place = DetectionLabel::new("LOCATION");
         let values_found = |text: &str, value: &str| -> Vec<String> {
             Detection::locate_values(text, &[(value.to_string(), place.clone())])
+                .unwrap()
                 .into_iter()
                 .map(|detection| detection.value)
                 .collect()
@@ -579,15 +705,10 @@ mod tests {
     fn the_range_of_a_case_insensitive_match_is_in_bytes_of_the_original_text() {
         let place = DetectionLabel::new("LOCATION");
         let text = "Kelvin K, then İstanbul";
-        let detections = Detection::locate_values(text, &[("istanbul".to_string(), place)]);
+        let detections =
+            Detection::locate_values(text, &[("istanbul".to_string(), place)]).unwrap();
         let start = text.find('İ').unwrap();
-        assert_eq!(
-            detections[0].location,
-            DetectionLocation::Text {
-                start,
-                end: text.len()
-            }
-        );
+        assert_eq!(located(&detections), vec![(start..text.len(), "İstanbul")]);
     }
 
     #[test]
@@ -611,27 +732,22 @@ mod tests {
                 ("Ana Lima".to_string(), DetectionLabel::new("PERSON")),
                 ("Lima Street 5".to_string(), DetectionLabel::new("ADDRESS")),
             ],
-        );
-        let located: Vec<(DetectionLocation, &str)> = detections
-            .iter()
-            .map(|detection| (detection.location, detection.value.as_str()))
-            .collect();
+        )
+        .unwrap();
         assert_eq!(
-            located,
-            vec![
-                (DetectionLocation::Text { start: 0, end: 8 }, "Ana Lima"),
-                (
-                    DetectionLocation::Text { start: 4, end: 17 },
-                    "Lima Street 5"
-                ),
-            ]
+            located(&detections),
+            vec![(0..8, "Ana Lima"), (4..17, "Lima Street 5")]
         );
     }
 
     #[test]
     fn a_value_that_is_nowhere_in_the_text_is_not_reported() {
         let person = DetectionLabel::new("PERSON");
-        assert!(Detection::locate_values("Ask Ana.", &[("Zoe".to_string(), person)]).is_empty());
+        assert!(
+            Detection::locate_values("Ask Ana.", &[("Zoe".to_string(), person)])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -643,32 +759,32 @@ mod tests {
                 ("a@b.io".to_string(), email()),
                 ("a@b.io".to_string(), email()),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(detections.len(), 1);
     }
 
     #[test]
     fn masking_replaces_each_character_of_a_detected_range_on_multibyte_text() {
         let text = "Grüße, Zoë Keller: zoe@example.com";
-        let detection = |needle: &str, len_in_bytes: usize| {
+        let lines = TextLines::new(text);
+        let detection = |needle: &str| {
             let start = text.find(needle).unwrap();
-            Detection {
-                label: DetectionLabel::new("PII"),
-                location: DetectionLocation::Text {
-                    start,
-                    end: start + len_in_bytes,
-                },
-                score: None,
-                value: needle.to_string(),
-            }
+            lines
+                .detection(
+                    start..start + needle.len(),
+                    DetectionLabel::new("PII"),
+                    None,
+                )
+                .unwrap()
         };
 
         let masked = mask_detections(
             text,
             &[
-                detection("zoe@example.com", 15),
-                detection("Zoë Keller", "Zoë Keller".len()),
-                detection("Keller: zoe", "Keller: zoe".len()),
+                detection("zoe@example.com"),
+                detection("Zoë Keller"),
+                detection("Keller: zoe"),
             ],
         );
 

@@ -1,5 +1,5 @@
 use crate::args::RedacterType;
-use crate::redacters::{DetectionLocation, ModelStop};
+use crate::redacters::ModelStop;
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use indicatif::style::TemplateError;
 use std::time::SystemTimeError;
@@ -79,11 +79,8 @@ pub enum AppError {
         redacter_type: RedacterType,
         missing: &'static str,
     },
-    #[error("{redacter_type} reported a detection outside the content it was given: {location:?}")]
-    DetectionOutsideContent {
-        redacter_type: RedacterType,
-        location: DetectionLocation,
-    },
+    #[error("A detection at {start}..{end} is outside the content it was given")]
+    DetectionOutsideContent { start: usize, end: usize },
     #[error("Score must be a number between 0 and 1, got `{value}`")]
     InvalidScore { value: String },
     #[error("System error: {message}")]

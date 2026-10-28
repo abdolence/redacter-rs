@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    RedacterDataItemContent, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -169,7 +169,7 @@ impl<'a> LocalGlinerRedacter<'a> {
     async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
     where
         T: Send + 'static,
-        F: FnOnce(&GlinerEngine, &GlinerOptions) -> Result<T, LocalGlinerError> + Send + 'static,
+        F: FnOnce(&GlinerEngine, &GlinerOptions) -> AppResult<T> + Send + 'static,
     {
         let engine = Arc::clone(&self.engine);
         let options = self.options.clone();
@@ -178,7 +178,7 @@ impl<'a> LocalGlinerRedacter<'a> {
             .map_err(|err| LocalGlinerError::InferenceTask {
                 reason: err.to_string(),
             })?;
-        Ok(result?)
+        result
     }
 }
 
@@ -230,11 +230,18 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
             RedacterDataItemContent::Value(text) => {
                 let text = text.clone();
                 self.run_blocking(move |engine, options| {
-                    Ok(engine
+                    let lines = TextLines::new(&text);
+                    engine
                         .find(&text, options)?
                         .into_iter()
-                        .map(|finding| Detection::in_text(&text, finding))
-                        .collect())
+                        .map(|finding| {
+                            lines.detection(
+                                finding.start..finding.end,
+                                finding.rule.into(),
+                                finding.score,
+                            )
+                        })
+                        .collect()
                 })
                 .await
             }
@@ -376,8 +383,8 @@ mod tests {
             vec![Detection {
                 label: DetectionLabel::new("person"),
                 location: DetectionLocation::TableCell {
-                    row: 1,
-                    column: 1,
+                    row: 2,
+                    column: 2,
                     start: 0,
                     end: 5
                 },
@@ -587,7 +594,7 @@ mod tests {
             email.score.is_some_and(|score| score.value() >= 0.5),
             "{email:?}"
         );
-        let DetectionLocation::Text { start, end } = email.location else {
+        let DetectionLocation::Text { start, end, .. } = email.location else {
             panic!("a text item yields text locations: {email:?}");
         };
         assert_eq!(&text[start..end], "john.smith@example.com");

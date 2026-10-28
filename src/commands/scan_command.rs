@@ -284,13 +284,14 @@ async fn detect_in_file(
             scanned
                 .detections
                 .iter()
-                .filter(|scanned| {
-                    context
-                        .options
-                        .min_score
-                        .is_none_or(|min_score| scanned.meets_min_score(min_score))
+                .filter(|(_, detection)| {
+                    context.options.min_score.is_none_or(|min_score| {
+                        detection.score.is_none_or(|score| score >= min_score)
+                    })
                 })
-                .map(|scanned| FindingReport::new(scanned, context.options.values))
+                .map(|(redacter, detection)| {
+                    FindingReport::new(*redacter, detection, context.options.values)
+                })
                 .collect(),
         ),
         Err(error) => failed_report(file_ref, &error),
@@ -344,7 +345,7 @@ mod tests {
                 None,
                 Vec::new(),
                 ModelStoreOptions::default(),
-                None,
+                Some(Score::from_static(0.9)),
                 ValueDisplay::Masked,
             ),
             email_rules(),
@@ -352,6 +353,7 @@ mod tests {
         .await
         .expect("one unreadable file does not abort the scan");
 
+        // A local-rules finding has no score, so `--min-score` keeps it.
         assert_eq!(
             (result.files_scanned, result.files_failed, result.findings),
             (1, 1, 1)

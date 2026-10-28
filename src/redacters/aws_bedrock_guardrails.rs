@@ -126,7 +126,7 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
     /// The sensitive values the guardrail reported for `text`, found wherever they occur in
     /// it: the service names the matched strings but gives no offsets. Reads the assessments
     /// whatever the filters' actions are, since detection does not need the text anonymized.
-    fn detections_in(text: &str, output: &ApplyGuardrailOutput) -> Vec<Detection> {
+    fn detections_in(text: &str, output: &ApplyGuardrailOutput) -> AppResult<Vec<Detection>> {
         let mut values = Vec::new();
         for policy in output
             .assessments()
@@ -189,10 +189,9 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
-            RedacterDataItemContent::Value(text) => Ok(Self::detections_in(
-                text,
-                &self.apply_guardrail(text).await?,
-            )),
+            RedacterDataItemContent::Value(text) => {
+                Self::detections_in(text, &self.apply_guardrail(text).await?)
+            }
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
             | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
@@ -292,7 +291,7 @@ mod tests {
                 .expect("action is set above")],
         );
 
-        let detections = AwsBedrockGuardrailsRedacter::detections_in(text, &output);
+        let detections = AwsBedrockGuardrailsRedacter::detections_in(text, &output).unwrap();
 
         let located: Vec<(String, DetectionLocation, &str)> = detections
             .iter()
@@ -309,6 +308,8 @@ mod tests {
             DetectionLocation::Text {
                 start,
                 end: start + needle.len(),
+                line: 1,
+                column: text[..start].chars().count() + 1,
             }
         };
         assert_eq!(
@@ -503,6 +504,8 @@ mod tests {
                         == DetectionLocation::Text {
                             start: email,
                             end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
                         }
                     && detection.value == "zoe.keller@example.com"
                     && detection.score.is_none()

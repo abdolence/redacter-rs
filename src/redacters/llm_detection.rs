@@ -70,11 +70,11 @@ impl LlmTextFinding {
     /// not a JSON array of findings is an error: reading it as "nothing found" would report
     /// a clean file.
     pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
-        Ok(Self::locate(text, parse_answer(answer)?))
+        Self::locate(text, parse_answer(answer)?)
     }
 
     /// Every occurrence in `text` of the values in `findings`.
-    pub fn locate(text: &str, findings: Vec<Self>) -> Vec<Detection> {
+    pub fn locate(text: &str, findings: Vec<Self>) -> AppResult<Vec<Detection>> {
         let values: Vec<(String, DetectionLabel)> = findings
             .into_iter()
             .map(|finding| (finding.text, DetectionLabel::new(finding.label)))
@@ -118,7 +118,7 @@ impl ImagePii {
             .await?
             .into_iter()
             .filter_map(|finding| match finding.location {
-                DetectionLocation::Text { start, end } => Some((start..end, finding.label)),
+                DetectionLocation::Text { start, end, .. } => Some((start..end, finding.label)),
                 _ => None,
             })
             .collect();
@@ -165,17 +165,32 @@ mod tests {
             vec![
                 (
                     "email_address".to_string(),
-                    DetectionLocation::Text { start: 5, end: 12 },
+                    DetectionLocation::Text {
+                        start: 5,
+                        end: 12,
+                        line: 1,
+                        column: 6,
+                    },
                     "a@b.com".to_string()
                 ),
                 (
                     "email_address".to_string(),
-                    DetectionLocation::Text { start: 16, end: 23 },
+                    DetectionLocation::Text {
+                        start: 16,
+                        end: 23,
+                        line: 1,
+                        column: 17,
+                    },
                     "a@b.com".to_string()
                 ),
                 (
                     "person_name".to_string(),
-                    DetectionLocation::Text { start: 29, end: 33 },
+                    DetectionLocation::Text {
+                        start: 29,
+                        end: 33,
+                        line: 1,
+                        column: 30,
+                    },
                     "Åsa".to_string()
                 ),
             ]
@@ -215,13 +230,10 @@ mod tests {
         }
     }
 
-    fn text_detection(label: &str, start: usize, end: usize) -> Detection {
-        Detection {
-            label: DetectionLabel::new(label),
-            location: DetectionLocation::Text { start, end },
-            score: None,
-            value: String::new(),
-        }
+    fn text_detection(text: &str, label: &str, range: Range<usize>) -> Detection {
+        crate::redacters::TextLines::new(text)
+            .detection(range, DetectionLabel::new(label), None)
+            .unwrap()
     }
 
     #[tokio::test]
@@ -236,16 +248,15 @@ mod tests {
 
         let detections = found
             .into_labelled_detections(|text| {
-                *asked.borrow_mut() = Some(text);
                 // The joined text is "John Michael Smith\na@b.com\nunclassified": the
                 // findings are the whole name, its first word, and the email address.
-                async {
-                    Ok(vec![
-                        text_detection("person_name", 0, 18),
-                        text_detection("given_name", 0, 4),
-                        text_detection("email_address", 19, 26),
-                    ])
-                }
+                let findings = vec![
+                    text_detection(&text, "person_name", 0..18),
+                    text_detection(&text, "given_name", 0..4),
+                    text_detection(&text, "email_address", 19..26),
+                ];
+                *asked.borrow_mut() = Some(text);
+                async { Ok(findings) }
             })
             .await
             .unwrap();
