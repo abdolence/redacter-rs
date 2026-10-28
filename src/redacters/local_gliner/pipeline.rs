@@ -3,6 +3,7 @@
 
 use super::error::LocalGlinerError;
 use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::Score;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -276,7 +277,7 @@ pub struct Candidate {
     pub start_byte: usize,
     pub end_byte: usize,
     pub label: String,
-    pub score: f32,
+    pub score: Score,
 }
 
 fn collect_candidates(
@@ -294,8 +295,12 @@ fn collect_candidates(
                 continue;
             }
             for (label_index, label) in labels.iter().enumerate() {
-                let score = sigmoid(logits.at(start, width, label_index));
-                if score >= threshold {
+                // A sigmoid leaves 0..=1 only for a NaN logit, which clears no threshold.
+                let Ok(score) = Score::try_from(sigmoid(logits.at(start, width, label_index)))
+                else {
+                    continue;
+                };
+                if score.value() >= threshold {
                     out.push(Candidate {
                         start_word: word_offset + start,
                         end_word: word_offset + end,
@@ -377,7 +382,7 @@ pub fn score_document(
 /// overlap a previously accepted span, highest-confidence spans winning ties for a word.
 /// Returned in document order.
 pub fn greedy_decode(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    candidates.sort_by(|a, b| b.score.value().total_cmp(&a.score.value()));
     let mut accepted: Vec<Candidate> = Vec::new();
     for candidate in candidates {
         let overlaps = accepted.iter().any(|kept| {
@@ -399,6 +404,7 @@ pub fn candidates_to_findings(candidates: Vec<Candidate>) -> Vec<Finding> {
             start: candidate.start_byte,
             end: candidate.end_byte,
             rule: RuleName::new(&candidate.label),
+            score: Some(candidate.score),
         })
         .collect()
 }
@@ -629,7 +635,15 @@ mod tests {
         assert_eq!(candidates[0].start_byte, 0);
         assert_eq!(candidates[0].end_byte, 5);
         assert_eq!(candidates[0].label, "person");
-        assert!(candidates[0].score > 0.99, "{}", candidates[0].score);
+        assert!(
+            candidates[0].score.value() > 0.99,
+            "{}",
+            candidates[0].score
+        );
+    }
+
+    fn score(probability: f32) -> Score {
+        Score::try_from(probability).unwrap()
     }
 
     fn candidate(
@@ -637,7 +651,7 @@ mod tests {
         end_word: usize,
         start_byte: usize,
         end_byte: usize,
-        score: f32,
+        probability: f32,
     ) -> Candidate {
         Candidate {
             start_word,
@@ -645,7 +659,7 @@ mod tests {
             start_byte,
             end_byte,
             label: "x".to_string(),
-            score,
+            score: score(probability),
         }
     }
 
@@ -667,14 +681,15 @@ mod tests {
     }
 
     #[test]
-    fn candidates_to_findings_names_the_rule_after_the_label() {
+    fn candidates_to_findings_keep_the_label_and_the_score() {
         let findings = candidates_to_findings(vec![candidate(0, 0, 0, 5, 0.9)]);
         assert_eq!(
             findings,
             vec![Finding {
                 start: 0,
                 end: 5,
-                rule: RuleName::new("x")
+                rule: RuleName::new("x"),
+                score: Some(score(0.9)),
             }]
         );
     }

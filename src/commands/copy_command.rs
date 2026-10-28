@@ -6,6 +6,7 @@ use crate::commands::copy_output::{
     CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
     SkipReason,
 };
+use crate::commands::report::Report;
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
@@ -29,6 +30,15 @@ pub struct CopyCommandResult {
     pub files_copied: usize,
     pub files_redacted: usize,
     pub files_skipped: usize,
+}
+
+impl Report for CopyCommandResult {
+    fn to_text(&self) -> String {
+        format!(
+            "Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
+            self.files_copied, self.files_redacted, self.files_skipped
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -529,25 +539,19 @@ async fn redact_upload_file<
 /// Why redaction did not happen, defaulting to "no redacter applied" when the
 /// pipeline did not record a reason.
 fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
-    use crate::redacters::RedactionBlocked;
-    match blocked {
-        Some(RedactionBlocked::PdfRendererUnavailable) => NotRedactedReason::PdfRendererUnavailable,
-        Some(RedactionBlocked::OcrUnavailable) => NotRedactedReason::OcrUnavailable,
-        Some(RedactionBlocked::OcrImageFormatNotSupported) => {
-            NotRedactedReason::OcrImageFormatNotSupported
-        }
-        None => NotRedactedReason::NoRedacterApplied,
-    }
+    blocked.map_or(
+        NotRedactedReason::NoRedacterApplied,
+        NotRedactedReason::from,
+    )
 }
 
-/// Why nothing in the plan could redact this file at all (`redact_stream` was never called):
-/// a PDF or image blocked on a missing conversion engine reports that reason, and anything
-/// else defaults to "type not supported" as before.
-fn plan_blocked_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
-    match blocked {
-        Some(blocked) => not_redacted_reason(Some(blocked)),
-        None => NotRedactedReason::TypeNotSupported,
-    }
+/// Why nothing in the plan could redact or scan this file at all: a PDF or image blocked on
+/// a missing conversion engine reports that reason, and anything else is a type no redacter
+/// supports.
+pub(crate) fn plan_blocked_reason(
+    blocked: Option<crate::redacters::RedactionBlocked>,
+) -> NotRedactedReason {
+    blocked.map_or(NotRedactedReason::TypeNotSupported, NotRedactedReason::from)
 }
 
 #[cfg(test)]

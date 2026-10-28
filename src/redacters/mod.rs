@@ -47,6 +47,9 @@ pub use local_gliner::{LocalGlinerRedacter, LocalGlinerRedacterOptions};
 /// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`).
 pub(crate) mod text_spans;
 
+mod detection;
+pub use detection::*;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
@@ -57,6 +60,8 @@ mod simple_image_redacter;
 pub use simple_image_redacter::*;
 mod stream_redacter;
 pub use stream_redacter::*;
+mod stream_detector;
+pub use stream_detector::*;
 
 mod redacter_throttler;
 pub use redacter_throttler::*;
@@ -541,6 +546,16 @@ pub trait Redacter {
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport>;
 
+    /// Finds sensitive data in `input` without changing it. Every location points into
+    /// `input` itself: a text range for a text item, a cell for a table, a box for an image.
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>>;
+
+    /// Whether `detect` reads this file as it is. Unsupported images and PDF pages are read
+    /// with OCR when the redacter supports text.
+    async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
+        self.redact_support(file_ref).await
+    }
+
     fn redacter_type(&self) -> RedacterType;
 }
 
@@ -578,6 +593,42 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.redact_support(file_ref).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.redact_support(file_ref).await,
+        }
+    }
+
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.detect(input).await,
+            Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
+            Redacters::MsPresidio(redacter) => redacter.detect(input).await,
+            Redacters::GeminiLlm(redacter) => redacter.detect(input).await,
+            Redacters::OpenAiLlm(redacter) => redacter.detect(input).await,
+            Redacters::GcpVertexAi(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrock(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect(input).await,
+            Redacters::LocalRules(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.detect(input).await,
+        }
+    }
+
+    async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsComprehend(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::MsPresidio(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::GeminiLlm(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::OpenAiLlm(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::GcpVertexAi(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsBedrock(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::LocalRules(redacter) => redacter.detect_support(file_ref).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.detect_support(file_ref).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.detect_support(file_ref).await,
         }
     }
 

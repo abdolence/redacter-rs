@@ -8,7 +8,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    bedrock_error, Detection, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
+    Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -155,6 +156,12 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
         Ok(match file_ref.media_type.as_ref() {
             Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
             _ => RedactSupport::Unsupported,
+        })
+    }
+
+    async fn detect(&self, _input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        Err(AppError::DetectionNotSupported {
+            redacter_type: self.redacter_type(),
         })
     }
 

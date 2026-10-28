@@ -7,7 +7,7 @@ use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
-    RedacterProviderOptions, RuleGroup, UserRule,
+    RedacterProviderOptions, RuleGroup, Score, UserRule,
 };
 #[cfg(feature = "local-ner")]
 use crate::redacters::{Entity, LocalNerRedacterOptions};
@@ -84,11 +84,62 @@ pub enum CliCommand {
         #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
         mime_override: Vec<(mime::Mime, globset::Glob)>,
 
+        #[command(flatten)]
+        report: ReportArgs,
+    },
+    #[command(
+        about = "Scan files for sensitive data and report what was found and where, without changing them. Exits with 0 when nothing is found, 2 when something is, 1 on errors",
+        mut_arg("redact", |arg| arg.required(true))
+    )]
+    Scan {
+        #[arg(
+            help = "Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
+        )]
+        source: String,
+
+        #[arg(short = 'm', long, help = "Maximum size of files to scan in bytes")]
+        max_size_limit: Option<usize>,
+
+        #[arg(
+            short = 'n',
+            long,
+            help = "Maximum number of files to scan. Sort order is not guaranteed and depends on the provider"
+        )]
+        max_files_limit: Option<usize>,
+
+        #[arg(
+            short = 'f',
+            long,
+            help = "Filter by name using glob patterns such as *.txt"
+        )]
+        filename_filter: Option<globset::Glob>,
+
+        #[command(flatten)]
+        redacter_args: RedacterArgs,
+
+        #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
+        mime_override: Vec<(mime::Mime, globset::Glob)>,
+
+        #[command(flatten)]
+        report: ReportArgs,
+
         #[arg(
             long,
-            help = "Save redacted results in JSON format to the specified file"
+            help = "Show the matched values in the output and the report. They are masked by default"
         )]
-        save_json_results: Option<PathBuf>,
+        show_values: bool,
+
+        #[arg(
+            long,
+            help = "Drop findings whose score is below this value, between 0 and 1. Findings without a score are kept"
+        )]
+        min_score: Option<Score>,
+
+        #[arg(
+            long,
+            help = "Exit with 0 when findings are reported. Errors still exit with 1"
+        )]
+        no_fail: bool,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -130,6 +181,28 @@ pub enum AddonsCommand {
     Ls,
 }
 
+/// Where `cp` and `scan` write their report. The terminal shows the usual output either way.
+#[derive(Args, Debug, Clone)]
+pub struct ReportArgs {
+    #[arg(long, help = "Write the report to this file")]
+    pub report_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "json",
+        requires = "report_file",
+        help = "Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'"
+    )]
+    pub report_format: ReportFormat,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportFormat {
+    Json,
+    Text,
+}
+
 impl CliCommand {
     fn parse_key_val<T, U>(
         s: &str,
@@ -147,7 +220,8 @@ impl CliCommand {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RedacterType {
     GcpDlp,
     AwsComprehend,
@@ -653,6 +727,99 @@ mod tests {
         assert_eq!(resolve_addons_dir(None, None), None);
     }
 
+    mod scan {
+        use super::*;
+        use clap::error::ErrorKind;
+
+        fn parse(args: &[&str]) -> Result<CliArgs, clap::Error> {
+            CliArgs::try_parse_from([&["redacter", "scan", "test-fixtures"], args].concat())
+        }
+
+        #[test]
+        fn scan_needs_at_least_one_redacter() {
+            let err = parse(&[]).expect_err("a scan without -d must fail");
+            assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        }
+
+        #[test]
+        fn scan_flags_are_parsed() {
+            let cli = parse(&[
+                "-d",
+                "local-rules",
+                "--report-file",
+                "report.txt",
+                "--report-format",
+                "text",
+                "--show-values",
+                "--min-score",
+                "0.7",
+                "--no-fail",
+            ])
+            .unwrap();
+            let CliCommand::Scan {
+                source,
+                report,
+                show_values,
+                min_score,
+                no_fail,
+                ..
+            } = cli.command
+            else {
+                panic!("expected the scan command");
+            };
+            assert_eq!(source, "test-fixtures");
+            assert_eq!(report.report_file, Some(PathBuf::from("report.txt")));
+            assert_eq!(report.report_format, ReportFormat::Text);
+            assert!(show_values);
+            assert_eq!(min_score, Some(Score::try_from(0.7).unwrap()));
+            assert!(no_fail);
+        }
+
+        #[test]
+        fn a_report_file_alone_is_written_as_json() {
+            let cli = parse(&["-d", "local-rules", "--report-file", "report.json"]).unwrap();
+            let CliCommand::Scan { report, .. } = cli.command else {
+                panic!("expected the scan command");
+            };
+            assert_eq!(report.report_format, ReportFormat::Json);
+        }
+
+        #[test]
+        fn a_report_format_without_a_report_file_is_rejected() {
+            let err = parse(&["-d", "local-rules", "--report-format", "json"])
+                .expect_err("a format without a file must fail");
+            assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        }
+
+        #[test]
+        fn a_min_score_outside_zero_to_one_is_rejected() {
+            let err = parse(&["-d", "local-rules", "--min-score", "1.5"])
+                .expect_err("a score above 1 must fail");
+            assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        }
+
+        #[test]
+        fn copy_takes_the_shared_report_flags_and_not_save_json_results() {
+            let cli =
+                CliArgs::try_parse_from(["redacter", "cp", "a", "b", "--report-file", "r.json"])
+                    .unwrap();
+            let CliCommand::Cp { report, .. } = cli.command else {
+                panic!("expected the cp command");
+            };
+            assert_eq!(report.report_file, Some(PathBuf::from("r.json")));
+            let err = CliArgs::try_parse_from([
+                "redacter",
+                "cp",
+                "a",
+                "b",
+                "--save-json-results",
+                "r.json",
+            ])
+            .expect_err("the old flag is gone");
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        }
+    }
+
     #[test]
     fn redacter_type_round_trips_through_its_name() {
         for redacter_type in [
@@ -682,6 +849,17 @@ mod tests {
                 .to_possible_value()
                 .expect("every redacter type is selectable on the command line");
             assert_eq!(redacter_type.to_string(), cli_value.get_name());
+        }
+    }
+
+    /// Reports name a redacter the way the command line does.
+    #[test]
+    fn redacter_type_is_reported_by_its_cli_name() {
+        for redacter_type in RedacterType::value_variants() {
+            assert_eq!(
+                serde_json::to_value(redacter_type).unwrap(),
+                serde_json::Value::String(redacter_type.to_string())
+            );
         }
     }
 

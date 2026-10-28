@@ -6,7 +6,7 @@
 
 use crate::addon_store::Addon;
 use crate::args::RedacterType;
-use crate::redacters::RedactionConversion;
+use crate::redacters::{RedactionBlocked, RedactionConversion};
 use console::{pad_str, Alignment, Style};
 
 /// Why a file was copied without being redacted, or skipped instead of redacted.
@@ -23,6 +23,18 @@ pub enum NotRedactedReason {
     OcrUnavailable,
     /// The OCR engine cannot read the image format of the file.
     OcrImageFormatNotSupported,
+}
+
+impl From<RedactionBlocked> for NotRedactedReason {
+    fn from(blocked: RedactionBlocked) -> Self {
+        match blocked {
+            RedactionBlocked::PdfRendererUnavailable => NotRedactedReason::PdfRendererUnavailable,
+            RedactionBlocked::OcrUnavailable => NotRedactedReason::OcrUnavailable,
+            RedactionBlocked::OcrImageFormatNotSupported => {
+                NotRedactedReason::OcrImageFormatNotSupported
+            }
+        }
+    }
 }
 
 /// Why a file was not copied at all.
@@ -181,7 +193,7 @@ impl NotRedactedReason {
 }
 
 impl SkipReason {
-    fn detail(&self) -> &'static str {
+    pub(crate) fn detail(&self) -> &'static str {
         match self {
             SkipReason::OverSizeLimit => "over size limit",
             SkipReason::NameFilter => "name filter",

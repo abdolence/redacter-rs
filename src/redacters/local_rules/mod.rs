@@ -15,8 +15,8 @@ pub use user_rules::UserMatcher;
 use crate::args::RedacterType;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    text_or_table_support, unsupported_type_error, Detection, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -107,6 +107,31 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => Ok(self
+                .rules
+                .find(text)
+                .into_iter()
+                .map(|finding| Detection::in_text(text, finding))
+                .collect()),
+            RedacterDataItemContent::Table { rows, .. } => {
+                let mut detections = Vec::new();
+                for (row_index, row) in rows.iter().enumerate() {
+                    for (column, cell) in row.iter().enumerate() {
+                        detections.extend(self.rules.find(cell).into_iter().map(|finding| {
+                            Detection::in_table_cell(row_index, column, cell, finding)
+                        }));
+                    }
+                }
+                Ok(detections)
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(unsupported_type_error())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalRules
     }
@@ -119,6 +144,7 @@ mod tests {
     use crate::redacters::test_support::{
         TEST_DOCUMENTS_DIR, TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
+    use crate::redacters::{DetectionLabel, DetectionLocation};
     use console::Term;
 
     fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalRulesRedacter<'a> {
@@ -208,6 +234,60 @@ mod tests {
         };
         assert_eq!(headers, vec!["email", "note"]);
         assert_eq!(rows, vec![vec!["[REDACTED]", "call [REDACTED]"]]);
+    }
+
+    #[tokio::test]
+    async fn detects_text_and_table_cell_findings_where_they_are() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter);
+
+        let text = "mail a@b.io";
+        let detections = redacter
+            .detect(&text_item(
+                "note.txt",
+                mime::TEXT_PLAIN,
+                RedacterDataItemContent::Value(text.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("email"),
+                location: DetectionLocation::Text { start: 5, end: 11 },
+                score: None,
+                value: "a@b.io".to_string(),
+            }]
+        );
+
+        let detections = redacter
+            .detect(&text_item(
+                "customers.csv",
+                mime::TEXT_CSV,
+                RedacterDataItemContent::Table {
+                    headers: vec!["id".to_string(), "contact".to_string()],
+                    rows: vec![
+                        vec!["1".to_string(), "none".to_string()],
+                        vec!["2".to_string(), "mail a@b.io".to_string()],
+                    ],
+                },
+            ))
+            .await
+            .unwrap();
+        let locations: Vec<DetectionLocation> = detections
+            .iter()
+            .map(|detection| detection.location)
+            .collect();
+        assert_eq!(
+            locations,
+            vec![DetectionLocation::TableCell {
+                row: 1,
+                column: 1,
+                start: 5,
+                end: 11
+            }]
+        );
     }
 
     #[tokio::test]

@@ -13,8 +13,8 @@ use crate::args::RedacterType;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    text_or_table_support, unsupported_type_error, Detection, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -55,16 +55,42 @@ impl LocalGlinerRedacterOptions {
     }
 }
 
-/// Redacts every table cell that could hold a labelled span, leaving the rest byte for byte.
-/// Only an empty or whitespace-only cell is skipped: unlike a name-only NER model, GLiNER's
-/// default labels include phone number, credit card number, iban and other digit-only spans,
-/// so a "holds no letter" skip would hide every phone number and card number in a table.
+/// The findings in one table cell, with offsets into the cell. Only an empty or
+/// whitespace-only cell is skipped: unlike a name-only NER model, GLiNER's default labels
+/// include phone number, credit card number, iban and other digit-only spans, so a "holds no
+/// letter" skip would hide every phone number and card number in a table.
 ///
-/// Each cell is scored with its column header in front of it, `"city: Madrid"` rather than
+/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a one-word cell gives the model no sentence, and short bare values are tagged
 /// at a lower score than the same value read as a sentence. The prefix is scoring context
-/// only. Findings are mapped back onto the cell by `shift_into_cell` and the redaction is
-/// applied to the original cell text, so no header text can reach the output.
+/// only: `shift_into_cell` maps the findings back onto the cell, so no header text can reach
+/// a redacted cell or a detection.
+fn find_in_cell<F>(
+    headers: &[String],
+    column: usize,
+    cell: &str,
+    find_in: &mut F,
+) -> Result<Vec<Finding>, LocalGlinerError>
+where
+    F: FnMut(&str) -> Result<Vec<Finding>, LocalGlinerError>,
+{
+    if cell.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // A row wider than the header list, or an empty header, leaves the cell alone.
+    let prefix = match headers.get(column) {
+        Some(header) if !header.is_empty() => format!("{header}: "),
+        _ => String::new(),
+    };
+    let scored = if prefix.is_empty() {
+        find_in(cell)?
+    } else {
+        find_in(&format!("{prefix}{cell}"))?
+    };
+    Ok(shift_into_cell(scored, prefix.len()))
+}
+
+/// Redacts every table cell that could hold a labelled span, leaving the rest byte for byte.
 fn redact_rows<F>(
     headers: &[String],
     rows: Vec<Vec<String>>,
@@ -78,27 +104,37 @@ where
     for row in rows {
         let mut redacted_row = Vec::with_capacity(row.len());
         for (column, cell) in row.into_iter().enumerate() {
-            if cell.trim().is_empty() {
+            let in_cell = find_in_cell(headers, column, &cell, &mut find_in)?;
+            if in_cell.is_empty() {
                 redacted_row.push(cell);
                 continue;
             }
-            // A row wider than the header list, or an empty header, leaves the cell alone.
-            let prefix = match headers.get(column) {
-                Some(header) if !header.is_empty() => format!("{header}: "),
-                _ => String::new(),
-            };
-            let scored = if prefix.is_empty() {
-                find_in(&cell)?
-            } else {
-                find_in(&format!("{prefix}{cell}"))?
-            };
-            let in_cell = shift_into_cell(scored, prefix.len());
             findings += in_cell.len();
             redacted_row.push(apply_redaction(&cell, &in_cell, REDACTED));
         }
         redacted_rows.push(redacted_row);
     }
     Ok((redacted_rows, findings))
+}
+
+/// Every labelled span in the table, placed in its cell.
+fn detect_rows<F>(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mut find_in: F,
+) -> Result<Vec<Detection>, LocalGlinerError>
+where
+    F: FnMut(&str) -> Result<Vec<Finding>, LocalGlinerError>,
+{
+    let mut detections = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        for (column, cell) in row.iter().enumerate() {
+            for finding in find_in_cell(headers, column, cell, &mut find_in)? {
+                detections.push(Detection::in_table_cell(row_index, column, cell, finding));
+            }
+        }
+    }
+    Ok(detections)
 }
 
 /// Maps findings on `"{prefix}{cell}"` back onto `cell`. A finding that ends inside the
@@ -208,6 +244,32 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => {
+                let text = text.clone();
+                self.run_blocking(move |engine, options| {
+                    Ok(engine
+                        .find(&text, options)?
+                        .into_iter()
+                        .map(|finding| Detection::in_text(&text, finding))
+                        .collect())
+                })
+                .await
+            }
+            RedacterDataItemContent::Table { headers, rows } => {
+                let (headers, rows) = (headers.clone(), rows.clone());
+                self.run_blocking(move |engine, options| {
+                    detect_rows(&headers, &rows, |text| engine.find(text, options))
+                })
+                .await
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(unsupported_type_error())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalGliner
     }
@@ -219,6 +281,7 @@ mod tests {
     use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
     use crate::redacters::text_spans::RuleName;
+    use crate::redacters::{DetectionLabel, DetectionLocation};
     use console::Term;
     use mime::Mime;
 
@@ -283,6 +346,7 @@ mod tests {
             start,
             end,
             rule: RuleName::new("person"),
+            score: None,
         }
     }
 
@@ -301,6 +365,39 @@ mod tests {
         })
         .unwrap();
         (rows.into_iter().next().unwrap(), seen, findings)
+    }
+
+    /// A detection is placed by the cell's own offsets, never by its offsets in the
+    /// header-prefixed text the model scored.
+    #[test]
+    fn a_table_detection_is_placed_in_its_cell() {
+        let headers = vec!["id".to_string(), "name".to_string()];
+        let rows = vec![
+            vec!["1".to_string(), "Rainy".to_string()],
+            vec!["2".to_string(), "Akira".to_string()],
+        ];
+        let detections = detect_rows(&headers, &rows, |text| {
+            Ok(if text == "name: Akira" {
+                vec![finding(6, 11)]
+            } else {
+                Vec::new()
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("person"),
+                location: DetectionLocation::TableCell {
+                    row: 1,
+                    column: 1,
+                    start: 0,
+                    end: 5
+                },
+                score: None,
+                value: "Akira".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -476,6 +573,37 @@ mod tests {
         assert!(out.contains("#A-10422"), "{out}");
         assert!(out.contains("6pm"), "{out}");
         assert!(out.contains("[REDACTED]"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-local-gliner"), ignore)]
+    async fn detects_the_pii_in_the_customer_note_with_labels_and_scores() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter).await;
+        let text =
+            std::fs::read_to_string(format!("{TEST_DOCUMENTS_DIR}customer-note.txt")).unwrap();
+        let detections = redacter
+            .detect(&item(
+                "customer-note.txt",
+                mime::TEXT_PLAIN,
+                RedacterDataItemContent::Value(text.clone()),
+            ))
+            .await
+            .unwrap();
+        let email = detections
+            .iter()
+            .find(|detection| detection.value == "john.smith@example.com")
+            .unwrap_or_else(|| panic!("no email among {detections:?}"));
+        assert_eq!(email.label, DetectionLabel::new("email"));
+        assert!(
+            email.score.is_some_and(|score| score.value() >= 0.5),
+            "{email:?}"
+        );
+        let DetectionLocation::Text { start, end } = email.location else {
+            panic!("a text item yields text locations: {email:?}");
+        };
+        assert_eq!(&text[start..end], "john.smith@example.com");
     }
 
     #[tokio::test]

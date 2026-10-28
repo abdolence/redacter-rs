@@ -9,7 +9,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, LlmImageMode, NativeImageEditError, RedactSupport, Redacter,
+    redact_image_with_mode, Detection, LlmImageMode, NativeImageEditError, RedactSupport, Redacter,
     RedacterDataItem, RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
@@ -441,6 +441,12 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
             Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
             Some(media_type) if Redacters::is_mime_image(media_type) => RedactSupport::Supported,
             _ => RedactSupport::Unsupported,
+        })
+    }
+
+    async fn detect(&self, _input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        Err(AppError::DetectionNotSupported {
+            redacter_type: self.redacter_type(),
         })
     }
 

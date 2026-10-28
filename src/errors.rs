@@ -1,3 +1,5 @@
+use crate::args::RedacterType;
+use crate::redacters::DetectionLocation;
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use indicatif::style::TemplateError;
 use std::time::SystemTimeError;
@@ -63,6 +65,15 @@ pub enum AppError {
     #[cfg(feature = "local-gliner")]
     #[error("Local GLiNER error: {0}")]
     LocalGlinerError(#[from] crate::redacters::local_gliner::LocalGlinerError),
+    #[error("{redacter_type} does not support detection yet")]
+    DetectionNotSupported { redacter_type: RedacterType },
+    #[error("{redacter_type} reported a detection outside the content it was given: {location:?}")]
+    DetectionOutsideContent {
+        redacter_type: RedacterType,
+        location: DetectionLocation,
+    },
+    #[error("Score must be a number between 0 and 1, got `{value}`")]
+    InvalidScore { value: String },
     #[error("System error: {message}")]
     SystemError { message: String },
     #[error("System error: {message}")]

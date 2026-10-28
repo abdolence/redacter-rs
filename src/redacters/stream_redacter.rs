@@ -366,10 +366,10 @@ impl<'a> StreamRedacter<'a> {
         }
     }
 
-    async fn stream_to_text_redact_item<
+    pub(crate) async fn stream_to_text_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
-        &'a self,
+        &self,
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
@@ -393,10 +393,10 @@ impl<'a> StreamRedacter<'a> {
         })
     }
 
-    async fn stream_to_table_redact_item<
+    pub(crate) async fn stream_to_table_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
-        &'a self,
+        &self,
         redacter_base_options: &RedacterBaseOptions,
         input: S,
         file_ref: &FileSystemRef,
@@ -552,9 +552,9 @@ impl<'a> StreamRedacter<'a> {
     /// the image, in order (so a later redacter sees an earlier one's `[REDACTED]` tokens),
     /// then boxes exactly the words the chain changed.
     ///
-    /// Words are joined by line (see [`TextImageCoords::line`]) rather than all with a single
-    /// space, so keyword-window rules see the same line breaks they would see reading the
-    /// file as text. Which words changed is decided by aligning the original OCR words against
+    /// Words are joined by line (see [`OcrText`]) rather than all with a single space, so
+    /// keyword-window rules see the same line breaks they would see reading the file as
+    /// text. Which words changed is decided by aligning the original OCR words against
     /// the final redacted text (see [`words_to_redact`]), not by checking whether a word still
     /// appears anywhere in a document-wide set: that would miss a word that is also part of an
     /// unredacted span elsewhere on the page, and would box every occurrence of a repeated
@@ -577,19 +577,15 @@ impl<'a> StreamRedacter<'a> {
                         );
                         let image = image::load_from_memory_with_format(data, image_format)?;
                         let text_coords = ocr.image_to_text(image.clone())?;
-                        let (ordered_coords, text) = words_by_line(&text_coords);
-                        let original_words: Vec<String> = ordered_coords
+                        let ocr_text = OcrText::from(text_coords.as_slice());
+                        let original_words: Vec<String> = ocr_text
+                            .words
                             .iter()
-                            .map(|coord| {
-                                coord
-                                    .text
-                                    .clone()
-                                    .expect("words_by_line only keeps coordinates with text")
-                            })
+                            .map(|word| ocr_text.text[word.span.clone()].to_string())
                             .collect();
 
                         let mut redacted_item = RedacterDataItem {
-                            content: RedacterDataItemContent::Value(text),
+                            content: RedacterDataItemContent::Value(ocr_text.text.clone()),
                             file_ref: file_ref.clone(),
                         };
                         for redacter in redacters {
@@ -600,11 +596,11 @@ impl<'a> StreamRedacter<'a> {
                             RedacterDataItemContent::Value(content) => {
                                 let to_redact = words_to_redact(&original_words, &content);
                                 let mut redacted_image = image.to_rgb8();
-                                for (coord, redact) in ordered_coords.iter().zip(&to_redact) {
+                                for (word, redact) in ocr_text.words.iter().zip(&to_redact) {
                                     if *redact {
                                         redact_rgba_image_at_coords(
                                             &mut redacted_image,
-                                            &vec![coord.clone()],
+                                            &vec![word.coords.clone()],
                                             0.10,
                                         );
                                     }
@@ -653,8 +649,21 @@ struct LineSpan<'a> {
     left: f32,
 }
 
-/// Builds the text sent to the redacter chain from OCR words, and the coordinates in the same
-/// order as the words in that text, so the two can be zipped back together after redaction.
+/// The text an OCR pass read, and every word of it with its place in that text, so a redacted
+/// text or a detection can be mapped back onto the words' boxes.
+pub(crate) struct OcrText {
+    /// The words in the order they appear in `text`; words without recognised text are dropped.
+    pub words: Vec<OcrWord>,
+    pub text: String,
+}
+
+/// One OCR word and the half-open byte range it fills in [`OcrText::text`].
+pub(crate) struct OcrWord {
+    pub coords: TextImageCoords,
+    pub span: std::ops::Range<usize>,
+}
+
+/// Builds the text sent to the redacters from OCR words.
 ///
 /// Words are joined by `" "` within a line and lines are joined by `"\n"` (using each word's
 /// [`TextImageCoords::line`]), so keyword-window rules see the same line breaks they would see
@@ -674,68 +683,74 @@ struct LineSpan<'a> {
 /// alone does not order them, and cannot rely on either line's exact top edge to do it. This is
 /// a no-op for ordinary single-column text, where rows never span more than one line and are
 /// already emitted top to bottom. Coordinates without recognised text are dropped.
-fn words_by_line(text_coords: &[TextImageCoords]) -> (Vec<TextImageCoords>, String) {
-    let mut lines: std::collections::BTreeMap<usize, Vec<&TextImageCoords>> =
-        std::collections::BTreeMap::new();
-    for coord in text_coords {
-        if coord.text.is_some() {
-            lines.entry(coord.line).or_default().push(coord);
-        }
-    }
-
-    let mut spans: Vec<LineSpan> = lines
-        .into_values()
-        .map(|words| LineSpan {
-            top: words.iter().map(|w| w.y1).fold(f32::INFINITY, f32::min),
-            bottom: words.iter().map(|w| w.y2).fold(f32::NEG_INFINITY, f32::max),
-            left: words.iter().map(|w| w.x1).fold(f32::INFINITY, f32::min),
-            words,
-        })
-        .collect();
-    spans.sort_by(|a, b| a.top.total_cmp(&b.top));
-
-    let mut rows: Vec<Vec<LineSpan>> = vec![];
-    for span in spans {
-        let overlaps_current_row = rows.last().is_some_and(|row: &Vec<LineSpan>| {
-            let row_top = row.iter().map(|l| l.top).fold(f32::INFINITY, f32::min);
-            let row_bottom = row
-                .iter()
-                .map(|l| l.bottom)
-                .fold(f32::NEG_INFINITY, f32::max);
-            span.top < row_bottom && span.bottom > row_top
-        });
-        if overlaps_current_row {
-            rows.last_mut().expect("checked above").push(span);
-        } else {
-            rows.push(vec![span]);
-        }
-    }
-    for row in &mut rows {
-        row.sort_by(|a, b| a.left.total_cmp(&b.left));
-    }
-
-    let mut ordered_coords = Vec::with_capacity(text_coords.len());
-    let mut text = String::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        if row_index > 0 {
-            text.push('\n');
-        }
-        for (line_index, line) in row.iter().enumerate() {
-            if line_index > 0 {
-                text.push(' ');
+impl From<&[TextImageCoords]> for OcrText {
+    fn from(text_coords: &[TextImageCoords]) -> Self {
+        let mut lines: std::collections::BTreeMap<usize, Vec<&TextImageCoords>> =
+            std::collections::BTreeMap::new();
+        for coord in text_coords {
+            if coord.text.is_some() {
+                lines.entry(coord.line).or_default().push(coord);
             }
-            for (word_index, coord) in line.words.iter().enumerate() {
-                if word_index > 0 {
+        }
+
+        let mut spans: Vec<LineSpan> = lines
+            .into_values()
+            .map(|words| LineSpan {
+                top: words.iter().map(|w| w.y1).fold(f32::INFINITY, f32::min),
+                bottom: words.iter().map(|w| w.y2).fold(f32::NEG_INFINITY, f32::max),
+                left: words.iter().map(|w| w.x1).fold(f32::INFINITY, f32::min),
+                words,
+            })
+            .collect();
+        spans.sort_by(|a, b| a.top.total_cmp(&b.top));
+
+        let mut rows: Vec<Vec<LineSpan>> = vec![];
+        for span in spans {
+            let overlaps_current_row = rows.last().is_some_and(|row: &Vec<LineSpan>| {
+                let row_top = row.iter().map(|l| l.top).fold(f32::INFINITY, f32::min);
+                let row_bottom = row
+                    .iter()
+                    .map(|l| l.bottom)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                span.top < row_bottom && span.bottom > row_top
+            });
+            if overlaps_current_row {
+                rows.last_mut().expect("checked above").push(span);
+            } else {
+                rows.push(vec![span]);
+            }
+        }
+        for row in &mut rows {
+            row.sort_by(|a, b| a.left.total_cmp(&b.left));
+        }
+
+        let mut words = Vec::with_capacity(text_coords.len());
+        let mut text = String::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            if row_index > 0 {
+                text.push('\n');
+            }
+            for (line_index, line) in row.iter().enumerate() {
+                if line_index > 0 {
                     text.push(' ');
                 }
-                // `words` only holds coordinates whose `text` is `Some`, checked when built.
-                text.push_str(coord.text.as_deref().unwrap_or_default());
-                ordered_coords.push((*coord).clone());
+                for (word_index, coord) in line.words.iter().enumerate() {
+                    if word_index > 0 {
+                        text.push(' ');
+                    }
+                    let start = text.len();
+                    // `words` only holds coordinates whose `text` is `Some`, checked when built.
+                    text.push_str(coord.text.as_deref().unwrap_or_default());
+                    words.push(OcrWord {
+                        coords: (*coord).clone(),
+                        span: start..text.len(),
+                    });
+                }
             }
         }
-    }
 
-    (ordered_coords, text)
+        OcrText { words, text }
+    }
 }
 
 #[cfg(test)]
@@ -765,16 +780,24 @@ mod tests {
         }
     }
 
-    fn texts_of(coords: &[TextImageCoords]) -> Vec<&str> {
-        coords.iter().map(|c| c.text.as_deref().unwrap()).collect()
+    /// Each word as it reads in the OCR text, which must match its own recognised text.
+    fn words_of(ocr: &OcrText) -> Vec<&str> {
+        ocr.words
+            .iter()
+            .map(|word| {
+                let in_text = &ocr.text[word.span.clone()];
+                assert_eq!(Some(in_text), word.coords.text.as_deref());
+                in_text
+            })
+            .collect()
     }
 
     #[test]
     fn words_on_the_same_line_are_joined_by_a_space() {
         let coords = vec![coord("hello", 0), coord("world", 0)];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["hello", "world"]);
-        assert_eq!(text, "hello world");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["hello", "world"]);
+        assert_eq!(ocr.text, "hello world");
     }
 
     #[test]
@@ -784,9 +807,9 @@ mod tests {
             coord_at("second", 1, 1.0),
             coord_at("third", 1, 1.0),
         ];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["first", "second", "third"]);
-        assert_eq!(text, "first\nsecond third");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["first", "second", "third"]);
+        assert_eq!(ocr.text, "first\nsecond third");
     }
 
     #[test]
@@ -794,9 +817,9 @@ mod tests {
         let mut untexted = coord("ignored", 0);
         untexted.text = None;
         let coords = vec![coord("kept", 0), untexted];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["kept"]);
-        assert_eq!(text, "kept");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["kept"]);
+        assert_eq!(ocr.text, "kept");
     }
 
     /// Reproduces the two-column form layout that motivated row grouping: the OCR engine
@@ -831,12 +854,12 @@ mod tests {
             word_at_xy("John", 2, 300.0, 100.0),
             word_at_xy("X1234567", 3, 311.0, 474.0),
         ];
-        let (words, text) = words_by_line(&coords);
+        let ocr = OcrText::from(coords.as_slice());
         assert_eq!(
-            texts_of(&words),
+            words_of(&ocr),
             vec!["Full", "name:", "John", "Passport", "X1234567"]
         );
-        assert_eq!(text, "Full name: John\nPassport X1234567");
+        assert_eq!(ocr.text, "Full name: John\nPassport X1234567");
     }
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {

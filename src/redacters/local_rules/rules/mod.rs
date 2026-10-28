@@ -254,6 +254,7 @@ impl RuleSet {
                     start: matched.start(),
                     end: matched.end(),
                     rule: rule.name.clone(),
+                    score: None,
                 });
             }
         }
