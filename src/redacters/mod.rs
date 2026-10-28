@@ -56,6 +56,9 @@ pub use open_ai_llm::*;
 mod llm_detection;
 pub use llm_detection::*;
 
+mod model_answer;
+pub use model_answer::*;
+
 mod ocr_alignment;
 pub use ocr_alignment::*;
 

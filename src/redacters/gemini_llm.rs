@@ -3,10 +3,11 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, Detection, ImagePii,
-    LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
-    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, retrying_once,
+    Detection, GeminiCandidate, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
+    NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -62,6 +63,41 @@ fn findings_schema(properties: Vec<(&str, gemini_api::Schema)>) -> gemini_api::S
     }
 }
 
+impl From<gemini_api::GenerateContentResponse> for ModelAnswer {
+    fn from(response: gemini_api::GenerateContentResponse) -> Self {
+        let prompt_block_reason = response
+            .prompt_feedback
+            .as_ref()
+            .map(|feedback| feedback.block_reason())
+            .filter(|reason| {
+                *reason != gemini_api::generate_content_response::prompt_feedback::BlockReason::Unspecified
+            })
+            .map(|reason| reason.as_str_name());
+        let candidate = response
+            .candidates
+            .first()
+            .map(|candidate| GeminiCandidate {
+                finish_reason: candidate.finish_reason().as_str_name(),
+                blocked_categories: candidate
+                    .safety_ratings
+                    .iter()
+                    .filter(|rating| rating.blocked)
+                    .map(|rating| rating.category().as_str_name().to_string())
+                    .collect(),
+                text: candidate
+                    .content
+                    .iter()
+                    .flat_map(|content| &content.parts)
+                    .filter_map(|part| match &part.data {
+                        Some(gemini_api::part::Data::Text(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            });
+        ModelAnswer::from_gemini(candidate, prompt_block_reason)
+    }
+}
+
 #[derive(Clone)]
 pub struct GeminiLlmRedacter<'a> {
     client: GoogleApi<GenerativeServiceClient<GoogleAuthMiddleware>>,
@@ -109,7 +145,8 @@ impl<'a> GeminiLlmRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {
-                let mut request = tonic::Request::new(
+                let blank_input = input_content.trim().is_empty();
+                let request =
                     gcloud_sdk::google::ai::generativelanguage::v1beta::GenerateContentRequest {
                         model: model_name,
                         safety_settings: vec![
@@ -170,40 +207,17 @@ impl<'a> GeminiLlmRedacter<'a> {
                             },
                         ),
                         ..std::default::Default::default()
-                    },
-                );
-                request.metadata_mut().insert(
-                    "x-goog-user-project",
-                    gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
-                        self.gemini_llm_options.project_id.as_ref(),
-                    )?,
-                );
-                let response = self.client.get().generate_content(request).await?;
-
-                let inner = response.into_inner();
-                if let Some(content) = inner.candidates.first().and_then(|c| c.content.as_ref()) {
-                    let redacted_content_text =
-                        content
-                            .parts
-                            .iter()
-                            .fold("".to_string(), |acc, entity| match &entity.data {
-                                Some(
-                                    gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::Text(
-                                        text,
-                                    ),
-                                ) => acc + text,
-                                _ => acc,
-                            });
-
-                    Ok(RedacterDataItem {
-                        file_ref: input.file_ref,
-                        content: RedacterDataItemContent::Value(redacted_content_text),
-                    })
-                } else {
-                    Err(AppError::SystemError {
-                        message: "No content item in the response".to_string(),
-                    })
-                }
+                    };
+                let redacted_content_text = retrying_once(|| async {
+                    self.generate(request.clone())
+                        .await?
+                        .into_redacted_text(blank_input)
+                })
+                .await?;
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content: RedacterDataItemContent::Value(redacted_content_text),
+                })
             }
             _ => Err(AppError::SystemError {
                 message: "Unsupported item for text redacting".to_string(),
@@ -281,15 +295,31 @@ impl<'a> GeminiLlmRedacter<'a> {
         }
     }
 
+    /// Sends `request` and returns the first candidate's text with how it ended.
+    async fn generate(
+        &self,
+        request: gemini_api::GenerateContentRequest,
+    ) -> AppResult<ModelAnswer> {
+        let mut request = tonic::Request::new(request);
+        request.metadata_mut().insert(
+            "x-goog-user-project",
+            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
+                self.gemini_llm_options.project_id.as_ref(),
+            )?,
+        );
+        let response = self.client.get().generate_content(request).await?;
+        Ok(response.into_inner().into())
+    }
+
     /// Asks the text model for JSON conforming to `response_schema` and returns its answer.
+    /// An answer that was filtered, cut short or empty is an error.
     async fn generate_json(
         &self,
         parts: Vec<gemini_api::Part>,
         response_schema: gemini_api::Schema,
     ) -> AppResult<String> {
-        let model_name = self.text_model_name();
-        let mut request = tonic::Request::new(gemini_api::GenerateContentRequest {
-            model: model_name,
+        let request = gemini_api::GenerateContentRequest {
+            model: self.text_model_name(),
             safety_settings: [
                 gemini_api::HarmCategory::HateSpeech,
                 gemini_api::HarmCategory::SexuallyExplicit,
@@ -314,31 +344,8 @@ impl<'a> GeminiLlmRedacter<'a> {
                 ..std::default::Default::default()
             }),
             ..std::default::Default::default()
-        });
-        request.metadata_mut().insert(
-            "x-goog-user-project",
-            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
-                self.gemini_llm_options.project_id.as_ref(),
-            )?,
-        );
-        let response = self.client.get().generate_content(request).await?;
-        let content = response
-            .into_inner()
-            .candidates
-            .into_iter()
-            .next()
-            .and_then(|candidate| candidate.content)
-            .ok_or_else(|| AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })?;
-        Ok(content
-            .parts
-            .into_iter()
-            .filter_map(|part| match part.data {
-                Some(gemini_api::part::Data::Text(text)) => Some(text),
-                _ => None,
-            })
-            .collect())
+        };
+        retrying_once(|| async { self.generate(request.clone()).await?.into_text() }).await
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
@@ -525,12 +532,81 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::live_detection;
     use crate::redacters::test_support::{
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
     use crate::redacters::RedacterProviderOptions;
+    use crate::redacters::{live_detection, ModelStop};
     use console::Term;
+
+    fn response(
+        finish_reason: gemini_api::candidate::FinishReason,
+        text: &str,
+        blocked: &[gemini_api::HarmCategory],
+    ) -> gemini_api::GenerateContentResponse {
+        let parts = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text_part(text.to_string())]
+        };
+        gemini_api::GenerateContentResponse {
+            candidates: vec![gemini_api::Candidate {
+                finish_reason: finish_reason.into(),
+                content: Some(gemini_api::Content {
+                    parts,
+                    role: "model".to_string(),
+                }),
+                safety_ratings: blocked
+                    .iter()
+                    .map(|category| gemini_api::SafetyRating {
+                        category: (*category).into(),
+                        blocked: true,
+                        ..std::default::Default::default()
+                    })
+                    .collect(),
+                ..std::default::Default::default()
+            }],
+            ..std::default::Default::default()
+        }
+    }
+
+    #[test]
+    fn a_safety_stop_without_content_names_the_blocked_categories() {
+        let stopped = response(
+            gemini_api::candidate::FinishReason::Safety,
+            "",
+            &[gemini_api::HarmCategory::DangerousContent],
+        );
+        assert!(matches!(
+            ModelAnswer::from(stopped).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::Safety { ref categories }))
+                if !categories.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_response_without_candidates_names_the_block_reason_of_the_prompt() {
+        let blocked = gemini_api::GenerateContentResponse {
+            prompt_feedback: Some(gemini_api::generate_content_response::PromptFeedback {
+                block_reason: gemini_api::generate_content_response::prompt_feedback::BlockReason::ProhibitedContent.into(),
+                ..std::default::Default::default()
+            }),
+            ..std::default::Default::default()
+        };
+        assert!(matches!(
+            ModelAnswer::from(blocked).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::PromptBlocked(_)))
+        ));
+    }
+
+    #[test]
+    fn a_redaction_that_stopped_normally_without_text_is_an_error() {
+        let empty = response(gemini_api::candidate::FinishReason::Stop, "", &[]);
+        assert!(matches!(
+            ModelAnswer::from(empty).into_redacted_text(false),
+            Err(AppError::EmptyModelAnswer)
+        ));
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp-llm"), ignore)]

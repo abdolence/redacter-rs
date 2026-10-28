@@ -3,10 +3,11 @@ use crate::common_types::{GcpProjectId, GcpRegion};
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, Detection, ImagePii,
-    LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
-    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, retrying_once,
+    Detection, GeminiCandidate, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
+    NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -60,6 +61,41 @@ fn findings_schema(properties: Vec<(&str, vertex_api::Schema)>) -> vertex_api::S
             ..std::default::Default::default()
         })),
         ..std::default::Default::default()
+    }
+}
+
+impl From<vertex_api::GenerateContentResponse> for ModelAnswer {
+    fn from(response: vertex_api::GenerateContentResponse) -> Self {
+        let prompt_block_reason = response
+            .prompt_feedback
+            .as_ref()
+            .map(|feedback| feedback.block_reason())
+            .filter(|reason| {
+                *reason != vertex_api::generate_content_response::prompt_feedback::BlockedReason::Unspecified
+            })
+            .map(|reason| reason.as_str_name());
+        let candidate = response
+            .candidates
+            .first()
+            .map(|candidate| GeminiCandidate {
+                finish_reason: candidate.finish_reason().as_str_name(),
+                blocked_categories: candidate
+                    .safety_ratings
+                    .iter()
+                    .filter(|rating| rating.blocked)
+                    .map(|rating| rating.category().as_str_name().to_string())
+                    .collect(),
+                text: candidate
+                    .content
+                    .iter()
+                    .flat_map(|content| &content.parts)
+                    .filter_map(|part| match &part.data {
+                        Some(vertex_api::part::Data::Text(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            });
+        ModelAnswer::from_gemini(candidate, prompt_block_reason)
     }
 }
 
@@ -137,7 +173,8 @@ impl<'a> GcpVertexAiRedacter<'a> {
 
         match input.content {
             RedacterDataItemContent::Value(input_content) => {
-                let mut request = tonic::Request::new(
+                let blank_input = input_content.trim().is_empty();
+                let request =
                     gcloud_sdk::google::cloud::aiplatform::v1::GenerateContentRequest {
                         model: model_path,
                         safety_settings: vec![
@@ -199,39 +236,17 @@ impl<'a> GcpVertexAiRedacter<'a> {
                             },
                         ),
                         ..std::default::Default::default()
-                    },
-                );
-                request.metadata_mut().insert(
-                    "x-goog-user-project",
-                    gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
-                        self.options.project_id.as_ref(),
-                    )?,
-                );
-                let response = self.client.get().generate_content(request).await?;
-
-                let inner = response.into_inner();
-                if let Some(content) = inner.candidates.first().and_then(|c| c.content.as_ref()) {
-                    let redacted_content_text =
-                        content.parts.iter().fold("".to_string(), |acc, entity| {
-                            match &entity.data {
-                                Some(
-                                    gcloud_sdk::google::cloud::aiplatform::v1::part::Data::Text(
-                                        text,
-                                    ),
-                                ) => acc + text,
-                                _ => acc,
-                            }
-                        });
-
-                    Ok(RedacterDataItem {
-                        file_ref: input.file_ref,
-                        content: RedacterDataItemContent::Value(redacted_content_text),
-                    })
-                } else {
-                    Err(AppError::SystemError {
-                        message: "No content item in the response".to_string(),
-                    })
-                }
+                    };
+                let redacted_content_text = retrying_once(|| async {
+                    self.generate(request.clone())
+                        .await?
+                        .into_redacted_text(blank_input)
+                })
+                .await?;
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content: RedacterDataItemContent::Value(redacted_content_text),
+                })
             }
             _ => Err(AppError::SystemError {
                 message: "Unsupported item for text redacting".to_string(),
@@ -239,15 +254,31 @@ impl<'a> GcpVertexAiRedacter<'a> {
         }
     }
 
+    /// Sends `request` and returns the first candidate's text with how it ended.
+    async fn generate(
+        &self,
+        request: vertex_api::GenerateContentRequest,
+    ) -> AppResult<ModelAnswer> {
+        let mut request = tonic::Request::new(request);
+        request.metadata_mut().insert(
+            "x-goog-user-project",
+            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
+                self.options.project_id.as_ref(),
+            )?,
+        );
+        let response = self.client.get().generate_content(request).await?;
+        Ok(response.into_inner().into())
+    }
+
     /// Asks the text model for JSON conforming to `response_schema` and returns its answer.
+    /// An answer that was filtered, cut short or empty is an error.
     async fn generate_json(
         &self,
         parts: Vec<vertex_api::Part>,
         response_schema: vertex_api::Schema,
     ) -> AppResult<String> {
-        let model_path = self.text_model_path();
-        let mut request = tonic::Request::new(vertex_api::GenerateContentRequest {
-            model: model_path,
+        let request = vertex_api::GenerateContentRequest {
+            model: self.text_model_path(),
             safety_settings: [
                 vertex_api::HarmCategory::HateSpeech,
                 vertex_api::HarmCategory::SexuallyExplicit,
@@ -273,31 +304,8 @@ impl<'a> GcpVertexAiRedacter<'a> {
                 ..std::default::Default::default()
             }),
             ..std::default::Default::default()
-        });
-        request.metadata_mut().insert(
-            "x-goog-user-project",
-            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
-                self.options.project_id.as_ref(),
-            )?,
-        );
-        let response = self.client.get().generate_content(request).await?;
-        let content = response
-            .into_inner()
-            .candidates
-            .into_iter()
-            .next()
-            .and_then(|candidate| candidate.content)
-            .ok_or_else(|| AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })?;
-        Ok(content
-            .parts
-            .into_iter()
-            .filter_map(|part| match part.data {
-                Some(vertex_api::part::Data::Text(text)) => Some(text),
-                _ => None,
-            })
-            .collect())
+        };
+        retrying_once(|| async { self.generate(request.clone()).await?.into_text() }).await
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
@@ -564,11 +572,11 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::live_detection;
     use crate::redacters::test_support::{
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
     use crate::redacters::RedacterProviderOptions;
+    use crate::redacters::{live_detection, ModelStop};
     use console::Term;
 
     #[test]
@@ -593,6 +601,118 @@ mod tests {
             vertex_ai_endpoint(&GcpRegion::new("europe-west1".to_string())),
             "https://europe-west1-aiplatform.googleapis.com"
         );
+    }
+
+    fn response(
+        finish_reason: vertex_api::candidate::FinishReason,
+        text: &str,
+        blocked: &[vertex_api::HarmCategory],
+    ) -> vertex_api::GenerateContentResponse {
+        let parts = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text_part(text.to_string())]
+        };
+        vertex_api::GenerateContentResponse {
+            candidates: vec![vertex_api::Candidate {
+                finish_reason: finish_reason.into(),
+                content: Some(vertex_api::Content {
+                    parts,
+                    role: "model".to_string(),
+                }),
+                safety_ratings: blocked
+                    .iter()
+                    .map(|category| vertex_api::SafetyRating {
+                        category: (*category).into(),
+                        blocked: true,
+                        ..std::default::Default::default()
+                    })
+                    .collect(),
+                ..std::default::Default::default()
+            }],
+            ..std::default::Default::default()
+        }
+    }
+
+    fn safety_stop() -> vertex_api::GenerateContentResponse {
+        response(
+            vertex_api::candidate::FinishReason::Safety,
+            "",
+            &[vertex_api::HarmCategory::DangerousContent],
+        )
+    }
+
+    fn completed(text: &str) -> vertex_api::GenerateContentResponse {
+        response(vertex_api::candidate::FinishReason::Stop, text, &[])
+    }
+
+    /// The text taken from `responses` in turn, and how many of them were asked for.
+    async fn text_from(
+        responses: Vec<vertex_api::GenerateContentResponse>,
+    ) -> (AppResult<String>, usize) {
+        let asked = std::cell::Cell::new(0);
+        let text = retrying_once(|| {
+            let next = responses[asked.get()].clone();
+            asked.set(asked.get() + 1);
+            async move { ModelAnswer::from(next).into_text() }
+        })
+        .await;
+        (text, asked.get())
+    }
+
+    #[test]
+    fn a_safety_stop_without_content_names_the_blocked_categories() {
+        let error = ModelAnswer::from(safety_stop()).into_text().unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::ModelAnswerStopped(ModelStop::Safety { ref categories })
+                if !categories.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_response_without_candidates_names_the_block_reason_of_the_prompt() {
+        let blocked = vertex_api::GenerateContentResponse {
+            prompt_feedback: Some(vertex_api::generate_content_response::PromptFeedback {
+                block_reason: vertex_api::generate_content_response::prompt_feedback::BlockedReason::ProhibitedContent.into(),
+                ..std::default::Default::default()
+            }),
+            ..std::default::Default::default()
+        };
+        assert!(matches!(
+            ModelAnswer::from(blocked).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::PromptBlocked(_)))
+        ));
+    }
+
+    #[test]
+    fn a_normal_stop_without_text_is_empty() {
+        assert!(matches!(
+            ModelAnswer::from(completed("")).into_text(),
+            Err(AppError::EmptyModelAnswer)
+        ));
+    }
+
+    #[test]
+    fn a_redaction_stopped_by_safety_is_an_error_and_not_an_empty_file() {
+        assert!(matches!(
+            ModelAnswer::from(safety_stop()).into_redacted_text(false),
+            Err(AppError::ModelAnswerStopped(ModelStop::Safety { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_safety_stop_is_asked_once_more_and_a_truncated_answer_is_not() {
+        let (text, asked) = text_from(vec![safety_stop(), completed("[]")]).await;
+        assert_eq!((text.unwrap().as_str(), asked), ("[]", 2));
+
+        let truncated = response(vertex_api::candidate::FinishReason::MaxTokens, "[{", &[]);
+        let (text, asked) = text_from(vec![truncated, completed("[]")]).await;
+        assert!(matches!(
+            text,
+            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
+        ));
+        assert_eq!(asked, 1);
     }
 
     #[tokio::test]

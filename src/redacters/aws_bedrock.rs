@@ -1,4 +1,5 @@
 use aws_config::Region;
+use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseApiOutput;
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, ConverseOutput, ImageBlock, ImageFormat, ImageSource,
@@ -13,9 +14,9 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding,
-    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters, TextDetectionPrompt,
+    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -297,22 +298,27 @@ pub fn claude_text_answer_to_image_coords(
         .collect())
 }
 
-/// Text blocks of a Converse answer, concatenated in order.
-fn converse_response_text(output: Option<&ConverseOutput>) -> Option<String> {
-    let message = match output {
-        Some(ConverseOutput::Message(message)) => message,
-        _ => return None,
-    };
-    Some(
-        message
-            .content()
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect(),
-    )
+/// The text blocks of a Converse answer, concatenated in order, with its stop reason.
+impl From<ConverseApiOutput> for ModelAnswer {
+    fn from(response: ConverseApiOutput) -> Self {
+        let text = match response.output() {
+            Some(ConverseOutput::Message(message)) => message
+                .content()
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => String::new(),
+        };
+        let stop = match response.stop_reason().as_str() {
+            "end_turn" | "stop_sequence" => None,
+            "max_tokens" | "model_context_window_exceeded" => Some(ModelStop::MaxTokens),
+            other => Some(ModelStop::Withheld(other.to_string())),
+        };
+        ModelAnswer::new(text, stop)
+    }
 }
 
 /// Bedrock image format for an image the tool decoded, or an error naming the format when
@@ -370,6 +376,7 @@ impl<'a> AwsBedrockRedacter<'a> {
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
         let input_starts_with_fence = input_content.trim_start().starts_with("```");
+        let blank_input = input_content.trim().is_empty();
 
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -390,7 +397,8 @@ impl<'a> AwsBedrockRedacter<'a> {
 
         let redacted_content = self
             .converse_text(self.text_model_id(), message, "Failed to redact the text")
-            .await?;
+            .await?
+            .into_redacted_text(blank_input)?;
 
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
@@ -444,7 +452,8 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message,
                 "Failed to locate the personal information",
             )
-            .await?;
+            .await?
+            .into_text()?;
 
         let coords = match family {
             AwsBedrockModelFamily::Nova => nova_text_answer_to_image_coords(
@@ -487,13 +496,13 @@ impl<'a> AwsBedrockRedacter<'a> {
         })
     }
 
-    /// Sends one user message to `model_id` and returns the text of the answer.
+    /// Sends one user message to `model_id` and returns the answer with how it ended.
     async fn converse_text(
         &self,
         model_id: String,
         message: Message,
         failure: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<ModelAnswer> {
         let response = self
             .client
             .converse()
@@ -503,9 +512,7 @@ impl<'a> AwsBedrockRedacter<'a> {
             .send()
             .await
             .map_err(|err| super::bedrock_error(failure, &err))?;
-        converse_response_text(response.output.as_ref()).ok_or_else(|| AppError::AwsBedrockError {
-            message: "No content item in the response".to_string(),
-        })
+        Ok(response.into())
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
@@ -527,7 +534,8 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message,
                 "Failed to detect personal information in the text",
             )
-            .await?;
+            .await?
+            .into_text()?;
         LlmTextFinding::detections_from_answer(strip_json_fence(&answer), text)
     }
 
@@ -611,6 +619,7 @@ mod tests {
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
     use crate::redacters::{DetectionLocation, NativeImageEditFailure};
+    use aws_sdk_bedrockruntime::types::StopReason;
     use console::Term;
 
     #[test]
@@ -933,19 +942,61 @@ mod tests {
         );
     }
 
+    fn converse_response(text: &str, stop_reason: StopReason) -> ConverseApiOutput {
+        let message = Message::builder()
+            .role(ConversationRole::Assistant)
+            .content(ContentBlock::Text(text.to_string()))
+            .build()
+            .expect("the role and content are set");
+        ConverseApiOutput::builder()
+            .output(ConverseOutput::Message(message))
+            .stop_reason(stop_reason)
+            .build()
+            .expect("the stop reason is set")
+    }
+
     #[test]
-    fn converse_text_blocks_are_concatenated() {
+    fn a_completed_answer_is_the_text_of_its_blocks() {
         let message = Message::builder()
             .role(ConversationRole::Assistant)
             .content(ContentBlock::Text("Hello, ".to_string()))
             .content(ContentBlock::Text("[REDACTED]".to_string()))
             .build()
             .expect("the role and content are set");
+        let response = ConverseApiOutput::builder()
+            .output(ConverseOutput::Message(message))
+            .stop_reason(StopReason::EndTurn)
+            .build()
+            .expect("the stop reason is set");
         assert_eq!(
-            converse_response_text(Some(&ConverseOutput::Message(message))).as_deref(),
-            Some("Hello, [REDACTED]")
+            ModelAnswer::from(response).into_text().unwrap(),
+            "Hello, [REDACTED]"
         );
-        assert_eq!(converse_response_text(None), None);
+    }
+
+    #[test]
+    fn a_filtered_or_intervened_answer_is_an_error_and_not_a_clean_scan() {
+        for stop_reason in [StopReason::ContentFiltered, StopReason::GuardrailIntervened] {
+            assert!(
+                matches!(
+                    ModelAnswer::from(converse_response("[]", stop_reason.clone())).into_text(),
+                    Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+                ),
+                "{stop_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_answer_and_an_empty_one_are_errors() {
+        assert!(matches!(
+            ModelAnswer::from(converse_response("[{", StopReason::MaxTokens)).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
+        ));
+        assert!(matches!(
+            ModelAnswer::from(converse_response("", StopReason::EndTurn)).into_text(),
+            Err(AppError::EmptyModelAnswer)
+        ));
     }
 
     #[tokio::test]

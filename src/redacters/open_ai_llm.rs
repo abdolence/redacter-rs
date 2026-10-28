@@ -9,9 +9,9 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding,
-    NativeImageEditError, RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent,
-    Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
+    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -50,10 +50,11 @@ struct OpenAiLlmAnalyzeMessageRequest {
     content: Vec<OpenAiLlmAnalyzeMessageContent>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// The message of a choice. A refusal or a filtered answer has no content.
+#[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeMessageResponse {
-    role: String,
-    content: String,
+    content: Option<String>,
+    refusal: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -93,6 +94,21 @@ struct OpenAiLlmAnalyzeResponse {
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeChoice {
     message: OpenAiLlmAnalyzeMessageResponse,
+    finish_reason: Option<String>,
+}
+
+impl From<OpenAiLlmAnalyzeChoice> for ModelAnswer {
+    fn from(choice: OpenAiLlmAnalyzeChoice) -> Self {
+        let stop = match choice.finish_reason.as_deref() {
+            None | Some("stop") if choice.message.refusal.is_some() => {
+                Some(ModelStop::Withheld("refusal".to_string()))
+            }
+            None | Some("stop") => None,
+            Some("length") => Some(ModelStop::MaxTokens),
+            Some(other) => Some(ModelStop::Withheld(other.to_string())),
+        };
+        ModelAnswer::new(choice.message.content.unwrap_or_default(), stop)
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -163,6 +179,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             }),
         }?;
 
+        let blank_input = text_content.trim().is_empty();
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
@@ -190,7 +207,10 @@ impl<'a> OpenAiLlmRedacter<'a> {
             ],
             response_format: None,
         };
-        let redacted_content = self.complete(&analyze_request).await?;
+        let redacted_content = self
+            .complete(&analyze_request)
+            .await?
+            .into_redacted_text(blank_input)?;
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_content),
@@ -261,7 +281,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
                 }
             })
         };
-        let answer = self.complete(&analyze_request).await?;
+        let answer = self.complete(&analyze_request).await?.into_text()?;
         let pii_image_coords: OpenAiLlmTextCoordsResponse = parse_answer(&answer)?;
         Ok(ImagePii {
             image: prepared_image,
@@ -311,8 +331,8 @@ impl<'a> OpenAiLlmRedacter<'a> {
         AppError::SystemError { message }
     }
 
-    /// Sends a chat completion request and returns the content of its last choice.
-    async fn complete(&self, request: &OpenAiLlmAnalyzeRequest) -> AppResult<String> {
+    /// Sends a chat completion request and returns its last choice with how it ended.
+    async fn complete(&self, request: &OpenAiLlmAnalyzeRequest) -> AppResult<ModelAnswer> {
         let response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")
@@ -335,13 +355,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
             return Err(Self::request_failure(response_status, &response_text));
         }
         let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-        open_ai_response
+        Ok(open_ai_response
             .choices
             .pop()
-            .map(|choice| choice.message.content)
-            .ok_or_else(|| AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })
+            .map(ModelAnswer::from)
+            .unwrap_or_else(|| ModelAnswer::new(String::new(), None)))
     }
 
     fn model_name(&self) -> String {
@@ -392,7 +410,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
                 },
             }),
         };
-        let answer = self.complete(&request).await?;
+        let answer = self.complete(&request).await?.into_text()?;
         OpenAiLlmTextFindings::detections_from_answer(&answer, text)
     }
 
@@ -669,6 +687,47 @@ mod tests {
     async fn redact_image_file_coords_mode_test(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         redact_image_file_test_with_mode(LlmImageMode::Coords, "open-ai-coords.png").await
+    }
+
+    fn answer_of(response: &str) -> AppResult<String> {
+        let mut response: OpenAiLlmAnalyzeResponse = serde_json::from_str(response).unwrap();
+        ModelAnswer::from(response.choices.pop().unwrap()).into_text()
+    }
+
+    #[test]
+    fn a_filtered_answer_is_an_error_and_not_an_empty_scan() {
+        let filtered = r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}"#;
+        assert!(matches!(
+            answer_of(filtered),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+        ));
+    }
+
+    #[test]
+    fn a_truncated_answer_is_an_error() {
+        let truncated = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\": [{"},"finish_reason":"length"}]}"#;
+        assert!(matches!(
+            answer_of(truncated),
+            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
+        ));
+    }
+
+    #[test]
+    fn a_refusal_and_an_empty_answer_are_errors() {
+        let refused = r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"No."},"finish_reason":"stop"}]}"#;
+        assert!(matches!(
+            answer_of(refused),
+            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+        ));
+        let empty =
+            r#"{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}"#;
+        assert!(matches!(answer_of(empty), Err(AppError::EmptyModelAnswer)));
+    }
+
+    #[test]
+    fn a_completed_answer_is_its_content() {
+        let completed = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":"stop"}]}"#;
+        assert_eq!(answer_of(completed).unwrap(), r#"{"findings":[]}"#);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::args::RedacterType;
-use crate::redacters::DetectionLocation;
+use crate::redacters::{DetectionLocation, ModelStop};
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use indicatif::style::TemplateError;
 use std::time::SystemTimeError;
@@ -69,6 +69,11 @@ pub enum AppError {
     /// answer is made of the scanned content.
     #[error("A model's answer is not the expected JSON (line {line}, column {column})")]
     UnreadableModelAnswer { line: usize, column: usize },
+    /// Names the provider's finish reason and blocked categories, never the content.
+    #[error("The model did not complete its answer: {0}")]
+    ModelAnswerStopped(ModelStop),
+    #[error("The model's answer is empty")]
+    EmptyModelAnswer,
     #[error("{redacter_type} returned a result without {missing}")]
     IncompleteResult {
         redacter_type: RedacterType,
