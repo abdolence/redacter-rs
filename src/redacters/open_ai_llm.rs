@@ -9,7 +9,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
+    redact_image_with_mode, text_detection_messages, Detection, ImagePii, LlmImageMode,
     LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
 };
@@ -155,7 +155,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
-            model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
+            model: self.model_name(),
             messages: vec![
                 OpenAiLlmAnalyzeMessageRequest {
                     role: "system".to_string(),
@@ -178,42 +178,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
             ],
             response_format: None,
         };
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.open_ai_llm_options.api_key.value()),
-            )
-            .json(&analyze_request)
-            .send()
-            .await?;
-        if !response.status().is_success()
-            || response
-                .headers()
-                .get("content-type")
-                .iter()
-                .all(|v| *v != mime::APPLICATION_JSON.as_ref())
-        {
-            let response_status = response.status();
-            let response_text = response.text().await.unwrap_or_default();
-            return Err(AppError::SystemError {
-                message: format!(
-                    "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                ),
-            });
-        }
-        let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-        if let Some(content) = open_ai_response.choices.pop() {
-            Ok(RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(content.message.content),
-            })
-        } else {
-            Err(AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })
-        }
+        let redacted_content = self.complete(&analyze_request).await?;
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(redacted_content),
+        })
     }
 
     /// Asks the model for the boxes of personal information in the image, which is scaled
@@ -226,7 +195,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         let prepared_image = prepare_image_for_llm(mime_type, data)?;
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
-            model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
+            model: self.model_name(),
             messages: vec![
                 OpenAiLlmAnalyzeMessageRequest {
                     role: "system".to_string(),
@@ -360,23 +329,22 @@ impl<'a> OpenAiLlmRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
-        let separator = format!("---{}", rand::rng().random::<u64>());
         let system_message = |text: String| OpenAiLlmAnalyzeMessageRequest {
             role: "system".to_string(),
             content: vec![OpenAiLlmAnalyzeMessageContent::Text { text }],
         };
+        let [instruction, opening_separator, content, closing_separator] =
+            text_detection_messages(text);
         let request = OpenAiLlmAnalyzeRequest {
             model: self.model_name(),
             messages: vec![
-                system_message(text_detection_prompt(&separator)),
-                system_message(format!("{separator}\n")),
+                system_message(instruction),
+                system_message(opening_separator),
                 OpenAiLlmAnalyzeMessageRequest {
                     role: "user".to_string(),
-                    content: vec![OpenAiLlmAnalyzeMessageContent::Text {
-                        text: text.to_string(),
-                    }],
+                    content: vec![OpenAiLlmAnalyzeMessageContent::Text { text: content }],
                 },
-                system_message(format!("{separator}\n")),
+                system_message(closing_separator),
             ],
             response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
                 json_schema: OpenAiLlmJsonSchema {

@@ -3,7 +3,7 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, text_detection_prompt,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, text_detection_messages,
     Detection, ImagePii, LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox,
     RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
     GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
@@ -94,13 +94,16 @@ impl<'a> GeminiLlmRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let model_name = self
-            .gemini_llm_options
+    fn text_model_name(&self) -> String {
+        self.gemini_llm_options
             .gemini_model
             .as_ref()
             .map(|model_name| model_name.value().to_string())
-            .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
+            .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string())
+    }
+
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+        let model_name = self.text_model_name();
         let mut rand = rand::rng();
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
@@ -215,136 +218,41 @@ impl<'a> GeminiLlmRedacter<'a> {
         mime_type: &Mime,
         data: &gcloud_sdk::prost::bytes::Bytes,
     ) -> AppResult<ImagePii> {
-        let model_name = self
-            .gemini_llm_options
-            .gemini_model
-            .as_ref()
-            .map(|model_name| model_name.value().to_string())
-            .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
-
         let prepared_image = prepare_image_for_llm(mime_type, data)?;
-
-        let mut request = tonic::Request::new(
-            gcloud_sdk::google::ai::generativelanguage::v1beta::GenerateContentRequest {
-                model: model_name,
-                safety_settings: vec![
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::HarmCategory::HateSpeech,
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::HarmCategory::SexuallyExplicit,
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::HarmCategory::DangerousContent,
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::HarmCategory::Harassment,
-                ].into_iter().map(|category| gcloud_sdk::google::ai::generativelanguage::v1beta::SafetySetting {
-                    category: category.into(),
-                    threshold: gcloud_sdk::google::ai::generativelanguage::v1beta::safety_setting::HarmBlockThreshold::BlockNone.into(),
-                }).collect(),
-                contents: vec![
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::Content {
-                        parts: vec![
-                            gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
-                                data: Some(
-                                    gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::Text(
-                                        GEMINI_COORDS_REDACTION_PROMPT.to_string(),
-                                    ),
-                                ),
-                                ..std::default::Default::default()
-                            },
-                            gcloud_sdk::google::ai::generativelanguage::v1beta::Part {
-                                data: Some(
-                                    gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::InlineData(
-                                        gcloud_sdk::google::ai::generativelanguage::v1beta::Blob {
-                                            mime_type: mime_type.to_string(),
-                                            data: prepared_image.data.to_vec(),
-                                        }
-                                    ),
-                                ),
-                                ..std::default::Default::default()
-                            }
-                        ],
-                        role: "user".to_string(),
-                    },
-                ],
-                generation_config: Some(
-                    gcloud_sdk::google::ai::generativelanguage::v1beta::GenerationConfig {
-                        candidate_count: Some(1),
-                        temperature: Some(0.2),
-                        response_mime_type: mime::APPLICATION_JSON.to_string(),
-                        response_schema: Some(
-                            gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Array.into(),
-                                items: Some(Box::new(
-                                    gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                        r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Object.into(),
-                                        properties: vec![
-                                            (
-                                                "box_2d".to_string(),
-                                                gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                    r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Array.into(),
-                                                    min_items: 4,
-                                                    items: Some(Box::new(
-                                                        gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                            r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::Integer.into(),
-                                                            ..std::default::Default::default()
-                                                        }
-                                                    )),
-                                                    ..std::default::Default::default()
-                                                },
-                                            ),
-                                            (
-                                                "text".to_string(),
-                                                gcloud_sdk::google::ai::generativelanguage::v1beta::Schema {
-                                                    r#type: gcloud_sdk::google::ai::generativelanguage::v1beta::Type::String.into(),
-                                                    ..std::default::Default::default()
-                                                },
-                                            ),
-                                        ].into_iter().collect(),
-                                        required: vec!["box_2d".to_string(), "text".to_string()],
-                                        ..std::default::Default::default()
-                                    }
-                                )),
-                                ..std::default::Default::default()
-                            }
-                        ),
+        let answer = self
+            .generate_json(
+                vec![
+                    text_part(GEMINI_COORDS_REDACTION_PROMPT.to_string()),
+                    gemini_api::Part {
+                        data: Some(gemini_api::part::Data::InlineData(gemini_api::Blob {
+                            mime_type: mime_type.to_string(),
+                            data: prepared_image.data.to_vec(),
+                        })),
                         ..std::default::Default::default()
                     },
-                ),
-                ..std::default::Default::default()
-            },
-        );
-        request.metadata_mut().insert(
-            "x-goog-user-project",
-            gcloud_sdk::tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(
-                self.gemini_llm_options.project_id.as_ref(),
-            )?,
-        );
-        let response = self.client.get().generate_content(request).await?;
-
-        let inner = response.into_inner();
-        if let Some(content) = inner.candidates.first().and_then(|c| c.content.as_ref()) {
-            let content_json =
-                content
-                    .parts
-                    .iter()
-                    .fold("".to_string(), |acc, entity| match &entity.data {
-                        Some(
-                            gcloud_sdk::google::ai::generativelanguage::v1beta::part::Data::Text(
-                                text,
-                            ),
-                        ) => acc + text,
-                        _ => acc,
-                    });
-            let pii_image_coords = NormalizedPiiBox::coords_from_answer(
-                &content_json,
-                prepared_image.width,
-                prepared_image.height,
-            )?;
-            Ok(ImagePii {
-                image: prepared_image,
-                coords: pii_image_coords,
-            })
-        } else {
-            Err(AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })
-        }
+                ],
+                findings_schema(vec![
+                    (
+                        "box_2d",
+                        gemini_api::Schema {
+                            min_items: 4,
+                            items: Some(Box::new(schema_of(gemini_api::Type::Integer))),
+                            ..schema_of(gemini_api::Type::Array)
+                        },
+                    ),
+                    ("text", schema_of(gemini_api::Type::String)),
+                ]),
+            )
+            .await?;
+        let coords = NormalizedPiiBox::coords_from_answer(
+            &answer,
+            prepared_image.width,
+            prepared_image.height,
+        )?;
+        Ok(ImagePii {
+            image: prepared_image,
+            coords,
+        })
     }
 
     pub async fn redact_image_file_using_coords(
@@ -379,12 +287,7 @@ impl<'a> GeminiLlmRedacter<'a> {
         parts: Vec<gemini_api::Part>,
         response_schema: gemini_api::Schema,
     ) -> AppResult<String> {
-        let model_name = self
-            .gemini_llm_options
-            .gemini_model
-            .as_ref()
-            .map(|model_name| model_name.value().to_string())
-            .unwrap_or_else(|| Self::DEFAULT_GEMINI_MODEL.to_string());
+        let model_name = self.text_model_name();
         let mut request = tonic::Request::new(gemini_api::GenerateContentRequest {
             model: model_name,
             safety_settings: [
@@ -439,15 +342,9 @@ impl<'a> GeminiLlmRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
-        let separator = format!("---{}", rand::rng().random::<u64>());
         let answer = self
             .generate_json(
-                vec![
-                    text_part(text_detection_prompt(&separator)),
-                    text_part(format!("{separator}\n")),
-                    text_part(text.to_string()),
-                    text_part(format!("{separator}\n")),
-                ],
+                text_detection_messages(text).map(text_part).into(),
                 findings_schema(vec![
                     ("text", schema_of(gemini_api::Type::String)),
                     ("type", schema_of(gemini_api::Type::String)),

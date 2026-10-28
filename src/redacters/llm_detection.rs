@@ -5,6 +5,7 @@
 use crate::errors::AppError;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImagePii};
 use crate::AppResult;
+use rand::RngExt;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::future::Future;
@@ -19,10 +20,22 @@ pub fn parse_answer<T: DeserializeOwned>(answer: &str) -> AppResult<T> {
     })
 }
 
-/// Instruction for the text detection pass. The input is untrusted text, so it is fenced by a
-/// random separator the model is told to treat as data. The container of the answer is
-/// described by the API's response schema, or by the caller where the API has none.
-pub fn text_detection_prompt(separator: &str) -> String {
+/// The four messages of a text detection request, in order: the instruction, the separator that
+/// opens the text, the text, and the separator that closes it. The text is untrusted, so it is
+/// fenced by a random separator the instruction tells the model to treat as data. The
+/// container of the answer is described by the API's response schema, or by the caller where
+/// the API has none.
+pub fn text_detection_messages(text: &str) -> [String; 4] {
+    let separator = format!("---{}", rand::rng().random::<u64>());
+    [
+        text_detection_instruction(&separator),
+        format!("{separator}\n"),
+        text.to_string(),
+        format!("{separator}\n"),
+    ]
+}
+
+fn text_detection_instruction(separator: &str) -> String {
     format!(
         "Find every piece of personal or sensitive information in the text: names, addresses, \
          email addresses, phone numbers, dates of birth, government and payment card numbers, \
@@ -161,6 +174,16 @@ mod tests {
             ]
         );
         assert!(detections.iter().all(|d| d.score.is_none()));
+    }
+
+    #[test]
+    fn the_text_is_fenced_by_the_separator_the_instruction_names() {
+        let [instruction, opening, text, closing] = text_detection_messages("John Smith");
+
+        assert_eq!(text, "John Smith");
+        assert_eq!(opening, closing);
+        assert!(opening.ends_with('\n'));
+        assert!(instruction.contains(opening.trim_end()));
     }
 
     fn found_boxes(texts: &[Option<&str>]) -> ImagePii {

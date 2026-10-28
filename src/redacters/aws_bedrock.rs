@@ -13,7 +13,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
+    redact_image_with_mode, text_detection_messages, Detection, ImagePii, LlmImageMode,
     LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
 };
@@ -388,28 +388,17 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: format!("Failed to build the Bedrock request: {err}"),
             })?;
 
-        let response = self
-            .client
-            .converse()
-            .model_id(self.text_model_id())
-            .messages(message)
-            .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
-            .send()
-            .await
-            .map_err(|err| super::bedrock_error("Failed to redact the text", &err))?;
+        let redacted_content = self
+            .converse_text(self.text_model_id(), message, "Failed to redact the text")
+            .await?;
 
-        match converse_response_text(response.output.as_ref()) {
-            Some(redacted_content) => Ok(RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(strip_answer_fence(
-                    &strip_echoed_separator(&redacted_content, &generate_random_text_separator),
-                    input_starts_with_fence,
-                )),
-            }),
-            None => Err(AppError::AwsBedrockError {
-                message: "No content item in the response".to_string(),
-            }),
-        }
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(strip_answer_fence(
+                &strip_echoed_separator(&redacted_content, &generate_random_text_separator),
+                input_starts_with_fence,
+            )),
+        })
     }
 
     /// Asks the model for the boxes of personal information in the image, which is scaled
@@ -449,23 +438,13 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: format!("Failed to build the Bedrock request: {err}"),
             })?;
 
-        let response = self
-            .client
-            .converse()
-            .model_id(model_id)
-            .messages(message)
-            .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
-            .send()
-            .await
-            .map_err(|err| {
-                super::bedrock_error("Failed to locate the personal information", &err)
-            })?;
-
-        let Some(answer) = converse_response_text(response.output.as_ref()) else {
-            return Err(AppError::AwsBedrockError {
-                message: "No content item in the response".to_string(),
-            });
-        };
+        let answer = self
+            .converse_text(
+                model_id,
+                message,
+                "Failed to locate the personal information",
+            )
+            .await?;
 
         let coords = match family {
             AwsBedrockModelFamily::Nova => nova_text_answer_to_image_coords(
@@ -530,14 +509,15 @@ impl<'a> AwsBedrockRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
-        let separator = format!("---{}", rand::rng().random::<u64>());
+        let [instruction, opening_separator, content, closing_separator] =
+            text_detection_messages(text);
         let message = Message::builder()
             .role(ConversationRole::User)
             .content(ContentBlock::Text(TEXT_DETECTION_ANSWER_FORMAT.to_string()))
-            .content(ContentBlock::Text(text_detection_prompt(&separator)))
-            .content(ContentBlock::Text(format!("{separator}\n")))
-            .content(ContentBlock::Text(text.to_string()))
-            .content(ContentBlock::Text(format!("{separator}\n")))
+            .content(ContentBlock::Text(instruction))
+            .content(ContentBlock::Text(opening_separator))
+            .content(ContentBlock::Text(content))
+            .content(ContentBlock::Text(closing_separator))
             .build()
             .map_err(|err| AppError::AwsBedrockError {
                 message: format!("Failed to build the Bedrock request: {err}"),
