@@ -8,7 +8,7 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    classify_http_native_failure, prepare_image_for_llm, redact_image_at_coords,
+    classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
     redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
     LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
@@ -110,7 +110,7 @@ struct OpenAiLlmTextFindings {
 
 impl OpenAiLlmTextFindings {
     fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
-        let findings: Self = serde_json::from_str(answer)?;
+        let findings: Self = parse_answer(answer)?;
         Ok(LlmTextFinding::locate(text, findings.findings))
     }
 }
@@ -281,7 +281,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             })
         };
         let answer = self.complete(&analyze_request).await?;
-        let pii_image_coords: OpenAiLlmTextCoordsResponse = serde_json::from_str(&answer)?;
+        let pii_image_coords: OpenAiLlmTextCoordsResponse = parse_answer(&answer)?;
         Ok(ImagePii {
             image: prepared_image,
             coords: pii_image_coords.text_coords,

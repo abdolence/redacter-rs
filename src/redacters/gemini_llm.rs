@@ -1,13 +1,12 @@
 use crate::args::RedacterType;
-use crate::common_types::{GcpProjectId, TextImageCoords};
+use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
-    LlmTextFinding, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, GEMINI_COORDS_REDACTION_PROMPT,
-    NATIVE_IMAGE_REDACTION_PROMPT,
+    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, text_detection_prompt,
+    Detection, ImagePii, LlmImageMode, LlmTextFinding, NativeImageEditError, NormalizedPiiBox,
+    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -332,19 +331,11 @@ impl<'a> GeminiLlmRedacter<'a> {
                         ) => acc + text,
                         _ => acc,
                     });
-            let detections: Vec<NormalizedPiiBox> = serde_json::from_str(&content_json)?;
-            let pii_image_coords: Vec<TextImageCoords> = detections
-                .into_iter()
-                .filter_map(|detection| {
-                    let box_2d: [f32; 4] = detection.box_2d.get(..4)?.try_into().ok()?;
-                    Some(normalized_box_to_image_coords(
-                        box_2d,
-                        prepared_image.width,
-                        prepared_image.height,
-                        detection.text,
-                    ))
-                })
-                .collect();
+            let pii_image_coords = NormalizedPiiBox::coords_from_answer(
+                &content_json,
+                prepared_image.width,
+                prepared_image.height,
+            )?;
             Ok(ImagePii {
                 image: prepared_image,
                 coords: pii_image_coords,

@@ -304,6 +304,28 @@ pub struct NormalizedPiiBox {
     pub text: Option<String>,
 }
 
+impl NormalizedPiiBox {
+    /// The pixel boxes of a model's JSON answer, for an image of `width` by `height` as the
+    /// model saw it. A box without four numbers is left out; an answer that is not a JSON
+    /// array of boxes is an error, since reading it as "no boxes" would report a clean image.
+    pub fn coords_from_answer(
+        answer: &str,
+        width: u32,
+        height: u32,
+    ) -> AppResult<Vec<TextImageCoords>> {
+        let boxes: Vec<Self> = parse_answer(answer)?;
+        Ok(boxes
+            .into_iter()
+            .filter_map(|found| {
+                let box_2d: [f32; 4] = found.box_2d.get(..4)?.try_into().ok()?;
+                Some(normalized_box_to_image_coords(
+                    box_2d, width, height, found.text,
+                ))
+            })
+            .collect())
+    }
+}
+
 /// Converts one Gemini-style normalized bounding box (`[ymin, xmin, ymax, xmax]`, each in
 /// 0..=1000) to pixel coordinates within an image of the given size.
 ///
@@ -986,6 +1008,31 @@ mod tests {
             NativeImageEditError::no_image_in_response().failure,
             NativeImageEditFailure::Unsupported
         );
+    }
+
+    #[test]
+    fn normalized_boxes_are_read_from_an_answer_and_a_short_box_is_left_out() {
+        let answer =
+            r#"[{"box_2d":[0,0,1000,500],"text":"Ana"},{"box_2d":[1,2,3],"text":"short"}]"#;
+
+        let coords = NormalizedPiiBox::coords_from_answer(answer, 100, 200).unwrap();
+
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords[0].text.as_deref(), Some("Ana"));
+        assert_eq!((coords[0].x2, coords[0].y2), (50.0, 200.0));
+    }
+
+    #[test]
+    fn an_unreadable_box_answer_is_an_error_without_the_content_it_could_not_read() {
+        let error = NormalizedPiiBox::coords_from_answer(
+            r#"[{"box_2d":"John Smith","text":null}]"#,
+            100,
+            100,
+        )
+        .expect_err("box_2d is not an array");
+
+        assert!(matches!(error, AppError::UnreadableModelAnswer { .. }));
+        assert!(!error.to_string().contains("John"));
     }
 
     #[test]

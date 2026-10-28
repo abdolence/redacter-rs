@@ -65,8 +65,15 @@ pub enum AppError {
     #[cfg(feature = "local-gliner")]
     #[error("Local GLiNER error: {0}")]
     LocalGlinerError(#[from] crate::redacters::local_gliner::LocalGlinerError),
-    #[error("{redacter_type} does not support detection yet")]
-    DetectionNotSupported { redacter_type: RedacterType },
+    /// Carries the position only: a serde error names the value it could not read, and the
+    /// answer is made of the scanned content.
+    #[error("A model's answer is not the expected JSON (line {line}, column {column})")]
+    UnreadableModelAnswer { line: usize, column: usize },
+    #[error("{redacter_type} returned a result without {missing}")]
+    IncompleteResult {
+        redacter_type: RedacterType,
+        missing: &'static str,
+    },
     #[error("{redacter_type} reported a detection outside the content it was given: {location:?}")]
     DetectionOutsideContent {
         redacter_type: RedacterType,

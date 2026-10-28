@@ -12,7 +12,7 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
+    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
     redact_image_with_mode, text_detection_prompt, Detection, ImagePii, LlmImageMode,
     LlmTextFinding, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
@@ -247,15 +247,11 @@ fn claude_box_to_image_coords(
 ///
 /// The answer is a JSON array, optionally wrapped in a ```json fence. Entries that are not
 /// objects, are missing `bbox`, or carry a `bbox` with fewer than 4 numeric entries are
-/// dropped individually rather than failing the whole pass; an answer that is not valid JSON
-/// at all yields no detections.
-fn parse_bbox_detections(text: &str) -> Vec<([f32; 4], Option<String>)> {
-    let Ok(detections) = serde_json::from_str::<Vec<serde_json::Value>>(strip_json_fence(text))
-    else {
-        return Vec::new();
-    };
-
-    detections
+/// dropped individually rather than failing the whole pass. An answer that is not a JSON
+/// array is an error: reading it as "no detections" would report a clean image.
+fn parse_bbox_detections(text: &str) -> AppResult<Vec<([f32; 4], Option<String>)>> {
+    let detections: Vec<serde_json::Value> = parse_answer(strip_json_fence(text))?;
+    Ok(detections
         .into_iter()
         .filter_map(|detection| {
             let object = detection.as_object()?;
@@ -272,7 +268,7 @@ fn parse_bbox_detections(text: &str) -> Vec<([f32; 4], Option<String>)> {
                 .map(str::to_string);
             Some((bbox, text))
         })
-        .collect()
+        .collect())
 }
 
 /// Reads the PII bounding boxes out of Nova's text answer to
@@ -281,11 +277,11 @@ pub fn nova_text_answer_to_image_coords(
     text: &str,
     width: u32,
     height: u32,
-) -> Vec<TextImageCoords> {
-    parse_bbox_detections(text)
+) -> AppResult<Vec<TextImageCoords>> {
+    Ok(parse_bbox_detections(text)?
         .into_iter()
         .map(|(bbox, text)| nova_box_to_image_coords(bbox, width, height, text))
-        .collect()
+        .collect())
 }
 
 /// Reads the PII bounding boxes out of Claude's text answer to
@@ -294,11 +290,11 @@ pub fn claude_text_answer_to_image_coords(
     text: &str,
     width: u32,
     height: u32,
-) -> Vec<TextImageCoords> {
-    parse_bbox_detections(text)
+) -> AppResult<Vec<TextImageCoords>> {
+    Ok(parse_bbox_detections(text)?
         .into_iter()
         .map(|(bbox, text)| claude_box_to_image_coords(bbox, width, height, text))
-        .collect()
+        .collect())
 }
 
 /// Text blocks of a Converse answer, concatenated in order.
@@ -476,12 +472,12 @@ impl<'a> AwsBedrockRedacter<'a> {
                 &answer,
                 prepared_image.width,
                 prepared_image.height,
-            ),
+            )?,
             AwsBedrockModelFamily::Claude => claude_text_answer_to_image_coords(
                 &answer,
                 prepared_image.width,
                 prepared_image.height,
-            ),
+            )?,
             AwsBedrockModelFamily::Other => {
                 unreachable!("require_supported_family already rejected the Other family")
             }
@@ -690,7 +686,7 @@ mod tests {
     fn nova_text_answer_parses_a_fenced_json_array() {
         let answer =
             "```json\n[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]\n```";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
@@ -698,7 +694,7 @@ mod tests {
     #[test]
     fn nova_text_answer_parses_a_bare_json_array() {
         let answer = "[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
@@ -706,7 +702,7 @@ mod tests {
     #[test]
     fn nova_text_answer_converts_normalized_bbox_to_pixels_for_a_1000x720_image() {
         let answer = "[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!((coords[0].x1 - 306.0).abs() < 0.01, "x1 = {}", coords[0].x1);
         assert!((coords[0].x2 - 537.0).abs() < 0.01, "x2 = {}", coords[0].x2);
@@ -725,7 +721,7 @@ mod tests {
     #[test]
     fn nova_text_answer_clamps_out_of_range_values() {
         let answer = "[{\"bbox\": [-50, -10, 2000, 1500], \"text\": \"x\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 100, 200);
+        let coords = nova_text_answer_to_image_coords(answer, 100, 200).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].x1, 0.0);
         assert_eq!(coords[0].y1, 0.0);
@@ -736,7 +732,7 @@ mod tests {
     #[test]
     fn nova_text_answer_orders_a_reversed_box() {
         let answer = "[{\"bbox\": [537, 208, 306, 167], \"text\": \"x\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!(coords[0].x1 <= coords[0].x2);
         assert!(coords[0].y1 <= coords[0].y2);
@@ -753,16 +749,27 @@ mod tests {
             { "bbox": [306, 167, 537, 208], "text": "John Michael Smith" },
         ])
         .to_string();
-        let coords = nova_text_answer_to_image_coords(&answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(&answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1, "only the well-formed detection survives");
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
 
     #[test]
-    fn nova_text_answer_of_an_unexpected_shape_yields_no_coordinates() {
-        assert!(nova_text_answer_to_image_coords("not json at all", 1000, 720).is_empty());
-        assert!(nova_text_answer_to_image_coords("[]", 1000, 720).is_empty());
-        assert!(nova_text_answer_to_image_coords("{\"other\": true}", 1000, 720).is_empty());
+    fn an_answer_that_is_not_a_json_array_is_an_error_not_a_clean_image() {
+        for answer in ["not json at all", "{\"other\": true}", "\"John Smith\""] {
+            let error = nova_text_answer_to_image_coords(answer, 1000, 720)
+                .expect_err("the answer is not an array of boxes");
+            assert!(matches!(error, AppError::UnreadableModelAnswer { .. }));
+            assert!(!error.to_string().contains("John"));
+            assert!(claude_text_answer_to_image_coords(answer, 1000, 720).is_err());
+        }
+    }
+
+    #[test]
+    fn an_empty_json_array_is_an_image_without_findings() {
+        assert!(nova_text_answer_to_image_coords("[]", 1000, 720)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -838,7 +845,7 @@ mod tests {
     fn claude_text_answer_converts_pixel_bbox_for_a_1000x720_image() {
         let answer =
             "```json\n[{\"bbox\": [300, 110, 950, 160], \"text\": \"John Michael Smith\"}]\n```";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
         assert_eq!(coords[0].x1, 300.0);
@@ -850,7 +857,7 @@ mod tests {
     #[test]
     fn claude_text_answer_clamps_out_of_range_pixel_values() {
         let answer = "[{\"bbox\": [-5, -5, 1200, 1200], \"text\": \"x\"}]";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].x1, 0.0);
         assert_eq!(coords[0].y1, 0.0);
@@ -861,7 +868,7 @@ mod tests {
     #[test]
     fn claude_text_answer_orders_a_reversed_box() {
         let answer = "[{\"bbox\": [950, 160, 300, 110], \"text\": \"x\"}]";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!(coords[0].x1 <= coords[0].x2);
         assert!(coords[0].y1 <= coords[0].y2);
@@ -878,7 +885,7 @@ mod tests {
             { "bbox": [300, 110, 950, 160], "text": "John Michael Smith" },
         ])
         .to_string();
-        let coords = claude_text_answer_to_image_coords(&answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(&answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1, "only the well-formed detection survives");
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }

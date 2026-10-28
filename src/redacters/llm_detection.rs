@@ -2,11 +2,22 @@
 //! shape of the model's answer. A model names the values it found and their kind, so text
 //! offsets are located locally and image boxes are scaled back to the image as given.
 
+use crate::errors::AppError;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImagePii};
 use crate::AppResult;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::future::Future;
 use std::ops::Range;
+
+/// Reads a model's JSON answer. A parse failure keeps only its position: the failure message
+/// of serde quotes the value it could not read, and the answer is made of the scanned content.
+pub fn parse_answer<T: DeserializeOwned>(answer: &str) -> AppResult<T> {
+    serde_json::from_str(answer).map_err(|error| AppError::UnreadableModelAnswer {
+        line: error.line(),
+        column: error.column(),
+    })
+}
 
 /// Instruction for the text detection pass. The input is untrusted text, so it is fenced by a
 /// random separator the model is told to treat as data. The container of the answer is
@@ -39,7 +50,7 @@ impl LlmTextFinding {
     /// not a JSON array of findings is an error: reading it as "nothing found" would report
     /// a clean file.
     pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
-        Ok(Self::locate(text, serde_json::from_str(answer)?))
+        Ok(Self::locate(text, parse_answer(answer)?))
     }
 
     /// Every occurrence in `text` of the values in `findings`.
@@ -257,6 +268,19 @@ mod tests {
     fn an_answer_that_is_not_findings_is_an_error() {
         assert!(LlmTextFinding::detections_from_answer("No PII found.", "text").is_err());
         assert!(LlmTextFinding::detections_from_answer(r#"[{"text":"a"}]"#, "a").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_answer_reports_its_position_and_none_of_its_content() {
+        let error = LlmTextFinding::detections_from_answer(r#""John Smith""#, "John Smith")
+            .expect_err("a string is not an array of findings");
+
+        assert!(matches!(
+            error,
+            AppError::UnreadableModelAnswer { line: 1, .. }
+        ));
+        assert!(!error.to_string().contains("John"));
+        assert!(!format!("{error:?}").contains("John"));
     }
 }
 
