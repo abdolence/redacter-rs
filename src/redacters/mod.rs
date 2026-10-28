@@ -409,6 +409,12 @@ pub struct RedacterDataItem {
     pub file_ref: FileSystemRef,
 }
 
+impl RedacterDataItem {
+    fn is_blank_text(&self) -> bool {
+        matches!(&self.content, RedacterDataItemContent::Value(text) if text.trim().is_empty())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RedacterDataItemContent {
     Value(String),
@@ -627,11 +633,11 @@ pub trait Redacter {
 }
 
 impl<'a> Redacter for Redacters<'a> {
-    // Text with nothing in it is returned as it is, without asking the redacter: a model
-    // has nothing to answer for it, and any text it made up would be written to the file.
+    // Text with nothing in it never reaches the redacter, in `redact` or in `detect`: a model
+    // has nothing to answer for it and would make something up (written to the file by
+    // `redact`), and the DLP services reject empty content as an invalid request.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        if matches!(&input.content, RedacterDataItemContent::Value(text) if text.trim().is_empty())
-        {
+        if input.is_blank_text() {
             return Ok(input);
         }
         match self {
@@ -670,6 +676,9 @@ impl<'a> Redacter for Redacters<'a> {
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+        if input.is_blank_text() {
+            return Ok(Vec::new());
+        }
         match self {
             Redacters::GcpDlp(redacter) => redacter.detect(input).await,
             Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
@@ -981,6 +990,57 @@ mod tests {
             }
             other => panic!("expected an image item, got {other:?}"),
         }
+    }
+
+    fn blank_text_item() -> RedacterDataItem {
+        RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "blank.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(3),
+            },
+            content: RedacterDataItemContent::Value(" \n\t".to_string()),
+        }
+    }
+
+    /// The redacter's service is unreachable, so only a guard in front of it can succeed.
+    async fn redacter_with_unreachable_service<'a>(reporter: &'a AppReporter<'a>) -> Redacters<'a> {
+        let unreachable = url::Url::parse("http://127.0.0.1:1/analyze").unwrap();
+        Redacters::MsPresidio(
+            ms_presidio::MsPresidioRedacter::new(
+                ms_presidio::MsPresidioRedacterOptions {
+                    text_analyze_url: Some(unreachable),
+                    image_redact_url: None,
+                },
+                reporter,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn blank_text_has_no_detections_and_is_not_sent_to_the_service() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = redacter_with_unreachable_service(&reporter).await;
+        assert!(redacter
+            .detect(&blank_text_item())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn blank_text_is_redacted_to_itself_without_the_service() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = redacter_with_unreachable_service(&reporter).await;
+        let redacted = redacter.redact(blank_text_item()).await.unwrap();
+        assert!(matches!(
+            redacted.content,
+            RedacterDataItemContent::Value(text) if text == " \n\t"
+        ));
     }
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {

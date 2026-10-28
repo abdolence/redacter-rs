@@ -112,14 +112,13 @@ impl From<OpenAiLlmAnalyzeChoice> for ModelAnswer {
     }
 }
 
-// A response without choices is a stop, not an empty answer that a retry might fill.
 impl From<OpenAiLlmAnalyzeResponse> for ModelAnswer {
     fn from(mut response: OpenAiLlmAnalyzeResponse) -> Self {
         response.choices.pop().map_or_else(
             || {
                 ModelAnswer::new(
                     String::new(),
-                    Some(ModelStop::Withheld("no_choices".to_string())),
+                    Some(ModelStop::Withheld("no choices".to_string())),
                 )
             },
             ModelAnswer::from,
@@ -225,7 +224,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         let redacted_content = self
             .complete(&analyze_request, "redact the text")
             .await?
-            .into_text()?;
+            .into_text_without_separator(&generate_random_text_separator)?;
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_content),
@@ -765,6 +764,16 @@ mod tests {
         assert!(matches!(
             answer_of(r#"{"choices":[]}"#),
             Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+        ));
+    }
+
+    #[test]
+    fn a_redaction_that_is_only_the_separators_is_an_error() {
+        let echoed = r#"{"choices":[{"message":{"role":"assistant","content":"---1234\n---1234\n"},"finish_reason":"stop"}]}"#;
+        let response: OpenAiLlmAnalyzeResponse = serde_json::from_str(echoed).unwrap();
+        assert!(matches!(
+            ModelAnswer::from(response).into_text_without_separator("---1234"),
+            Err(AppError::EmptyModelAnswer)
         ));
     }
 

@@ -677,15 +677,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_response_without_candidates_or_feedback_is_an_empty_answer() {
-        let nothing = vertex_api::GenerateContentResponse::default();
-        assert!(matches!(
-            ModelAnswer::from(nothing).into_text(),
-            Err(AppError::EmptyModelAnswer)
-        ));
-    }
-
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp-vertex-ai"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

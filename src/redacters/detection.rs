@@ -174,8 +174,8 @@ impl Detection {
         Ok(detections)
     }
 
-    /// Every non-overlapping occurrence of every value in `text`, for providers that name the
-    /// values they found but not where. Occurrences are found ignoring case, since a model
+    /// Each value's occurrences in `text` that do not overlap each other, for providers that
+    /// name the values they found but not where. Occurrences are found ignoring case, since a model
     /// may not copy a value letter for letter, but accents are not folded (`Müller` does not
     /// match `Muller`). They are reported wherever they occur, inside longer words too:
     /// `John` is also reported inside `Johnson`, because text in scripts without spaces and

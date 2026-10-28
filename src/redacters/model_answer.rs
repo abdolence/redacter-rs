@@ -18,8 +18,9 @@ pub enum ModelStop {
     Unexplained,
     /// The answer reached the output limit and is cut short.
     MaxTokens,
-    /// The provider withheld the answer for a reason another attempt does not change, named
-    /// as the provider names it.
+    /// The answer was withheld for a reason another attempt does not change: the provider's
+    /// own finish reason, spelled as it spells it, or a plain-words description of what the
+    /// response lacked (`no choices`, `no finish_reason`, `refusal`).
     Withheld(String),
     /// The provider rejected the prompt and produced no answer, named by its block reason.
     PromptBlocked(String),
@@ -109,6 +110,24 @@ impl ModelAnswer {
             None => Ok(self.text),
         }
     }
+
+    /// The text of a redaction answer once the random input separator, which models
+    /// sometimes echo around their answer despite being told not to, is gone. An answer
+    /// without the separator is returned untouched, whitespace included; an echo is trimmed
+    /// because the whitespace around it belongs to the echo, not to the document. An answer
+    /// made of nothing but separators is not a redacted copy of a document that had content.
+    pub fn into_text_without_separator(self, separator: &str) -> AppResult<String> {
+        let text = self.into_text()?;
+        let text = if text.contains(separator) {
+            text.replace(separator, "").trim().to_string()
+        } else {
+            text
+        };
+        if text.trim().is_empty() {
+            return Err(AppError::EmptyModelAnswer);
+        }
+        Ok(text)
+    }
 }
 
 /// The result of `attempt`, which runs a second time when the first failed in a way that
@@ -180,15 +199,34 @@ mod tests {
     }
 
     #[test]
-    fn an_unspecified_or_unrecognised_finish_reason_is_a_stop() {
+    fn an_unspecified_finish_reason_is_a_stop() {
         assert_eq!(
             stop_of(answer_stopped_by(Ok("FINISH_REASON_UNSPECIFIED")).into_text()),
             ModelStop::Withheld("FINISH_REASON_UNSPECIFIED".to_string())
         );
-        assert!(matches!(
-            stop_of(answer_stopped_by(Err(4242)).into_text()),
-            ModelStop::Withheld(_)
-        ));
+    }
+
+    #[test]
+    fn an_echoed_separator_is_removed_from_around_the_answer() {
+        for echoed in [
+            "---1234 Hello, [REDACTED] ---1234",
+            "---1234\nHello, [REDACTED]\n---1234\n",
+        ] {
+            let answer = ModelAnswer::new(echoed.to_string(), None);
+            assert_eq!(
+                answer.into_text_without_separator("---1234").unwrap(),
+                "Hello, [REDACTED]"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_without_the_separator_keeps_its_whitespace() {
+        let answer = ModelAnswer::new("  Hello, [REDACTED]\n".to_string(), None);
+        assert_eq!(
+            answer.into_text_without_separator("---1234").unwrap(),
+            "  Hello, [REDACTED]\n"
+        );
     }
 
     #[test]

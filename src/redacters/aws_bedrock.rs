@@ -191,18 +191,6 @@ fn strip_answer_fence(answer: &str, original_starts_with_fence: bool) -> String 
     }
 }
 
-/// Removes the random input separator when the model echoes it around its answer, which
-/// Nova does about one run in eight despite being told not to. An answer without the
-/// separator is returned untouched, whitespace included; an echo is trimmed because the
-/// whitespace around it belongs to the echo, not to the document.
-fn strip_echoed_separator(answer: &str, separator: &str) -> String {
-    if answer.contains(separator) {
-        answer.replace(separator, "").trim().to_string()
-    } else {
-        answer.to_string()
-    }
-}
-
 /// The text of a redaction answer once the echoed separator and the code fence are gone.
 /// What is left must say something: an answer made of nothing but the separators is not a
 /// redacted copy of a document that had content.
@@ -212,7 +200,7 @@ fn redacted_text_from(
     input_starts_with_fence: bool,
 ) -> AppResult<String> {
     let text = strip_answer_fence(
-        &strip_echoed_separator(&answer.into_text()?, separator),
+        &answer.into_text_without_separator(separator)?,
         input_starts_with_fence,
     );
     if text.trim().is_empty() {
@@ -937,26 +925,6 @@ mod tests {
     fn strip_answer_fence_keeps_a_fenced_answer_when_the_original_input_was_itself_fenced() {
         let answer = "```text\nHello, [REDACTED]\n```";
         assert_eq!(strip_answer_fence(answer, true), answer);
-    }
-
-    #[test]
-    fn strip_echoed_separator_removes_a_separator_echoed_around_the_answer() {
-        assert_eq!(
-            strip_echoed_separator("---1234 Hello, [REDACTED] ---1234", "---1234"),
-            "Hello, [REDACTED]"
-        );
-        assert_eq!(
-            strip_echoed_separator("---1234\nHello, [REDACTED]\n---1234\n", "---1234"),
-            "Hello, [REDACTED]"
-        );
-    }
-
-    #[test]
-    fn strip_echoed_separator_leaves_an_answer_without_the_separator_untouched() {
-        assert_eq!(
-            strip_echoed_separator("  Hello, [REDACTED]\n", "---1234"),
-            "  Hello, [REDACTED]\n"
-        );
     }
 
     fn converse_response(text: &str, stop_reason: StopReason) -> ConverseApiOutput {
