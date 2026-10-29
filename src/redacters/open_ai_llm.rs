@@ -8,9 +8,10 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    classify_http_native_failure, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, LlmImageMode, NativeImageEditError, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, NATIVE_IMAGE_REDACTION_PROMPT,
+    classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
+    redact_image_with_mode, Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -49,10 +50,11 @@ struct OpenAiLlmAnalyzeMessageRequest {
     content: Vec<OpenAiLlmAnalyzeMessageContent>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+/// The message of a choice. A refusal or a filtered answer has no content.
+#[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeMessageResponse {
-    role: String,
-    content: String,
+    content: Option<String>,
+    refusal: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -72,6 +74,18 @@ struct OpenAiLlmAnalyzeMessageContentUrl {
     url: String,
 }
 
+#[derive(Deserialize)]
+struct OpenAiErrorResponse {
+    error: OpenAiErrorBody,
+}
+
+/// The identifying fields of an API error; its `message` is left out on purpose.
+#[derive(Deserialize)]
+struct OpenAiErrorBody {
+    r#type: Option<String>,
+    code: Option<String>,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeResponse {
     choices: Vec<OpenAiLlmAnalyzeChoice>,
@@ -80,6 +94,36 @@ struct OpenAiLlmAnalyzeResponse {
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmAnalyzeChoice {
     message: OpenAiLlmAnalyzeMessageResponse,
+    finish_reason: Option<String>,
+}
+
+impl From<OpenAiLlmAnalyzeChoice> for ModelAnswer {
+    fn from(choice: OpenAiLlmAnalyzeChoice) -> Self {
+        let stop = match choice.finish_reason.as_deref() {
+            Some("stop") if choice.message.refusal.is_some() => {
+                Some(ModelStop::Withheld("refusal".to_string()))
+            }
+            Some("stop") => None,
+            Some("length") => Some(ModelStop::MaxTokens),
+            Some(other) => Some(ModelStop::Withheld(other.to_string())),
+            None => Some(ModelStop::Withheld("no finish_reason".to_string())),
+        };
+        ModelAnswer::new(choice.message.content.unwrap_or_default(), stop)
+    }
+}
+
+impl From<OpenAiLlmAnalyzeResponse> for ModelAnswer {
+    fn from(mut response: OpenAiLlmAnalyzeResponse) -> Self {
+        response.choices.pop().map_or_else(
+            || {
+                ModelAnswer::new(
+                    String::new(),
+                    Some(ModelStop::Withheld("no choices".to_string())),
+                )
+            },
+            ModelAnswer::from,
+        )
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -98,6 +142,13 @@ struct OpenAiLlmJsonSchema {
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmTextCoordsResponse {
     text_coords: Vec<TextImageCoords>,
+}
+
+/// The answer to the text detection request: OpenAI's response schemas must be objects, so
+/// the findings sit under a key.
+#[derive(Deserialize, Debug)]
+struct OpenAiLlmTextFindings {
+    findings: Vec<LlmTextFinding>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -140,7 +191,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
         let generate_random_text_separator = format!("---{}", rand.random::<u64>());
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
-            model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
+            model: self.model_name(),
             messages: vec![
                 OpenAiLlmAnalyzeMessageRequest {
                     role: "system".to_string(),
@@ -163,6 +214,140 @@ impl<'a> OpenAiLlmRedacter<'a> {
             ],
             response_format: None,
         };
+        let redacted_content = self
+            .complete(&analyze_request, "redact the text")
+            .await?
+            .into_text_without_separator(&generate_random_text_separator)?;
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(redacted_content),
+        })
+    }
+
+    /// Asks the model for the boxes of personal information in the image, which is scaled
+    /// down to the model's input limit first.
+    async fn find_image_boxes(
+        &self,
+        mime_type: &mime::Mime,
+        data: &gcloud_sdk::prost::bytes::Bytes,
+    ) -> AppResult<ImageBoxes> {
+        let prepared_image = prepare_image_for_llm(mime_type, data)?;
+
+        let analyze_request = OpenAiLlmAnalyzeRequest {
+            model: self.model_name(),
+            messages: vec![
+                OpenAiLlmAnalyzeMessageRequest {
+                    role: "system".to_string(),
+                    content: vec![OpenAiLlmAnalyzeMessageContent::Text {
+                        text: format!("Find anything in the attached image that look like personal information. \
+                                            Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
+                                            The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
+                                            The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height)
+                    }],
+                },
+                OpenAiLlmAnalyzeMessageRequest {
+                    role: "user".to_string(),
+                    content: vec![OpenAiLlmAnalyzeMessageContent::ImageUrl { image_url: OpenAiLlmAnalyzeMessageContentUrl {
+                        url: format!("data:{};base64,{}", mime_type, base64::engine::general_purpose::STANDARD.encode(&prepared_image.data))
+                    }}],
+                },
+            ],
+            response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
+                json_schema: OpenAiLlmJsonSchema {
+                    name: "image_redact".to_string(),
+                    schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text_coords": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x1": {
+                                            "type": "number"
+                                        },
+                                        "y1": {
+                                            "type": "number"
+                                        },
+                                        "x2": {
+                                            "type": "number"
+                                        },
+                                        "y2": {
+                                            "type": "number"
+                                        },
+                                        "text": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": ["x1", "y1", "x2", "y2"]
+                                }
+                            },
+                        },
+                        "required": ["text_coords"]
+                    })
+                }
+            })
+        };
+        let answer = self
+            .complete(&analyze_request, "locate the sensitive data")
+            .await?
+            .into_text()?;
+        let pii_image_coords: OpenAiLlmTextCoordsResponse = parse_answer(&answer)?;
+        Ok(ImageBoxes {
+            image: prepared_image,
+            coords: pii_image_coords.text_coords,
+        })
+    }
+
+    pub async fn redact_image_file_using_coords(
+        &self,
+        input: RedacterDataItem,
+    ) -> AppResult<RedacterDataItem> {
+        match input.content {
+            RedacterDataItemContent::Image { mime_type, data } => {
+                let found = self.find_image_boxes(&mime_type, &data).await?;
+                Ok(RedacterDataItem {
+                    file_ref: input.file_ref,
+                    content: RedacterDataItemContent::Image {
+                        mime_type: mime_type.clone(),
+                        data: redact_image_at_coords(
+                            mime_type,
+                            found.image.data,
+                            found.coords,
+                            0.25,
+                        )?,
+                    },
+                })
+            }
+            _ => Err(AppError::SystemError {
+                message: "Unsupported item for image redacting".to_string(),
+            }),
+        }
+    }
+
+    /// The error of a rejected request. It carries the status and OpenAI's error type and code
+    /// but not the body: the message of an API error can quote the scanned text, and both the
+    /// error and the log reach the terminal and the scan report.
+    fn request_failure(operation: &str, status: reqwest::StatusCode, body: &str) -> AppError {
+        let identifiers = serde_json::from_str::<OpenAiErrorResponse>(body)
+            .map(|response| [response.error.r#type, response.error.code])
+            .unwrap_or_default();
+        let identifiers: Vec<String> = identifiers.into_iter().flatten().collect();
+        tracing::debug!(%status, ?identifiers, operation, "OpenAI rejected the request");
+        let mut message = format!("Failed to {operation}. HTTP status: {status}.");
+        if !identifiers.is_empty() {
+            message.push_str(&format!(" OpenAI error: {}.", identifiers.join(", ")));
+        }
+        AppError::SystemError { message }
+    }
+
+    /// Sends a chat completion request and returns its last choice with how it ended.
+    /// `operation` names what the request was for in the error of a rejected one.
+    async fn complete(
+        &self,
+        request: &OpenAiLlmAnalyzeRequest,
+        operation: &str,
+    ) -> AppResult<ModelAnswer> {
         let response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")
@@ -170,7 +355,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
                 "Authorization",
                 format!("Bearer {}", self.open_ai_llm_options.api_key.value()),
             )
-            .json(&analyze_request)
+            .json(request)
             .send()
             .await?;
         if !response.status().is_success()
@@ -182,140 +367,70 @@ impl<'a> OpenAiLlmRedacter<'a> {
         {
             let response_status = response.status();
             let response_text = response.text().await.unwrap_or_default();
-            return Err(AppError::SystemError {
-                message: format!(
-                    "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                ),
-            });
+            return Err(Self::request_failure(
+                operation,
+                response_status,
+                &response_text,
+            ));
         }
-        let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-        if let Some(content) = open_ai_response.choices.pop() {
-            Ok(RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(content.message.content),
-            })
-        } else {
-            Err(AppError::SystemError {
-                message: "No content item in the response".to_string(),
-            })
-        }
+        let open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
+        Ok(open_ai_response.into())
     }
 
-    pub async fn redact_image_file_using_coords(
-        &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
-        match input.content {
-            RedacterDataItemContent::Image { mime_type, data } => {
-                let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
+    fn model_name(&self) -> String {
+        self.open_ai_llm_options
+            .model
+            .as_ref()
+            .map(|model| model.value().clone())
+            .unwrap_or_else(|| Self::DEFAULT_MODEL.to_string())
+    }
 
-                let analyze_request = OpenAiLlmAnalyzeRequest {
-                    model: self.open_ai_llm_options.model.as_ref().map(|v| v.value().clone()).unwrap_or_else(|| Self::DEFAULT_MODEL.to_string()),
-                    messages: vec![
-                        OpenAiLlmAnalyzeMessageRequest {
-                            role: "system".to_string(),
-                            content: vec![OpenAiLlmAnalyzeMessageContent::Text {
-                                text: format!("Find anything in the attached image that look like personal information. \
-                                                    Return their coordinates with x1,y1,x2,y2 as pixel coordinates and the corresponding text. \
-                                                    The coordinates should be in the format of the top left corner (x1, y1) and the bottom right corner (x2, y2). \
-                                                    The image width is: {}. The image height is: {}.", prepared_image.width, prepared_image.height)
-                            }],
-                        },
-                        OpenAiLlmAnalyzeMessageRequest {
-                            role: "user".to_string(),
-                            content: vec![OpenAiLlmAnalyzeMessageContent::ImageUrl { image_url: OpenAiLlmAnalyzeMessageContentUrl {
-                                url: format!("data:{};base64,{}", mime_type, base64::engine::general_purpose::STANDARD.encode(&prepared_image.data))
-                            }}],
-                        },
-                    ],
-                    response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
-                        json_schema: OpenAiLlmJsonSchema {
-                            name: "image_redact".to_string(),
-                            schema: serde_json::json!({
-                                "type": "object",
-                                "properties": {
-                                    "text_coords": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "x1": {
-                                                    "type": "number"
-                                                },
-                                                "y1": {
-                                                    "type": "number"
-                                                },
-                                                "x2": {
-                                                    "type": "number"
-                                                },
-                                                "y2": {
-                                                    "type": "number"
-                                                },
-                                                "text": {
-                                                    "type": "string"
-                                                }
-                                            },
-                                            "required": ["x1", "y1", "x2", "y2"]
-                                        }
+    async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
+        let system_message = |text: String| OpenAiLlmAnalyzeMessageRequest {
+            role: "system".to_string(),
+            content: vec![OpenAiLlmAnalyzeMessageContent::Text { text }],
+        };
+        let prompt = TextDetectionPrompt::new(text);
+        let request = OpenAiLlmAnalyzeRequest {
+            model: self.model_name(),
+            messages: vec![
+                system_message(prompt.instruction),
+                system_message(prompt.fence.clone()),
+                OpenAiLlmAnalyzeMessageRequest {
+                    role: "user".to_string(),
+                    content: vec![OpenAiLlmAnalyzeMessageContent::Text { text: prompt.text }],
+                },
+                system_message(prompt.fence),
+            ],
+            response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
+                json_schema: OpenAiLlmJsonSchema {
+                    name: "text_detect".to_string(),
+                    schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "findings": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": { "type": "string" },
+                                        "type": { "type": "string" }
                                     },
-                                },
-                                "required": ["text_coords"]
-                            })
-                        }
-                    })
-                };
-                let response = self
-                    .client
-                    .post("https://api.openai.com/v1/chat/completions")
-                    .header(
-                        "Authorization",
-                        format!("Bearer {}", self.open_ai_llm_options.api_key.value()),
-                    )
-                    .json(&analyze_request)
-                    .send()
-                    .await?;
-
-                if !response.status().is_success()
-                    || response
-                        .headers()
-                        .get("content-type")
-                        .iter()
-                        .all(|v| *v != mime::APPLICATION_JSON.as_ref())
-                {
-                    let response_status = response.status();
-                    let response_text = response.text().await.unwrap_or_default();
-                    return Err(AppError::SystemError {
-                        message: format!(
-                            "Failed to analyze text: {response_text}. HTTP status: {response_status}."
-                        ),
-                    });
-                }
-                let mut open_ai_response: OpenAiLlmAnalyzeResponse = response.json().await?;
-                if let Some(content) = open_ai_response.choices.pop() {
-                    let pii_image_coords: OpenAiLlmTextCoordsResponse =
-                        serde_json::from_str(&content.message.content)?;
-                    Ok(RedacterDataItem {
-                        file_ref: input.file_ref,
-                        content: RedacterDataItemContent::Image {
-                            mime_type: mime_type.clone(),
-                            data: redact_image_at_coords(
-                                mime_type.clone(),
-                                prepared_image.data.clone(),
-                                pii_image_coords.text_coords,
-                                0.25,
-                            )?,
+                                    "required": ["text", "type"]
+                                }
+                            }
                         },
-                    })
-                } else {
-                    Err(AppError::SystemError {
-                        message: "No content item in the response".to_string(),
-                    })
-                }
-            }
-            _ => Err(AppError::SystemError {
-                message: "Unsupported item for image redacting".to_string(),
+                        "required": ["findings"]
+                    }),
+                },
             }),
-        }
+        };
+        let answer = self
+            .complete(&request, "find the sensitive data")
+            .await?
+            .into_text()?;
+        let findings: OpenAiLlmTextFindings = parse_answer(&answer)?;
+        LlmTextFinding::locate(text, findings.findings)
     }
 
     /// Output format accepted by the images/edits endpoint for the given input format.
@@ -370,11 +485,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
                     let response_text = response.text().await.unwrap_or_default();
                     return Err(NativeImageEditError {
                         failure: classify_http_native_failure(response_status.as_u16()),
-                        error: AppError::SystemError {
-                            message: format!(
-                                "Failed to edit the image: {response_text}. HTTP status: {response_status}."
-                            ),
-                        },
+                        error: Self::request_failure(
+                            "edit the image",
+                            response_status,
+                            &response_text,
+                        ),
                     });
                 }
 
@@ -429,9 +544,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported table type".to_string(),
-                })
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -444,6 +557,23 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
         })
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
+            RedacterDataItemContent::Image { mime_type, data } => {
+                self.find_image_boxes(mime_type, data)
+                    .await?
+                    .into_labelled_detections(
+                        |text| async move { self.detect_in_text(&text).await },
+                    )
+                    .await
+            }
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::unsupported_content())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::OpenAiLlm
     }
@@ -454,12 +584,33 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
 mod tests {
     use console::Term;
 
+    use crate::redacters::live_detection;
     use crate::redacters::test_support::{
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
-    use crate::redacters::RedacterProviderOptions;
+    use crate::redacters::{DetectionLocation, RedacterProviderOptions};
 
     use super::*;
+
+    const PLANTED_VALUE: &str = "jane.doe@example.com";
+
+    #[test]
+    fn a_failed_request_does_not_repeat_the_response_body() {
+        let bodies = [
+            format!(
+                r#"{{"error": {{"message": "Invalid input {PLANTED_VALUE}", "type": "invalid_request_error", "code": "string_above_max_length"}}}}"#
+            ),
+            format!("upstream said: {PLANTED_VALUE}"),
+        ];
+        for body in bodies {
+            let error = OpenAiLlmRedacter::request_failure(
+                "analyze text",
+                reqwest::StatusCode::BAD_REQUEST,
+                &body,
+            );
+            assert!(!error.to_string().contains(PLANTED_VALUE), "{body}");
+        }
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-open-ai"), ignore)]
@@ -559,5 +710,107 @@ mod tests {
     async fn redact_image_file_coords_mode_test(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         redact_image_file_test_with_mode(LlmImageMode::Coords, "open-ai-coords.png").await
+    }
+
+    fn answer_of(response: &str) -> AppResult<String> {
+        let response: OpenAiLlmAnalyzeResponse = serde_json::from_str(response).unwrap();
+        ModelAnswer::from(response).into_text()
+    }
+
+    #[test]
+    fn an_answer_that_did_not_finish_is_an_error_and_not_an_empty_scan() {
+        let content_filter = r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}"#;
+        let refusal = r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"No."},"finish_reason":"stop"}]}"#;
+        let no_finish_reason = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":null}]}"#;
+        let no_choices = r#"{"choices":[]}"#;
+        let truncated = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\": [{"},"finish_reason":"length"}]}"#;
+        for (response, reaches_output_limit) in [
+            (content_filter, false),
+            (refusal, false),
+            (no_finish_reason, false),
+            (no_choices, false),
+            (truncated, true),
+        ] {
+            let Err(AppError::ModelAnswerStopped(stop)) = answer_of(response) else {
+                panic!("{response} is not an error");
+            };
+            assert_eq!(
+                stop == ModelStop::MaxTokens,
+                reaches_output_limit,
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redaction_that_is_only_the_separators_is_an_error() {
+        let echoed = r#"{"choices":[{"message":{"role":"assistant","content":"---1234\n---1234\n"},"finish_reason":"stop"}]}"#;
+        let response: OpenAiLlmAnalyzeResponse = serde_json::from_str(echoed).unwrap();
+        assert!(matches!(
+            ModelAnswer::from(response).into_text_without_separator("---1234"),
+            Err(AppError::EmptyModelAnswer)
+        ));
+    }
+
+    #[test]
+    fn a_completed_answer_is_its_content() {
+        let completed = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":"stop"}]}"#;
+        assert_eq!(answer_of(completed).unwrap(), r#"{"findings":[]}"#);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-open-ai"), ignore)]
+    async fn detect_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        initialize_crypto();
+        let Some(test_api_key) = test_open_ai_key(&term)? else {
+            return Ok(());
+        };
+        let redacter = OpenAiLlmRedacter::new(
+            OpenAiLlmRedacterOptions {
+                api_key: test_api_key.into(),
+                model: None,
+                image_model: None,
+                image_mode: LlmImageMode::Auto,
+            },
+            &reporter,
+        )
+        .await?;
+
+        let input = live_detection::note_item();
+        let detections = redacter.detect(&input).await?.found;
+
+        live_detection::assert_note_found(&input, &detections);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-open-ai"), ignore)]
+    async fn detect_image_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        initialize_crypto();
+        let Some(test_api_key) = test_open_ai_key(&term)? else {
+            return Ok(());
+        };
+        let redacter = OpenAiLlmRedacter::new(
+            OpenAiLlmRedacterOptions {
+                api_key: test_api_key.into(),
+                model: None,
+                image_model: None,
+                image_mode: LlmImageMode::Auto,
+            },
+            &reporter,
+        )
+        .await?;
+
+        let detections = redacter
+            .detect(&live_detection::enlarged_form_item())
+            .await?
+            .found;
+
+        live_detection::assert_form_found(&detections);
+        Ok(())
     }
 }

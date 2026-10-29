@@ -3,14 +3,16 @@
 
 use super::error::LocalGlinerError;
 use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::Score;
 use regex::Regex;
+use std::cmp::Ordering;
 use std::sync::OnceLock;
 
 /// What the redacter looks for and how sure the model must be about a span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlinerOptions {
     pub labels: Vec<String>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 /// A whitespace-split word: GLiNER's `WhitespaceTokenSplitter`
@@ -276,7 +278,7 @@ pub struct Candidate {
     pub start_byte: usize,
     pub end_byte: usize,
     pub label: String,
-    pub score: f32,
+    pub score: Score,
 }
 
 fn collect_candidates(
@@ -284,7 +286,7 @@ fn collect_candidates(
     window_words: &[Word],
     word_offset: usize,
     labels: &[String],
-    threshold: f32,
+    threshold: Score,
     out: &mut Vec<Candidate>,
 ) {
     for start in 0..logits.num_words {
@@ -294,7 +296,11 @@ fn collect_candidates(
                 continue;
             }
             for (label_index, label) in labels.iter().enumerate() {
-                let score = sigmoid(logits.at(start, width, label_index));
+                // A sigmoid leaves 0..=1 only for a NaN logit, which clears no threshold.
+                let Ok(score) = Score::try_from(sigmoid(logits.at(start, width, label_index)))
+                else {
+                    continue;
+                };
                 if score >= threshold {
                     out.push(Candidate {
                         start_word: word_offset + start,
@@ -329,7 +335,7 @@ pub fn score_document(
     max_len: usize,
     max_width: usize,
     overlap: usize,
-    threshold: f32,
+    threshold: Score,
 ) -> Result<Vec<Candidate>, LocalGlinerError> {
     if words.is_empty() {
         return Ok(Vec::new());
@@ -377,7 +383,7 @@ pub fn score_document(
 /// overlap a previously accepted span, highest-confidence spans winning ties for a word.
 /// Returned in document order.
 pub fn greedy_decode(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     let mut accepted: Vec<Candidate> = Vec::new();
     for candidate in candidates {
         let overlaps = accepted.iter().any(|kept| {
@@ -399,6 +405,7 @@ pub fn candidates_to_findings(candidates: Vec<Candidate>) -> Vec<Finding> {
             start: candidate.start_byte,
             end: candidate.end_byte,
             rule: RuleName::new(&candidate.label),
+            score: Some(candidate.score),
         })
         .collect()
 }
@@ -622,14 +629,22 @@ mod tests {
             384,
             12,
             32,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].start_byte, 0);
         assert_eq!(candidates[0].end_byte, 5);
         assert_eq!(candidates[0].label, "person");
-        assert!(candidates[0].score > 0.99, "{}", candidates[0].score);
+        assert!(
+            candidates[0].score > Score::from_static(0.99),
+            "{}",
+            candidates[0].score
+        );
+    }
+
+    fn score(probability: f32) -> Score {
+        Score::try_from(probability).unwrap()
     }
 
     fn candidate(
@@ -637,7 +652,7 @@ mod tests {
         end_word: usize,
         start_byte: usize,
         end_byte: usize,
-        score: f32,
+        probability: f32,
     ) -> Candidate {
         Candidate {
             start_word,
@@ -645,7 +660,7 @@ mod tests {
             start_byte,
             end_byte,
             label: "x".to_string(),
-            score,
+            score: score(probability),
         }
     }
 
@@ -667,14 +682,15 @@ mod tests {
     }
 
     #[test]
-    fn candidates_to_findings_names_the_rule_after_the_label() {
+    fn candidates_to_findings_keep_the_label_and_the_score() {
         let findings = candidates_to_findings(vec![candidate(0, 0, 0, 5, 0.9)]);
         assert_eq!(
             findings,
             vec![Finding {
                 start: 0,
                 end: 5,
-                rule: RuleName::new("x")
+                rule: RuleName::new("x"),
+                score: Some(score(0.9)),
             }]
         );
     }
@@ -753,7 +769,7 @@ mod tests {
             14,
             12,
             4,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
         assert_eq!(candidates.len(), 1, "{candidates:?}");
@@ -818,7 +834,7 @@ mod tests {
             max_len,
             12,
             0,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
 

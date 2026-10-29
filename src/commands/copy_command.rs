@@ -1,10 +1,7 @@
-#[cfg(any(feature = "pdf-render", feature = "ocr"))]
-use crate::addon_store::Addon;
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
-    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capability,
-    CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
-    SkipReason,
+    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
+    CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason, COPY_LEGEND,
 };
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -29,6 +26,16 @@ pub struct CopyCommandResult {
     pub files_copied: usize,
     pub files_redacted: usize,
     pub files_skipped: usize,
+}
+
+impl CopyCommandResult {
+    /// The report for people.
+    pub fn to_text(&self) -> String {
+        format!(
+            "Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
+            self.files_copied, self.files_redacted, self.files_skipped
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +83,7 @@ pub async fn command_copy(
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
     let addons = AddonStore::new(&options.addon_store);
-    let styles = CopyOutputStyles::new();
+    let styles = OutputStyles::new();
 
     // The bar exists from here on because the file systems report through it, but it is
     // not drawn until the converters and redacters have been bound: they report straight to
@@ -161,7 +168,7 @@ pub async fn command_copy(
             .as_str(),
         );
         if files_found > 0 {
-            bar.println(format_legend(&styles));
+            bar.println(format_legend(&COPY_LEGEND, &styles));
         }
 
         bar.set_length(files_found as u64);
@@ -201,7 +208,7 @@ pub async fn command_copy(
             files_skipped: total_files_skipped,
         })
     } else {
-        bar.println(format_legend(&styles));
+        bar.println(format_legend(&COPY_LEGEND, &styles));
         let report = transfer_and_redact_file(
             term,
             &bar,
@@ -264,10 +271,10 @@ fn report_copy_info(
     destination: &str,
     redacter_options: &Option<RedacterOptions>,
     file_converters: &FileConverters<'_>,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) -> AppResult<()> {
-    let capabilities = CopyCapabilities {
-        redacters: redacter_options
+    let capabilities = Capabilities::new(
+        redacter_options
             .as_ref()
             .map(|options| {
                 options
@@ -277,24 +284,11 @@ fn report_copy_info(
                     .collect()
             })
             .unwrap_or_default(),
-        pdf_rendering: match file_converters.pdf_image_converter {
-            Some(_) => Capability::Yes,
-            #[cfg(feature = "pdf-render")]
-            None => Capability::No(Addon::Pdf.manifest().map(|_| Addon::Pdf)),
-            #[cfg(not(feature = "pdf-render"))]
-            None => Capability::No(None),
-        },
-        ocr: match file_converters.ocr {
-            Some(_) => Capability::Yes,
-            #[cfg(feature = "ocr")]
-            None => Capability::No(Some(Addon::Ocr)),
-            #[cfg(not(feature = "ocr"))]
-            None => Capability::No(None),
-        },
-        sampling_size: redacter_options
+        file_converters,
+        redacter_options
             .as_ref()
             .and_then(|o| o.base_options.sampling_size),
-    };
+    );
 
     term.write_line(
         format!(
@@ -330,7 +324,7 @@ async fn transfer_and_redact_file<
     redacter: &Option<(RedacterBaseOptions, Vec<Redacters<'a>>)>,
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
 
@@ -396,7 +390,7 @@ fn print_file_row(
     bar: &ProgressBar,
     file_ref: &FileSystemRef,
     outcome: &CopyFileOutcome,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) {
     bar.println(format_file_row(
         term.width() as usize,
@@ -410,7 +404,7 @@ fn print_file_row(
         HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
             .to_string()
             .as_str(),
-        outcome,
+        &outcome.row(styles),
         styles,
     ));
 }
@@ -424,7 +418,7 @@ async fn redact_upload_file<
 >(
     bar: &ProgressBar,
     destination_fs: &mut DFS,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,
@@ -529,30 +523,26 @@ async fn redact_upload_file<
 /// Why redaction did not happen, defaulting to "no redacter applied" when the
 /// pipeline did not record a reason.
 fn not_redacted_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
-    use crate::redacters::RedactionBlocked;
-    match blocked {
-        Some(RedactionBlocked::PdfRendererUnavailable) => NotRedactedReason::PdfRendererUnavailable,
-        Some(RedactionBlocked::OcrUnavailable) => NotRedactedReason::OcrUnavailable,
-        Some(RedactionBlocked::OcrImageFormatNotSupported) => {
-            NotRedactedReason::OcrImageFormatNotSupported
-        }
-        None => NotRedactedReason::NoRedacterApplied,
-    }
+    blocked.map_or(
+        NotRedactedReason::NoRedacterApplied,
+        NotRedactedReason::from,
+    )
 }
 
-/// Why nothing in the plan could redact this file at all (`redact_stream` was never called):
-/// a PDF or image blocked on a missing conversion engine reports that reason, and anything
-/// else defaults to "type not supported" as before.
-fn plan_blocked_reason(blocked: Option<crate::redacters::RedactionBlocked>) -> NotRedactedReason {
-    match blocked {
-        Some(blocked) => not_redacted_reason(Some(blocked)),
-        None => NotRedactedReason::TypeNotSupported,
-    }
+/// Why nothing in the plan could redact or scan this file at all: a PDF or image blocked on
+/// a missing conversion engine reports that reason, and anything else is a type no redacter
+/// supports.
+pub(crate) fn plan_blocked_reason(
+    blocked: Option<crate::redacters::RedactionBlocked>,
+) -> NotRedactedReason {
+    blocked.map_or(NotRedactedReason::TypeNotSupported, NotRedactedReason::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "pdf-render", feature = "ocr"))]
+    use crate::addon_store::Addon;
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
         initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,
@@ -574,6 +564,7 @@ mod tests {
             provider_options: vec![provider_options],
             base_options: RedacterBaseOptions {
                 allow_unsupported_copies: false,
+                unsupported_as_text: false,
                 csv_headers_disable: false,
                 csv_delimiter: None,
                 sampling_size: None,

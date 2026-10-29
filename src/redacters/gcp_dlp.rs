@@ -3,16 +3,20 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
+use gcloud_sdk::google::privacy::dlp::v2 as dlp;
 use gcloud_sdk::google::privacy::dlp::v2::dlp_service_client::DlpServiceClient;
 use gcloud_sdk::tonic::metadata::MetadataValue;
 use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use mime::Mime;
 use rvstruct::ValueStruct;
+use std::cell::OnceCell;
 use std::collections::HashSet;
+use std::ops::Range;
 use tokio_util::bytes;
 
 #[derive(Clone)]
@@ -68,24 +72,13 @@ impl<'a> GcpDlpRedacter<'a> {
     }
 
     pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let mut request = tonic::Request::new(
-            gcloud_sdk::google::privacy::dlp::v2::DeidentifyContentRequest {
-                parent: format!(
-                    "projects/{}/locations/global",
-                    self.gcp_dlp_options.project_id.value()
-                ),
-                inspect_config: Some(self.create_inspect_config()),
-                deidentify_config: Some(self.create_deidentify_config()),
-                item: Some(input.content.try_into()?),
-                ..gcloud_sdk::google::privacy::dlp::v2::DeidentifyContentRequest::default()
-            },
-        );
-        request.metadata_mut().insert(
-            "x-goog-user-project",
-            MetadataValue::<tonic::metadata::Ascii>::try_from(
-                self.gcp_dlp_options.project_id.value(),
-            )?,
-        );
+        let request = self.request(dlp::DeidentifyContentRequest {
+            parent: self.parent(),
+            inspect_config: Some(self.create_inspect_config()),
+            deidentify_config: Some(self.create_deidentify_config()),
+            item: Some(input.content.try_into()?),
+            ..dlp::DeidentifyContentRequest::default()
+        })?;
         let response = self.client.get().deidentify_content(request).await?;
 
         if let Some(content_item) = response.into_inner().item {
@@ -105,22 +98,12 @@ impl<'a> GcpDlpRedacter<'a> {
         &self,
         input_bytes_content: gcloud_sdk::google::privacy::dlp::v2::ByteContentItem,
     ) -> AppResult<bytes::Bytes> {
-        let mut request =
-            tonic::Request::new(gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest {
-                parent: format!(
-                    "projects/{}/locations/global",
-                    self.gcp_dlp_options.project_id.value()
-                ),
-                inspect_config: Some(self.create_inspect_config()),
-                byte_item: Some(input_bytes_content),
-                ..gcloud_sdk::google::privacy::dlp::v2::RedactImageRequest::default()
-            });
-        request.metadata_mut().insert(
-            "x-goog-user-project",
-            MetadataValue::<tonic::metadata::Ascii>::try_from(
-                self.gcp_dlp_options.project_id.value(),
-            )?,
-        );
+        let request = self.request(dlp::RedactImageRequest {
+            parent: self.parent(),
+            inspect_config: Some(self.create_inspect_config()),
+            byte_item: Some(input_bytes_content),
+            ..dlp::RedactImageRequest::default()
+        })?;
         let response = self.client.get().redact_image(request).await?;
         Ok(response.into_inner().redacted_image.into())
     }
@@ -139,10 +122,126 @@ impl<'a> GcpDlpRedacter<'a> {
                     content,
                 })
             }
-            _ => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported image type".to_string(),
-            }),
+            _ => Err(AppError::unsupported_content()),
         }
+    }
+
+    fn parent(&self) -> String {
+        format!(
+            "projects/{}/locations/global",
+            self.gcp_dlp_options.project_id.value()
+        )
+    }
+
+    fn request<T>(&self, message: T) -> AppResult<tonic::Request<T>> {
+        let mut request = tonic::Request::new(message);
+        request.metadata_mut().insert(
+            "x-goog-user-project",
+            MetadataValue::<tonic::metadata::Ascii>::try_from(
+                self.gcp_dlp_options.project_id.value(),
+            )?,
+        );
+        Ok(request)
+    }
+
+    /// The DLP findings of `item`, found with the redaction path's inspect config so that
+    /// scanning finds what redacting would replace. The quote is requested because it is the
+    /// only text DLP gives for an image finding.
+    async fn inspect(&self, item: dlp::ContentItem) -> AppResult<dlp::InspectResult> {
+        let request = self.request(dlp::InspectContentRequest {
+            parent: self.parent(),
+            inspect_config: Some(dlp::InspectConfig {
+                include_quote: true,
+                ..self.create_inspect_config()
+            }),
+            item: Some(item),
+            ..dlp::InspectContentRequest::default()
+        })?;
+        let response = self.client.get().inspect_content(request).await?;
+        Self::inspect_result(response.into_inner())
+    }
+
+    /// The result of an inspect response. A response without one is an error: reading it as
+    /// "no findings" would report the item clean.
+    fn inspect_result(response: dlp::InspectContentResponse) -> AppResult<dlp::InspectResult> {
+        response
+            .result
+            .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "an inspect result"))
+    }
+
+    /// Turns the findings DLP returned for `content` into detections. `field_names` are the
+    /// column names the table was sent with; they are only read for a table.
+    fn detections_in(
+        content: &RedacterDataItemContent,
+        field_names: &[String],
+        result: dlp::InspectResult,
+    ) -> AppResult<Vec<Detection>> {
+        if result.findings_truncated {
+            return Err(AppError::SystemError {
+                message: "GCP DLP truncated its findings, so the item has more than it reported"
+                    .to_string(),
+            });
+        }
+        let text_lines = OnceCell::new();
+        let mut detections = Vec::new();
+        for finding in result.findings {
+            let score = likelihood_score(finding.likelihood());
+            let label = finding
+                .info_type
+                .map(|info_type| DetectionLabel::new(info_type.name))
+                .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "an info type"))?;
+            let location = finding
+                .location
+                .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a location"))?;
+            match content {
+                RedacterDataItemContent::Value(text) => {
+                    let lines = text_lines.get_or_init(|| TextLines::new(text));
+                    detections.push(lines.detection(byte_span(&location)?, label, score)?);
+                }
+                RedacterDataItemContent::Table { rows, .. } => {
+                    let (row, column) = table_cell(&location, field_names)?;
+                    let cell = rows
+                        .get(row)
+                        .and_then(|cells| cells.get(column))
+                        .ok_or_else(|| {
+                            AppError::incomplete_result(RedacterType::GcpDlp, "a cell of the table")
+                        })?;
+                    detections.push(Detection::in_table_cell(
+                        row,
+                        column,
+                        cell,
+                        byte_span(&location)?,
+                        label,
+                        score,
+                    )?);
+                }
+                RedacterDataItemContent::Image { .. } => {
+                    for bounding_box in location.content_locations.iter().flat_map(|content| {
+                        match &content.location {
+                            Some(dlp::content_location::Location::ImageLocation(image)) => {
+                                image.bounding_boxes.as_slice()
+                            }
+                            _ => &[],
+                        }
+                    }) {
+                        detections.push(Detection {
+                            label: label.clone(),
+                            location: DetectionLocation::Image {
+                                page: None,
+                                x1: bounding_box.left as f32,
+                                y1: bounding_box.top as f32,
+                                x2: (bounding_box.left + bounding_box.width) as f32,
+                                y2: (bounding_box.top + bounding_box.height) as f32,
+                            },
+                            score,
+                            value: finding.quote.clone(),
+                        });
+                    }
+                }
+                RedacterDataItemContent::Pdf { .. } => return Err(AppError::unsupported_content()),
+            }
+        }
+        Ok(detections)
     }
 
     fn create_inspect_config(&self) -> gcloud_sdk::google::privacy::dlp::v2::InspectConfig {
@@ -260,9 +359,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
                 self.redact_image_file(input).await
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -278,9 +375,106 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
         })
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        let mut item: dlp::ContentItem = match &input.content {
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Value(_) => {
+                input.content.clone().try_into()?
+            }
+            RedacterDataItemContent::Image { mime_type, .. }
+                if Self::check_supported_image_type(mime_type) =>
+            {
+                dlp::ContentItem {
+                    content_metadata: None,
+                    data_item: Some(dlp::content_item::DataItem::ByteItem(
+                        input.content.clone().try_into()?,
+                    )),
+                }
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                return Err(AppError::unsupported_content());
+            }
+        };
+        let field_names = unique_field_names(&mut item);
+        let result = self.inspect(item).await?;
+        Ok(Self::detections_in(&input.content, &field_names, result)?.into())
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::GcpDlp
     }
+}
+
+/// A finding's likelihood read as a score. DLP gives five buckets and no number, so each gets a
+/// fixed score. An unspecified bucket has no score.
+fn likelihood_score(likelihood: dlp::Likelihood) -> Option<Score> {
+    match likelihood {
+        dlp::Likelihood::VeryUnlikely => Some(const { Score::from_static(0.1) }),
+        dlp::Likelihood::Unlikely => Some(const { Score::from_static(0.3) }),
+        dlp::Likelihood::Possible => Some(const { Score::from_static(0.5) }),
+        dlp::Likelihood::Likely => Some(const { Score::from_static(0.7) }),
+        dlp::Likelihood::VeryLikely => Some(const { Score::from_static(0.9) }),
+        dlp::Likelihood::Unspecified => None,
+    }
+}
+
+/// The finding's byte range within its containing text or table cell. DLP counts UTF-8 bytes.
+fn byte_span(location: &dlp::Location) -> AppResult<Range<usize>> {
+    let range = location
+        .byte_range
+        .as_ref()
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a byte range"))?;
+    match (usize::try_from(range.start), usize::try_from(range.end)) {
+        (Ok(start), Ok(end)) => Ok(start..end),
+        _ => Err(AppError::SystemError {
+            message: format!(
+                "A GCP DLP finding has the invalid byte range {}..{}",
+                range.start, range.end
+            ),
+        }),
+    }
+}
+
+/// The row and column a table finding sits in, the column found by the name of its field.
+fn table_cell(location: &dlp::Location, field_names: &[String]) -> AppResult<(usize, usize)> {
+    let record = location
+        .content_locations
+        .iter()
+        .find_map(|content| match &content.location {
+            Some(dlp::content_location::Location::RecordLocation(record)) => Some(record),
+            _ => None,
+        })
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a record location"))?;
+    let row = record
+        .table_location
+        .as_ref()
+        .and_then(|table| usize::try_from(table.row_index).ok())
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a row"))?;
+    let column = record
+        .field_id
+        .as_ref()
+        .and_then(|field| field_names.iter().position(|name| *name == field.name))
+        .ok_or_else(|| AppError::incomplete_result(RedacterType::GcpDlp, "a known column"))?;
+    Ok((row, column))
+}
+
+/// Gives every column of a table item a distinct name, which is how DLP tells the columns
+/// of a finding apart, and returns the names. The result is empty for anything but a table.
+fn unique_field_names(item: &mut dlp::ContentItem) -> Vec<String> {
+    let Some(dlp::content_item::DataItem::Table(table)) = &mut item.data_item else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    for (column, header) in table.headers.iter_mut().enumerate() {
+        if !seen.insert(header.name.clone()) {
+            header.name = format!("{} (column {column})", header.name);
+            seen.insert(header.name.clone());
+        }
+    }
+    table
+        .headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect()
 }
 
 impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ContentItem> for RedacterDataItemContent {
@@ -429,11 +623,291 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ByteContentItem> for Redacter
     }
 }
 
-#[allow(unused_imports)]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::RedacterProviderOptions;
     use console::Term;
+
+    fn finding(
+        info_type: &str,
+        likelihood: dlp::Likelihood,
+        location: dlp::Location,
+        quote: &str,
+    ) -> dlp::Finding {
+        dlp::Finding {
+            info_type: Some(dlp::InfoType {
+                name: info_type.to_string(),
+                ..dlp::InfoType::default()
+            }),
+            likelihood: likelihood.into(),
+            location: Some(location),
+            quote: quote.to_string(),
+            ..dlp::Finding::default()
+        }
+    }
+
+    fn result_of(findings: Vec<dlp::Finding>) -> dlp::InspectResult {
+        dlp::InspectResult {
+            findings,
+            ..dlp::InspectResult::default()
+        }
+    }
+
+    fn byte_location(start: usize, end: usize) -> dlp::Location {
+        dlp::Location {
+            byte_range: Some(dlp::Range {
+                start: start as i64,
+                end: end as i64,
+            }),
+            ..dlp::Location::default()
+        }
+    }
+
+    fn score(value: f32) -> Option<Score> {
+        Some(Score::try_from(value).unwrap())
+    }
+
+    #[test]
+    fn text_findings_keep_dlp_byte_ranges_on_multibyte_text() {
+        let text = "Grüße, Zoë: write to john@example.com or call 555-0100";
+        let email = text.find("john@example.com").unwrap();
+        let phone = text.find("555-0100").unwrap();
+        assert!(email > "Grüße, Zoë: write to ".chars().count());
+        let result = result_of(vec![
+            finding(
+                "EMAIL_ADDRESS",
+                dlp::Likelihood::VeryLikely,
+                byte_location(email, email + 16),
+                "john@example.com",
+            ),
+            finding(
+                "PHONE_NUMBER",
+                dlp::Likelihood::Possible,
+                byte_location(phone, phone + 8),
+                "555-0100",
+            ),
+        ]);
+
+        let detections = GcpDlpRedacter::detections_in(
+            &RedacterDataItemContent::Value(text.to_string()),
+            &[],
+            result,
+        )
+        .unwrap();
+
+        assert_eq!(
+            detections,
+            vec![
+                Detection {
+                    label: DetectionLabel::new("EMAIL_ADDRESS"),
+                    location: DetectionLocation::Text {
+                        start: email,
+                        end: email + 16,
+                        line: 1,
+                        column: 22,
+                    },
+                    score: score(0.9),
+                    value: "john@example.com".to_string(),
+                },
+                Detection {
+                    label: DetectionLabel::new("PHONE_NUMBER"),
+                    location: DetectionLocation::Text {
+                        start: phone,
+                        end: phone + 8,
+                        line: 1,
+                        column: 47,
+                    },
+                    score: score(0.5),
+                    value: "555-0100".to_string(),
+                },
+            ]
+        );
+    }
+
+    fn cell_location(field_name: &str, row_index: i64, start: usize, end: usize) -> dlp::Location {
+        dlp::Location {
+            content_locations: vec![dlp::ContentLocation {
+                location: Some(dlp::content_location::Location::RecordLocation(
+                    dlp::RecordLocation {
+                        field_id: Some(dlp::FieldId {
+                            name: field_name.to_string(),
+                        }),
+                        table_location: Some(dlp::TableLocation { row_index }),
+                        ..dlp::RecordLocation::default()
+                    },
+                )),
+                ..dlp::ContentLocation::default()
+            }],
+            ..byte_location(start, end)
+        }
+    }
+
+    #[test]
+    fn table_findings_name_their_row_and_column() {
+        let content = RedacterDataItemContent::Table {
+            headers: vec!["name".to_string(), "email".to_string()],
+            rows: vec![
+                vec!["Ana".to_string(), "ana@example.org".to_string()],
+                vec!["Zoë".to_string(), "mail zoë@example.org".to_string()],
+            ],
+        };
+        let email_start = "mail ".len();
+        let result = result_of(vec![finding(
+            "EMAIL_ADDRESS",
+            dlp::Likelihood::VeryLikely,
+            cell_location("email", 1, email_start, "mail zoë@example.org".len()),
+            "zoë@example.org",
+        )]);
+
+        let detections = GcpDlpRedacter::detections_in(
+            &content,
+            &["name".to_string(), "email".to_string()],
+            result,
+        )
+        .unwrap();
+
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("EMAIL_ADDRESS"),
+                location: DetectionLocation::TableCell {
+                    row: 2,
+                    column: 2,
+                    start: email_start,
+                    end: "mail zoë@example.org".len()
+                },
+                score: score(0.9),
+                value: "zoë@example.org".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn columns_with_the_same_header_are_sent_under_distinct_names() {
+        let mut item: dlp::ContentItem = RedacterDataItemContent::Table {
+            headers: vec!["phone".to_string(), "phone".to_string(), "city".to_string()],
+            rows: vec![vec!["1".to_string(), "2".to_string(), "Oslo".to_string()]],
+        }
+        .try_into()
+        .unwrap();
+
+        let names = unique_field_names(&mut item);
+
+        assert_eq!(names.len(), 3);
+        assert_eq!(
+            names.iter().collect::<HashSet<_>>().len(),
+            3,
+            "names: {names:?}"
+        );
+        assert_eq!(names[0], "phone", "the first column keeps its name");
+        assert_eq!(names[2], "city");
+        let Some(dlp::content_item::DataItem::Table(table)) = item.data_item else {
+            panic!("a table item stays a table");
+        };
+        assert_eq!(
+            table
+                .headers
+                .iter()
+                .map(|header| header.name.clone())
+                .collect::<Vec<_>>(),
+            names
+        );
+    }
+
+    #[test]
+    fn image_findings_become_pixel_boxes_one_per_bounding_box() {
+        let location = dlp::Location {
+            content_locations: vec![dlp::ContentLocation {
+                location: Some(dlp::content_location::Location::ImageLocation(
+                    dlp::ImageLocation {
+                        bounding_boxes: vec![
+                            dlp::BoundingBox {
+                                top: 195,
+                                left: 310,
+                                width: 310,
+                                height: 23,
+                            },
+                            dlp::BoundingBox {
+                                top: 220,
+                                left: 10,
+                                width: 50,
+                                height: 20,
+                            },
+                        ],
+                    },
+                )),
+                ..dlp::ContentLocation::default()
+            }],
+            ..dlp::Location::default()
+        };
+        let result = result_of(vec![finding(
+            "EMAIL_ADDRESS",
+            dlp::Likelihood::Likely,
+            location,
+            "john.smith@example.com",
+        )]);
+        let content = RedacterDataItemContent::Image {
+            mime_type: mime::IMAGE_PNG,
+            data: bytes::Bytes::new(),
+        };
+
+        let detections = GcpDlpRedacter::detections_in(&content, &[], result).unwrap();
+
+        let boxes: Vec<DetectionLocation> = detections
+            .iter()
+            .map(|detection| detection.location)
+            .collect();
+        assert_eq!(
+            boxes,
+            vec![
+                DetectionLocation::Image {
+                    page: None,
+                    x1: 310.0,
+                    y1: 195.0,
+                    x2: 620.0,
+                    y2: 218.0
+                },
+                DetectionLocation::Image {
+                    page: None,
+                    x1: 10.0,
+                    y1: 220.0,
+                    x2: 60.0,
+                    y2: 240.0
+                },
+            ]
+        );
+        assert!(detections
+            .iter()
+            .all(|detection| detection.value == "john.smith@example.com"
+                && detection.score == score(0.7)));
+    }
+
+    #[test]
+    fn a_response_without_a_result_is_an_error_not_a_clean_item() {
+        let error = GcpDlpRedacter::inspect_result(dlp::InspectContentResponse { result: None })
+            .expect_err("a response without a result says nothing about the item");
+        assert!(matches!(
+            error,
+            AppError::IncompleteResult {
+                redacter_type: RedacterType::GcpDlp,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn truncated_findings_are_an_error_not_a_short_list() {
+        let result = dlp::InspectResult {
+            findings_truncated: true,
+            ..result_of(Vec::new())
+        };
+        assert!(GcpDlpRedacter::detections_in(
+            &RedacterDataItemContent::Value("x".to_string()),
+            &[],
+            result
+        )
+        .is_err());
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
@@ -474,5 +948,178 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    async fn live_redacter<'a>(reporter: &'a AppReporter<'a>) -> GcpDlpRedacter<'a> {
+        crate::redacters::test_support::initialize_crypto();
+        let test_gcp_project_id =
+            std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required");
+        GcpDlpRedacter::new(
+            GcpDlpRedacterOptions {
+                project_id: GcpProjectId::new(test_gcp_project_id),
+                user_defined_built_in_info_types: vec![],
+                user_defined_stored_info_types: vec![],
+            },
+            reporter,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn detect_text_finds_values_at_their_byte_offsets() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let text = "Grüße aus Köln, bitte schreib an zoe.keller@example.com oder ruf an: \
+                    +49 30 1234 5678";
+        let input = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        };
+
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
+
+        let email = text.find("zoe.keller@example.com").unwrap();
+        assert!(
+            detections.iter().any(|detection| {
+                detection.label == DetectionLabel::new("EMAIL_ADDRESS")
+                    && detection.location
+                        == DetectionLocation::Text {
+                            start: email,
+                            end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
+                        }
+                    && detection.value == "zoe.keller@example.com"
+                    && detection.score.is_some()
+            }),
+            "{detections:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn detect_table_finds_values_in_their_cells() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let input = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.csv".into(),
+                media_type: Some(mime::TEXT_CSV),
+                file_size: None,
+            },
+            content: RedacterDataItemContent::Table {
+                headers: vec![
+                    "id".to_string(),
+                    "contact".to_string(),
+                    "contact".to_string(),
+                ],
+                rows: vec![
+                    vec!["1".to_string(), "none".to_string(), "none".to_string()],
+                    vec![
+                        "2".to_string(),
+                        "none".to_string(),
+                        "mail zoë.keller@example.com".to_string(),
+                    ],
+                ],
+            },
+        };
+
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
+
+        let email = "mail ".len();
+        assert!(
+            detections.iter().any(|detection| {
+                detection.label == DetectionLabel::new("EMAIL_ADDRESS")
+                    && detection.location
+                        == DetectionLocation::TableCell {
+                            row: 2,
+                            column: 3,
+                            start: email,
+                            end: email + "zoë.keller@example.com".len(),
+                        }
+                    && detection.value == "zoë.keller@example.com"
+            }),
+            "{detections:?}"
+        );
+    }
+
+    /// Ink extents of the email and the phone number in `test-fixtures/media/form-example.png`,
+    /// measured from the pixels: `(info type, [x1, y1, x2, y2])`.
+    const FORM_IMAGE_INK: [(&str, [f32; 4]); 2] = [
+        ("EMAIL_ADDRESS", [310.0, 195.0, 620.0, 218.0]),
+        ("PHONE_NUMBER", [313.0, 265.0, 538.0, 286.0]),
+    ];
+
+    /// DLP boxes words with padding and splits a value over several boxes, so the boxes of a
+    /// value are joined, and the join must contain the ink and stay within a word's padding of it.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn detect_image_boxes_cover_the_values_printed_on_the_form() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let input = crate::redacters::test_support::test_image_item();
+
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
+
+        let (horizontal_padding, vertical_padding) = (50.0_f32, 15.0_f32);
+        for (info_type, [ink_x1, ink_y1, ink_x2, ink_y2]) in FORM_IMAGE_INK {
+            let joined = detections
+                .iter()
+                .filter(|detection| detection.label == DetectionLabel::new(info_type))
+                .filter_map(|detection| match detection.location {
+                    DetectionLocation::Image { x1, y1, x2, y2, .. }
+                        if x1 < ink_x2 && x2 > ink_x1 && y1 < ink_y2 && y2 > ink_y1 =>
+                    {
+                        Some([x1, y1, x2, y2])
+                    }
+                    _ => None,
+                })
+                .reduce(|a, b| {
+                    [
+                        a[0].min(b[0]),
+                        a[1].min(b[1]),
+                        a[2].max(b[2]),
+                        a[3].max(b[3]),
+                    ]
+                })
+                .unwrap_or_else(|| panic!("no {info_type} box on the ink: {detections:?}"));
+            assert!(
+                joined[0] <= ink_x1
+                    && joined[1] <= ink_y1
+                    && joined[2] >= ink_x2
+                    && joined[3] >= ink_y2,
+                "{info_type} boxes {joined:?} miss the ink {:?}",
+                [ink_x1, ink_y1, ink_x2, ink_y2]
+            );
+            assert!(
+                ink_x1 - joined[0] <= horizontal_padding
+                    && joined[2] - ink_x2 <= horizontal_padding
+                    && ink_y1 - joined[1] <= vertical_padding
+                    && joined[3] - ink_y2 <= vertical_padding,
+                "{info_type} boxes {joined:?} spill far past the ink {:?}",
+                [ink_x1, ink_y1, ink_x2, ink_y2]
+            );
+        }
     }
 }

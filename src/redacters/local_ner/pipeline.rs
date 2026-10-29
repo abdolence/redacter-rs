@@ -3,6 +3,7 @@
 
 use super::error::LocalNerError;
 use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::Score;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Tokens shared by two neighbouring windows.
@@ -309,24 +310,27 @@ pub fn collapse_words(
 #[derive(Clone, Debug, PartialEq)]
 pub struct NerOptions {
     pub entities: BTreeSet<Entity>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 /// Merges BIO-tagged words into findings. A word tagged `O`, of an unselected entity, or
 /// below the score floor closes the open span. `I-` continues the open span of the same
-/// entity when only whitespace separates them, otherwise it starts a new span.
+/// entity when only whitespace separates them, otherwise it starts a new span. A span is as
+/// certain as its least certain word.
 pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Finding> {
-    let mut spans: Vec<(Entity, usize, usize)> = Vec::new();
+    let mut spans: Vec<(Entity, usize, usize, Score)> = Vec::new();
     let mut open: Option<usize> = None;
     for word in words {
-        let selected =
-            |entity: Entity| options.entities.contains(&entity) && word.score >= options.min_score;
-        match word.tag {
-            Tag::Begin(entity) if selected(entity) => {
-                spans.push((entity, word.start, word.end));
+        // A NaN score is no probability and clears no floor.
+        let score = Score::try_from(word.score)
+            .ok()
+            .filter(|score| *score >= options.min_score);
+        match (word.tag, score) {
+            (Tag::Begin(entity), Some(score)) if options.entities.contains(&entity) => {
+                spans.push((entity, word.start, word.end, score));
                 open = Some(spans.len() - 1);
             }
-            Tag::Inside(entity) if selected(entity) => {
+            (Tag::Inside(entity), Some(score)) if options.entities.contains(&entity) => {
                 let continuing = open.filter(|index| {
                     spans.get(*index).is_some_and(|span| {
                         span.0 == entity
@@ -336,9 +340,14 @@ pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Find
                     })
                 });
                 match continuing.and_then(|index| spans.get_mut(index)) {
-                    Some(span) => span.2 = word.end,
+                    Some(span) => {
+                        span.2 = word.end;
+                        if score < span.3 {
+                            span.3 = score;
+                        }
+                    }
                     None => {
-                        spans.push((entity, word.start, word.end));
+                        spans.push((entity, word.start, word.end, score));
                         open = Some(spans.len() - 1);
                     }
                 }
@@ -348,10 +357,11 @@ pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Find
     }
     spans
         .into_iter()
-        .map(|(entity, start, end)| Finding {
+        .map(|(entity, start, end, score)| Finding {
             start,
             end,
             rule: RuleName::new(entity.as_str()),
+            score: Some(score),
         })
         .collect()
 }
@@ -463,7 +473,7 @@ mod tests {
     fn all_entities() -> NerOptions {
         NerOptions {
             entities: Entity::all(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         }
     }
 
@@ -825,12 +835,25 @@ mod tests {
         );
         let lenient = NerOptions {
             entities: Entity::all(),
-            min_score: 0.1,
+            min_score: Score::from_static(0.1),
         };
         assert_eq!(
             spans(text, &merge_spans(text, &words, &lenient)),
             vec![("per".to_string(), "Jean Claude Van Damme".to_string())]
         );
+    }
+
+    #[test]
+    fn a_merged_span_carries_the_score_of_its_least_certain_word() {
+        let text = "John Michael Smith";
+        let words = [
+            word(0, 4, Tag::Begin(Entity::Per), 0.99),
+            word(5, 12, Tag::Inside(Entity::Per), 0.6),
+            word(13, 18, Tag::Inside(Entity::Per), 0.9),
+        ];
+        let findings = merge_spans(text, &words, &all_entities());
+        assert_eq!(spans(text, &findings).len(), 1);
+        assert_eq!(findings[0].score, Some(Score::try_from(0.6).unwrap()));
     }
 
     #[test]
@@ -845,7 +868,7 @@ mod tests {
         ];
         let only_loc = NerOptions {
             entities: [Entity::Loc].into_iter().collect(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         };
         assert_eq!(
             spans(text, &merge_spans(text, &words, &only_loc)),

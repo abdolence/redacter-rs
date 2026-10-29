@@ -28,8 +28,6 @@ pub enum LocalGlinerError {
     NoLabels,
     #[error("local-gliner label is empty or all whitespace")]
     EmptyLabel,
-    #[error("local-gliner minimum score {value} is outside 0.0..=1.0")]
-    InvalidMinScore { value: f32 },
     #[error(
         "a label batch prompt of {prompt_tokens} tokens leaves no room for any text word within max_len {max_len}"
     )]

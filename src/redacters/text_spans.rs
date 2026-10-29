@@ -1,3 +1,4 @@
+use crate::redacters::detection::Score;
 use std::fmt::Display;
 
 pub const REDACTED: &str = "[REDACTED]";
@@ -23,11 +24,13 @@ impl Display for RuleName {
 }
 
 /// A byte range of the input text matched by one rule. `start..end` is half-open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Finding {
     pub start: usize,
     pub end: usize,
     pub rule: RuleName,
+    /// The model's confidence in the span; `None` for regex and dictionary rules.
+    pub score: Option<Score>,
 }
 
 /// Sorts findings by start and drops any finding that overlaps an earlier kept one. On the
@@ -68,6 +71,7 @@ mod tests {
             start,
             end,
             rule: RuleName::new(rule),
+            score: None,
         }
     }
 

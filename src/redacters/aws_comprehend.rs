@@ -2,11 +2,13 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_config::Region;
+use aws_sdk_comprehend::types::PiiEntity;
 
 #[derive(Debug, Clone)]
 pub struct AwsComprehendRedacterOptions {
@@ -42,37 +44,65 @@ impl<'a> AwsComprehendRedacter<'a> {
             }),
         }?;
 
-        let aws_request = self
-            .client
-            .detect_pii_entities()
-            .language_code(aws_sdk_comprehend::types::LanguageCode::En)
-            .text(text_content.clone());
-
-        let result = aws_request.send().await?;
-        let redacted_content = result.entities.iter().fold(text_content, |acc, entity| {
-            entity.iter().fold(acc, |acc, entity| {
-                match (entity.begin_offset, entity.end_offset) {
-                    (Some(start), Some(end)) => [
-                        acc[..start as usize].to_string(),
-                        "X".repeat((end - start) as usize),
-                        acc[end as usize..].to_string(),
-                    ]
-                    .concat(),
-                    (Some(start), None) => {
-                        acc[..start as usize].to_string()
-                            + "X".repeat(acc.len() - start as usize).as_str()
-                    }
-                    (None, Some(end)) => {
-                        ["X".repeat(end as usize), acc[end as usize..].to_string()].concat()
-                    }
-                    _ => acc,
-                }
-            })
-        });
+        let redacted_content =
+            mask_detections(&text_content, &self.detect_text(&text_content).await?);
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Value(redacted_content),
         })
+    }
+}
+
+impl<'a> AwsComprehendRedacter<'a> {
+    /// Turns the entities Comprehend found in `text` into detections, converting its
+    /// character offsets to byte offsets.
+    fn detections_in(text: &str, entities: &[PiiEntity]) -> AppResult<Vec<Detection>> {
+        let offsets = CharOffsets::new(text);
+        let lines = TextLines::new(text);
+        entities
+            .iter()
+            .map(|entity| {
+                let (Some(begin), Some(end), Some(entity_type)) =
+                    (entity.begin_offset, entity.end_offset, entity.r#type())
+                else {
+                    return Err(AppError::SystemError {
+                        message: format!(
+                            "AWS Comprehend returned a PII entity without a type or offsets: \
+                             {entity:?}"
+                        ),
+                    });
+                };
+                let (start, end) = match (usize::try_from(begin), usize::try_from(end)) {
+                    (Ok(start), Ok(end)) => (start, end),
+                    _ => {
+                        return Err(AppError::SystemError {
+                            message: format!(
+                                "AWS Comprehend returned the invalid offsets {begin}..{end}"
+                            ),
+                        })
+                    }
+                };
+                let range = offsets
+                    .byte_range(start, end)
+                    .ok_or(AppError::DetectionOutsideContent { start, end })?;
+                lines.detection(
+                    range,
+                    DetectionLabel::new(entity_type.as_str()),
+                    entity.score.map(Score::try_from).transpose()?,
+                )
+            })
+            .collect()
+    }
+
+    async fn detect_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+        let result = self
+            .client
+            .detect_pii_entities()
+            .language_code(aws_sdk_comprehend::types::LanguageCode::En)
+            .text(text)
+            .send()
+            .await?;
+        Self::detections_in(text, result.entities())
     }
 }
 
@@ -82,9 +112,7 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
-            | RedacterDataItemContent::Pdf { .. } => Err(AppError::SystemError {
-                message: "Attempt to redact of unsupported type".to_string(),
-            }),
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 
@@ -95,16 +123,104 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
         })
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => {
+                self.detect_text(text).await.map(Detections::from)
+            }
+            RedacterDataItemContent::Table { .. }
+            | RedacterDataItemContent::Image { .. }
+            | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::AwsComprehend
     }
 }
 
-#[allow(unused_imports)]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::RedacterProviderOptions;
+    use crate::redacters::DetectionLocation;
+    use aws_sdk_comprehend::types::PiiEntityType;
     use console::Term;
+
+    fn entity(
+        entity_type: PiiEntityType,
+        score: f32,
+        begin_offset: i32,
+        end_offset: i32,
+    ) -> PiiEntity {
+        PiiEntity::builder()
+            .r#type(entity_type)
+            .score(score)
+            .begin_offset(begin_offset)
+            .end_offset(end_offset)
+            .build()
+    }
+
+    fn score(value: f32) -> Option<Score> {
+        Some(Score::try_from(value).unwrap())
+    }
+
+    #[test]
+    fn entities_keep_type_and_score_and_get_byte_ranges_from_character_offsets() {
+        let text = "Grüße, Zoë Keller: zoe@example.com";
+        let name_chars = (7, 17);
+        let email_chars = (19, 34);
+        assert_eq!(text.chars().count(), email_chars.1 as usize);
+        assert!(text.len() > text.chars().count());
+
+        let detections = AwsComprehendRedacter::detections_in(
+            text,
+            &[
+                entity(PiiEntityType::Name, 0.99, name_chars.0, name_chars.1),
+                entity(PiiEntityType::Email, 0.97, email_chars.0, email_chars.1),
+            ],
+        )
+        .unwrap();
+
+        let name = text.find("Zoë Keller").unwrap();
+        let email = text.find("zoe@example.com").unwrap();
+        assert_eq!(
+            detections,
+            vec![
+                Detection {
+                    label: DetectionLabel::new("NAME"),
+                    location: DetectionLocation::Text {
+                        start: name,
+                        end: name + "Zoë Keller".len(),
+                        line: 1,
+                        column: 8,
+                    },
+                    score: score(0.99),
+                    value: "Zoë Keller".to_string(),
+                },
+                Detection {
+                    label: DetectionLabel::new("EMAIL"),
+                    location: DetectionLocation::Text {
+                        start: email,
+                        end: email + "zoe@example.com".len(),
+                        line: 1,
+                        column: 20,
+                    },
+                    score: score(0.97),
+                    value: "zoe@example.com".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_entity_without_offsets_is_an_error_rather_than_dropped() {
+        let without_end = PiiEntity::builder()
+            .r#type(PiiEntityType::Name)
+            .score(0.9)
+            .begin_offset(0)
+            .build();
+        assert!(AwsComprehendRedacter::detections_in("Zoë", &[without_end]).is_err());
+    }
 
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-aws"), ignore)]
@@ -140,5 +256,49 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn detect_text_finds_values_at_their_byte_offsets() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let text = "Grüße aus Köln, Zoë Keller schreibt an zoe.keller@example.com";
+        let input = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        };
+        let redacter = AwsComprehendRedacter::new(
+            AwsComprehendRedacterOptions {
+                region: Some(Region::new(test_aws_region)),
+            },
+            &reporter,
+        )
+        .await
+        .unwrap();
+
+        let detections = redacter.detect(&input).await.unwrap().found;
+
+        let email = text.find("zoe.keller@example.com").unwrap();
+        assert!(
+            detections.iter().any(|detection| {
+                detection.label == DetectionLabel::new("EMAIL")
+                    && detection.location
+                        == DetectionLocation::Text {
+                            start: email,
+                            end: email + "zoe.keller@example.com".len(),
+                            line: 1,
+                            column: text[..email].chars().count() + 1,
+                        }
+                    && detection.value == "zoe.keller@example.com"
+                    && detection.score.is_some()
+            }),
+            "{detections:?}"
+        );
     }
 }

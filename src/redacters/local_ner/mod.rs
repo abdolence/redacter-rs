@@ -10,11 +10,12 @@ pub use pipeline::Entity;
 
 use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
+use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -27,17 +28,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalNerRedacterOptions {
     pub entities: BTreeSet<Entity>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 impl LocalNerRedacterOptions {
     /// Rejects an empty entity list and a score outside `0.0..=1.0` (NaN included).
-    pub fn validated(entities: BTreeSet<Entity>, min_score: f32) -> Result<Self, LocalNerError> {
+    pub fn validated(entities: BTreeSet<Entity>, min_score: Score) -> Result<Self, LocalNerError> {
         if entities.is_empty() {
             return Err(LocalNerError::NoEntities);
-        }
-        if !(0.0..=1.0).contains(&min_score) {
-            return Err(LocalNerError::InvalidMinScore { value: min_score });
         }
         Ok(Self {
             entities,
@@ -46,16 +44,40 @@ impl LocalNerRedacterOptions {
     }
 }
 
-/// Redacts every table cell that could hold a name, leaving the rest byte for byte. The
-/// predicate is "holds no letter", not "is a number": a name needs letters, so a cell without
-/// one cannot hold a name and never reaches the model, which would cost a tokenizer pass and
-/// a forward pass to find nothing.
+/// The findings in one table cell, with offsets into the cell. A cell without a letter cannot
+/// hold a name and never reaches the model: the predicate is "holds no letter", not "is a
+/// number", and the model would cost a tokenizer pass and a forward pass to find nothing.
 ///
-/// Each cell is scored with its column header in front of it, `"city: Madrid"` rather than
+/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a one-word cell gives the model no sentence, and it tags a bare city as `O` at
-/// every score floor. The prefix is scoring context only. Findings are mapped back onto the
-/// cell by `shift_into_cell` and the redaction is applied to the original cell text, so no
-/// header text can reach the output.
+/// every score floor. The prefix is scoring context only: `shift_into_cell` maps the findings
+/// back onto the cell, so no header text can reach a redacted cell or a detection.
+fn find_in_cell<F>(
+    headers: &[String],
+    column: usize,
+    cell: &str,
+    find_in: &mut F,
+) -> Result<Vec<Finding>, LocalNerError>
+where
+    F: FnMut(&str) -> Result<Vec<Finding>, LocalNerError>,
+{
+    if !cell.chars().any(char::is_alphabetic) {
+        return Ok(Vec::new());
+    }
+    // A row wider than the header list, or an empty header, leaves the cell alone.
+    let prefix = match headers.get(column) {
+        Some(header) if !header.is_empty() => format!("{header}: "),
+        _ => String::new(),
+    };
+    let scored = if prefix.is_empty() {
+        find_in(cell)?
+    } else {
+        find_in(&format!("{prefix}{cell}"))?
+    };
+    Ok(shift_into_cell(scored, prefix.len()))
+}
+
+/// Redacts every table cell that could hold a name, leaving the rest byte for byte.
 fn redact_rows<F>(
     headers: &[String],
     rows: Vec<Vec<String>>,
@@ -69,21 +91,11 @@ where
     for row in rows {
         let mut redacted_row = Vec::with_capacity(row.len());
         for (column, cell) in row.into_iter().enumerate() {
-            if !cell.chars().any(char::is_alphabetic) {
+            let in_cell = find_in_cell(headers, column, &cell, &mut find_in)?;
+            if in_cell.is_empty() {
                 redacted_row.push(cell);
                 continue;
             }
-            // A row wider than the header list, or an empty header, leaves the cell alone.
-            let prefix = match headers.get(column) {
-                Some(header) if !header.is_empty() => format!("{header}: "),
-                _ => String::new(),
-            };
-            let scored = if prefix.is_empty() {
-                find_in(&cell)?
-            } else {
-                find_in(&format!("{prefix}{cell}"))?
-            };
-            let in_cell = shift_into_cell(scored, prefix.len());
             findings += in_cell.len();
             redacted_row.push(apply_redaction(&cell, &in_cell, REDACTED));
         }
@@ -143,7 +155,7 @@ impl<'a> LocalNerRedacter<'a> {
     async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
     where
         T: Send + 'static,
-        F: FnOnce(&NerEngine, &NerOptions) -> Result<T, LocalNerError> + Send + 'static,
+        F: FnOnce(&NerEngine, &NerOptions) -> AppResult<T> + Send + 'static,
     {
         let engine = Arc::clone(&self.engine);
         let options = self.options.clone();
@@ -152,7 +164,7 @@ impl<'a> LocalNerRedacter<'a> {
             .map_err(|err| LocalNerError::InferenceTask {
                 reason: err.to_string(),
             })?;
-        Ok(result?)
+        result
     }
 }
 
@@ -179,7 +191,7 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
                 (RedacterDataItemContent::Table { headers, rows }, findings)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(unsupported_type_error())
+                return Err(AppError::unsupported_content())
             }
         };
         if findings > 0 {
@@ -199,6 +211,32 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => {
+                let text = text.clone();
+                self.run_blocking(move |engine, options| {
+                    Detection::in_text(&text, engine.find(&text, options)?)
+                })
+                .await
+            }
+            RedacterDataItemContent::Table { headers, rows } => {
+                let (headers, rows) = (headers.clone(), rows.clone());
+                self.run_blocking(move |engine, options| {
+                    Detection::in_table_cells(&rows, |column, cell| {
+                        find_in_cell(&headers, column, cell, &mut |text| {
+                            engine.find(text, options)
+                        })
+                    })
+                })
+                .await
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::unsupported_content())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalNer
     }
@@ -210,27 +248,15 @@ mod tests {
     use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
     use crate::redacters::text_spans::RuleName;
+    use crate::redacters::{DetectionLabel, DetectionLocation};
     use console::Term;
     use mime::Mime;
 
     #[test]
-    fn options_default_to_every_entity_and_reject_bad_values() {
-        let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
-        assert_eq!(options.entities, Entity::all());
-        assert_eq!(options.min_score, 0.5);
-        assert!(
-            LocalNerRedacterOptions::validated([Entity::Per].into_iter().collect(), 0.0).is_ok()
-        );
-        assert!(LocalNerRedacterOptions::validated(Entity::all(), 1.0).is_ok());
-        let err = LocalNerRedacterOptions::validated(BTreeSet::new(), 0.5).unwrap_err();
+    fn options_reject_an_empty_entity_set() {
+        let err = LocalNerRedacterOptions::validated(BTreeSet::new(), Score::from_static(0.5))
+            .unwrap_err();
         assert!(matches!(err, LocalNerError::NoEntities), "{err}");
-        for bad in [-0.1_f32, 1.5, f32::NAN] {
-            let err = LocalNerRedacterOptions::validated(Entity::all(), bad).unwrap_err();
-            assert!(
-                matches!(err, LocalNerError::InvalidMinScore { .. }),
-                "{bad}: {err}"
-            );
-        }
     }
 
     /// The redacter answers `redact_support` with the shared text/table rule, so the media
@@ -263,6 +289,7 @@ mod tests {
             start,
             end,
             rule: RuleName::new("loc"),
+            score: None,
         }
     }
 
@@ -384,6 +411,42 @@ mod tests {
         assert_eq!(findings, 1);
     }
 
+    /// A detection is placed by the cell's own offsets, never by its offsets in the
+    /// header-prefixed text the model scored.
+    #[test]
+    fn a_table_detection_is_placed_in_its_cell() {
+        let headers = vec!["id".to_string(), "city".to_string()];
+        let rows = vec![
+            vec!["1".to_string(), "Madrid".to_string()],
+            vec!["2".to_string(), "Rainy".to_string()],
+        ];
+        let detections = Detection::in_table_cells(&rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                Ok(if text == "city: Madrid" {
+                    vec![finding(6, 12)]
+                } else {
+                    Vec::new()
+                })
+            })
+        })
+        .unwrap()
+        .found;
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("loc"),
+                location: DetectionLocation::TableCell {
+                    row: 1,
+                    column: 2,
+                    start: 0,
+                    end: 6
+                },
+                score: None,
+                value: "Madrid".to_string(),
+            }]
+        );
+    }
+
     /// Without a header there is nothing to prefix with, and the cell is scored alone.
     #[test]
     fn a_cell_with_no_header_is_scored_on_its_own() {
@@ -406,7 +469,8 @@ mod tests {
     /// downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalNerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());
-        let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
+        let options =
+            LocalNerRedacterOptions::validated(Entity::all(), Score::from_static(0.5)).unwrap();
         LocalNerRedacter::new(options, reporter, &store)
             .await
             .unwrap()
@@ -466,6 +530,40 @@ mod tests {
         };
         serde_json::from_str::<serde_json::Value>(&out).unwrap();
         assert!(!out.contains("John Michael Smith"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
+    async fn detects_the_names_in_the_text_fixture_with_their_scores() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter).await;
+        let text =
+            std::fs::read_to_string(format!("{TEST_DOCUMENTS_DIR}customer-note.txt")).unwrap();
+        let detections = redacter
+            .detect(&item(
+                "customer-note.txt",
+                mime::TEXT_PLAIN,
+                RedacterDataItemContent::Value(text.clone()),
+            ))
+            .await
+            .unwrap()
+            .found;
+        let person = detections
+            .iter()
+            .find(|detection| detection.value == "John Michael Smith")
+            .unwrap_or_else(|| panic!("no person among {detections:?}"));
+        assert_eq!(person.label, DetectionLabel::new("per"));
+        assert!(
+            person
+                .score
+                .is_some_and(|score| score >= Score::from_static(0.5)),
+            "{person:?}"
+        );
+        let DetectionLocation::Text { start, end, .. } = person.location else {
+            panic!("a text item yields text locations: {person:?}");
+        };
+        assert_eq!(&text[start..end], "John Michael Smith");
     }
 
     /// Probed against this exact model, a bare `"Madrid"`, `"Paris"`, `"London"` or

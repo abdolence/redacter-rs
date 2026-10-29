@@ -254,6 +254,7 @@ mod tests {
     use super::*;
     use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
     use crate::redacters::local_ner::pipeline::{Entity, Tag};
+    use crate::redacters::Score;
 
     const REAL_CONFIG: &str = r#"{
   "id2label": {"0": "O", "1": "B-DATE", "2": "I-DATE", "3": "B-PER", "4": "I-PER",
@@ -425,7 +426,7 @@ mod tests {
     fn all_entities() -> NerOptions {
         NerOptions {
             entities: Entity::all(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         }
     }
 

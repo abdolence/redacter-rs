@@ -1,3 +1,5 @@
+use crate::args::RedacterType;
+use crate::redacters::ModelStop;
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
 use indicatif::style::TemplateError;
 use std::time::SystemTimeError;
@@ -63,6 +65,24 @@ pub enum AppError {
     #[cfg(feature = "local-gliner")]
     #[error("Local GLiNER error: {0}")]
     LocalGlinerError(#[from] crate::redacters::local_gliner::LocalGlinerError),
+    /// Carries the position only: a serde error names the value it could not read, and the
+    /// answer is made of the scanned content.
+    #[error("A model's answer is not the expected JSON (line {line}, column {column})")]
+    UnreadableModelAnswer { line: usize, column: usize },
+    /// Names the provider's finish reason and blocked categories, never the content.
+    #[error("The model did not complete its answer: {0}")]
+    ModelAnswerStopped(ModelStop),
+    #[error("The model's answer is empty")]
+    EmptyModelAnswer,
+    #[error("{redacter_type} returned a result without {missing}")]
+    IncompleteResult {
+        redacter_type: RedacterType,
+        missing: &'static str,
+    },
+    #[error("A detection at {start}..{end} is outside the content it was given")]
+    DetectionOutsideContent { start: usize, end: usize },
+    #[error("Score must be a number between 0 and 1, got `{value}`")]
+    InvalidScore { value: String },
     #[error("System error: {message}")]
     SystemError { message: String },
     #[error("System error: {message}")]
@@ -70,6 +90,23 @@ pub enum AppError {
         message: String,
         cause: Box<dyn std::fmt::Debug + Send + Sync + 'static>,
     },
+}
+
+impl AppError {
+    /// A redacter was handed content of a type it does not support: `redact_support` said no
+    /// and the caller ignored it.
+    pub fn unsupported_content() -> Self {
+        Self::SystemError {
+            message: "The redacter does not support this type of content".to_string(),
+        }
+    }
+
+    pub fn incomplete_result(redacter_type: RedacterType, missing: &'static str) -> Self {
+        Self::IncompleteResult {
+            redacter_type,
+            missing,
+        }
+    }
 }
 
 impl<

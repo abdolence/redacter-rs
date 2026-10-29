@@ -7,7 +7,7 @@ use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
-    RedacterProviderOptions, RuleGroup, UserRule,
+    RedacterProviderOptions, RuleGroup, Score, UserRule,
 };
 #[cfg(feature = "local-ner")]
 use crate::redacters::{Entity, LocalNerRedacterOptions};
@@ -84,11 +84,62 @@ pub enum CliCommand {
         #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
         mime_override: Vec<(mime::Mime, globset::Glob)>,
 
+        #[command(flatten)]
+        report: ReportArgs,
+    },
+    #[command(
+        about = "Scan files for sensitive data and report what was found and where, without changing them. Exits with 0 when nothing is found, 2 when something is, 1 on errors",
+        mut_arg("redact", |arg| arg.required(true))
+    )]
+    Scan {
+        #[arg(
+            help = "Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
+        )]
+        source: String,
+
+        #[arg(short = 'm', long, help = "Maximum size of files to scan in bytes")]
+        max_size_limit: Option<usize>,
+
+        #[arg(
+            short = 'n',
+            long,
+            help = "Maximum number of files to scan. Sort order is not guaranteed and depends on the provider"
+        )]
+        max_files_limit: Option<usize>,
+
+        #[arg(
+            short = 'f',
+            long,
+            help = "Filter by name using glob patterns such as *.txt"
+        )]
+        filename_filter: Option<globset::Glob>,
+
+        #[command(flatten)]
+        redacter_args: RedacterArgs,
+
+        #[arg(long, help = "Override media type detection using glob patterns such as 'text/plain=*.md'", value_parser = CliCommand::parse_key_val::<mime::Mime, globset::Glob>)]
+        mime_override: Vec<(mime::Mime, globset::Glob)>,
+
+        #[command(flatten)]
+        report: ReportArgs,
+
         #[arg(
             long,
-            help = "Save redacted results in JSON format to the specified file"
+            help = "Show the matched values in the output and the report. They are masked by default"
         )]
-        save_json_results: Option<PathBuf>,
+        show_values: bool,
+
+        #[arg(
+            long,
+            help = "Drop findings whose score is below this value, between 0 and 1. Findings without a score are kept"
+        )]
+        min_score: Option<Score>,
+
+        #[arg(
+            long,
+            help = "Exit with 0 when findings are reported. Errors still exit with 1"
+        )]
+        no_fail: bool,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -130,6 +181,28 @@ pub enum AddonsCommand {
     Ls,
 }
 
+/// Where `cp` and `scan` write their report. The terminal shows the usual output either way.
+#[derive(Args, Debug, Clone)]
+pub struct ReportArgs {
+    #[arg(long, help = "Write the report to this file")]
+    pub report_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "json",
+        requires = "report_file",
+        help = "Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'"
+    )]
+    pub report_format: ReportFormat,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportFormat {
+    Json,
+    Text,
+}
+
 impl CliCommand {
     fn parse_key_val<T, U>(
         s: &str,
@@ -147,7 +220,8 @@ impl CliCommand {
     }
 }
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RedacterType {
     GcpDlp,
     AwsComprehend,
@@ -213,6 +287,12 @@ pub struct RedacterArgs {
         default_value = "false"
     )]
     pub allow_unsupported_copies: bool,
+
+    #[arg(
+        long,
+        help = "Read files of a type no redacter supports, such as .env files, keys and source code, as text when they are valid UTF-8 without NUL bytes"
+    )]
+    pub unsupported_as_text: bool,
 
     #[arg(
         long,
@@ -378,10 +458,10 @@ pub struct RedacterArgs {
     #[cfg(feature = "local-ner")]
     #[arg(
         long,
-        default_value_t = 0.5,
+        default_value = "0.5",
         help = "Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
-    pub local_ner_min_score: f32,
+    pub local_ner_min_score: Score,
 
     #[cfg(feature = "local-gliner")]
     #[arg(
@@ -394,10 +474,10 @@ pub struct RedacterArgs {
     #[cfg(feature = "local-gliner")]
     #[arg(
         long,
-        default_value_t = 0.5,
+        default_value = "0.5",
         help = "Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
-    pub local_gliner_min_score: f32,
+    pub local_gliner_min_score: Score,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -579,6 +659,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
 
         let base_options = RedacterBaseOptions {
             allow_unsupported_copies: self.allow_unsupported_copies,
+            unsupported_as_text: self.unsupported_as_text,
             csv_headers_disable: self.csv_headers_disable,
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
@@ -651,6 +732,21 @@ mod tests {
     #[test]
     fn addons_dir_is_none_without_either() {
         assert_eq!(resolve_addons_dir(None, None), None);
+    }
+
+    mod scan {
+        use super::*;
+        use clap::error::ErrorKind;
+
+        fn parse(args: &[&str]) -> Result<CliArgs, clap::Error> {
+            CliArgs::try_parse_from([&["redacter", "scan", "test-fixtures"], args].concat())
+        }
+
+        #[test]
+        fn scan_needs_at_least_one_redacter() {
+            let err = parse(&[]).expect_err("a scan without -d must fail");
+            assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        }
     }
 
     #[test]
@@ -795,7 +891,7 @@ mod tests {
         fn defaults_to_every_entity_at_half_score() {
             let options = local_ner_options(&[]).unwrap();
             assert_eq!(options.entities, Entity::all());
-            assert_eq!(options.min_score, 0.5);
+            assert_eq!(options.min_score, Score::from_static(0.5));
         }
 
         #[test]
@@ -811,7 +907,7 @@ mod tests {
                 options.entities.into_iter().collect::<Vec<_>>(),
                 vec![Entity::Per, Entity::Loc]
             );
-            assert_eq!(options.min_score, 0.3);
+            assert_eq!(options.min_score, Score::from_static(0.3));
         }
 
         #[test]
@@ -826,13 +922,6 @@ mod tests {
             .err()
             .expect("unknown entity must fail");
             assert!(err.to_string().contains("person"), "{err}");
-        }
-
-        #[test]
-        fn score_outside_the_unit_range_is_a_config_error() {
-            let err = local_ner_options(&["--local-ner-min-score", "1.5"]).unwrap_err();
-            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
-            assert!(err.to_string().contains("1.5"), "{err}");
         }
     }
 
@@ -856,7 +945,7 @@ mod tests {
         fn defaults_to_the_pii_label_list_at_half_score() {
             let options = local_gliner_options(&[]).unwrap();
             assert_eq!(options.labels, default_labels());
-            assert_eq!(options.min_score, 0.5);
+            assert_eq!(options.min_score, Score::from_static(0.5));
         }
 
         #[test]
@@ -872,14 +961,7 @@ mod tests {
                 options.labels,
                 vec!["person".to_string(), "medical condition".to_string()]
             );
-            assert_eq!(options.min_score, 0.3);
-        }
-
-        #[test]
-        fn score_outside_the_unit_range_is_a_config_error() {
-            let err = local_gliner_options(&["--local-gliner-min-score", "1.5"]).unwrap_err();
-            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
-            assert!(err.to_string().contains("1.5"), "{err}");
+            assert_eq!(options.min_score, Score::from_static(0.3));
         }
 
         #[test]

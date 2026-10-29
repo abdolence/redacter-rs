@@ -254,6 +254,7 @@ impl RuleSet {
                     start: matched.start(),
                     end: matched.end(),
                     rule: rule.name.clone(),
+                    score: None,
                 });
             }
         }
@@ -793,7 +794,9 @@ mod reference {
              a few characters of a context word such as `passport` or `NIF`. A synthetic example \
              is made up for the tests, with check digits computed from the published formula; a \
              published example is a real worked value from the cited public specification or \
-             vendor documentation. Generated from the rule table by \
+             vendor documentation. `redacter scan -d local-rules` reports the same matches \
+             instead of redacting them, labelled with the rule name from the first column of \
+             the tables below. Generated from the rule table by \
              `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n",
         );
         out.push_str("| Group | Rules | Purpose |\n|---|---|---|\n");

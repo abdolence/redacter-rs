@@ -3,7 +3,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::tonic;
 use mime::Mime;
@@ -47,8 +47,17 @@ pub use local_gliner::{LocalGlinerRedacter, LocalGlinerRedacterOptions};
 /// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`).
 pub(crate) mod text_spans;
 
+mod detection;
+pub use detection::*;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
+
+mod llm_detection;
+pub use llm_detection::*;
+
+mod model_answer;
+pub use model_answer::*;
 
 mod ocr_alignment;
 pub use ocr_alignment::*;
@@ -68,16 +77,38 @@ use crate::common_types::{DlpRequestLimit, TextImageCoords};
 pub const LLM_MAX_IMAGE_DIMENSION: u32 = 1024;
 
 /// Formats a Bedrock SDK failure, keeping the service error code and message when the call
-/// reached the service and the whole source chain when it did not.
-pub(crate) fn bedrock_error<E, R>(context: &str, err: &SdkError<E, R>) -> AppError
+/// reached the service. Without a code the message names only the kind of failure and the
+/// HTTP status: the debug form of an SDK error holds the raw response and so can echo the
+/// scanned content, and the message reaches reports. The `Display` chain of the error goes to
+/// the debug log.
+pub(crate) fn bedrock_error<E>(context: &str, err: &SdkError<E>) -> AppError
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
-    R: std::fmt::Debug,
 {
     let message = match (err.code(), err.message()) {
         (Some(code), Some(message)) => format!("{context}: {code}: {message}"),
         (Some(code), None) => format!("{context}: {code}"),
-        (None, _) => format!("{context}: {}", DisplayErrorContext(err)),
+        (None, _) => {
+            let chain: Vec<String> =
+                std::iter::successors(Some(err as &(dyn std::error::Error + 'static)), |source| {
+                    source.source()
+                })
+                .map(ToString::to_string)
+                .collect();
+            tracing::debug!(chain = %chain.join(": "), "Bedrock call failed");
+            let kind = match err {
+                SdkError::ConstructionFailure(_) => "the request could not be built",
+                SdkError::TimeoutError(_) => "the request timed out",
+                SdkError::DispatchFailure(_) => "the request could not be sent",
+                SdkError::ResponseError(_) => "the response could not be read",
+                SdkError::ServiceError(_) => "the service returned an error",
+                _ => "the call failed",
+            };
+            match err.raw_response() {
+                Some(response) => format!("{context}: {kind} (HTTP {})", response.status()),
+                None => format!("{context}: {kind}"),
+            }
+        }
     };
     AppError::AwsBedrockError { message }
 }
@@ -204,6 +235,51 @@ pub struct PreparedImage {
     pub data: bytes::Bytes,
     pub width: u32,
     pub height: u32,
+    /// Size of the image before it was scaled down, which is the size detections report in.
+    pub original_width: u32,
+    pub original_height: u32,
+}
+
+/// The kind of a box in an image whose text no text detection classified: the coordinate pass
+/// locates text a model takes for sensitive data, and does not classify it.
+const IMAGE_DETECTION_LABEL: &str = "sensitive_data";
+
+/// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
+#[derive(Debug, Clone)]
+pub struct ImageBoxes {
+    pub image: PreparedImage,
+    pub coords: Vec<TextImageCoords>,
+}
+
+impl ImageBoxes {
+    /// The boxes as detections in pixels of the image as it was given, clamped to the image
+    /// and ordered. The value is the text the model read, empty when it gave none.
+    pub fn into_detections(self) -> Vec<Detection> {
+        let image = self.image;
+        let scale_x = image.original_width as f32 / image.width as f32;
+        let scale_y = image.original_height as f32 / image.height as f32;
+        let to_x = |x: f32| x.clamp(0.0, image.width as f32) * scale_x;
+        let to_y = |y: f32| y.clamp(0.0, image.height as f32) * scale_y;
+        self.coords
+            .into_iter()
+            .map(|coords| {
+                let (x1, x2) = (to_x(coords.x1), to_x(coords.x2));
+                let (y1, y2) = (to_y(coords.y1), to_y(coords.y2));
+                Detection {
+                    label: DetectionLabel::new(IMAGE_DETECTION_LABEL),
+                    location: DetectionLocation::Image {
+                        page: None,
+                        x1: x1.min(x2),
+                        y1: y1.min(y2),
+                        x2: x1.max(x2),
+                        y2: y1.max(y2),
+                    },
+                    score: None,
+                    value: coords.text.unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
 }
 
 /// Decodes, scales down and re-encodes an image so it fits the model input limits.
@@ -225,6 +301,8 @@ pub fn prepare_image_for_llm(mime_type: &Mime, data: &bytes::Bytes) -> AppResult
         data: encoded.into_inner().into(),
         width: resized.width(),
         height: resized.height(),
+        original_width: image.width(),
+        original_height: image.height(),
     })
 }
 
@@ -247,6 +325,28 @@ pub const GEMINI_COORDS_REDACTION_PROMPT: &str =
 pub struct NormalizedPiiBox {
     pub box_2d: Vec<f32>,
     pub text: Option<String>,
+}
+
+impl NormalizedPiiBox {
+    /// The pixel boxes of a model's JSON answer, for an image of `width` by `height` as the
+    /// model saw it. A box without four numbers is left out; an answer that is not a JSON
+    /// array of boxes is an error, since reading it as "no boxes" would report a clean image.
+    pub fn coords_from_answer(
+        answer: &str,
+        width: u32,
+        height: u32,
+    ) -> AppResult<Vec<TextImageCoords>> {
+        let boxes: Vec<Self> = parse_answer(answer)?;
+        Ok(boxes
+            .into_iter()
+            .filter_map(|found| {
+                let box_2d: [f32; 4] = found.box_2d.get(..4)?.try_into().ok()?;
+                Some(normalized_box_to_image_coords(
+                    box_2d, width, height, found.text,
+                ))
+            })
+            .collect())
+    }
 }
 
 /// Converts one Gemini-style normalized bounding box (`[ymin, xmin, ymax, xmax]`, each in
@@ -329,6 +429,12 @@ pub struct RedacterDataItem {
     pub file_ref: FileSystemRef,
 }
 
+impl RedacterDataItem {
+    fn is_blank_text(&self) -> bool {
+        matches!(&self.content, RedacterDataItemContent::Value(text) if text.trim().is_empty())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RedacterDataItemContent {
     Value(String),
@@ -371,6 +477,8 @@ pub struct RedacterOptions {
 #[derive(Debug, Clone)]
 pub struct RedacterBaseOptions {
     pub allow_unsupported_copies: bool,
+    /// Read a file whose type no redacter supports as text, when its content is text.
+    pub unsupported_as_text: bool,
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
@@ -528,24 +636,32 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
     }
 }
 
-/// Raised when a redacter that only handles strings is handed image or PDF bytes anyway:
-/// `redact_support` said no and the caller ignored it.
-pub(crate) fn unsupported_type_error() -> AppError {
-    AppError::SystemError {
-        message: "Attempt to redact of unsupported type".to_string(),
-    }
-}
-
 pub trait Redacter {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem>;
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport>;
 
+    /// Finds sensitive data in `input` without changing it. Every location points into
+    /// `input` itself: a text range for a text item, a cell for a table, a box for an image.
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections>;
+
+    /// Whether `detect` reads this file as it is. Unsupported images and PDF pages are read
+    /// with OCR when the redacter supports text.
+    async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
+        self.redact_support(file_ref).await
+    }
+
     fn redacter_type(&self) -> RedacterType;
 }
 
 impl<'a> Redacter for Redacters<'a> {
+    // Text with nothing in it never reaches the redacter, in `redact` or in `detect`: a model
+    // has nothing to answer for it and would make something up (written to the file by
+    // `redact`), and the DLP services reject empty content as an invalid request.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+        if input.is_blank_text() {
+            return Ok(input);
+        }
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
             Redacters::AwsComprehend(redacter) => redacter.redact(input).await,
@@ -578,6 +694,45 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.redact_support(file_ref).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.redact_support(file_ref).await,
+        }
+    }
+
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        if input.is_blank_text() {
+            return Ok(Detections::default());
+        }
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.detect(input).await,
+            Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
+            Redacters::MsPresidio(redacter) => redacter.detect(input).await,
+            Redacters::GeminiLlm(redacter) => redacter.detect(input).await,
+            Redacters::OpenAiLlm(redacter) => redacter.detect(input).await,
+            Redacters::GcpVertexAi(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrock(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect(input).await,
+            Redacters::LocalRules(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.detect(input).await,
+        }
+    }
+
+    async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsComprehend(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::MsPresidio(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::GeminiLlm(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::OpenAiLlm(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::GcpVertexAi(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsBedrock(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::LocalRules(redacter) => redacter.detect_support(file_ref).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.detect_support(file_ref).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.detect_support(file_ref).await,
         }
     }
 
@@ -698,6 +853,137 @@ pub mod test_support {
     }
 }
 
+/// Fixtures and assertions shared by the live `detect` tests of the LLM redacters.
+#[cfg(test)]
+pub mod live_detection {
+    use crate::redacters::test_support::test_image_item;
+    use crate::redacters::{
+        Detection, DetectionLocation, RedacterDataItem, RedacterDataItemContent,
+    };
+
+    pub const NOTE_FIXTURE: &str = "test-fixtures/documents/customer-note.txt";
+
+    /// Width the form fixture is enlarged to: not 1000, so a box scaled by the wrong factor
+    /// misses, and past the model input limit, so boxes must be mapped back to the original.
+    pub const FORM_WIDTH: u32 = 1500;
+
+    const FORM_FIXTURE_WIDTH: u32 = 1000;
+
+    /// Pixel boxes `[x1, y1, x2, y2]` of values in `form-example.png` at its own 1000 px
+    /// width, measured from the dark pixels of each field.
+    const FORM_VALUES: [(&str, [f32; 4], Option<&str>); 4] = [
+        (
+            "John Michael Smith",
+            [309.0, 125.0, 536.0, 147.0],
+            Some("name"),
+        ),
+        (
+            "john.smith@example.com",
+            [310.0, 195.0, 619.0, 217.0],
+            Some("email"),
+        ),
+        (
+            "+1 (555) 123-4567",
+            [313.0, 265.0, 537.0, 285.0],
+            Some("phone"),
+        ),
+        ("4111 1111 1111 1111", [311.0, 545.0, 574.0, 562.0], None),
+    ];
+
+    pub fn note_item() -> RedacterDataItem {
+        let text = std::fs::read_to_string(NOTE_FIXTURE).expect("the note fixture is committed");
+        RedacterDataItem {
+            file_ref: crate::file_systems::FileSystemRef {
+                relative_path: "customer-note.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text),
+        }
+    }
+
+    /// The form fixture enlarged to [`FORM_WIDTH`], with its height scaled alike.
+    pub fn enlarged_form_item() -> RedacterDataItem {
+        let mut item = test_image_item();
+        let RedacterDataItemContent::Image { data, .. } = &item.content else {
+            unreachable!("the fixture is an image");
+        };
+        let original = image::load_from_memory(data).expect("the fixture decodes");
+        let height = original.height() * FORM_WIDTH / original.width();
+        let enlarged =
+            original.resize_exact(FORM_WIDTH, height, image::imageops::FilterType::Lanczos3);
+        let mut png = std::io::Cursor::new(Vec::new());
+        enlarged
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("the image encodes");
+        item.content = RedacterDataItemContent::Image {
+            mime_type: mime::IMAGE_PNG,
+            data: png.into_inner().into(),
+        };
+        item
+    }
+
+    /// Asserts the note's name, email address and phone number are found at their own text
+    /// ranges under a label that names the kind of data.
+    pub fn assert_note_found(item: &RedacterDataItem, detections: &[Detection]) {
+        let RedacterDataItemContent::Value(text) = &item.content else {
+            panic!("the note is text");
+        };
+        for (value, label_word) in [
+            ("John Michael Smith", "name"),
+            ("john.smith@example.com", "email"),
+            ("+1 (555) 123-4567", "phone"),
+        ] {
+            let found = detections.iter().any(|detection| {
+                matches!(
+                    detection.location,
+                    DetectionLocation::Text { start, end, .. } if text.get(start..end) == Some(value)
+                ) && detection
+                    .label
+                    .to_string()
+                    .to_lowercase()
+                    .contains(label_word)
+            });
+            assert!(
+                found,
+                "{value} not found as *{label_word}* in {detections:?}"
+            );
+        }
+    }
+
+    /// Asserts a box covers most of each value's pixels in the enlarged form without being
+    /// much larger than it.
+    pub fn assert_form_found(detections: &[Detection]) {
+        let scale = FORM_WIDTH as f32 / FORM_FIXTURE_WIDTH as f32;
+        for (value, expected, label_word) in FORM_VALUES {
+            let expected = expected.map(|pixel| pixel * scale);
+            let found = detections.iter().any(|detection| {
+                matches!(
+                    detection.location,
+                    DetectionLocation::Image { x1, y1, x2, y2, .. }
+                        if covers([x1, y1, x2, y2], expected)
+                ) && label_word
+                    .is_none_or(|word| detection.label.to_string().to_lowercase().contains(word))
+            });
+            assert!(
+                found,
+                "no box covers {value} at {expected:?} under a label with {label_word:?} in {detections:?}"
+            );
+        }
+    }
+
+    fn covers(found: [f32; 4], expected: [f32; 4]) -> bool {
+        let area = |[x1, y1, x2, y2]: [f32; 4]| (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+        let overlap = area([
+            found[0].max(expected[0]),
+            found[1].max(expected[1]),
+            found[2].min(expected[2]),
+            found[3].min(expected[3]),
+        ]);
+        overlap >= 0.6 * area(expected) && area(found) <= 3.0 * area(expected)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,8 +1014,75 @@ mod tests {
         }
     }
 
+    fn blank_text_item() -> RedacterDataItem {
+        RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "blank.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(3),
+            },
+            content: RedacterDataItemContent::Value(" \n\t".to_string()),
+        }
+    }
+
+    /// The redacter's service is unreachable, so only a guard in front of it can succeed.
+    async fn redacter_with_unreachable_service<'a>(reporter: &'a AppReporter<'a>) -> Redacters<'a> {
+        let unreachable = url::Url::parse("http://127.0.0.1:1/analyze").unwrap();
+        Redacters::MsPresidio(
+            ms_presidio::MsPresidioRedacter::new(
+                ms_presidio::MsPresidioRedacterOptions {
+                    text_analyze_url: Some(unreachable),
+                    image_redact_url: None,
+                },
+                reporter,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn blank_text_has_no_detections_and_is_not_sent_to_the_service() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = redacter_with_unreachable_service(&reporter).await;
+        assert!(redacter
+            .detect(&blank_text_item())
+            .await
+            .unwrap()
+            .found
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn blank_text_is_redacted_to_itself_without_the_service() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = redacter_with_unreachable_service(&reporter).await;
+        let redacted = redacter.redact(blank_text_item()).await.unwrap();
+        assert!(matches!(
+            redacted.content,
+            RedacterDataItemContent::Value(text) if text == " \n\t"
+        ));
+    }
+
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {
         AppReporter::from(term)
+    }
+
+    #[test]
+    fn a_bedrock_failure_without_a_service_code_keeps_its_source_chain_out_of_the_message() {
+        use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+
+        let failure = SdkError::<ConverseError>::construction_failure("body: patient Jane Doe");
+
+        let AppError::AwsBedrockError { message } = bedrock_error("Failed to converse", &failure)
+        else {
+            panic!("a Bedrock failure is an AwsBedrockError");
+        };
+
+        assert!(message.starts_with("Failed to converse"), "{message}");
+        assert!(!message.contains("Jane Doe"), "{message}");
     }
 
     #[tokio::test]
@@ -888,6 +1241,31 @@ mod tests {
     }
 
     #[test]
+    fn normalized_boxes_are_read_from_an_answer_and_a_short_box_is_left_out() {
+        let answer =
+            r#"[{"box_2d":[0,0,1000,500],"text":"Ana"},{"box_2d":[1,2,3],"text":"short"}]"#;
+
+        let coords = NormalizedPiiBox::coords_from_answer(answer, 100, 200).unwrap();
+
+        assert_eq!(coords.len(), 1);
+        assert_eq!(coords[0].text.as_deref(), Some("Ana"));
+        assert_eq!((coords[0].x2, coords[0].y2), (50.0, 200.0));
+    }
+
+    #[test]
+    fn an_unreadable_box_answer_is_an_error_without_the_content_it_could_not_read() {
+        let error = NormalizedPiiBox::coords_from_answer(
+            r#"[{"box_2d":"John Smith","text":null}]"#,
+            100,
+            100,
+        )
+        .expect_err("box_2d is not an array");
+
+        assert!(matches!(error, AppError::UnreadableModelAnswer { .. }));
+        assert!(!error.to_string().contains("John"));
+    }
+
+    #[test]
     fn normalized_box_converts_to_pixel_coordinates() {
         let coords = normalized_box_to_image_coords([233.0, 98.0, 248.0, 345.0], 740, 1018, None);
         assert!((coords.x1 - 72.5).abs() < 0.5, "x1 = {}", coords.x1);
@@ -923,5 +1301,63 @@ mod tests {
             Some("14 March 1985".to_string()),
         );
         assert_eq!(coords.text.as_deref(), Some("14 March 1985"));
+    }
+
+    #[test]
+    fn image_boxes_are_reported_in_pixels_of_the_image_as_given() {
+        let found = ImageBoxes {
+            image: PreparedImage {
+                format: image::ImageFormat::Png,
+                data: Default::default(),
+                width: 1024,
+                height: 737,
+                original_width: 2048,
+                original_height: 1474,
+            },
+            coords: vec![
+                TextImageCoords {
+                    x1: 300.0,
+                    y1: 80.0,
+                    x2: 100.0,
+                    y2: 50.0,
+                    text: Some("X1234567".to_string()),
+                    line: 0,
+                },
+                TextImageCoords {
+                    x1: 900.0,
+                    y1: 700.0,
+                    x2: 1100.0,
+                    y2: 800.0,
+                    text: None,
+                    line: 0,
+                },
+            ],
+        };
+
+        let detections = found.into_detections();
+
+        assert_eq!(detections[0].value, "X1234567");
+        assert_eq!(
+            detections[0].location,
+            DetectionLocation::Image {
+                page: None,
+                x1: 200.0,
+                y1: 100.0,
+                x2: 600.0,
+                y2: 160.0
+            },
+            "a reversed box is ordered and doubled to the original size"
+        );
+        assert_eq!(
+            detections[1].location,
+            DetectionLocation::Image {
+                page: None,
+                x1: 1800.0,
+                y1: 1400.0,
+                x2: 2048.0,
+                y2: 1474.0
+            },
+            "a box beyond the image is clamped to it"
+        );
     }
 }

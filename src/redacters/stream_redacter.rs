@@ -6,12 +6,13 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_rgba_image_at_coords, words_to_redact, RedactSupport, Redacter, RedacterBaseOptions,
-    RedacterDataItem, RedacterDataItemContent, Redacters,
+    redact_rgba_image_at_coords, words_to_redact, Detection, DetectionLocation, RedactSupport,
+    Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
 use image::ImageFormat;
+use mime::Mime;
 use rvstruct::ValueStruct;
 
 /// The conversion the content went through before it was redacted.
@@ -32,6 +33,9 @@ pub enum RedactionBlocked {
     OcrUnavailable,
     /// The OCR engine cannot read the image format of the file.
     OcrImageFormatNotSupported,
+    /// No redacter supports the type of the file, which was to be read as text, and its content
+    /// is not text.
+    NotText,
 }
 
 /// What the pipeline actually did to a file, so the caller can report it once the
@@ -54,6 +58,27 @@ pub struct RedactStreamResult {
     pub stream: Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>,
 }
 
+#[derive(Default)]
+pub struct DetectStreamResult {
+    /// What each redacter of the plan found, with the redacter that found it, in plan order and
+    /// in the order the redacter reported.
+    pub detections: Vec<(RedacterType, Detection)>,
+    /// How many values the redacters named without being able to place them in the file, see
+    /// [`Detections::unlocated`].
+    pub unlocated: usize,
+    /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
+    /// file read as text is not text. The plan was not blocked; the step was, so the caller
+    /// reports the file as unsupported.
+    pub blocked: Option<RedactionBlocked>,
+}
+
+impl DetectStreamResult {
+    fn absorb(&mut self, other: Self) {
+        self.detections.extend(other.detections);
+        self.unlocated += other.unlocated;
+    }
+}
+
 /// The result of running one OCR conversion step.
 enum OcrStepResult {
     Redacted,
@@ -69,6 +94,9 @@ pub struct StreamRedactPlan<'a> {
     pub apply_pdf_image_converter: bool,
     pub apply_ocr: bool,
     pub leave_data_table_as_text: bool,
+    /// No redacter supports the type of the file, and `--unsupported-as-text` asks for it to be
+    /// read as text.
+    pub read_unsupported_as_text: bool,
     pub supported_redacters: Vec<&'a Redacters<'a>>,
     /// Set when `supported_redacters` is empty because a PDF or image needs a conversion
     /// engine (pdfium, OCR) that this build does not have, rather than because none of the
@@ -91,70 +119,69 @@ impl<'a> StreamRedacter<'a> {
 
     pub async fn create_redact_plan(
         &'a self,
-        redacters: &'a Vec<Redacters<'a>>,
+        redacters: &'a [Redacters<'a>],
         file_ref: &FileSystemRef,
+    ) -> AppResult<StreamRedactPlan<'a>> {
+        self.create_plan(redacters, file_ref, async |redacter, file_ref| {
+            redacter.redact_support(file_ref).await
+        })
+        .await
+    }
+
+    /// The plan `scan` runs: the same decisions as redaction, asked of `detect_support`.
+    pub async fn create_detect_plan(
+        &'a self,
+        redacters: &'a [Redacters<'a>],
+        file_ref: &FileSystemRef,
+    ) -> AppResult<StreamRedactPlan<'a>> {
+        self.create_plan(redacters, file_ref, async |redacter, file_ref| {
+            redacter.detect_support(file_ref).await
+        })
+        .await
+    }
+
+    async fn create_plan(
+        &'a self,
+        redacters: &'a [Redacters<'a>],
+        file_ref: &FileSystemRef,
+        supports: impl AsyncFn(&Redacters<'a>, &FileSystemRef) -> AppResult<RedactSupport>,
     ) -> AppResult<StreamRedactPlan<'a>> {
         let mut stream_redact_plan = StreamRedactPlan {
             apply_pdf_image_converter: false,
             apply_ocr: false,
             leave_data_table_as_text: false,
-            supported_redacters: vec![],
+            read_unsupported_as_text: false,
+            // Supports natively
+            supported_redacters: Self::supporting(redacters, file_ref, None, &supports).await?,
             blocked: None,
         };
-        // Supports natively
-        for redacter in redacters {
-            let supported_options = redacter.redact_support(file_ref).await?;
-            if supported_options == RedactSupport::Supported {
-                stream_redact_plan.supported_redacters.push(redacter);
-            }
-        }
 
         if stream_redact_plan.supported_redacters.is_empty() {
-            if let Some(file_ref_media) = &file_ref.media_type {
-                // Supports with conversion
-                if Redacters::is_mime_table(file_ref_media) {
-                    for redacter in redacters {
-                        let supported_options = redacter
-                            .redact_support(&FileSystemRef {
-                                media_type: Some(mime::TEXT_PLAIN),
-                                ..file_ref.clone()
-                            })
+            // Supports with conversion
+            match &file_ref.media_type {
+                Some(file_ref_media) if Redacters::is_mime_table(file_ref_media) => {
+                    stream_redact_plan.supported_redacters =
+                        Self::supporting(redacters, file_ref, Some(mime::TEXT_PLAIN), &supports)
                             .await?;
-                        if supported_options == RedactSupport::Supported {
-                            stream_redact_plan.supported_redacters.push(redacter);
-                        }
-                    }
-                    if !stream_redact_plan.supported_redacters.is_empty() {
-                        stream_redact_plan.leave_data_table_as_text = true;
-                    }
-                } else if Redacters::is_mime_pdf(file_ref_media) {
+                    stream_redact_plan.leave_data_table_as_text =
+                        !stream_redact_plan.supported_redacters.is_empty();
+                }
+                Some(file_ref_media) if Redacters::is_mime_pdf(file_ref_media) => {
                     if self.file_converters.pdf_image_converter.is_some() {
-                        for redacter in redacters {
-                            let supported_options = redacter
-                                .redact_support(&FileSystemRef {
-                                    media_type: Some(mime::IMAGE_PNG),
-                                    ..file_ref.clone()
-                                })
+                        stream_redact_plan.supported_redacters =
+                            Self::supporting(redacters, file_ref, Some(mime::IMAGE_PNG), &supports)
                                 .await?;
-                            if supported_options == RedactSupport::Supported {
-                                stream_redact_plan.supported_redacters.push(redacter);
-                            }
-                        }
 
                         if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_pdf_image_converter = true;
                         } else if self.file_converters.ocr.is_some() {
-                            for redacter in redacters {
-                                let supported_options = redacter
-                                    .redact_support(&FileSystemRef {
-                                        media_type: Some(mime::TEXT_PLAIN),
-                                        ..file_ref.clone()
-                                    })
-                                    .await?;
-                                if supported_options == RedactSupport::Supported {
-                                    stream_redact_plan.supported_redacters.push(redacter);
-                                }
-                            }
+                            stream_redact_plan.supported_redacters = Self::supporting(
+                                redacters,
+                                file_ref,
+                                Some(mime::TEXT_PLAIN),
+                                &supports,
+                            )
+                            .await?;
                             if !stream_redact_plan.supported_redacters.is_empty() {
                                 stream_redact_plan.apply_pdf_image_converter = true;
                                 stream_redact_plan.apply_ocr = true;
@@ -167,19 +194,16 @@ impl<'a> StreamRedacter<'a> {
                     } else {
                         stream_redact_plan.blocked = Some(RedactionBlocked::PdfRendererUnavailable);
                     }
-                } else if Redacters::is_mime_image(file_ref_media) {
+                }
+                Some(file_ref_media) if Redacters::is_mime_image(file_ref_media) => {
                     if self.file_converters.ocr.is_some() {
-                        for redacter in redacters {
-                            let supported_options = redacter
-                                .redact_support(&FileSystemRef {
-                                    media_type: Some(mime::TEXT_PLAIN),
-                                    ..file_ref.clone()
-                                })
-                                .await?;
-                            if supported_options == RedactSupport::Supported {
-                                stream_redact_plan.supported_redacters.push(redacter);
-                            }
-                        }
+                        stream_redact_plan.supported_redacters = Self::supporting(
+                            redacters,
+                            file_ref,
+                            Some(mime::TEXT_PLAIN),
+                            &supports,
+                        )
+                        .await?;
                         if !stream_redact_plan.supported_redacters.is_empty() {
                             stream_redact_plan.apply_ocr = true;
                         }
@@ -187,10 +211,38 @@ impl<'a> StreamRedacter<'a> {
                         stream_redact_plan.blocked = Some(RedactionBlocked::OcrUnavailable);
                     }
                 }
+                _ if self.redacter_base_options.unsupported_as_text => {
+                    stream_redact_plan.supported_redacters =
+                        Self::supporting(redacters, file_ref, Some(mime::TEXT_PLAIN), &supports)
+                            .await?;
+                    stream_redact_plan.read_unsupported_as_text =
+                        !stream_redact_plan.supported_redacters.is_empty();
+                }
+                _ => {}
             }
         }
 
         Ok(stream_redact_plan)
+    }
+
+    /// The redacters that `supports` says read the file, as `media_type` when one is given.
+    async fn supporting(
+        redacters: &'a [Redacters<'a>],
+        file_ref: &FileSystemRef,
+        media_type: Option<Mime>,
+        supports: &impl AsyncFn(&Redacters<'a>, &FileSystemRef) -> AppResult<RedactSupport>,
+    ) -> AppResult<Vec<&'a Redacters<'a>>> {
+        let file_ref = FileSystemRef {
+            media_type: media_type.or_else(|| file_ref.media_type.clone()),
+            ..file_ref.clone()
+        };
+        let mut supported = Vec::new();
+        for redacter in redacters {
+            if supports(redacter, &file_ref).await? == RedactSupport::Supported {
+                supported.push(redacter);
+            }
+        }
+        Ok(supported)
     }
 
     pub async fn redact_stream<
@@ -201,9 +253,22 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult> {
-        let mut redacted = self
+        let mut redacted = match self
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
-            .await?;
+            .await?
+        {
+            Ok(item) => item,
+            Err(data) => {
+                return Ok(RedactStreamResult {
+                    number_of_redactions: 0,
+                    summary: RedactionSummary {
+                        blocked: Some(RedactionBlocked::NotText),
+                        ..RedactionSummary::default()
+                    },
+                    stream: Box::new(futures::stream::iter(vec![Ok(data)])),
+                });
+            }
+        };
         let mut number_of_redactions = 0;
         let mut summary = RedactionSummary::default();
 
@@ -330,6 +395,173 @@ impl<'a> StreamRedacter<'a> {
         })
     }
 
+    /// What the redacters of `plan` find in the file, read as `redact_stream` reads it. Every
+    /// redacter reads the original content: unlike redaction, nothing is chained.
+    pub async fn detect_stream<
+        S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
+    >(
+        &'a self,
+        input: S,
+        plan: &StreamRedactPlan<'a>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<DetectStreamResult> {
+        let Ok(item) = self
+            .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
+            .await?
+        else {
+            return Ok(DetectStreamResult {
+                blocked: Some(RedactionBlocked::NotText),
+                ..DetectStreamResult::default()
+            });
+        };
+        let redacters = &plan.supported_redacters;
+        let mut result = DetectStreamResult::default();
+        match &item.content {
+            RedacterDataItemContent::Pdf { data } if plan.apply_pdf_image_converter => {
+                let converter = self
+                    .file_converters
+                    .pdf_image_converter
+                    .as_deref()
+                    .ok_or_else(|| AppError::SystemError {
+                        message: "No PDF renderer is available to detect in a PDF".to_string(),
+                    })?;
+                for (index, page_info) in converter
+                    .convert_to_images(data.clone())?
+                    .pages
+                    .into_iter()
+                    .enumerate()
+                {
+                    let page = Some(index + 1);
+                    if plan.apply_ocr {
+                        result.absorb(
+                            Self::detect_with_ocr(
+                                redacters,
+                                &page_info.page_as_images,
+                                page,
+                                self.ocr()?,
+                                file_ref,
+                            )
+                            .await?,
+                        );
+                    } else {
+                        let mut png = std::io::Cursor::new(Vec::new());
+                        page_info
+                            .page_as_images
+                            .write_to(&mut png, ImageFormat::Png)?;
+                        let page_item = RedacterDataItem {
+                            content: RedacterDataItemContent::Image {
+                                mime_type: mime::IMAGE_PNG,
+                                data: png.into_inner().into(),
+                            },
+                            file_ref: file_ref.clone(),
+                        };
+                        result.absorb(Self::detect_all(redacters, &page_item, page).await?);
+                    }
+                }
+            }
+            RedacterDataItemContent::Image { mime_type, data } if plan.apply_ocr => {
+                match ImageFormat::from_mime_type(mime_type) {
+                    Some(format) => {
+                        let image = image::load_from_memory_with_format(data, format)?;
+                        result =
+                            Self::detect_with_ocr(redacters, &image, None, self.ocr()?, file_ref)
+                                .await?;
+                    }
+                    None => result.blocked = Some(RedactionBlocked::OcrImageFormatNotSupported),
+                }
+            }
+            _ => result = Self::detect_all(redacters, &item, None).await?,
+        }
+        Ok(result)
+    }
+
+    fn ocr(&self) -> AppResult<&dyn Ocr> {
+        self.file_converters
+            .ocr
+            .as_deref()
+            .ok_or_else(|| AppError::SystemError {
+                message: "No OCR engine is available to detect in an image".to_string(),
+            })
+    }
+
+    /// What each of `redacters` finds in `item`, every image location placed on `page`.
+    async fn detect_all(
+        redacters: &[&Redacters<'a>],
+        item: &RedacterDataItem,
+        page: Option<usize>,
+    ) -> AppResult<DetectStreamResult> {
+        let mut result = DetectStreamResult::default();
+        for redacter in redacters {
+            tracing::debug!(
+                redacter = %redacter.redacter_type(),
+                file = %item.file_ref.relative_path.value(),
+                "detecting"
+            );
+            let detected = redacter.detect(item).await?;
+            result.unlocated += detected.unlocated;
+            for mut detection in detected.found {
+                if let DetectionLocation::Image {
+                    page: ref mut image_page,
+                    ..
+                } = detection.location
+                {
+                    *image_page = page;
+                }
+                result
+                    .detections
+                    .push((redacter.redacter_type(), detection));
+            }
+        }
+        Ok(result)
+    }
+
+    /// What `redacters` find in the text OCR reads from `image`, each detection boxed by the
+    /// words it covers. A detection that covers no word, only the spaces between them, has no
+    /// box and is dropped.
+    async fn detect_with_ocr(
+        redacters: &[&Redacters<'a>],
+        image: &image::DynamicImage,
+        page: Option<usize>,
+        ocr: &dyn Ocr,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<DetectStreamResult> {
+        let ocr_text = OcrText::from(ocr.image_to_text(image.clone())?.as_slice());
+        let item = RedacterDataItem {
+            content: RedacterDataItemContent::Value(ocr_text.text.clone()),
+            file_ref: file_ref.clone(),
+        };
+        let detected = Self::detect_all(redacters, &item, page).await?;
+        let mut result = DetectStreamResult {
+            unlocated: detected.unlocated,
+            ..DetectStreamResult::default()
+        };
+        for (redacter, detection) in detected.detections {
+            let DetectionLocation::Text { start, end, .. } = detection.location else {
+                continue;
+            };
+            match ocr_text.image_location(start, end, page) {
+                Some(location) => result.detections.push((
+                    redacter,
+                    Detection {
+                        location,
+                        ..detection
+                    },
+                )),
+                None => tracing::debug!(
+                    %redacter,
+                    start,
+                    end,
+                    "dropping a detection that covers no OCR word"
+                ),
+            }
+        }
+        Ok(result)
+    }
+
+    /// The item `input` is read as under the plan. With `--unsupported-as-text` the content
+    /// is text when it is valid UTF-8 without a NUL byte, which binary formats carry and text
+    /// does not; otherwise the whole content comes back as `Err`, for a caller that leaves
+    /// the file as it is.
     async fn stream_to_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
@@ -338,8 +570,16 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
         redact_plan: &StreamRedactPlan<'a>,
-    ) -> AppResult<RedacterDataItem> {
-        match file_ref.media_type {
+    ) -> AppResult<Result<RedacterDataItem, bytes::Bytes>> {
+        if redact_plan.read_unsupported_as_text {
+            let data = input.try_collect::<Vec<_>>().await?.concat();
+            return Ok(match String::from_utf8(data) {
+                Ok(text) if !text.contains('\0') => Ok(self.text_redact_item(text, file_ref)),
+                Ok(text) => Err(text.into()),
+                Err(error) => Err(error.into_bytes().into()),
+            });
+        }
+        let item = match file_ref.media_type {
             Some(ref mime)
                 if Redacters::is_mime_text(mime)
                     || (Redacters::is_mime_table(mime) && redact_plan.leave_data_table_as_text) =>
@@ -363,13 +603,14 @@ impl<'a> StreamRedacter<'a> {
             None => Err(AppError::SystemError {
                 message: "Media type is not provided to redact".to_string(),
             }),
-        }
+        };
+        item.map(Ok)
     }
 
     async fn stream_to_text_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
-        &'a self,
+        &self,
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
@@ -378,6 +619,14 @@ impl<'a> StreamRedacter<'a> {
         let whole_content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
             message: format!("Failed to convert bytes to string: {e}"),
         })?;
+        Ok(self.text_redact_item(whole_content, file_ref))
+    }
+
+    fn text_redact_item(
+        &self,
+        whole_content: String,
+        file_ref: &FileSystemRef,
+    ) -> RedacterDataItem {
         let content = if let Some(sampling_size) = self.redacter_base_options.sampling_size {
             let sampling_size = std::cmp::min(sampling_size, whole_content.len());
             whole_content
@@ -387,16 +636,16 @@ impl<'a> StreamRedacter<'a> {
         } else {
             whole_content
         };
-        Ok(RedacterDataItem {
+        RedacterDataItem {
             content: RedacterDataItemContent::Value(content),
             file_ref: file_ref.clone(),
-        })
+        }
     }
 
     async fn stream_to_table_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
-        &'a self,
+        &self,
         redacter_base_options: &RedacterBaseOptions,
         input: S,
         file_ref: &FileSystemRef,
@@ -552,9 +801,9 @@ impl<'a> StreamRedacter<'a> {
     /// the image, in order (so a later redacter sees an earlier one's `[REDACTED]` tokens),
     /// then boxes exactly the words the chain changed.
     ///
-    /// Words are joined by line (see [`TextImageCoords::line`]) rather than all with a single
-    /// space, so keyword-window rules see the same line breaks they would see reading the
-    /// file as text. Which words changed is decided by aligning the original OCR words against
+    /// Words are joined by line (see [`OcrText`]) rather than all with a single space, so
+    /// keyword-window rules see the same line breaks they would see reading the file as
+    /// text. Which words changed is decided by aligning the original OCR words against
     /// the final redacted text (see [`words_to_redact`]), not by checking whether a word still
     /// appears anywhere in a document-wide set: that would miss a word that is also part of an
     /// unredacted span elsewhere on the page, and would box every occurrence of a repeated
@@ -577,19 +826,15 @@ impl<'a> StreamRedacter<'a> {
                         );
                         let image = image::load_from_memory_with_format(data, image_format)?;
                         let text_coords = ocr.image_to_text(image.clone())?;
-                        let (ordered_coords, text) = words_by_line(&text_coords);
-                        let original_words: Vec<String> = ordered_coords
+                        let ocr_text = OcrText::from(text_coords.as_slice());
+                        let original_words: Vec<String> = ocr_text
+                            .words
                             .iter()
-                            .map(|coord| {
-                                coord
-                                    .text
-                                    .clone()
-                                    .expect("words_by_line only keeps coordinates with text")
-                            })
+                            .map(|word| ocr_text.text[word.span.clone()].to_string())
                             .collect();
 
                         let mut redacted_item = RedacterDataItem {
-                            content: RedacterDataItemContent::Value(text),
+                            content: RedacterDataItemContent::Value(ocr_text.text.clone()),
                             file_ref: file_ref.clone(),
                         };
                         for redacter in redacters {
@@ -600,11 +845,11 @@ impl<'a> StreamRedacter<'a> {
                             RedacterDataItemContent::Value(content) => {
                                 let to_redact = words_to_redact(&original_words, &content);
                                 let mut redacted_image = image.to_rgb8();
-                                for (coord, redact) in ordered_coords.iter().zip(&to_redact) {
+                                for (word, redact) in ocr_text.words.iter().zip(&to_redact) {
                                     if *redact {
                                         redact_rgba_image_at_coords(
                                             &mut redacted_image,
-                                            &vec![coord.clone()],
+                                            &vec![word.coords.clone()],
                                             0.10,
                                         );
                                     }
@@ -653,8 +898,21 @@ struct LineSpan<'a> {
     left: f32,
 }
 
-/// Builds the text sent to the redacter chain from OCR words, and the coordinates in the same
-/// order as the words in that text, so the two can be zipped back together after redaction.
+/// The text an OCR pass read, and every word of it with its place in that text, so a redacted
+/// text or a detection can be mapped back onto the words' boxes.
+pub(crate) struct OcrText {
+    /// The words in the order they appear in `text`; words without recognised text are dropped.
+    pub words: Vec<OcrWord>,
+    pub text: String,
+}
+
+/// One OCR word and the half-open byte range it fills in [`OcrText::text`].
+pub(crate) struct OcrWord {
+    pub coords: TextImageCoords,
+    pub span: std::ops::Range<usize>,
+}
+
+/// Builds the text sent to the redacters from OCR words.
 ///
 /// Words are joined by `" "` within a line and lines are joined by `"\n"` (using each word's
 /// [`TextImageCoords::line`]), so keyword-window rules see the same line breaks they would see
@@ -674,77 +932,119 @@ struct LineSpan<'a> {
 /// alone does not order them, and cannot rely on either line's exact top edge to do it. This is
 /// a no-op for ordinary single-column text, where rows never span more than one line and are
 /// already emitted top to bottom. Coordinates without recognised text are dropped.
-fn words_by_line(text_coords: &[TextImageCoords]) -> (Vec<TextImageCoords>, String) {
-    let mut lines: std::collections::BTreeMap<usize, Vec<&TextImageCoords>> =
-        std::collections::BTreeMap::new();
-    for coord in text_coords {
-        if coord.text.is_some() {
-            lines.entry(coord.line).or_default().push(coord);
-        }
-    }
-
-    let mut spans: Vec<LineSpan> = lines
-        .into_values()
-        .map(|words| LineSpan {
-            top: words.iter().map(|w| w.y1).fold(f32::INFINITY, f32::min),
-            bottom: words.iter().map(|w| w.y2).fold(f32::NEG_INFINITY, f32::max),
-            left: words.iter().map(|w| w.x1).fold(f32::INFINITY, f32::min),
-            words,
-        })
-        .collect();
-    spans.sort_by(|a, b| a.top.total_cmp(&b.top));
-
-    let mut rows: Vec<Vec<LineSpan>> = vec![];
-    for span in spans {
-        let overlaps_current_row = rows.last().is_some_and(|row: &Vec<LineSpan>| {
-            let row_top = row.iter().map(|l| l.top).fold(f32::INFINITY, f32::min);
-            let row_bottom = row
-                .iter()
-                .map(|l| l.bottom)
-                .fold(f32::NEG_INFINITY, f32::max);
-            span.top < row_bottom && span.bottom > row_top
-        });
-        if overlaps_current_row {
-            rows.last_mut().expect("checked above").push(span);
-        } else {
-            rows.push(vec![span]);
-        }
-    }
-    for row in &mut rows {
-        row.sort_by(|a, b| a.left.total_cmp(&b.left));
-    }
-
-    let mut ordered_coords = Vec::with_capacity(text_coords.len());
-    let mut text = String::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        if row_index > 0 {
-            text.push('\n');
-        }
-        for (line_index, line) in row.iter().enumerate() {
-            if line_index > 0 {
-                text.push(' ');
+impl From<&[TextImageCoords]> for OcrText {
+    fn from(text_coords: &[TextImageCoords]) -> Self {
+        let mut lines: std::collections::BTreeMap<usize, Vec<&TextImageCoords>> =
+            std::collections::BTreeMap::new();
+        for coord in text_coords {
+            if coord.text.is_some() {
+                lines.entry(coord.line).or_default().push(coord);
             }
-            for (word_index, coord) in line.words.iter().enumerate() {
-                if word_index > 0 {
+        }
+
+        let mut spans: Vec<LineSpan> = lines
+            .into_values()
+            .map(|words| LineSpan {
+                top: words.iter().map(|w| w.y1).fold(f32::INFINITY, f32::min),
+                bottom: words.iter().map(|w| w.y2).fold(f32::NEG_INFINITY, f32::max),
+                left: words.iter().map(|w| w.x1).fold(f32::INFINITY, f32::min),
+                words,
+            })
+            .collect();
+        spans.sort_by(|a, b| a.top.total_cmp(&b.top));
+
+        let mut rows: Vec<Vec<LineSpan>> = vec![];
+        for span in spans {
+            let overlaps_current_row = rows.last().is_some_and(|row: &Vec<LineSpan>| {
+                let row_top = row.iter().map(|l| l.top).fold(f32::INFINITY, f32::min);
+                let row_bottom = row
+                    .iter()
+                    .map(|l| l.bottom)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                span.top < row_bottom && span.bottom > row_top
+            });
+            if overlaps_current_row {
+                rows.last_mut().expect("checked above").push(span);
+            } else {
+                rows.push(vec![span]);
+            }
+        }
+        for row in &mut rows {
+            row.sort_by(|a, b| a.left.total_cmp(&b.left));
+        }
+
+        let mut words = Vec::with_capacity(text_coords.len());
+        let mut text = String::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            if row_index > 0 {
+                text.push('\n');
+            }
+            for (line_index, line) in row.iter().enumerate() {
+                if line_index > 0 {
                     text.push(' ');
                 }
-                // `words` only holds coordinates whose `text` is `Some`, checked when built.
-                text.push_str(coord.text.as_deref().unwrap_or_default());
-                ordered_coords.push((*coord).clone());
+                for (word_index, coord) in line.words.iter().enumerate() {
+                    if word_index > 0 {
+                        text.push(' ');
+                    }
+                    let start = text.len();
+                    // `words` only holds coordinates whose `text` is `Some`, checked when built.
+                    text.push_str(coord.text.as_deref().unwrap_or_default());
+                    words.push(OcrWord {
+                        coords: (*coord).clone(),
+                        span: start..text.len(),
+                    });
+                }
             }
         }
-    }
 
-    (ordered_coords, text)
+        OcrText { words, text }
+    }
+}
+
+impl OcrText {
+    /// The box around every word that overlaps the half-open byte range `start..end` of the
+    /// text, or `None` when the range covers no word.
+    fn image_location(
+        &self,
+        start: usize,
+        end: usize,
+        page: Option<usize>,
+    ) -> Option<DetectionLocation> {
+        self.words
+            .iter()
+            .filter(|word| word.span.start < end && start < word.span.end)
+            .map(|word| &word.coords)
+            .fold(None, |covered, coords| {
+                Some(match covered {
+                    None => (coords.x1, coords.y1, coords.x2, coords.y2),
+                    Some((x1, y1, x2, y2)) => (
+                        coords.x1.min(x1),
+                        coords.y1.min(y1),
+                        coords.x2.max(x2),
+                        coords.y2.max(y2),
+                    ),
+                })
+            })
+            .map(|(x1, y1, x2, y2)| DetectionLocation::Image {
+                page,
+                x1,
+                y1,
+                x2,
+                y2,
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::redacters::{
-        parse_inline_rule, LocalRulesRedacter, LocalRulesRedacterOptions, RuleGroup, UserRule,
+        parse_inline_rule, DetectionLabel, LocalRulesRedacter, LocalRulesRedacterOptions,
+        RuleGroup, UserRule,
     };
     use crate::reporter::AppReporter;
+    use std::collections::BTreeSet;
 
     fn coord(text: &str, line: usize) -> TextImageCoords {
         coord_at(text, line, 0.0)
@@ -765,16 +1065,24 @@ mod tests {
         }
     }
 
-    fn texts_of(coords: &[TextImageCoords]) -> Vec<&str> {
-        coords.iter().map(|c| c.text.as_deref().unwrap()).collect()
+    /// Each word as it reads in the OCR text, which must match its own recognised text.
+    fn words_of(ocr: &OcrText) -> Vec<&str> {
+        ocr.words
+            .iter()
+            .map(|word| {
+                let in_text = &ocr.text[word.span.clone()];
+                assert_eq!(Some(in_text), word.coords.text.as_deref());
+                in_text
+            })
+            .collect()
     }
 
     #[test]
     fn words_on_the_same_line_are_joined_by_a_space() {
         let coords = vec![coord("hello", 0), coord("world", 0)];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["hello", "world"]);
-        assert_eq!(text, "hello world");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["hello", "world"]);
+        assert_eq!(ocr.text, "hello world");
     }
 
     #[test]
@@ -784,9 +1092,9 @@ mod tests {
             coord_at("second", 1, 1.0),
             coord_at("third", 1, 1.0),
         ];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["first", "second", "third"]);
-        assert_eq!(text, "first\nsecond third");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["first", "second", "third"]);
+        assert_eq!(ocr.text, "first\nsecond third");
     }
 
     #[test]
@@ -794,9 +1102,9 @@ mod tests {
         let mut untexted = coord("ignored", 0);
         untexted.text = None;
         let coords = vec![coord("kept", 0), untexted];
-        let (words, text) = words_by_line(&coords);
-        assert_eq!(texts_of(&words), vec!["kept"]);
-        assert_eq!(text, "kept");
+        let ocr = OcrText::from(coords.as_slice());
+        assert_eq!(words_of(&ocr), vec!["kept"]);
+        assert_eq!(ocr.text, "kept");
     }
 
     /// Reproduces the two-column form layout that motivated row grouping: the OCR engine
@@ -831,16 +1139,19 @@ mod tests {
             word_at_xy("John", 2, 300.0, 100.0),
             word_at_xy("X1234567", 3, 311.0, 474.0),
         ];
-        let (words, text) = words_by_line(&coords);
+        let ocr = OcrText::from(coords.as_slice());
         assert_eq!(
-            texts_of(&words),
+            words_of(&ocr),
             vec!["Full", "name:", "John", "Passport", "X1234567"]
         );
-        assert_eq!(text, "Full name: John\nPassport X1234567");
+        assert_eq!(ocr.text, "Full name: John\nPassport X1234567");
     }
 
-    fn test_reporter(term: &console::Term) -> AppReporter<'_> {
-        AppReporter::from(term)
+    fn reporter() -> &'static AppReporter<'static> {
+        // Leaked so the reporter, and the terminal it borrows, outlive the redacters built
+        // from it in a short-lived test process.
+        let term: &'static console::Term = Box::leak(Box::new(console::Term::stdout()));
+        Box::leak(Box::new(AppReporter::from(term)))
     }
 
     fn png_file_ref(name: &str) -> FileSystemRef {
@@ -862,6 +1173,7 @@ mod tests {
     fn base_options() -> RedacterBaseOptions {
         RedacterBaseOptions {
             allow_unsupported_copies: false,
+            unsupported_as_text: false,
             csv_headers_disable: false,
             csv_delimiter: None,
             sampling_size: None,
@@ -870,15 +1182,10 @@ mod tests {
     }
 
     async fn local_rules(
-        groups: std::collections::BTreeSet<RuleGroup>,
+        groups: BTreeSet<RuleGroup>,
         user_rules: Vec<UserRule>,
     ) -> LocalRulesRedacter<'static> {
-        // Leaked so the `AppReporter` (and the `Term` it borrows) outlive the redacter:
-        // fine in a short-lived test process, and simpler than threading lifetimes through
-        // every test that needs one.
-        let term: &'static console::Term = Box::leak(Box::new(console::Term::stdout()));
-        let reporter: &'static AppReporter<'static> = Box::leak(Box::new(test_reporter(term)));
-        LocalRulesRedacter::new(LocalRulesRedacterOptions { groups, user_rules }, reporter)
+        LocalRulesRedacter::new(LocalRulesRedacterOptions { groups, user_rules }, reporter())
             .await
             .expect("valid rule set")
     }
@@ -889,15 +1196,31 @@ mod tests {
         local_rules(RuleGroup::all(), vec![]).await
     }
 
-    /// A `PdfToImage` that is never called: only its presence (`Some`/`None` in
-    /// `FileConverters`) matters to `create_redact_plan`'s blocked-reason logic.
-    struct UnusedPdfToImage;
-    impl crate::file_converters::pdf::PdfToImage for UnusedPdfToImage {
+    /// Renders as many blank pages as it is told; the OCR fake decides what they say.
+    struct FakePdf {
+        pages: usize,
+    }
+
+    #[cfg(feature = "pdf-render")]
+    const NO_POINTS: pdfium_render::prelude::PdfPoints = pdfium_render::prelude::PdfPoints::ZERO;
+    #[cfg(not(feature = "pdf-render"))]
+    const NO_POINTS: f32 = 0.0;
+
+    impl PdfToImage for FakePdf {
         fn convert_to_images(&self, _pdf_bytes: bytes::Bytes) -> AppResult<PdfInfo> {
-            unreachable!("not called by create_redact_plan")
+            Ok(PdfInfo {
+                pages: (0..self.pages)
+                    .map(|_| PdfPageInfo {
+                        height: NO_POINTS,
+                        width: NO_POINTS,
+                        page_as_images: image::DynamicImage::new_rgb8(4, 4),
+                    })
+                    .collect(),
+            })
         }
+
         fn images_to_pdf(&self, _pdf_info: PdfInfo) -> AppResult<bytes::Bytes> {
-            unreachable!("not called by create_redact_plan")
+            unreachable!("planning and detection never write a PDF")
         }
     }
 
@@ -925,7 +1248,7 @@ mod tests {
         let redacter = any_local_rules().await;
         let redacters = vec![Redacters::LocalRules(redacter)];
         let mut converters = FileConverters::new();
-        converters.pdf_image_converter = Some(Box::new(UnusedPdfToImage));
+        converters.pdf_image_converter = Some(Box::new(FakePdf { pages: 0 }));
         let options = base_options();
         let stream_redacter = StreamRedacter::new(&options, &converters);
 
@@ -960,7 +1283,7 @@ mod tests {
         let redacter = any_local_rules().await;
         let redacters = vec![Redacters::LocalRules(redacter)];
         let mut converters = FileConverters::new();
-        converters.pdf_image_converter = Some(Box::new(UnusedPdfToImage));
+        converters.pdf_image_converter = Some(Box::new(FakePdf { pages: 0 }));
         converters.ocr = Some(Box::new(FakeOcr { coords: vec![] }));
         let options = base_options();
         let stream_redacter = StreamRedacter::new(&options, &converters);
@@ -1063,5 +1386,429 @@ mod tests {
             "the untouched second \"SSN\" is not boxed"
         );
         assert!(!is_black_at(&data, 3, 0), "\"Form\" is not boxed");
+    }
+
+    fn word(text: &str, line: usize, x1: f32, y1: f32, x2: f32, y2: f32) -> TextImageCoords {
+        TextImageCoords {
+            x1,
+            y1,
+            x2,
+            y2,
+            text: Some(text.to_string()),
+            line,
+        }
+    }
+
+    /// The email and phone rows of the form fixture, as OCR reads them: each label on a line
+    /// of its own beside its value.
+    fn form_words() -> Vec<TextImageCoords> {
+        vec![
+            word("Email:", 0, 50.0, 193.0, 125.0, 218.0),
+            word("john.smith@example.com", 1, 310.0, 193.0, 622.0, 218.0),
+            word("Phone:", 2, 50.0, 263.0, 131.0, 288.0),
+            word("+1", 3, 310.0, 263.0, 338.0, 288.0),
+            word("(555)", 3, 345.0, 262.0, 415.0, 290.0),
+            word("123-4567", 3, 425.0, 263.0, 540.0, 288.0),
+        ]
+    }
+
+    async fn email_and_phone_rules() -> Redacters<'static> {
+        Redacters::LocalRules(
+            local_rules([RuleGroup::Email, RuleGroup::Phone].into(), vec![]).await,
+        )
+    }
+
+    async fn email_rules() -> Redacters<'static> {
+        Redacters::LocalRules(local_rules([RuleGroup::Email].into(), vec![]).await)
+    }
+
+    fn file_ref(name: &str, media_type: mime::Mime) -> FileSystemRef {
+        FileSystemRef {
+            relative_path: name.into(),
+            media_type: Some(media_type),
+            file_size: None,
+        }
+    }
+
+    async fn detect(
+        converters: &FileConverters<'_>,
+        redacters: &[Redacters<'static>],
+        file_ref: &FileSystemRef,
+        data: bytes::Bytes,
+    ) -> AppResult<DetectStreamResult> {
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, converters);
+        let plan = stream_redacter
+            .create_detect_plan(redacters, file_ref)
+            .await?;
+        assert!(
+            !plan.supported_redacters.is_empty(),
+            "nothing can read {file_ref:?}"
+        );
+        stream_redacter
+            .detect_stream(futures::stream::iter(vec![Ok(data)]), &plan, file_ref)
+            .await
+    }
+
+    fn located(result: &DetectStreamResult) -> Vec<(DetectionLocation, &str)> {
+        result
+            .detections
+            .iter()
+            .map(|(_, detection)| (detection.location, detection.value.as_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_ocr_detection_is_boxed_by_the_words_it_covers() {
+        let mut converters = FileConverters::new();
+        converters.ocr = Some(Box::new(FakeOcr {
+            coords: form_words(),
+        }));
+        let redacters = vec![email_and_phone_rules().await];
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &png_file_ref("form.png"),
+            white_png(8, 8),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            located(&result),
+            vec![
+                (
+                    DetectionLocation::Image {
+                        page: None,
+                        x1: 310.0,
+                        y1: 193.0,
+                        x2: 622.0,
+                        y2: 218.0
+                    },
+                    "john.smith@example.com"
+                ),
+                (
+                    DetectionLocation::Image {
+                        page: None,
+                        x1: 310.0,
+                        y1: 262.0,
+                        x2: 540.0,
+                        y2: 290.0
+                    },
+                    "+1 (555) 123-4567"
+                ),
+            ]
+        );
+        assert!(result
+            .detections
+            .iter()
+            .all(|(redacter, _)| *redacter == RedacterType::LocalRules));
+    }
+
+    #[tokio::test]
+    async fn an_image_format_ocr_cannot_decode_is_blocked_and_reports_nothing() {
+        let mut converters = FileConverters::new();
+        converters.ocr = Some(Box::new(FakeOcr {
+            coords: form_words(),
+        }));
+        let redacters = vec![email_and_phone_rules().await];
+
+        for media_type in [mime::IMAGE_SVG, "image/heic".parse().unwrap()] {
+            let result = detect(
+                &converters,
+                &redacters,
+                &file_ref("picture", media_type.clone()),
+                white_png(8, 8),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.blocked,
+                Some(RedactionBlocked::OcrImageFormatNotSupported),
+                "{media_type}"
+            );
+            assert!(result.detections.is_empty(), "{media_type}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_page_of_a_pdf_is_read_and_named() {
+        let mut converters = FileConverters::new();
+        converters.ocr = Some(Box::new(FakeOcr {
+            coords: form_words(),
+        }));
+        converters.pdf_image_converter = Some(Box::new(FakePdf { pages: 2 }));
+        let redacters = vec![email_rules().await];
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &pdf_file_ref("form.pdf"),
+            bytes::Bytes::from_static(b"%PDF"),
+        )
+        .await
+        .unwrap();
+
+        let pages: Vec<Option<usize>> = result
+            .detections
+            .iter()
+            .map(|(_, detection)| match detection.location {
+                DetectionLocation::Image { page, .. } => page,
+                other => panic!("a PDF page yields image locations, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(pages, vec![Some(1), Some(2)]);
+    }
+
+    /// Redaction chains redacters, so the second one sees the first one's `[REDACTED]`;
+    /// detection must not, or a value two redacters both recognise is reported once.
+    #[tokio::test]
+    async fn every_redacter_reads_the_original_content() {
+        let converters = FileConverters::new();
+        let contact_rule = parse_inline_rule("contact=a@b\\.io").unwrap();
+        let redacters = vec![
+            email_rules().await,
+            Redacters::LocalRules(local_rules(BTreeSet::new(), vec![contact_rule]).await),
+        ];
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            bytes::Bytes::from_static(b"mail a@b.io"),
+        )
+        .await
+        .unwrap();
+
+        let labels: Vec<&DetectionLabel> = result
+            .detections
+            .iter()
+            .map(|(_, detection)| &detection.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                &DetectionLabel::new("email"),
+                &DetectionLabel::new("contact")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_csv_file_is_read_as_a_table_of_cells() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("customers.csv", mime::TEXT_CSV),
+            bytes::Bytes::from_static(b"id,contact\n1,none\n2,a@b.io\n"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            located(&result),
+            vec![(
+                DetectionLocation::TableCell {
+                    row: 2,
+                    column: 2,
+                    start: 0,
+                    end: 6
+                },
+                "a@b.io"
+            )]
+        );
+    }
+
+    /// Ink extents of two values of the form, measured from the PNG fixture and from page 1
+    /// of the PDF fixture as pdfium renders it (one pixel per point): `(x1, y1, x2, y2)`. The
+    /// phone number is three OCR words, so its box is a union.
+    const FORM_FIXTURE_INK: [(&str, Option<usize>, &str, [f32; 4]); 4] = [
+        (
+            "test-fixtures/media/form-example.png",
+            None,
+            "email",
+            [310.0, 195.0, 620.0, 218.0],
+        ),
+        (
+            "test-fixtures/media/form-example.png",
+            None,
+            "phone-international",
+            [313.0, 265.0, 538.0, 286.0],
+        ),
+        (
+            "test-fixtures/documents/customer-form.pdf",
+            Some(1),
+            "email",
+            [97.0, 148.0, 234.0, 159.0],
+        ),
+        (
+            "test-fixtures/documents/customer-form.pdf",
+            Some(1),
+            "phone-international",
+            [102.0, 173.0, 200.0, 184.0],
+        ),
+    ];
+
+    /// Pdfium binds once per process, so the image and the PDF share one set of converters.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-ocr"), ignore)]
+    async fn detections_in_the_form_fixtures_are_boxed_where_the_values_are_printed() {
+        use crate::addon_store::{AddonStore, AddonStoreOptions};
+        use crate::redacters::test_support::pdfium_test_lock;
+        let _guard = pdfium_test_lock().lock().await;
+        let store = AddonStore::new(&AddonStoreOptions::default());
+        let converters = FileConverters::new()
+            .init(reporter(), &store)
+            .await
+            .unwrap();
+        assert!(
+            converters.ocr.is_some() && converters.pdf_image_converter.is_some(),
+            "the ci-ocr feature needs the OCR model and pdfium"
+        );
+        let redacters = vec![email_and_phone_rules().await];
+
+        for (path, page, label, [ink_x1, ink_y1, ink_x2, ink_y2]) in FORM_FIXTURE_INK {
+            let media_type = mime_guess::from_path(path).first().unwrap();
+            let data = std::fs::read(path).unwrap();
+            let result = detect(
+                &converters,
+                &redacters,
+                &file_ref(path, media_type),
+                data.into(),
+            )
+            .await
+            .unwrap();
+            let (_, found) = result
+                .detections
+                .iter()
+                .find(|(_, detection)| detection.label == DetectionLabel::new(label))
+                .unwrap_or_else(|| panic!("{path}: no {label} found"));
+            let DetectionLocation::Image {
+                page: found_page,
+                x1,
+                y1,
+                x2,
+                y2,
+            } = found.location
+            else {
+                panic!("{path}: an image location is expected, got {found:?}");
+            };
+            assert_eq!(found_page, page, "{path}");
+            assert!(
+                x1 <= ink_x1 + 2.0
+                    && y1 <= ink_y1 + 2.0
+                    && x2 >= ink_x2 - 2.0
+                    && y2 >= ink_y2 - 2.0,
+                "{path}: the {label} box {:?} does not cover its ink",
+                (x1, y1, x2, y2)
+            );
+            assert!(
+                x2 - x1 <= ink_x2 - ink_x1 + 10.0 && y2 - y1 <= ink_y2 - ink_y1 + 10.0,
+                "{path}: the {label} box {:?} reaches past its value",
+                (x1, y1, x2, y2)
+            );
+        }
+    }
+
+    fn one_chunk(
+        data: &[u8],
+    ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
+        futures::stream::iter(vec![Ok(bytes::Bytes::copy_from_slice(data))])
+    }
+
+    /// A file without an extension, which no redacter supports by its type.
+    fn env_file() -> FileSystemRef {
+        FileSystemRef {
+            relative_path: ".env".into(),
+            media_type: None,
+            file_size: None,
+        }
+    }
+
+    /// Valid UTF-8 with a NUL byte, and bytes that are not UTF-8.
+    const NOT_TEXT: [&[u8]; 2] = [b"ADMIN_EMAIL=a@b.io\0", &[0xff, 0xfe, b'a', b'@']];
+
+    #[tokio::test]
+    async fn an_unsupported_file_is_scanned_as_text_only_when_asked_and_when_it_is_text() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        let by_default = StreamRedacter::new(&options, &converters)
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap()
+            .supported_redacters
+            .len();
+        assert_eq!(by_default, 0);
+
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let text = stream_redacter
+            .detect_stream(one_chunk(b"ADMIN_EMAIL=a@b.io\n"), &plan, &env_file())
+            .await
+            .unwrap();
+        assert_eq!(
+            located(&text),
+            vec![(
+                DetectionLocation::Text {
+                    start: 12,
+                    end: 18,
+                    line: 1,
+                    column: 13
+                },
+                "a@b.io"
+            )]
+        );
+        for data in NOT_TEXT {
+            let result = stream_redacter
+                .detect_stream(one_chunk(data), &plan, &env_file())
+                .await
+                .unwrap();
+            assert_eq!(result.blocked, Some(RedactionBlocked::NotText), "{data:?}");
+            assert!(result.detections.is_empty(), "{data:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_file_that_is_not_text_is_left_as_it_is_by_redaction() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let redacted = stream_redacter
+            .redact_stream(one_chunk(b"ADMIN_EMAIL=a@b.io"), plan, &env_file())
+            .await
+            .unwrap();
+        let output: Vec<bytes::Bytes> = redacted.stream.try_collect().await.unwrap();
+        assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
+
+        for data in NOT_TEXT {
+            let plan = stream_redacter
+                .create_redact_plan(&redacters, &env_file())
+                .await
+                .unwrap();
+            let result = stream_redacter
+                .redact_stream(one_chunk(data), plan, &env_file())
+                .await
+                .unwrap();
+            assert_eq!(result.number_of_redactions, 0, "{data:?}");
+            assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
+            let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+            assert_eq!(output.concat(), data, "the file is left as it is");
+        }
     }
 }

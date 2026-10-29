@@ -64,7 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let cli = CliArgs::parse();
+    let cli = match CliArgs::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            err.print()?;
+            // clap exits with 2 on a usage error, which `scan` reserves for findings.
+            std::process::exit(if err.use_stderr() { 1 } else { 0 });
+        }
+    };
     match handle_args(cli, &term).await {
         Err(err) => {
             term.write_line(
@@ -78,11 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             std::process::exit(1);
         }
-        Ok(_) => Ok(()),
+        Ok(0) => Ok(()),
+        Ok(exit_code) => std::process::exit(exit_code),
     }
 }
 
-async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
+/// Runs the command and returns the process exit code.
+async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
     let addon_store = AddonStoreOptions {
         addons_dir: resolve_addons_dir(cli.addons_dir, std::env::var_os("REDACTER_ADDONS_DIR")),
     };
@@ -95,7 +104,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
             filename_filter,
             redacter_args,
             mime_override,
-            save_json_results,
+            report,
         } => {
             let options = CopyCommandOptions::new(
                 filename_filter,
@@ -112,18 +121,42 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 redacter_args.map(|args| args.try_into()).transpose()?,
             )
             .await?;
-            if let Some(json_path) = save_json_results {
-                let json_result = serde_json::to_string_pretty(&copy_result)?;
-                let mut file = tokio::fs::File::create(&json_path).await?;
-                tokio::io::AsyncWriteExt::write_all(&mut file, json_result.as_bytes()).await?;
-                term.write_line(
-                    format!(
-                        "Results saved to JSON file: {}",
-                        Style::new().bold().apply_to(json_path.display())
-                    )
-                    .as_str(),
-                )?;
-            }
+            report
+                .write(term, &copy_result, &copy_result.to_text())
+                .await?;
+            Ok(0)
+        }
+        CliCommand::Scan {
+            source,
+            max_size_limit,
+            max_files_limit,
+            filename_filter,
+            redacter_args,
+            mime_override,
+            report,
+            show_values,
+            min_score,
+            no_fail,
+        } => {
+            let options = ScanCommandOptions::new(
+                filename_filter,
+                max_size_limit,
+                max_files_limit,
+                mime_override,
+                addon_store,
+                min_score,
+                if show_values {
+                    ValueDisplay::Raw
+                } else {
+                    ValueDisplay::Masked
+                },
+            );
+            let scan_result =
+                command_scan(term, &source, options, redacter_args.try_into()?).await?;
+            report
+                .write(term, &scan_result, &scan_result.to_text())
+                .await?;
+            Ok(scan_result.exit_code(no_fail))
         }
         CliCommand::Ls {
             source,
@@ -132,14 +165,17 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
         } => {
             let options = LsCommandOptions::new(filename_filter, max_size_limit);
             command_ls(term, &source, options).await?;
+            Ok(0)
         }
         CliCommand::Addons { command } => match command {
             AddonsCommand::Install { addons } => {
-                command_addons_install(term, &addons, &addon_store).await?
+                command_addons_install(term, &addons, &addon_store).await?;
+                Ok(0)
             }
-            AddonsCommand::Ls => command_addons_ls(term, &addon_store)?,
+            AddonsCommand::Ls => {
+                command_addons_ls(term, &addon_store)?;
+                Ok(0)
+            }
         },
     }
-
-    Ok(())
 }

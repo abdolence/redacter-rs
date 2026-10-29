@@ -10,9 +10,9 @@ documentation = "https://docs.rs/redacter"
 readme = "README.md"
 include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
 rust-version = "1.94.0"
-keywords = ["redact", "pii", "dlp"]
+keywords = ["redact", "pii", "secrets", "dlp", "scan"]
 categories = ["command-line-utilities"]
-description = "Copy & Redact cli tool to securely copy and redact files removing Personal Identifiable Information (PII) across various filesystems."
+description = "Detect & Redact cli tool to find sensitive data in files, such as personal information (PII), passwords and API keys, and to securely copy and redact files removing it, across various filesystems."
 
 [features]
 default = ["pdf-render", "clipboard", "ocr", "local-ner", "local-gliner"]

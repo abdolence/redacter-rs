@@ -10,11 +10,12 @@ pub use error::LocalGlinerError;
 
 use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
+use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
-    text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -26,14 +27,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalGlinerRedacterOptions {
     pub labels: Vec<String>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 impl LocalGlinerRedacterOptions {
     /// Rejects an empty or all-whitespace label, an empty label list and a score outside
     /// `0.0..=1.0` (NaN included). Every label is trimmed, since the model reads it as
     /// prompt text and leading or trailing whitespace changes nothing but the token count.
-    pub fn validated(labels: Vec<String>, min_score: f32) -> Result<Self, LocalGlinerError> {
+    pub fn validated(labels: Vec<String>, min_score: Score) -> Result<Self, LocalGlinerError> {
         if labels.is_empty() {
             return Err(LocalGlinerError::NoLabels);
         }
@@ -45,9 +46,6 @@ impl LocalGlinerRedacterOptions {
             }
             trimmed.push(label);
         }
-        if !(0.0..=1.0).contains(&min_score) {
-            return Err(LocalGlinerError::InvalidMinScore { value: min_score });
-        }
         Ok(Self {
             labels: trimmed,
             min_score,
@@ -55,16 +53,42 @@ impl LocalGlinerRedacterOptions {
     }
 }
 
-/// Redacts every table cell that could hold a labelled span, leaving the rest byte for byte.
-/// Only an empty or whitespace-only cell is skipped: unlike a name-only NER model, GLiNER's
-/// default labels include phone number, credit card number, iban and other digit-only spans,
-/// so a "holds no letter" skip would hide every phone number and card number in a table.
+/// The findings in one table cell, with offsets into the cell. Only an empty or
+/// whitespace-only cell is skipped: unlike a name-only NER model, GLiNER's default labels
+/// include phone number, credit card number, iban and other digit-only spans, so a "holds no
+/// letter" skip would hide every phone number and card number in a table.
 ///
-/// Each cell is scored with its column header in front of it, `"city: Madrid"` rather than
+/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a one-word cell gives the model no sentence, and short bare values are tagged
 /// at a lower score than the same value read as a sentence. The prefix is scoring context
-/// only. Findings are mapped back onto the cell by `shift_into_cell` and the redaction is
-/// applied to the original cell text, so no header text can reach the output.
+/// only: `shift_into_cell` maps the findings back onto the cell, so no header text can reach
+/// a redacted cell or a detection.
+fn find_in_cell<F>(
+    headers: &[String],
+    column: usize,
+    cell: &str,
+    find_in: &mut F,
+) -> Result<Vec<Finding>, LocalGlinerError>
+where
+    F: FnMut(&str) -> Result<Vec<Finding>, LocalGlinerError>,
+{
+    if cell.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // A row wider than the header list, or an empty header, leaves the cell alone.
+    let prefix = match headers.get(column) {
+        Some(header) if !header.is_empty() => format!("{header}: "),
+        _ => String::new(),
+    };
+    let scored = if prefix.is_empty() {
+        find_in(cell)?
+    } else {
+        find_in(&format!("{prefix}{cell}"))?
+    };
+    Ok(shift_into_cell(scored, prefix.len()))
+}
+
+/// Redacts every table cell that could hold a labelled span, leaving the rest byte for byte.
 fn redact_rows<F>(
     headers: &[String],
     rows: Vec<Vec<String>>,
@@ -78,21 +102,11 @@ where
     for row in rows {
         let mut redacted_row = Vec::with_capacity(row.len());
         for (column, cell) in row.into_iter().enumerate() {
-            if cell.trim().is_empty() {
+            let in_cell = find_in_cell(headers, column, &cell, &mut find_in)?;
+            if in_cell.is_empty() {
                 redacted_row.push(cell);
                 continue;
             }
-            // A row wider than the header list, or an empty header, leaves the cell alone.
-            let prefix = match headers.get(column) {
-                Some(header) if !header.is_empty() => format!("{header}: "),
-                _ => String::new(),
-            };
-            let scored = if prefix.is_empty() {
-                find_in(&cell)?
-            } else {
-                find_in(&format!("{prefix}{cell}"))?
-            };
-            let in_cell = shift_into_cell(scored, prefix.len());
             findings += in_cell.len();
             redacted_row.push(apply_redaction(&cell, &in_cell, REDACTED));
         }
@@ -152,7 +166,7 @@ impl<'a> LocalGlinerRedacter<'a> {
     async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
     where
         T: Send + 'static,
-        F: FnOnce(&GlinerEngine, &GlinerOptions) -> Result<T, LocalGlinerError> + Send + 'static,
+        F: FnOnce(&GlinerEngine, &GlinerOptions) -> AppResult<T> + Send + 'static,
     {
         let engine = Arc::clone(&self.engine);
         let options = self.options.clone();
@@ -161,7 +175,7 @@ impl<'a> LocalGlinerRedacter<'a> {
             .map_err(|err| LocalGlinerError::InferenceTask {
                 reason: err.to_string(),
             })?;
-        Ok(result?)
+        result
     }
 }
 
@@ -188,7 +202,7 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
                 (RedacterDataItemContent::Table { headers, rows }, findings)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(unsupported_type_error())
+                return Err(AppError::unsupported_content())
             }
         };
         if findings > 0 {
@@ -208,6 +222,32 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => {
+                let text = text.clone();
+                self.run_blocking(move |engine, options| {
+                    Detection::in_text(&text, engine.find(&text, options)?)
+                })
+                .await
+            }
+            RedacterDataItemContent::Table { headers, rows } => {
+                let (headers, rows) = (headers.clone(), rows.clone());
+                self.run_blocking(move |engine, options| {
+                    Detection::in_table_cells(&rows, |column, cell| {
+                        find_in_cell(&headers, column, cell, &mut |text| {
+                            engine.find(text, options)
+                        })
+                    })
+                })
+                .await
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::unsupported_content())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalGliner
     }
@@ -219,37 +259,28 @@ mod tests {
     use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
     use crate::redacters::text_spans::RuleName;
+    use crate::redacters::{DetectionLabel, DetectionLocation};
     use console::Term;
     use mime::Mime;
 
     #[test]
-    fn options_default_labels_and_reject_bad_values() {
-        let options = LocalGlinerRedacterOptions::validated(labels::default_labels(), 0.5).unwrap();
-        assert_eq!(options.labels, labels::default_labels());
-        assert_eq!(options.min_score, 0.5);
-        assert!(LocalGlinerRedacterOptions::validated(vec!["person".to_string()], 0.0).is_ok());
-        assert!(LocalGlinerRedacterOptions::validated(vec!["person".to_string()], 1.0).is_ok());
+    fn options_reject_no_labels_and_a_blank_label() {
+        let half = Score::from_static(0.5);
 
-        let err = LocalGlinerRedacterOptions::validated(Vec::new(), 0.5).unwrap_err();
+        let err = LocalGlinerRedacterOptions::validated(Vec::new(), half).unwrap_err();
         assert!(matches!(err, LocalGlinerError::NoLabels), "{err}");
 
-        let err = LocalGlinerRedacterOptions::validated(vec!["  ".to_string()], 0.5).unwrap_err();
+        let err = LocalGlinerRedacterOptions::validated(vec!["  ".to_string()], half).unwrap_err();
         assert!(matches!(err, LocalGlinerError::EmptyLabel), "{err}");
-
-        for bad in [-0.1_f32, 1.5, f32::NAN] {
-            let err =
-                LocalGlinerRedacterOptions::validated(vec!["person".to_string()], bad).unwrap_err();
-            assert!(
-                matches!(err, LocalGlinerError::InvalidMinScore { .. }),
-                "{bad}: {err}"
-            );
-        }
     }
 
     #[test]
     fn labels_are_trimmed() {
-        let options =
-            LocalGlinerRedacterOptions::validated(vec![" email \n".to_string()], 0.5).unwrap();
+        let options = LocalGlinerRedacterOptions::validated(
+            vec![" email \n".to_string()],
+            Score::from_static(0.5),
+        )
+        .unwrap();
         assert_eq!(options.labels, vec!["email".to_string()]);
     }
 
@@ -283,6 +314,7 @@ mod tests {
             start,
             end,
             rule: RuleName::new("person"),
+            score: None,
         }
     }
 
@@ -301,6 +333,42 @@ mod tests {
         })
         .unwrap();
         (rows.into_iter().next().unwrap(), seen, findings)
+    }
+
+    /// A detection is placed by the cell's own offsets, never by its offsets in the
+    /// header-prefixed text the model scored.
+    #[test]
+    fn a_table_detection_is_placed_in_its_cell() {
+        let headers = vec!["id".to_string(), "name".to_string()];
+        let rows = vec![
+            vec!["1".to_string(), "Rainy".to_string()],
+            vec!["2".to_string(), "Akira".to_string()],
+        ];
+        let detections = Detection::in_table_cells(&rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                Ok(if text == "name: Akira" {
+                    vec![finding(6, 11)]
+                } else {
+                    Vec::new()
+                })
+            })
+        })
+        .unwrap()
+        .found;
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("person"),
+                location: DetectionLocation::TableCell {
+                    row: 2,
+                    column: 2,
+                    start: 0,
+                    end: 5
+                },
+                score: None,
+                value: "Akira".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -426,7 +494,11 @@ mod tests {
     /// never downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalGlinerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());
-        let options = LocalGlinerRedacterOptions::validated(labels::default_labels(), 0.5).unwrap();
+        let options = LocalGlinerRedacterOptions::validated(
+            labels::default_labels(),
+            Score::from_static(0.5),
+        )
+        .unwrap();
         LocalGlinerRedacter::new(options, reporter, &store)
             .await
             .unwrap()
@@ -476,6 +548,40 @@ mod tests {
         assert!(out.contains("#A-10422"), "{out}");
         assert!(out.contains("6pm"), "{out}");
         assert!(out.contains("[REDACTED]"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-local-gliner"), ignore)]
+    async fn detects_the_pii_in_the_customer_note_with_labels_and_scores() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter).await;
+        let text =
+            std::fs::read_to_string(format!("{TEST_DOCUMENTS_DIR}customer-note.txt")).unwrap();
+        let detections = redacter
+            .detect(&item(
+                "customer-note.txt",
+                mime::TEXT_PLAIN,
+                RedacterDataItemContent::Value(text.clone()),
+            ))
+            .await
+            .unwrap()
+            .found;
+        let email = detections
+            .iter()
+            .find(|detection| detection.value == "john.smith@example.com")
+            .unwrap_or_else(|| panic!("no email among {detections:?}"));
+        assert_eq!(email.label, DetectionLabel::new("email"));
+        assert!(
+            email
+                .score
+                .is_some_and(|score| score >= Score::from_static(0.5)),
+            "{email:?}"
+        );
+        let DetectionLocation::Text { start, end, .. } = email.location else {
+            panic!("a text item yields text locations: {email:?}");
+        };
+        assert_eq!(&text[start..end], "john.smith@example.com");
     }
 
     #[tokio::test]

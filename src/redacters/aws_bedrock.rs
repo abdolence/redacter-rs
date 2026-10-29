@@ -1,8 +1,9 @@
 use aws_config::Region;
+use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseApiOutput;
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConversationRole, ConverseOutput, ImageBlock, ImageFormat, ImageSource,
-    InferenceConfiguration, Message,
+    InferenceConfiguration, Message, StopReason,
 };
 use rand::RngExt;
 use rvstruct::ValueStruct;
@@ -12,9 +13,10 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, LlmImageMode, NativeImageEditError, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters,
+    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
+    redact_image_with_mode, Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -53,6 +55,11 @@ fn claude_coords_redaction_prompt(width: u32, height: u32) -> String {
          Return only JSON."
     )
 }
+
+/// Bedrock models have no response schema here, so the text detection prompt is preceded by
+/// the shape of the answer.
+const TEXT_DETECTION_ANSWER_FORMAT: &str =
+    "Return only a JSON array of objects with keys 'text' and 'type'. Return only JSON.";
 
 /// Bedrock model family, detected from the model id, that determines which bounding-box
 /// convention and prompt the image coordinate path uses.
@@ -184,16 +191,22 @@ fn strip_answer_fence(answer: &str, original_starts_with_fence: bool) -> String 
     }
 }
 
-/// Removes the random input separator when the model echoes it around its answer, which
-/// Nova does about one run in eight despite being told not to. An answer without the
-/// separator is returned untouched, whitespace included; an echo is trimmed because the
-/// whitespace around it belongs to the echo, not to the document.
-fn strip_echoed_separator(answer: &str, separator: &str) -> String {
-    if answer.contains(separator) {
-        answer.replace(separator, "").trim().to_string()
-    } else {
-        answer.to_string()
+/// The text of a redaction answer once the echoed separator and the code fence are gone.
+/// What is left must say something: an answer made of nothing but the separators is not a
+/// redacted copy of a document that had content.
+fn redacted_text_from(
+    answer: ModelAnswer,
+    separator: &str,
+    input_starts_with_fence: bool,
+) -> AppResult<String> {
+    let text = strip_answer_fence(
+        &answer.into_text_without_separator(separator)?,
+        input_starts_with_fence,
+    );
+    if text.trim().is_empty() {
+        return Err(AppError::EmptyModelAnswer);
     }
+    Ok(text)
 }
 
 /// Converts one Nova-style normalized bounding box (`[x1, y1, x2, y2]`, each in 0..=1000) to
@@ -241,15 +254,11 @@ fn claude_box_to_image_coords(
 ///
 /// The answer is a JSON array, optionally wrapped in a ```json fence. Entries that are not
 /// objects, are missing `bbox`, or carry a `bbox` with fewer than 4 numeric entries are
-/// dropped individually rather than failing the whole pass; an answer that is not valid JSON
-/// at all yields no detections.
-fn parse_bbox_detections(text: &str) -> Vec<([f32; 4], Option<String>)> {
-    let Ok(detections) = serde_json::from_str::<Vec<serde_json::Value>>(strip_json_fence(text))
-    else {
-        return Vec::new();
-    };
-
-    detections
+/// dropped individually rather than failing the whole pass. An answer that is not a JSON
+/// array is an error: reading it as "no detections" would report a clean image.
+fn parse_bbox_detections(text: &str) -> AppResult<Vec<([f32; 4], Option<String>)>> {
+    let detections: Vec<serde_json::Value> = parse_answer(strip_json_fence(text))?;
+    Ok(detections
         .into_iter()
         .filter_map(|detection| {
             let object = detection.as_object()?;
@@ -266,7 +275,7 @@ fn parse_bbox_detections(text: &str) -> Vec<([f32; 4], Option<String>)> {
                 .map(str::to_string);
             Some((bbox, text))
         })
-        .collect()
+        .collect())
 }
 
 /// Reads the PII bounding boxes out of Nova's text answer to
@@ -275,11 +284,11 @@ pub fn nova_text_answer_to_image_coords(
     text: &str,
     width: u32,
     height: u32,
-) -> Vec<TextImageCoords> {
-    parse_bbox_detections(text)
+) -> AppResult<Vec<TextImageCoords>> {
+    Ok(parse_bbox_detections(text)?
         .into_iter()
         .map(|(bbox, text)| nova_box_to_image_coords(bbox, width, height, text))
-        .collect()
+        .collect())
 }
 
 /// Reads the PII bounding boxes out of Claude's text answer to
@@ -288,29 +297,35 @@ pub fn claude_text_answer_to_image_coords(
     text: &str,
     width: u32,
     height: u32,
-) -> Vec<TextImageCoords> {
-    parse_bbox_detections(text)
+) -> AppResult<Vec<TextImageCoords>> {
+    Ok(parse_bbox_detections(text)?
         .into_iter()
         .map(|(bbox, text)| claude_box_to_image_coords(bbox, width, height, text))
-        .collect()
+        .collect())
 }
 
-/// Text blocks of a Converse answer, concatenated in order.
-fn converse_response_text(output: Option<&ConverseOutput>) -> Option<String> {
-    let message = match output {
-        Some(ConverseOutput::Message(message)) => message,
-        _ => return None,
-    };
-    Some(
-        message
-            .content()
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect(),
-    )
+impl From<ConverseApiOutput> for ModelAnswer {
+    fn from(response: ConverseApiOutput) -> Self {
+        let text = match response.output() {
+            Some(ConverseOutput::Message(message)) => message
+                .content()
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => String::new(),
+        };
+        let stop = match response.stop_reason() {
+            StopReason::EndTurn | StopReason::StopSequence => None,
+            StopReason::MaxTokens | StopReason::ModelContextWindowExceeded => {
+                Some(ModelStop::MaxTokens)
+            }
+            other => Some(ModelStop::Withheld(other.as_str().to_string())),
+        };
+        ModelAnswer::new(text, stop)
+    }
 }
 
 /// Bedrock image format for an image the tool decoded, or an error naming the format when
@@ -386,42 +401,30 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: format!("Failed to build the Bedrock request: {err}"),
             })?;
 
-        let response = self
-            .client
-            .converse()
-            .model_id(self.text_model_id())
-            .messages(message)
-            .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
-            .send()
-            .await
-            .map_err(|err| super::bedrock_error("Failed to redact the text", &err))?;
+        let answer = self
+            .converse_text(self.text_model_id(), message, "Failed to redact the text")
+            .await?;
 
-        match converse_response_text(response.output.as_ref()) {
-            Some(redacted_content) => Ok(RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(strip_answer_fence(
-                    &strip_echoed_separator(&redacted_content, &generate_random_text_separator),
-                    input_starts_with_fence,
-                )),
-            }),
-            None => Err(AppError::AwsBedrockError {
-                message: "No content item in the response".to_string(),
-            }),
-        }
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Value(redacted_text_from(
+                answer,
+                &generate_random_text_separator,
+                input_starts_with_fence,
+            )?),
+        })
     }
 
-    pub async fn redact_image_file_using_coords(
+    /// Asks the model for the boxes of personal information in the image, which is scaled
+    /// down to the model's input limit first.
+    async fn find_image_boxes(
         &self,
-        input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
-        let RedacterDataItemContent::Image { mime_type, data } = input.content else {
-            return Err(AppError::SystemError {
-                message: "Unsupported item for image redacting".to_string(),
-            });
-        };
+        mime_type: &mime::Mime,
+        data: &gcloud_sdk::prost::bytes::Bytes,
+    ) -> AppResult<ImageBoxes> {
         let model_id = self.text_model_id();
         let family = require_supported_family(&model_id)?;
-        let prepared_image = prepare_image_for_llm(&mime_type, &data)?;
+        let prepared_image = prepare_image_for_llm(mime_type, data)?;
         let prompt = match family {
             AwsBedrockModelFamily::Nova => NOVA_COORDS_REDACTION_PROMPT.to_string(),
             AwsBedrockModelFamily::Claude => {
@@ -449,6 +452,63 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: format!("Failed to build the Bedrock request: {err}"),
             })?;
 
+        let answer = self
+            .converse_text(
+                model_id,
+                message,
+                "Failed to locate the personal information",
+            )
+            .await?
+            .into_text()?;
+
+        let coords = match family {
+            AwsBedrockModelFamily::Nova => nova_text_answer_to_image_coords(
+                &answer,
+                prepared_image.width,
+                prepared_image.height,
+            )?,
+            AwsBedrockModelFamily::Claude => claude_text_answer_to_image_coords(
+                &answer,
+                prepared_image.width,
+                prepared_image.height,
+            )?,
+            AwsBedrockModelFamily::Other => {
+                unreachable!("require_supported_family already rejected the Other family")
+            }
+        };
+
+        Ok(ImageBoxes {
+            image: prepared_image,
+            coords,
+        })
+    }
+
+    pub async fn redact_image_file_using_coords(
+        &self,
+        input: RedacterDataItem,
+    ) -> AppResult<RedacterDataItem> {
+        let RedacterDataItemContent::Image { mime_type, data } = input.content else {
+            return Err(AppError::SystemError {
+                message: "Unsupported item for image redacting".to_string(),
+            });
+        };
+        let found = self.find_image_boxes(&mime_type, &data).await?;
+        Ok(RedacterDataItem {
+            file_ref: input.file_ref,
+            content: RedacterDataItemContent::Image {
+                mime_type: mime_type.clone(),
+                data: redact_image_at_coords(mime_type, found.image.data, found.coords, 0.25)?,
+            },
+        })
+    }
+
+    /// Sends one user message to `model_id` and returns the answer with how it ended.
+    async fn converse_text(
+        &self,
+        model_id: String,
+        message: Message,
+        failure: &str,
+    ) -> AppResult<ModelAnswer> {
         let response = self
             .client
             .converse()
@@ -457,44 +517,32 @@ impl<'a> AwsBedrockRedacter<'a> {
             .inference_config(InferenceConfiguration::builder().temperature(0.2).build())
             .send()
             .await
-            .map_err(|err| {
-                super::bedrock_error("Failed to locate the personal information", &err)
+            .map_err(|err| super::bedrock_error(failure, &err))?;
+        Ok(response.into())
+    }
+
+    async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
+        let prompt = TextDetectionPrompt::new(text);
+        let message = Message::builder()
+            .role(ConversationRole::User)
+            .content(ContentBlock::Text(TEXT_DETECTION_ANSWER_FORMAT.to_string()))
+            .content(ContentBlock::Text(prompt.instruction))
+            .content(ContentBlock::Text(prompt.fence.clone()))
+            .content(ContentBlock::Text(prompt.text))
+            .content(ContentBlock::Text(prompt.fence))
+            .build()
+            .map_err(|err| AppError::AwsBedrockError {
+                message: format!("Failed to build the Bedrock request: {err}"),
             })?;
-
-        let Some(answer) = converse_response_text(response.output.as_ref()) else {
-            return Err(AppError::AwsBedrockError {
-                message: "No content item in the response".to_string(),
-            });
-        };
-
-        let coords = match family {
-            AwsBedrockModelFamily::Nova => nova_text_answer_to_image_coords(
-                &answer,
-                prepared_image.width,
-                prepared_image.height,
-            ),
-            AwsBedrockModelFamily::Claude => claude_text_answer_to_image_coords(
-                &answer,
-                prepared_image.width,
-                prepared_image.height,
-            ),
-            AwsBedrockModelFamily::Other => {
-                unreachable!("require_supported_family already rejected the Other family")
-            }
-        };
-
-        Ok(RedacterDataItem {
-            file_ref: input.file_ref,
-            content: RedacterDataItemContent::Image {
-                mime_type: mime_type.clone(),
-                data: redact_image_at_coords(
-                    mime_type.clone(),
-                    prepared_image.data.clone(),
-                    coords,
-                    0.25,
-                )?,
-            },
-        })
+        let answer = self
+            .converse_text(
+                self.text_model_id(),
+                message,
+                "Failed to detect sensitive data in the text",
+            )
+            .await?
+            .into_text()?;
+        LlmTextFinding::detections_from_answer(strip_json_fence(&answer), text)
     }
 
     /// AWS Bedrock has no active image editing model: Amazon Nova Canvas, the only inpainting
@@ -533,9 +581,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
                 .await
             }
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::SystemError {
-                    message: "Attempt to redact of unsupported type".to_string(),
-                })
+                Err(AppError::unsupported_content())
             }
         }
     }
@@ -548,6 +594,23 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
         })
     }
 
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match &input.content {
+            RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
+            RedacterDataItemContent::Image { mime_type, data } => {
+                self.find_image_boxes(mime_type, data)
+                    .await?
+                    .into_labelled_detections(
+                        |text| async move { self.detect_in_text(&text).await },
+                    )
+                    .await
+            }
+            RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
+                Err(AppError::unsupported_content())
+            }
+        }
+    }
+
     fn redacter_type(&self) -> RedacterType {
         RedacterType::AwsBedrock
     }
@@ -557,10 +620,11 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redacters::live_detection;
     use crate::redacters::test_support::{
         check_and_save_redacted_image, initialize_crypto, test_image_item,
     };
-    use crate::redacters::NativeImageEditFailure;
+    use crate::redacters::{DetectionLocation, NativeImageEditFailure};
     use console::Term;
 
     #[test]
@@ -611,7 +675,7 @@ mod tests {
     fn nova_text_answer_parses_a_fenced_json_array() {
         let answer =
             "```json\n[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]\n```";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
@@ -619,7 +683,7 @@ mod tests {
     #[test]
     fn nova_text_answer_parses_a_bare_json_array() {
         let answer = "[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
@@ -627,7 +691,7 @@ mod tests {
     #[test]
     fn nova_text_answer_converts_normalized_bbox_to_pixels_for_a_1000x720_image() {
         let answer = "[{\"bbox\": [306, 167, 537, 208], \"text\": \"John Michael Smith\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!((coords[0].x1 - 306.0).abs() < 0.01, "x1 = {}", coords[0].x1);
         assert!((coords[0].x2 - 537.0).abs() < 0.01, "x2 = {}", coords[0].x2);
@@ -646,7 +710,7 @@ mod tests {
     #[test]
     fn nova_text_answer_clamps_out_of_range_values() {
         let answer = "[{\"bbox\": [-50, -10, 2000, 1500], \"text\": \"x\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 100, 200);
+        let coords = nova_text_answer_to_image_coords(answer, 100, 200).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].x1, 0.0);
         assert_eq!(coords[0].y1, 0.0);
@@ -657,7 +721,7 @@ mod tests {
     #[test]
     fn nova_text_answer_orders_a_reversed_box() {
         let answer = "[{\"bbox\": [537, 208, 306, 167], \"text\": \"x\"}]";
-        let coords = nova_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!(coords[0].x1 <= coords[0].x2);
         assert!(coords[0].y1 <= coords[0].y2);
@@ -674,16 +738,27 @@ mod tests {
             { "bbox": [306, 167, 537, 208], "text": "John Michael Smith" },
         ])
         .to_string();
-        let coords = nova_text_answer_to_image_coords(&answer, 1000, 720);
+        let coords = nova_text_answer_to_image_coords(&answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1, "only the well-formed detection survives");
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
 
     #[test]
-    fn nova_text_answer_of_an_unexpected_shape_yields_no_coordinates() {
-        assert!(nova_text_answer_to_image_coords("not json at all", 1000, 720).is_empty());
-        assert!(nova_text_answer_to_image_coords("[]", 1000, 720).is_empty());
-        assert!(nova_text_answer_to_image_coords("{\"other\": true}", 1000, 720).is_empty());
+    fn an_answer_that_is_not_a_json_array_is_an_error_not_a_clean_image() {
+        for answer in ["not json at all", "{\"other\": true}", "\"John Smith\""] {
+            let error = nova_text_answer_to_image_coords(answer, 1000, 720)
+                .expect_err("the answer is not an array of boxes");
+            assert!(matches!(error, AppError::UnreadableModelAnswer { .. }));
+            assert!(!error.to_string().contains("John"));
+            assert!(claude_text_answer_to_image_coords(answer, 1000, 720).is_err());
+        }
+    }
+
+    #[test]
+    fn an_empty_json_array_is_an_image_without_findings() {
+        assert!(nova_text_answer_to_image_coords("[]", 1000, 720)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -759,7 +834,7 @@ mod tests {
     fn claude_text_answer_converts_pixel_bbox_for_a_1000x720_image() {
         let answer =
             "```json\n[{\"bbox\": [300, 110, 950, 160], \"text\": \"John Michael Smith\"}]\n```";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
         assert_eq!(coords[0].x1, 300.0);
@@ -771,7 +846,7 @@ mod tests {
     #[test]
     fn claude_text_answer_clamps_out_of_range_pixel_values() {
         let answer = "[{\"bbox\": [-5, -5, 1200, 1200], \"text\": \"x\"}]";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert_eq!(coords[0].x1, 0.0);
         assert_eq!(coords[0].y1, 0.0);
@@ -782,7 +857,7 @@ mod tests {
     #[test]
     fn claude_text_answer_orders_a_reversed_box() {
         let answer = "[{\"bbox\": [950, 160, 300, 110], \"text\": \"x\"}]";
-        let coords = claude_text_answer_to_image_coords(answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1);
         assert!(coords[0].x1 <= coords[0].x2);
         assert!(coords[0].y1 <= coords[0].y2);
@@ -799,7 +874,7 @@ mod tests {
             { "bbox": [300, 110, 950, 160], "text": "John Michael Smith" },
         ])
         .to_string();
-        let coords = claude_text_answer_to_image_coords(&answer, 1000, 720);
+        let coords = claude_text_answer_to_image_coords(&answer, 1000, 720).unwrap();
         assert_eq!(coords.len(), 1, "only the well-formed detection survives");
         assert_eq!(coords[0].text.as_deref(), Some("John Michael Smith"));
     }
@@ -852,39 +927,66 @@ mod tests {
         assert_eq!(strip_answer_fence(answer, true), answer);
     }
 
-    #[test]
-    fn strip_echoed_separator_removes_a_separator_echoed_around_the_answer() {
-        assert_eq!(
-            strip_echoed_separator("---1234 Hello, [REDACTED] ---1234", "---1234"),
-            "Hello, [REDACTED]"
-        );
-        assert_eq!(
-            strip_echoed_separator("---1234\nHello, [REDACTED]\n---1234\n", "---1234"),
-            "Hello, [REDACTED]"
-        );
+    fn converse_response(text: &str, stop_reason: StopReason) -> ConverseApiOutput {
+        let message = Message::builder()
+            .role(ConversationRole::Assistant)
+            .content(ContentBlock::Text(text.to_string()))
+            .build()
+            .expect("the role and content are set");
+        ConverseApiOutput::builder()
+            .output(ConverseOutput::Message(message))
+            .stop_reason(stop_reason)
+            .build()
+            .expect("the stop reason is set")
     }
 
     #[test]
-    fn strip_echoed_separator_leaves_an_answer_without_the_separator_untouched() {
-        assert_eq!(
-            strip_echoed_separator("  Hello, [REDACTED]\n", "---1234"),
-            "  Hello, [REDACTED]\n"
-        );
-    }
-
-    #[test]
-    fn converse_text_blocks_are_concatenated() {
+    fn a_completed_answer_is_the_text_of_its_blocks() {
         let message = Message::builder()
             .role(ConversationRole::Assistant)
             .content(ContentBlock::Text("Hello, ".to_string()))
             .content(ContentBlock::Text("[REDACTED]".to_string()))
             .build()
             .expect("the role and content are set");
+        let response = ConverseApiOutput::builder()
+            .output(ConverseOutput::Message(message))
+            .stop_reason(StopReason::EndTurn)
+            .build()
+            .expect("the stop reason is set");
         assert_eq!(
-            converse_response_text(Some(&ConverseOutput::Message(message))).as_deref(),
-            Some("Hello, [REDACTED]")
+            ModelAnswer::from(response).into_text().unwrap(),
+            "Hello, [REDACTED]"
         );
-        assert_eq!(converse_response_text(None), None);
+    }
+
+    #[test]
+    fn a_filtered_or_intervened_answer_is_an_error_and_not_a_clean_scan() {
+        for stop_reason in [StopReason::ContentFiltered, StopReason::GuardrailIntervened] {
+            assert!(
+                matches!(
+                    ModelAnswer::from(converse_response("[]", stop_reason.clone())).into_text(),
+                    Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
+                ),
+                "{stop_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_answer_is_an_error() {
+        assert!(matches!(
+            ModelAnswer::from(converse_response("[{", StopReason::MaxTokens)).into_text(),
+            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
+        ));
+    }
+
+    #[test]
+    fn a_redaction_that_is_only_the_separators_is_an_error() {
+        let echoed = converse_response("---1234\n---1234\n", StopReason::EndTurn);
+        assert!(matches!(
+            redacted_text_from(ModelAnswer::from(echoed), "---1234", false),
+            Err(AppError::EmptyModelAnswer)
+        ));
     }
 
     #[tokio::test]
@@ -1063,6 +1165,77 @@ mod tests {
             output_path.display()
         ))?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn text_answer_in_a_fence_is_located_in_the_text() {
+        let answer =
+            "```text\n[{\"text\": \"john.smith@example.com\", \"type\": \"email_address\"}]\n```";
+
+        let detections = LlmTextFinding::detections_from_answer(
+            strip_json_fence(answer),
+            "Mail john.smith@example.com now",
+        )
+        .unwrap()
+        .found;
+
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].label.to_string(), "email_address");
+        assert_eq!(
+            detections[0].location,
+            DetectionLocation::Text {
+                start: 5,
+                end: 27,
+                line: 1,
+                column: 6,
+            }
+        );
+    }
+
+    async fn detection_test_redacter<'a>(
+        reporter: &'a AppReporter<'a>,
+    ) -> Result<AwsBedrockRedacter<'a>, Box<dyn std::error::Error + Send + Sync>> {
+        initialize_crypto();
+        let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        Ok(AwsBedrockRedacter::new(
+            AwsBedrockRedacterOptions {
+                region: Some(Region::new(test_aws_region)),
+                text_model: None,
+                image_mode: LlmImageMode::Auto,
+            },
+            reporter,
+        )
+        .await?)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn detect_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let redacter = detection_test_redacter(&reporter).await?;
+
+        let input = live_detection::note_item();
+        let detections = redacter.detect(&input).await?.found;
+
+        live_detection::assert_note_found(&input, &detections);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn detect_image_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let redacter = detection_test_redacter(&reporter).await?;
+
+        let detections = redacter
+            .detect(&live_detection::enlarged_form_item())
+            .await?
+            .found;
+
+        live_detection::assert_form_found(&detections);
         Ok(())
     }
 }
