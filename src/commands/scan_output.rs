@@ -295,7 +295,7 @@ impl ScanCommandResult {
         let fails = match fail_on {
             FailOn::Never => false,
             FailOn::Findings => self.findings > 0,
-            FailOn::FindingsOrUnconfirmed => self.findings > 0 || self.files_unconfirmed > 0,
+            FailOn::Unconfirmed => self.findings > 0 || self.files_unconfirmed > 0,
         };
         if self.files_failed > 0 || self.files_blocked > 0 {
             1
@@ -468,6 +468,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -1032,12 +1033,12 @@ mod tests {
                 NotRedactedReason::OcrUnavailable,
             )
         };
-        // Exit codes for each `FailOn`: findings, never, findings or unconfirmed.
+        // Exit codes for each `FailOn`, in the order of its variants: never, findings, unconfirmed.
         for (files, expected) in [
             (vec![], [0, 0, 0]),
-            (vec![found()], [2, 0, 2]),
+            (vec![found()], [0, 2, 2]),
             (vec![unconfirmed()], [0, 0, 2]),
-            (vec![found(), unconfirmed()], [2, 0, 2]),
+            (vec![found(), unconfirmed()], [0, 2, 2]),
             (
                 vec![
                     found(),
@@ -1068,12 +1069,10 @@ mod tests {
             for file in files {
                 result.push(file);
             }
-            let exit_codes = [
-                FailOn::Findings,
-                FailOn::Never,
-                FailOn::FindingsOrUnconfirmed,
-            ]
-            .map(|fail_on| result.exit_code(fail_on));
+            let exit_codes: Vec<i32> = FailOn::value_variants()
+                .iter()
+                .map(|fail_on| result.exit_code(*fail_on))
+                .collect();
             assert_eq!(exit_codes, expected, "{result:?}");
         }
     }

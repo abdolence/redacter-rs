@@ -135,8 +135,13 @@ pub enum CliCommand {
         )]
         min_score: Option<Score>,
 
-        #[command(flatten)]
-        fail_on: FailOnArgs,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = FailOn::Findings,
+            help = "Which results make the command exit with 2: 'findings', 'unconfirmed' (findings, or a file without findings whose named values could not be located, marked ?) or 'never'. Errors, blocked and failed files exit with 1 whichever it is"
+        )]
+        fail_on: FailOn,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -194,40 +199,15 @@ pub struct ReportArgs {
     pub report_format: ReportFormat,
 }
 
-/// When `scan` exits with 2.
-#[derive(Args, Debug, Clone, Copy)]
-pub struct FailOnArgs {
-    #[arg(
-        long,
-        help = "Exit with 0 when findings are reported, and when --fail-on-unconfirmed is set. Errors still exit with 1"
-    )]
-    no_fail: bool,
-
-    #[arg(
-        long,
-        help = "Exit with 2 for a file without findings whose named values could not be located (marked ?), as for findings. Such a file does not change the exit code by default, since a model may name a value that is not in the file"
-    )]
-    fail_on_unconfirmed: bool,
-}
-
 /// Which results make `scan` exit with 2. Errors exit with 1 whichever it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailOn {
+    /// Exit with 0 on findings and unconfirmed files
     Never,
+    /// Exit with 2 on findings
     Findings,
-    FindingsOrUnconfirmed,
-}
-
-impl From<FailOnArgs> for FailOn {
-    fn from(args: FailOnArgs) -> Self {
-        if args.no_fail {
-            FailOn::Never
-        } else if args.fail_on_unconfirmed {
-            FailOn::FindingsOrUnconfirmed
-        } else {
-            FailOn::Findings
-        }
-    }
+    /// Exit with 2 on findings and on unconfirmed files
+    Unconfirmed,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_fails_on_unconfirmed_files_only_when_asked_and_no_fail_wins() {
+    fn scan_takes_what_makes_it_fail_and_fails_on_findings_by_default() {
         let fail_on = |flags: &[&str]| {
             let cli = CliArgs::try_parse_from(
                 ["redacter", "scan", "/tmp", "--redact", "local-rules"]
@@ -730,28 +710,13 @@ mod tests {
             )
             .unwrap();
             match cli.command {
-                CliCommand::Scan { fail_on, .. } => FailOn::from(fail_on),
+                CliCommand::Scan { fail_on, .. } => fail_on,
                 other => panic!("expected scan, got {other:?}"),
             }
         };
         assert_eq!(fail_on(&[]), FailOn::Findings);
-        assert_eq!(
-            fail_on(&["--fail-on-unconfirmed"]),
-            FailOn::FindingsOrUnconfirmed
-        );
-        assert_eq!(
-            fail_on(&["--fail-on-unconfirmed", "--no-fail"]),
-            FailOn::Never
-        );
-        assert!(CliArgs::try_parse_from([
-            "redacter",
-            "scan",
-            "/tmp",
-            "--redact",
-            "local-rules",
-            "--fail-on-unlocated"
-        ])
-        .is_err());
+        assert_eq!(fail_on(&["--fail-on", "never"]), FailOn::Never);
+        assert_eq!(fail_on(&["--fail-on", "unconfirmed"]), FailOn::Unconfirmed);
     }
 
     #[test]
