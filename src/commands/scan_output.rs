@@ -101,8 +101,8 @@ impl FindingReport {
         escaped(&self.value)
     }
 
-    /// The label for a terminal or a text report: a model names it, so it is as much the
-    /// scanned file's doing as the value is.
+    /// The label for a terminal or a text report, see [`escaped`]. A model chooses a label
+    /// while reading the scanned file, so it can hold what a value can.
     fn escaped_label(&self) -> String {
         escaped(&self.label.to_string())
     }
