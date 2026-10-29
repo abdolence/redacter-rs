@@ -22,10 +22,15 @@ use std::collections::BTreeMap;
 /// The glyph of a scanned file with findings.
 const GLYPH_FINDINGS: &str = "!";
 
+/// The glyph of a scanned file without findings from which the redacters named values they
+/// could not place in it, so the file may still hold what they meant.
+const GLYPH_UNCONFIRMED: &str = "?";
+
 /// What each glyph of a `scan` row means.
-pub const SCAN_LEGEND: [(&str, &str); 4] = [
+pub const SCAN_LEGEND: [(&str, &str); 5] = [
     (GLYPH_OK, "clean"),
     (GLYPH_FINDINGS, "findings"),
+    (GLYPH_UNCONFIRMED, "unconfirmed"),
     (GLYPH_SKIPPED, "skipped"),
     (GLYPH_ERROR, "error"),
 ];
@@ -174,17 +179,29 @@ impl ScanFileReport {
         Self::new(file_ref, ScanFileStatus::Failed, Some(message), Vec::new())
     }
 
-    /// What the file's row shows: `!` and the number of findings, `✓` for a clean file, `↷` for
-    /// a file left out or that no redacter reads, and `✗` for one that failed or is blocked,
-    /// since both make the scan incomplete.
+    /// Whether the file was read, has no findings, and has values the redacters named but could
+    /// not locate. Such a file is not known to be clean, and a model's hallucination looks the
+    /// same, so it is neither a finding nor clean.
+    fn is_unconfirmed(&self) -> bool {
+        self.status == ScanFileStatus::Scanned
+            && self.findings.is_empty()
+            && self.unlocated_values > 0
+    }
+
+    /// What the file's row shows: `!` and the number of findings, `?` for a file without findings
+    /// whose values could not be located, `✓` for a clean file, `↷` for a file left out or that
+    /// no redacter reads, and `✗` for one that failed or is blocked, since both make the scan
+    /// incomplete.
     pub fn row<'a>(&self, styles: &'a OutputStyles) -> RowOutcome<'a> {
         let reason = self.reason.clone().unwrap_or_default();
         match self.status {
             ScanFileStatus::Scanned => {
-                let (glyph, style) = if self.findings.is_empty() {
-                    (GLYPH_OK, &styles.ok)
-                } else {
+                let (glyph, style) = if !self.findings.is_empty() {
                     (GLYPH_FINDINGS, &styles.found)
+                } else if self.is_unconfirmed() {
+                    (GLYPH_UNCONFIRMED, &styles.unconfirmed)
+                } else {
+                    (GLYPH_OK, &styles.ok)
                 };
                 let mut counts = Vec::new();
                 if !self.findings.is_empty() {
@@ -251,6 +268,7 @@ pub struct FindingsByLabel(BTreeMap<DetectionLabel, usize>);
 pub struct ScanCommandResult {
     pub files_scanned: usize,
     pub files_with_findings: usize,
+    pub files_unconfirmed: usize,
     pub files_skipped: usize,
     pub files_unsupported: usize,
     pub files_blocked: usize,
@@ -268,6 +286,8 @@ impl ScanCommandResult {
                 self.files_scanned += 1;
                 if !file.findings.is_empty() {
                     self.files_with_findings += 1;
+                } else if file.is_unconfirmed() {
+                    self.files_unconfirmed += 1;
                 }
             }
             ScanFileStatus::Unsupported => self.files_unsupported += 1,
@@ -288,11 +308,12 @@ impl ScanCommandResult {
 
     /// The process exit code: 1 when a file that should have been scanned was not, because it
     /// failed or because the run lacks a converter it needs; 2 when something was found,
-    /// unless `no_fail`; 0 otherwise.
-    pub fn exit_code(&self, no_fail: bool) -> i32 {
+    /// or with `fail_on_unlocated` when a file is unconfirmed, unless `no_fail`; 0 otherwise.
+    pub fn exit_code(&self, no_fail: bool, fail_on_unlocated: bool) -> i32 {
+        let found = self.findings > 0 || (fail_on_unlocated && self.files_unconfirmed > 0);
         if self.files_failed > 0 || self.files_blocked > 0 {
             1
-        } else if self.findings > 0 && !no_fail {
+        } else if found && !no_fail {
             2
         } else {
             0
@@ -402,10 +423,16 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         styles.found.apply_to(result.files_with_findings),
         styles
             .highlighted
-            .apply_to(result.files_scanned - result.files_with_findings),
+            .apply_to(result.files_scanned - result.files_with_findings - result.files_unconfirmed),
         styles.highlighted.apply_to(result.files_skipped),
         styles.highlighted.apply_to(result.files_unsupported),
     );
+    if result.files_unconfirmed > 0 {
+        line.push_str(&format!(
+            ", {} unconfirmed",
+            styles.unconfirmed.apply_to(result.files_unconfirmed)
+        ));
+    }
     if result.files_blocked > 0 {
         line.push_str(&format!(
             ", {} blocked",
@@ -679,6 +706,7 @@ mod tests {
             serde_json::json!({
                 "files_scanned": 4,
                 "files_with_findings": 3,
+                "files_unconfirmed": 0,
                 "files_skipped": 1,
                 "files_unsupported": 1,
                 "files_blocked": 1,
@@ -760,7 +788,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "✓ clean ! findings ↷ skipped ✗ error",
+                "✓ clean ! findings ? unconfirmed ↷ skipped ✗ error",
                 "! customer-note.txt text/plain 0 B 1 finding",
                 "3:15 email local-rules j********************m",
                 "! customers.csv text/csv 0 B 1 finding, 1 value not located",
@@ -775,11 +803,11 @@ mod tests {
                 "! two.txt text/plain 0 B 2 findings",
                 "1:1 email local-rules a****o",
                 "2:1 email local-rules c****o",
-                "✓ reformatted.txt text/plain 0 B 2 values not located",
+                "? reformatted.txt text/plain 0 B 2 values not located",
                 "✗ broken.txt text/plain 0 B provider unavailable",
                 "",
-                "11 files: 4 with findings, 2 clean, 2 skipped, 1 unsupported, 1 blocked, \
-                 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
+                "11 files: 4 with findings, 1 clean, 2 skipped, 1 unsupported, 1 unconfirmed, \
+                 1 blocked, 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
             ]
         );
         assert!(
@@ -910,6 +938,7 @@ mod tests {
                 0,
             )
         };
+        let unconfirmed = || ScanFileReport::scanned(&note, Vec::new(), 1);
         let not_read = |name, media_type, reason| {
             ScanFileReport::not_scanned(
                 &file_ref(name, media_type),
@@ -923,26 +952,28 @@ mod tests {
                 NotRedactedReason::OcrUnavailable,
             )
         };
-        for (files, exit_code, exit_code_with_no_fail) in [
-            (vec![], 0, 0),
-            (vec![found()], 2, 0),
+        // Exit codes by default, with `no_fail`, with `fail_on_unlocated`, and with both.
+        for (files, expected) in [
+            (vec![], [0, 0, 0, 0]),
+            (vec![found()], [2, 0, 2, 0]),
+            (vec![unconfirmed()], [0, 0, 2, 0]),
+            (vec![found(), unconfirmed()], [2, 0, 2, 0]),
             (
                 vec![
                     found(),
                     ScanFileReport::failed(&note, "unavailable".to_string()),
                 ],
-                1,
-                1,
+                [1, 1, 1, 1],
             ),
-            (vec![found(), blocked()], 1, 1),
+            (vec![found(), blocked()], [1, 1, 1, 1]),
+            (vec![unconfirmed(), blocked()], [1, 1, 1, 1]),
             (
                 vec![not_read(
                     "blob.bin",
                     mime::APPLICATION_OCTET_STREAM,
                     NotRedactedReason::TypeNotSupported,
                 )],
-                0,
-                0,
+                [0, 0, 0, 0],
             ),
             (
                 vec![not_read(
@@ -950,16 +981,16 @@ mod tests {
                     mime::IMAGE_SVG,
                     NotRedactedReason::OcrImageFormatNotSupported,
                 )],
-                0,
-                0,
+                [0, 0, 0, 0],
             ),
         ] {
             let mut result = ScanCommandResult::default();
             for file in files {
                 result.push(file);
             }
-            assert_eq!(result.exit_code(false), exit_code, "{result:?}");
-            assert_eq!(result.exit_code(true), exit_code_with_no_fail, "{result:?}");
+            let exit_codes = [(false, false), (true, false), (false, true), (true, true)]
+                .map(|(no_fail, fail_on_unlocated)| result.exit_code(no_fail, fail_on_unlocated));
+            assert_eq!(exit_codes, expected, "{result:?}");
         }
     }
 }

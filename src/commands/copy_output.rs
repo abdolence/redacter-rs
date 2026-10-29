@@ -111,6 +111,8 @@ pub struct OutputStyles {
     pub found: Style,
     /// The label of a finding.
     pub label: Style,
+    /// The glyph of a file whose only results are values the redacters could not locate.
+    pub unconfirmed: Style,
 }
 
 impl OutputStyles {
@@ -127,6 +129,7 @@ impl OutputStyles {
             highlighted: Style::new().bold().white(),
             found: Style::new().bold().red(),
             label: Style::new().yellow(),
+            unconfirmed: Style::new().cyan(),
         }
     }
 
@@ -143,6 +146,7 @@ impl OutputStyles {
             highlighted: Style::new(),
             found: Style::new(),
             label: Style::new(),
+            unconfirmed: Style::new(),
         }
     }
 }

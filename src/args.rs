@@ -140,6 +140,12 @@ pub enum CliCommand {
             help = "Exit with 0 when findings are reported. Errors still exit with 1"
         )]
         no_fail: bool,
+
+        #[arg(
+            long,
+            help = "Exit with 2 for a file without findings whose named values could not be located, as for findings. They exit with 0 by default, since a model may name a value that is not there"
+        )]
+        fail_on_unlocated: bool,
     },
     #[command(about = "List files in the source")]
     Ls {

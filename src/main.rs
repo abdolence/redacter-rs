@@ -137,6 +137,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             show_values,
             min_score,
             no_fail,
+            fail_on_unlocated,
         } => {
             let options = ScanCommandOptions::new(
                 filename_filter,
@@ -156,7 +157,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             report
                 .write(term, &scan_result, &scan_result.to_text())
                 .await?;
-            Ok(scan_result.exit_code(no_fail))
+            Ok(scan_result.exit_code(no_fail, fail_on_unlocated))
         }
         CliCommand::Ls {
             source,

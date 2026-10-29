@@ -373,6 +373,6 @@ mod tests {
             (result.files_scanned, result.files_failed, result.findings),
             (1, 1, 1)
         );
-        assert_eq!(result.exit_code(false), 1);
+        assert_eq!(result.exit_code(false, false), 1);
     }
 }
