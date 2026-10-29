@@ -242,9 +242,12 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult> {
-        let mut redacted = if redact_plan.read_unsupported_as_text {
-            let data = bytes::Bytes::from(input.try_collect::<Vec<_>>().await?.concat());
-            if !is_text(&data) {
+        let mut redacted = match self
+            .stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
+            .await?
+        {
+            Ok(item) => item,
+            Err(data) => {
                 return Ok(RedactStreamResult {
                     number_of_redactions: 0,
                     summary: RedactionSummary {
@@ -254,16 +257,6 @@ impl<'a> StreamRedacter<'a> {
                     stream: Box::new(futures::stream::iter(vec![Ok(data)])),
                 });
             }
-            self.stream_to_redact_item(
-                self.redacter_base_options,
-                futures::stream::iter(vec![Ok(data)]),
-                file_ref,
-                &redact_plan,
-            )
-            .await?
-        } else {
-            self.stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
-                .await?
         };
         let mut number_of_redactions = 0;
         let mut summary = RedactionSummary::default();
@@ -401,24 +394,14 @@ impl<'a> StreamRedacter<'a> {
         plan: &StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<DetectStreamResult> {
-        let item = if plan.read_unsupported_as_text {
-            let data = bytes::Bytes::from(input.try_collect::<Vec<_>>().await?.concat());
-            if !is_text(&data) {
-                return Ok(DetectStreamResult {
-                    detections: Vec::new(),
-                    blocked: Some(RedactionBlocked::NotText),
-                });
-            }
-            self.stream_to_redact_item(
-                self.redacter_base_options,
-                futures::stream::iter(vec![Ok(data)]),
-                file_ref,
-                plan,
-            )
+        let Ok(item) = self
+            .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
             .await?
-        } else {
-            self.stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
-                .await?
+        else {
+            return Ok(DetectStreamResult {
+                detections: Vec::new(),
+                blocked: Some(RedactionBlocked::NotText),
+            });
         };
         let redacters = &plan.supported_redacters;
         let mut detections = Vec::new();
@@ -560,6 +543,10 @@ impl<'a> StreamRedacter<'a> {
         Ok(detections)
     }
 
+    /// The item `input` is read as under the plan. With `--unsupported-as-text` the content
+    /// is text when it is valid UTF-8 without a NUL byte, which binary formats carry and text
+    /// does not; otherwise the whole content comes back as `Err`, for a caller that leaves
+    /// the file as it is.
     async fn stream_to_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
@@ -568,11 +555,16 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
         redact_plan: &StreamRedactPlan<'a>,
-    ) -> AppResult<RedacterDataItem> {
-        match file_ref.media_type {
-            _ if redact_plan.read_unsupported_as_text => {
-                self.stream_to_text_redact_item(input, file_ref).await
-            }
+    ) -> AppResult<Result<RedacterDataItem, bytes::Bytes>> {
+        if redact_plan.read_unsupported_as_text {
+            let data = input.try_collect::<Vec<_>>().await?.concat();
+            return Ok(match String::from_utf8(data) {
+                Ok(text) if !text.contains('\0') => Ok(self.text_redact_item(text, file_ref)),
+                Ok(text) => Err(text.into()),
+                Err(error) => Err(error.into_bytes().into()),
+            });
+        }
+        let item = match file_ref.media_type {
             Some(ref mime)
                 if Redacters::is_mime_text(mime)
                     || (Redacters::is_mime_table(mime) && redact_plan.leave_data_table_as_text) =>
@@ -596,7 +588,8 @@ impl<'a> StreamRedacter<'a> {
             None => Err(AppError::SystemError {
                 message: "Media type is not provided to redact".to_string(),
             }),
-        }
+        };
+        item.map(Ok)
     }
 
     async fn stream_to_text_redact_item<
@@ -611,6 +604,14 @@ impl<'a> StreamRedacter<'a> {
         let whole_content = String::from_utf8(all_bytes).map_err(|e| AppError::SystemError {
             message: format!("Failed to convert bytes to string: {e}"),
         })?;
+        Ok(self.text_redact_item(whole_content, file_ref))
+    }
+
+    fn text_redact_item(
+        &self,
+        whole_content: String,
+        file_ref: &FileSystemRef,
+    ) -> RedacterDataItem {
         let content = if let Some(sampling_size) = self.redacter_base_options.sampling_size {
             let sampling_size = std::cmp::min(sampling_size, whole_content.len());
             whole_content
@@ -620,10 +621,10 @@ impl<'a> StreamRedacter<'a> {
         } else {
             whole_content
         };
-        Ok(RedacterDataItem {
+        RedacterDataItem {
             content: RedacterDataItemContent::Value(content),
             file_ref: file_ref.clone(),
-        })
+        }
     }
 
     async fn stream_to_table_redact_item<
@@ -869,12 +870,6 @@ impl<'a> StreamRedacter<'a> {
             _ => Ok((redacted, OcrStepResult::Redacted)),
         }
     }
-}
-
-/// Whether a file's content is text: valid UTF-8 without a NUL byte, which binary formats such as
-/// images, archives and executables carry and text does not.
-fn is_text(data: &[u8]) -> bool {
-    !data.contains(&0) && std::str::from_utf8(data).is_ok()
 }
 
 /// One OCR line (`TextImageCoords::line`) with its text-bearing words and vertical extent.
