@@ -28,19 +28,19 @@ pub struct CliArgs {
     #[arg(
         long,
         global = true,
-        help = "Directory holding the addons that setup-addons installs and manually placed models, one subdirectory per addon. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models"
+        help = "Directory holding the addons that `addons install` installs and manually placed copies, one subdirectory per addon. Overrides the REDACTER_ADDONS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/addons"
     )]
-    pub models_dir: Option<PathBuf>,
+    pub addons_dir: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: CliCommand,
 }
 
-/// Merges `--models-dir` with the `REDACTER_MODELS_DIR` environment value, the flag winning.
+/// Merges `--addons-dir` with the `REDACTER_ADDONS_DIR` environment value, the flag winning.
 /// Kept as a plain function rather than a `clap` `env` attribute so a parse of `CliArgs`
 /// never reads the real process environment: production passes
-/// `std::env::var_os("REDACTER_MODELS_DIR")`, tests pass an explicit value.
-pub fn resolve_models_dir(
+/// `std::env::var_os("REDACTER_ADDONS_DIR")`, tests pass an explicit value.
+pub fn resolve_addons_dir(
     cli_value: Option<PathBuf>,
     env_value: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
@@ -106,9 +106,18 @@ pub enum CliCommand {
         filename_filter: Option<globset::Glob>,
     },
     #[command(
-        about = "Download and verify addons: the OCR models, the Pdfium library for PDF rendering and the local-ner and local-gliner models"
+        about = "Install and list the addons: OCR models, Pdfium and the local redacter models"
     )]
-    SetupAddons {
+    Addons {
+        #[command(subcommand)]
+        command: AddonsCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AddonsCommand {
+    #[command(about = "Download and verify addons; the only command that downloads anything")]
+    Install {
         #[arg(
             value_enum,
             value_delimiter = ',',
@@ -117,6 +126,8 @@ pub enum CliCommand {
         )]
         addons: Vec<Addon>,
     },
+    #[command(about = "List the addons of this build and whether each is installed")]
+    Ls,
 }
 
 impl CliCommand {
@@ -585,37 +596,43 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn setup_addons_takes_a_comma_separated_list() {
-        let cli = CliArgs::try_parse_from(["redacter", "setup-addons", "ocr,pdf"]).unwrap();
+    fn addons_install_takes_a_comma_separated_list() {
+        let cli = CliArgs::try_parse_from(["redacter", "addons", "install", "ocr,pdf"]).unwrap();
         match cli.command {
-            CliCommand::SetupAddons { addons } => assert_eq!(addons, [Addon::Ocr, Addon::Pdf]),
-            other => panic!("expected setup-addons, got {other:?}"),
+            CliCommand::Addons {
+                command: AddonsCommand::Install { addons },
+            } => assert_eq!(addons, [Addon::Ocr, Addon::Pdf]),
+            other => panic!("expected addons install, got {other:?}"),
         }
     }
 
     #[test]
-    fn setup_addons_rejects_an_unknown_addon() {
-        let err = CliArgs::try_parse_from(["redacter", "setup-addons", "ocr,fonts"])
-            .expect_err("fonts is not an addon");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+    fn addons_ls_takes_no_arguments() {
+        let cli = CliArgs::try_parse_from(["redacter", "addons", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            CliCommand::Addons {
+                command: AddonsCommand::Ls
+            }
+        ));
     }
 
     #[test]
-    fn models_dir_is_accepted_before_and_after_the_subcommand() {
+    fn addons_dir_is_accepted_before_and_after_the_subcommand() {
         let before =
-            CliArgs::try_parse_from(["redacter", "--models-dir", "/m", "setup-addons", "ocr"])
+            CliArgs::try_parse_from(["redacter", "--addons-dir", "/m", "addons", "install", "ocr"])
                 .unwrap();
         let after =
-            CliArgs::try_parse_from(["redacter", "setup-addons", "ocr", "--models-dir", "/m"])
+            CliArgs::try_parse_from(["redacter", "addons", "install", "ocr", "--addons-dir", "/m"])
                 .unwrap();
-        assert_eq!(before.models_dir, Some(PathBuf::from("/m")));
-        assert_eq!(after.models_dir, Some(PathBuf::from("/m")));
+        assert_eq!(before.addons_dir, Some(PathBuf::from("/m")));
+        assert_eq!(after.addons_dir, Some(PathBuf::from("/m")));
     }
 
     #[test]
-    fn models_dir_flag_wins_over_the_environment_value() {
+    fn addons_dir_flag_wins_over_the_environment_value() {
         assert_eq!(
-            resolve_models_dir(
+            resolve_addons_dir(
                 Some(PathBuf::from("/flag")),
                 Some(std::ffi::OsString::from("/env"))
             ),
@@ -624,16 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn models_dir_falls_back_to_the_environment_value() {
+    fn addons_dir_falls_back_to_the_environment_value() {
         assert_eq!(
-            resolve_models_dir(None, Some(std::ffi::OsString::from("/env"))),
+            resolve_addons_dir(None, Some(std::ffi::OsString::from("/env"))),
             Some(PathBuf::from("/env"))
         );
     }
 
     #[test]
-    fn models_dir_is_none_without_either() {
-        assert_eq!(resolve_models_dir(None, None), None);
+    fn addons_dir_is_none_without_either() {
+        assert_eq!(resolve_addons_dir(None, None), None);
     }
 
     #[test]

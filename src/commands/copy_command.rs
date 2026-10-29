@@ -1,3 +1,5 @@
+#[cfg(any(feature = "pdf-render", feature = "ocr"))]
+use crate::addon_store::Addon;
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
     format_capabilities_line, format_file_row, format_legend, format_summary_line, Capability,
@@ -77,8 +79,9 @@ pub async fn command_copy(
     let styles = CopyOutputStyles::new();
 
     // The bar exists from here on because the file systems report through it, but it is
-    // not drawn until the converters have been bound: they report straight to the terminal,
-    // and those lines must not land under a live progress bar.
+    // not drawn until the converters and redacters have been bound: they report straight to
+    // the terminal, those lines must not land under a live progress bar, and a failure to
+    // bind one must not leave a bar running.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -118,9 +121,6 @@ pub async fn command_copy(
         &styles,
     )?;
 
-    bar.set_draw_target(ProgressDrawTarget::stderr());
-    bar.enable_steady_tick(Duration::from_millis(100));
-
     let mut redacter_throttler = redacter_options
         .as_ref()
         .and_then(|o| o.base_options.limit_dlp_requests.clone())
@@ -131,13 +131,16 @@ pub async fn command_copy(
             let mut redacters = Vec::with_capacity(options.provider_options.len());
             for provider_options in options.provider_options {
                 let redacter =
-                    Redacters::new_redacter(provider_options, &app_reporter, &addons).await?;
+                    Redacters::new_redacter(provider_options, &term_reporter, &addons).await?;
                 redacters.push(redacter);
             }
             Some((options.base_options, redacters))
         }
         None => None,
     };
+
+    bar.set_draw_target(ProgressDrawTarget::stderr());
+    bar.enable_steady_tick(Duration::from_millis(100));
 
     let mut summary = CopySummary::default();
     let copy_result: AppResult<CopyCommandResult> = if let Some(listing) = source_listing {
@@ -277,14 +280,14 @@ fn report_copy_info(
         pdf_rendering: match file_converters.pdf_image_converter {
             Some(_) => Capability::Yes,
             #[cfg(feature = "pdf-render")]
-            None => Capability::No(Some(crate::addon_store::Addon::Pdf)),
+            None => Capability::No(Addon::Pdf.manifest().map(|_| Addon::Pdf)),
             #[cfg(not(feature = "pdf-render"))]
             None => Capability::No(None),
         },
         ocr: match file_converters.ocr {
             Some(_) => Capability::Yes,
             #[cfg(feature = "ocr")]
-            None => Capability::No(Some(crate::addon_store::Addon::Ocr)),
+            None => Capability::No(Some(Addon::Ocr)),
             #[cfg(not(feature = "ocr"))]
             None => Capability::No(None),
         },
@@ -612,8 +615,9 @@ mod tests {
         Ok(())
     }
 
-    /// Only `setup-addons` installs anything: a redacting copy of a PDF over an empty models
-    /// directory runs without the addons and leaves the directory as it found it.
+    /// Only `addons install` installs anything: a redacting copy of a PDF over an empty addons
+    /// directory runs without the addons, leaves the directory as it found it and never
+    /// opens a connection, which a download would have to do through the proxy set here.
     #[tokio::test]
     async fn a_redacting_copy_never_downloads_an_addon(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -622,8 +626,11 @@ mod tests {
 
         let term = Term::stdout();
         let temp_dir = TempDir::with_prefix("copy_command_tests_no_addons")?;
-        let models_dir = temp_dir.path().join("models");
-        command_copy(
+        let addons_dir = temp_dir.path().join("addons");
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0")?;
+        proxy.set_nonblocking(true)?;
+        std::env::set_var("HTTPS_PROXY", format!("http://{}", proxy.local_addr()?));
+        let copy = command_copy(
             &term,
             "test-fixtures/documents/customer-form.pdf",
             &temp_dir.path().join("out.pdf").to_string_lossy(),
@@ -633,7 +640,7 @@ mod tests {
                 None,
                 vec![],
                 AddonStoreOptions {
-                    models_dir: Some(models_dir.clone()),
+                    addons_dir: Some(addons_dir.clone()),
                 },
             ),
             Some(base_redacter_options(RedacterProviderOptions::LocalRules(
@@ -643,10 +650,17 @@ mod tests {
                 },
             ))),
         )
-        .await?;
+        .await;
+        std::env::remove_var("HTTPS_PROXY");
+        copy?;
         assert!(
-            !models_dir.exists(),
-            "nothing may be written to {models_dir:?}"
+            !addons_dir.exists(),
+            "nothing may be written to {addons_dir:?}"
+        );
+        assert_eq!(
+            proxy.accept().map(|_| ()).map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::WouldBlock),
+            "no connection may be opened"
         );
         Ok(())
     }
@@ -654,16 +668,15 @@ mod tests {
     /// A damaged OCR install is not a reason to copy nothing: the run goes on without OCR.
     #[cfg(feature = "ocr")]
     #[tokio::test]
-    async fn copies_over_a_stale_models_directory(
+    async fn copies_over_a_stale_addons_directory(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::addon_store::Addon;
         let lock = pdfium_test_lock();
         let _guard = lock.lock().await;
 
         let term = Term::stdout();
-        let temp_dir = TempDir::with_prefix("copy_command_tests_stale_models")?;
-        let models_dir = temp_dir.path().join("models");
-        let ocrs_dir = models_dir.join("ocrs");
+        let temp_dir = TempDir::with_prefix("copy_command_tests_stale_addons")?;
+        let addons_dir = temp_dir.path().join("addons");
+        let ocrs_dir = addons_dir.join("ocrs");
         std::fs::create_dir_all(&ocrs_dir)?;
         for file in Addon::Ocr.manifest().unwrap().files {
             std::fs::write(ocrs_dir.join(file.name), b"junk")?;
@@ -671,14 +684,14 @@ mod tests {
         let destination = temp_dir.path().join("out");
         std::fs::create_dir_all(&destination)?;
 
-        let with_stale_models = || {
+        let with_stale_addons = || {
             CopyCommandOptions::new(
                 None,
                 None,
                 None,
                 vec![],
                 AddonStoreOptions {
-                    models_dir: Some(models_dir.clone()),
+                    addons_dir: Some(addons_dir.clone()),
                 },
             )
         };
@@ -687,7 +700,7 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &destination.to_string_lossy(),
-            with_stale_models(),
+            with_stale_addons(),
             None,
         )
         .await?;
@@ -700,7 +713,7 @@ mod tests {
             &term,
             "test-fixtures/media/",
             &image_destination.to_string_lossy(),
-            with_stale_models(),
+            with_stale_addons(),
             Some(base_redacter_options(RedacterProviderOptions::LocalRules(
                 LocalRulesRedacterOptions {
                     groups: RuleGroup::all(),

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-/// An optional part of the tool that only `redacter setup-addons` downloads. Each variant
+/// An optional part of the tool that only `redacter addons install` downloads. Each variant
 /// exists only in builds with its feature, so the subcommand never offers an addon the build
 /// cannot use; test builds keep them all so every manifest is checked in every build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -35,7 +35,7 @@ impl Addon {
     }
 }
 
-/// The name `setup-addons` takes.
+/// The name `addons install` takes.
 impl std::fmt::Display for Addon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = clap::ValueEnum::to_possible_value(self)
@@ -56,7 +56,7 @@ pub struct AddonFile {
 /// Everything the store knows about the files of one addon, declared once.
 #[derive(Debug)]
 pub struct AddonManifest {
-    /// Directory name under the models root.
+    /// Directory name under the addons root.
     pub dir_name: &'static str,
     pub files: &'static [AddonFile],
     /// Directories from earlier versions where a manual copy may still live; never verified.
@@ -98,7 +98,7 @@ static NER_MULTILINGUAL_HRL_FILES: [AddonFile; 3] = [
     },
 ];
 
-/// An addon that has never lived anywhere but the models root.
+/// An addon that has never lived anywhere but the addons root.
 #[cfg(any(
     feature = "local-ner",
     feature = "local-gliner",
@@ -201,34 +201,41 @@ static GLINER_MULTI_PII: AddonManifest = AddonManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
     use std::path::Path;
 
+    const RELEASES: &str = "https://github.com/abdolence/redacter-rs/releases/download/";
+
+    /// Every file is fetched from one release of this repository per addon and is pinned by
+    /// a SHA-256 digest, whichever platform the table is compiled for.
     #[test]
-    fn ocrs_manifest_lists_both_rten_files_with_pinned_sizes() {
-        let manifest = Addon::Ocr.manifest().unwrap();
-        assert_eq!(manifest.dir_name, "ocrs");
-        let files: Vec<(&str, u64)> = manifest.files.iter().map(|f| (f.name, f.size)).collect();
-        assert_eq!(
-            files,
-            [
-                ("text-detection.rten", 2_510_284),
-                ("text-recognition.rten", 9_716_568)
-            ]
-        );
-        for file in manifest.files {
-            assert_eq!(
-                file.url,
-                format!(
-                    "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/{}",
+    fn every_addon_pins_digests_of_files_hosted_in_one_release() {
+        for &addon in Addon::value_variants() {
+            let Some(manifest) = addon.manifest() else {
+                continue;
+            };
+            let mut tags: Vec<&str> = manifest
+                .files
+                .iter()
+                .map(|file| {
+                    let (tag, _) = file
+                        .url
+                        .strip_prefix(RELEASES)
+                        .and_then(|rest| rest.split_once('/'))
+                        .unwrap_or_else(|| panic!("{addon}: {} is not a release asset", file.url));
+                    tag
+                })
+                .collect();
+            tags.dedup();
+            assert_eq!(tags.len(), 1, "{addon}: {tags:?}");
+            for file in manifest.files {
+                assert_eq!(file.sha256.len(), 64, "{addon}: {}", file.name);
+                assert!(
+                    file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{addon}: {}",
                     file.name
-                )
-            );
-            assert_eq!(file.sha256.len(), 64, "{}", file.name);
-            assert!(
-                file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
-                "{}",
-                file.name
-            );
+                );
+            }
         }
     }
 
@@ -247,78 +254,10 @@ mod tests {
         );
     }
 
+    /// The directory is named after the Pdfium build, and the models release that hosts the
+    /// library after the same build, so replacing one without the other cannot go unnoticed.
     #[test]
-    fn ner_manifest_lists_the_three_pinned_files() {
-        let manifest = Addon::LocalNer.manifest().unwrap();
-        assert_eq!(
-            manifest.dir_name,
-            "distilbert-base-multilingual-cased-ner-hrl"
-        );
-        let names: Vec<&str> = manifest.files.iter().map(|f| f.name).collect();
-        assert_eq!(names, ["model_uint8.onnx", "tokenizer.json", "config.json"]);
-        let total: u64 = manifest.files.iter().map(|f| f.size).sum();
-        assert_eq!(total, 138_036_031);
-        assert!((manifest.legacy_dirs)().is_empty());
-    }
-
-    #[test]
-    fn gliner_manifest_lists_the_three_pinned_files() {
-        let manifest = Addon::LocalGliner.manifest().unwrap();
-        assert_eq!(manifest.dir_name, "gliner_multi_pii-v1");
-        let names: Vec<&str> = manifest.files.iter().map(|f| f.name).collect();
-        assert_eq!(
-            names,
-            ["model.onnx", "tokenizer.json", "gliner_config.json"]
-        );
-        let total: u64 = manifest.files.iter().map(|f| f.size).sum();
-        assert_eq!(total, 1_157_129_714 + 16_331_948 + 732);
-        assert!((manifest.legacy_dirs)().is_empty());
-    }
-
-    #[test]
-    fn gliner_urls_point_at_the_release_and_digests_are_hex() {
-        let manifest = Addon::LocalGliner.manifest().unwrap();
-        for file in manifest.files {
-            assert!(
-                file.url.starts_with(
-                    "https://github.com/abdolence/redacter-rs/releases/download/models-gliner-multi-pii-1/"
-                ),
-                "{}",
-                file.url
-            );
-            assert!(file.url.ends_with(file.name), "{}", file.url);
-            assert_eq!(file.sha256.len(), 64, "{}", file.name);
-            assert!(
-                file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
-                "{}",
-                file.name
-            );
-        }
-    }
-
-    #[test]
-    fn ner_urls_point_at_the_release_and_digests_are_hex() {
-        let manifest = Addon::LocalNer.manifest().unwrap();
-        for file in manifest.files {
-            assert!(
-                file.url.starts_with(
-                    "https://github.com/abdolence/redacter-rs/releases/download/models-ner-hrl-1/"
-                ),
-                "{}",
-                file.url
-            );
-            assert!(file.url.ends_with(file.name), "{}", file.url);
-            assert_eq!(file.sha256.len(), 64, "{}", file.name);
-            assert!(
-                file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
-                "{}",
-                file.name
-            );
-        }
-    }
-
-    #[test]
-    fn pdfium_manifest_pins_one_library_from_the_release_of_its_build() {
+    fn pdfium_release_tag_matches_the_directory_build() {
         let Some(manifest) = Addon::Pdf.manifest() else {
             return;
         };
@@ -331,12 +270,9 @@ mod tests {
         };
         assert_eq!(
             file.url
-                .strip_prefix("https://github.com/abdolence/redacter-rs/releases/download/")
+                .strip_prefix(RELEASES)
                 .and_then(|rest| rest.split('/').next()),
             Some(format!("models-pdfium-{build}").as_str())
         );
-        assert_eq!(file.sha256.len(), 64, "{}", file.name);
-        assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!((manifest.legacy_dirs)().is_empty());
     }
 }

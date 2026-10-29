@@ -73,8 +73,8 @@ impl<'a> Ocrs<'a> {
             "Loading OCR models from {}",
             files.dir().to_string_lossy()
         ))?;
-        let detection_model = rten::Model::load_file(files.path("text-detection.rten"))?;
-        let recognition_model = rten::Model::load_file(files.path("text-recognition.rten"))?;
+        let detection_model = rten::Model::load_file(files.dir().join("text-detection.rten"))?;
+        let recognition_model = rten::Model::load_file(files.dir().join("text-recognition.rten"))?;
         let ocr_engine = OcrEngine::new(OcrEngineParams {
             detection_model: Some(detection_model),
             recognition_model: Some(recognition_model),

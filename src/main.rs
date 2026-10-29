@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
     let addon_store = AddonStoreOptions {
-        models_dir: resolve_models_dir(cli.models_dir, std::env::var_os("REDACTER_MODELS_DIR")),
+        addons_dir: resolve_addons_dir(cli.addons_dir, std::env::var_os("REDACTER_ADDONS_DIR")),
     };
     match cli.command {
         CliCommand::Cp {
@@ -133,9 +133,12 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
             let options = LsCommandOptions::new(filename_filter, max_size_limit);
             command_ls(term, &source, options).await?;
         }
-        CliCommand::SetupAddons { addons } => {
-            command_setup_addons(term, &addons, &addon_store).await?;
-        }
+        CliCommand::Addons { command } => match command {
+            AddonsCommand::Install { addons } => {
+                command_addons_install(term, &addons, &addon_store).await?
+            }
+            AddonsCommand::Ls => command_addons_ls(term, &addon_store)?,
+        },
     }
 
     Ok(())

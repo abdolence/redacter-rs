@@ -25,8 +25,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
-      - name: Download pdfium
-        run: curl -sSL https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7881/pdfium-linux-x64.tgz | tar -xz -C . lib/libpdfium.so
+      - name: Install pdfium
+        run: cargo run -- addons install pdf
       - name: Authenticate to Google Cloud development
         id: auth
         uses: google-github-actions/auth@v3

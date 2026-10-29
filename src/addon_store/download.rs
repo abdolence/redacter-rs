@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn creates_the_directory_when_missing() {
         let dir = TempDir::new().unwrap();
-        let nested = dir.path().join("models").join("test-model");
+        let nested = dir.path().join("addons").join("test-model");
         let fetcher = FakeFetcher::good();
         download_file(&fetcher, &TEST_FILES[1], &nested, &ProgressBar::hidden())
             .await

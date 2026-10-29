@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(row, ["Madrid", "[REDACTED]"]);
     }
 
-    /// The 1.16 GB model is installed with `redacter setup-addons local-gliner`; a test
+    /// The 1.16 GB model is installed with `redacter addons install local-gliner`; a test
     /// never downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalGlinerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());

@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(row, ["Madrid", "[REDACTED]"]);
     }
 
-    /// The model is installed with `redacter setup-addons local-ner`; a test never
+    /// The model is installed with `redacter addons install local-ner`; a test never
     /// downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalNerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());

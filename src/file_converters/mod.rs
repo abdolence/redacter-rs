@@ -28,22 +28,21 @@ impl<'a> FileConverters<'a> {
 
     /// Binds the converters whose addons are installed. Nothing is downloaded: a converter
     /// whose addon is missing is off for this run.
-    // `mut self`, `app_reporter` and `addons` are only used inside the feature-gated blocks
-    // below; unused when neither the pdf-render nor ocr feature is enabled.
-    #[cfg_attr(
-        not(any(feature = "pdf-render", feature = "ocr")),
-        allow(unused_mut, unused_variables)
-    )]
+    // `mut self` is only mutated inside the feature-gated blocks below, and `app_reporter` is
+    // only read by the ocr one.
+    #[cfg_attr(not(any(feature = "pdf-render", feature = "ocr")), allow(unused_mut))]
+    #[cfg_attr(not(feature = "ocr"), allow(unused_variables))]
     pub async fn init(
         mut self,
         app_reporter: &'a AppReporter<'a>,
         addons: &AddonStore,
     ) -> AppResult<Self> {
         #[cfg(feature = "pdf-render")]
-        {
-            if let Ok(pdf_image_converter) = pdf_image_converter::PdfImageConverter::new(addons) {
-                self.pdf_image_converter = Some(Box::new(pdf_image_converter));
+        match pdf_image_converter::PdfImageConverter::new(addons) {
+            Ok(pdf_image_converter) => {
+                self.pdf_image_converter = Some(Box::new(pdf_image_converter))
             }
+            Err(err) => tracing::debug!(%err, "PDF rendering is off"),
         }
         #[cfg(feature = "ocr")]
         match addons.find(crate::addon_store::Addon::Ocr) {

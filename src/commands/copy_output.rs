@@ -414,7 +414,7 @@ pub fn format_capabilities_line(
         Capability::No(None) => styles.dimmed.apply_to("no".to_string()),
         Capability::No(Some(addon)) => styles
             .dimmed
-            .apply_to(format!("no (redacter setup-addons {addon})")),
+            .apply_to(format!("no (redacter addons install {addon})")),
     };
     let sampling = match capabilities.sampling_size {
         Some(size) => styles.highlighted.apply_to(format!("{size} bytes")),
@@ -752,8 +752,8 @@ mod tests {
                 },
                 &CopyOutputStyles::plain()
             ),
-            "Redacting: local-rules · PDF rendering: no (redacter setup-addons pdf) · \
-             OCR: no (redacter setup-addons ocr) · Sampling: off"
+            "Redacting: local-rules · PDF rendering: no (redacter addons install pdf) · \
+             OCR: no (redacter addons install ocr) · Sampling: off"
         );
     }
 
