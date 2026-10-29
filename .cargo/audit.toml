@@ -1,0 +1,5 @@
+[advisories]
+# crypto-bigint 0.5.5 reaches the build only through aws-sigv4 (p256, used for SigV4a signing),
+# and no aws-sigv4 release drops it yet. Remove the entry once
+# `cargo tree -i crypto-bigint@0.5.5` comes back empty.
+ignore = ["RUSTSEC-2026-0387"]
