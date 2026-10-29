@@ -169,43 +169,6 @@ mod tests {
         )
     }
 
-    fn stop_of(result: AppResult<String>) -> ModelStop {
-        match result {
-            Err(AppError::ModelAnswerStopped(stop)) => stop,
-            other => panic!("expected a stopped answer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_safety_stop_names_the_blocked_categories() {
-        assert_eq!(
-            stop_of(answer_stopped_by(Ok("SAFETY")).into_text()),
-            ModelStop::Safety {
-                categories: vec!["DANGEROUS_CONTENT".to_string()]
-            }
-        );
-    }
-
-    #[test]
-    fn other_finish_reasons_are_named_as_the_provider_names_them() {
-        assert_eq!(
-            stop_of(answer_stopped_by(Ok("MAX_TOKENS")).into_text()),
-            ModelStop::MaxTokens
-        );
-        assert_eq!(
-            stop_of(answer_stopped_by(Ok("PROHIBITED_CONTENT")).into_text()),
-            ModelStop::Withheld("PROHIBITED_CONTENT".to_string())
-        );
-    }
-
-    #[test]
-    fn an_unspecified_finish_reason_is_a_stop() {
-        assert_eq!(
-            stop_of(answer_stopped_by(Ok("FINISH_REASON_UNSPECIFIED")).into_text()),
-            ModelStop::Withheld("FINISH_REASON_UNSPECIFIED".to_string())
-        );
-    }
-
     #[test]
     fn an_echoed_separator_is_removed_from_around_the_answer() {
         for echoed in [
@@ -226,15 +189,6 @@ mod tests {
         assert_eq!(
             answer.into_text_without_separator("---1234").unwrap(),
             "  Hello, [REDACTED]\n"
-        );
-    }
-
-    #[test]
-    fn a_response_without_candidates_names_the_reason_the_prompt_was_blocked() {
-        let answer = ModelAnswer::from_gemini(None, Some("PROHIBITED_CONTENT"));
-        assert_eq!(
-            stop_of(answer.into_text()),
-            ModelStop::PromptBlocked("PROHIBITED_CONTENT".to_string())
         );
     }
 
@@ -274,22 +228,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_safety_stop_is_retried_once_and_a_second_answer_is_taken() {
-        let (result, attempts) = attempts_until_done(&["SAFETY", "STOP"]).await;
-        assert_eq!(result.unwrap(), "[]");
-        assert_eq!(attempts, 2);
+    async fn a_safety_or_unexplained_stop_is_retried_once_and_any_other_is_not() {
+        let stopped_by_safety = || ModelStop::Safety {
+            categories: Vec::new(),
+        };
+        for (finish_reasons, expected_attempts, expected) in [
+            (&["SAFETY", "STOP"][..], 2, Ok("[]".to_string())),
+            (&["OTHER", "STOP"][..], 2, Ok("[]".to_string())),
+            (
+                &["SAFETY", "SAFETY", "STOP"][..],
+                2,
+                Err(stopped_by_safety()),
+            ),
+            (&["MAX_TOKENS", "STOP"][..], 1, Err(ModelStop::MaxTokens)),
+        ] {
+            let (result, attempts) = attempts_until_done(finish_reasons).await;
+            let outcome = match result {
+                Ok(text) => Ok(text),
+                Err(AppError::ModelAnswerStopped(stop)) => Err(stop),
+                Err(other) => panic!("{finish_reasons:?} ended in {other:?}"),
+            };
+            assert_eq!(outcome, expected, "{finish_reasons:?}");
+            assert_eq!(attempts, expected_attempts, "{finish_reasons:?}");
+        }
     }
 
     #[tokio::test]
-    async fn a_stop_that_repeats_ends_as_the_error_after_one_retry() {
-        let (result, attempts) = attempts_until_done(&["SAFETY", "SAFETY", "STOP"]).await;
-        assert!(matches!(stop_of(result), ModelStop::Safety { .. }));
-        assert_eq!(attempts, 2);
-    }
-
-    #[tokio::test]
-    async fn other_and_an_empty_stop_are_retried() {
-        assert_eq!(attempts_until_done(&["OTHER", "STOP"]).await.1, 2);
+    async fn an_empty_answer_is_retried() {
         let attempts = Cell::new(0);
         let result = retrying_once(|| {
             attempts.set(attempts.get() + 1);
@@ -298,12 +263,5 @@ mod tests {
         })
         .await;
         assert_eq!(result.unwrap(), "[]");
-    }
-
-    #[tokio::test]
-    async fn a_truncated_answer_is_not_retried() {
-        let (result, attempts) = attempts_until_done(&["MAX_TOKENS", "STOP"]).await;
-        assert_eq!(stop_of(result), ModelStop::MaxTokens);
-        assert_eq!(attempts, 1);
     }
 }

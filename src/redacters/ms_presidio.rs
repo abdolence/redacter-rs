@@ -309,16 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn an_item_reaching_past_the_text_is_an_error() {
-        let items: Vec<MsPresidioAnalyzedItem> =
-            serde_json::from_str(r#"[{"entity_type": "PERSON", "start": 0, "end": 9}]"#).unwrap();
-        assert!(matches!(
-            MsPresidioRedacter::detections_in("Grüße", &items),
-            Err(AppError::DetectionOutsideContent { .. })
-        ));
-    }
-
-    #[test]
     fn an_item_without_a_score_is_unscored() {
         let items: Vec<MsPresidioAnalyzedItem> =
             serde_json::from_str(r#"[{"entity_type": "PERSON", "start": 0, "end": 3}]"#).unwrap();

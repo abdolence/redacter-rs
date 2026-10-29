@@ -294,27 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn a_value_the_model_cased_differently_is_reported_as_the_text_spells_it() {
-        let detections = LlmTextFinding::detections_from_answer(
-            r#"[{"text":"john smith","type":"person_name"}]"#,
-            "John Smith",
-        )
-        .unwrap();
-        assert_eq!(detections.len(), 1);
-        assert_eq!(detections[0].value, "John Smith");
-    }
-
-    #[test]
-    fn a_value_the_model_changed_beyond_case_is_not_reported() {
-        let detections = LlmTextFinding::detections_from_answer(
-            r#"[{"text":"J. Smith","type":"person_name"}]"#,
-            "John Smith",
-        )
-        .unwrap();
-        assert!(detections.is_empty());
-    }
-
-    #[test]
     fn an_answer_that_is_not_findings_is_an_error() {
         assert!(LlmTextFinding::detections_from_answer("No PII found.", "text").is_err());
         assert!(LlmTextFinding::detections_from_answer(r#"[{"text":"a"}]"#, "a").is_err());

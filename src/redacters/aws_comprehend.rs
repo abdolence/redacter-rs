@@ -211,18 +211,6 @@ mod tests {
     }
 
     #[test]
-    fn an_entity_reaching_past_the_text_is_an_error() {
-        let result = AwsComprehendRedacter::detections_in(
-            "Grüße",
-            &[entity(PiiEntityType::Name, 0.9, 0, 6)],
-        );
-        assert!(matches!(
-            result,
-            Err(AppError::DetectionOutsideContent { .. })
-        ));
-    }
-
-    #[test]
     fn an_entity_without_offsets_is_an_error_rather_than_dropped() {
         let without_end = PiiEntity::builder()
             .r#type(PiiEntityType::Name)

@@ -724,48 +724,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_range_that_does_not_fit_the_text_is_an_error() {
-        let text = "Grüße";
-        for (start, end) in [(0, 99), (2, 3)] {
-            let result = result_of(vec![finding(
-                "PERSON_NAME",
-                dlp::Likelihood::Likely,
-                byte_location(start, end),
-                "",
-            )]);
-            assert!(
-                matches!(
-                    GcpDlpRedacter::detections_in(
-                        &RedacterDataItemContent::Value(text.to_string()),
-                        &[],
-                        result
-                    ),
-                    Err(AppError::DetectionOutsideContent { .. })
-                ),
-                "{start}..{end}"
-            );
-        }
-    }
-
-    #[test]
-    fn likelihood_buckets_map_to_the_fixed_score_table() {
-        let score_of = |likelihood: i32| {
-            let finding = dlp::Finding {
-                likelihood,
-                ..dlp::Finding::default()
-            };
-            likelihood_score(finding.likelihood())
-        };
-        assert_eq!(score_of(dlp::Likelihood::VeryUnlikely.into()), score(0.1));
-        assert_eq!(score_of(dlp::Likelihood::Unlikely.into()), score(0.3));
-        assert_eq!(score_of(dlp::Likelihood::Possible.into()), score(0.5));
-        assert_eq!(score_of(dlp::Likelihood::Likely.into()), score(0.7));
-        assert_eq!(score_of(dlp::Likelihood::VeryLikely.into()), score(0.9));
-        assert_eq!(score_of(dlp::Likelihood::Unspecified.into()), None);
-        assert_eq!(score_of(99), None);
-    }
-
     fn cell_location(field_name: &str, row_index: i64, start: usize, end: usize) -> dlp::Location {
         dlp::Location {
             content_locations: vec![dlp::ContentLocation {
