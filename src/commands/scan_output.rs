@@ -131,8 +131,9 @@ pub struct ScanFileReport {
     reason: Option<String>,
     findings: Vec<FindingReport>,
     /// How many values the redacters named in the file without being able to place them in it,
-    /// so a file without findings may still hold what they meant. Only the count is kept, since
-    /// a value is the sensitive data itself.
+    /// so a file without findings may still hold what they meant. Such a file is unconfirmed:
+    /// not known to be clean, and a model's hallucination looks the same, so it is neither a
+    /// finding nor clean. Only the count is kept, since a value is the sensitive data itself.
     unlocated_values: usize,
 }
 
@@ -179,15 +180,6 @@ impl ScanFileReport {
         Self::new(file_ref, ScanFileStatus::Failed, Some(message), Vec::new())
     }
 
-    /// Whether the file was read, has no findings, and has values the redacters named but could
-    /// not locate. Such a file is not known to be clean, and a model's hallucination looks the
-    /// same, so it is neither a finding nor clean.
-    fn is_unconfirmed(&self) -> bool {
-        self.status == ScanFileStatus::Scanned
-            && self.findings.is_empty()
-            && self.unlocated_values > 0
-    }
-
     /// What the file's row shows: `!` and the number of findings, `?` for a file without findings
     /// whose values could not be located, `✓` for a clean file, `↷` for a file left out or that
     /// no redacter reads, and `✗` for one that failed or is blocked, since both make the scan
@@ -198,7 +190,7 @@ impl ScanFileReport {
             ScanFileStatus::Scanned => {
                 let (glyph, style) = if !self.findings.is_empty() {
                     (GLYPH_FINDINGS, &styles.found)
-                } else if self.is_unconfirmed() {
+                } else if self.unlocated_values > 0 {
                     (GLYPH_UNCONFIRMED, &styles.unconfirmed)
                 } else {
                     (GLYPH_OK, &styles.ok)
@@ -286,7 +278,7 @@ impl ScanCommandResult {
                 self.files_scanned += 1;
                 if !file.findings.is_empty() {
                     self.files_with_findings += 1;
-                } else if file.is_unconfirmed() {
+                } else if file.unlocated_values > 0 {
                     self.files_unconfirmed += 1;
                 }
             }
@@ -417,15 +409,13 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         + result.files_blocked
         + result.files_failed;
     let mut line = format!(
-        "{} {}: {} with findings, {} clean, {} skipped, {} unsupported",
+        "{} {}: {} with findings, {} clean",
         styles.highlighted.apply_to(total),
         if total == 1 { "file" } else { "files" },
         styles.found.apply_to(result.files_with_findings),
         styles
             .highlighted
             .apply_to(result.files_scanned - result.files_with_findings - result.files_unconfirmed),
-        styles.highlighted.apply_to(result.files_skipped),
-        styles.highlighted.apply_to(result.files_unsupported),
     );
     if result.files_unconfirmed > 0 {
         line.push_str(&format!(
@@ -433,6 +423,11 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
             styles.unconfirmed.apply_to(result.files_unconfirmed)
         ));
     }
+    line.push_str(&format!(
+        ", {} skipped, {} unsupported",
+        styles.highlighted.apply_to(result.files_skipped),
+        styles.highlighted.apply_to(result.files_unsupported),
+    ));
     if result.files_blocked > 0 {
         line.push_str(&format!(
             ", {} blocked",
@@ -837,7 +832,7 @@ mod tests {
                 "? reformatted.txt text/plain 0 B 2 values not located",
                 "✗ broken.txt text/plain 0 B provider unavailable",
                 "",
-                "11 files: 4 with findings, 1 clean, 2 skipped, 1 unsupported, 1 unconfirmed, \
+                "11 files: 4 with findings, 1 clean, 1 unconfirmed, 2 skipped, 1 unsupported, \
                  1 blocked, 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
             ]
         );
