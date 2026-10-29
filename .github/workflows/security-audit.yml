@@ -5,6 +5,7 @@ on:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - '.cargo/audit.toml'
+      - '.github/workflows/security-audit.yml'
   schedule:
     - cron: '5 4 * * 6'
 concurrency:
