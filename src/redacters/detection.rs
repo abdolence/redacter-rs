@@ -93,7 +93,7 @@ pub struct Detection {
 }
 
 /// What a provider found in an item.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub struct Detections {
     pub found: Vec<Detection>,
     /// How many values the provider named without being able to place them in the item, such

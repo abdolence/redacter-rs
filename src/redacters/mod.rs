@@ -3,7 +3,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::tonic;
 use mime::Mime;
@@ -78,8 +78,9 @@ pub const LLM_MAX_IMAGE_DIMENSION: u32 = 1024;
 
 /// Formats a Bedrock SDK failure, keeping the service error code and message when the call
 /// reached the service. Without a code the message names only the kind of failure and the
-/// HTTP status: the source chain of a response error can carry the response, which echoes the
-/// scanned content, and the message reaches reports. The chain goes to the debug log.
+/// HTTP status: the debug form of an SDK error holds the raw response and so can echo the
+/// scanned content, and the message reaches reports. The `Display` chain of the error goes to
+/// the debug log.
 pub(crate) fn bedrock_error<E>(context: &str, err: &SdkError<E>) -> AppError
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
@@ -88,7 +89,13 @@ where
         (Some(code), Some(message)) => format!("{context}: {code}: {message}"),
         (Some(code), None) => format!("{context}: {code}"),
         (None, _) => {
-            tracing::debug!(error = %DisplayErrorContext(err), "Bedrock call failed");
+            let chain: Vec<String> =
+                std::iter::successors(Some(err as &(dyn std::error::Error + 'static)), |source| {
+                    source.source()
+                })
+                .map(ToString::to_string)
+                .collect();
+            tracing::debug!(chain = %chain.join(": "), "Bedrock call failed");
             let kind = match err {
                 SdkError::ConstructionFailure(_) => "the request could not be built",
                 SdkError::TimeoutError(_) => "the request timed out",
