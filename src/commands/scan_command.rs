@@ -5,7 +5,7 @@ use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_command::plan_blocked_reason;
 use crate::commands::copy_output::{
     format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
-    SkipReason,
+    RowLayout, SkipReason,
 };
 use crate::commands::scan_output::{
     format_file_lines, format_scan_summary, FindingReport, ScanCommandResult, ScanFileReport,
@@ -219,7 +219,11 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     write_lines(
         context.term,
         context.bar,
-        &format_file_lines(&report, usize::from(context.term.size().1), context.styles),
+        &format_file_lines(
+            &report,
+            RowLayout::for_terminal(usize::from(context.term.size().1)),
+            context.styles,
+        ),
     )?;
     context.bar.inc(1);
     Ok(report)
@@ -315,6 +319,7 @@ async fn detect_in_file(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::args::FailOn;
     use crate::redacters::{
         LocalRulesRedacterOptions, RedacterBaseOptions, RedacterProviderOptions, RuleGroup,
     };
@@ -339,6 +344,18 @@ mod tests {
         }
     }
 
+    /// A terminal that writes to `/dev/null`, so the rows of a scan do not land in the output
+    /// of the test run.
+    fn silent_term() -> Term {
+        Term::read_write_pair(
+            std::fs::File::open("/dev/null").unwrap(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn a_file_that_cannot_be_read_is_reported_failed_and_the_scan_goes_on() {
         let dir = tempfile::TempDir::with_prefix("scan_unreadable_file").unwrap();
@@ -352,7 +369,7 @@ mod tests {
         }
 
         let result = command_scan(
-            &Term::stdout(),
+            &silent_term(),
             &format!("{}/", dir.path().display()),
             ScanCommandOptions::new(
                 None,
@@ -373,6 +390,6 @@ mod tests {
             (result.files_scanned, result.files_failed, result.findings),
             (1, 1, 1)
         );
-        assert_eq!(result.exit_code(false), 1);
+        assert_eq!(result.exit_code(FailOn::Findings), 1);
     }
 }

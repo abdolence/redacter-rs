@@ -31,9 +31,9 @@ pub struct LocalGlinerRedacterOptions {
 }
 
 impl LocalGlinerRedacterOptions {
-    /// Rejects an empty or all-whitespace label, an empty label list and a score outside
-    /// `0.0..=1.0` (NaN included). Every label is trimmed, since the model reads it as
-    /// prompt text and leading or trailing whitespace changes nothing but the token count.
+    /// Rejects an empty or all-whitespace label and an empty label list. Every label is
+    /// trimmed, since the model reads it as prompt text and leading or trailing whitespace
+    /// changes nothing but the token count.
     pub fn validated(labels: Vec<String>, min_score: Score) -> Result<Self, LocalGlinerError> {
         if labels.is_empty() {
             return Err(LocalGlinerError::NoLabels);

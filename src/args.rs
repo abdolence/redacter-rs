@@ -137,9 +137,11 @@ pub enum CliCommand {
 
         #[arg(
             long,
-            help = "Exit with 0 when findings are reported. Errors still exit with 1"
+            value_enum,
+            default_value_t = FailOn::Findings,
+            help = "Which results make the command exit with 2: 'findings', 'unconfirmed' (findings, or a file without findings whose named values could not be located, marked ?) or 'never'. Errors, blocked and failed files exit with 1 whichever it is"
         )]
-        no_fail: bool,
+        fail_on: FailOn,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -195,6 +197,17 @@ pub struct ReportArgs {
         help = "Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
+}
+
+/// Which results make `scan` exit with 2. Errors exit with 1 whichever it is.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailOn {
+    /// Exit with 0 on findings and unconfirmed files
+    Never,
+    /// Exit with 2 on findings
+    Findings,
+    /// Exit with 2 on findings and on unconfirmed files
+    Unconfirmed,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -685,6 +698,25 @@ mod tests {
             } => assert_eq!(addons, [Addon::Ocr, Addon::Pdf]),
             other => panic!("expected addons install, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scan_takes_what_makes_it_fail_and_fails_on_findings_by_default() {
+        let fail_on = |flags: &[&str]| {
+            let cli = CliArgs::try_parse_from(
+                ["redacter", "scan", "/tmp", "--redact", "local-rules"]
+                    .into_iter()
+                    .chain(flags.iter().copied()),
+            )
+            .unwrap();
+            match cli.command {
+                CliCommand::Scan { fail_on, .. } => fail_on,
+                other => panic!("expected scan, got {other:?}"),
+            }
+        };
+        assert_eq!(fail_on(&[]), FailOn::Findings);
+        assert_eq!(fail_on(&["--fail-on", "never"]), FailOn::Never);
+        assert_eq!(fail_on(&["--fail-on", "unconfirmed"]), FailOn::Unconfirmed);
     }
 
     #[test]

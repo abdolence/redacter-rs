@@ -111,6 +111,8 @@ pub struct OutputStyles {
     pub found: Style,
     /// The label of a finding.
     pub label: Style,
+    /// The glyph of a file whose only results are values the redacters could not locate.
+    pub unconfirmed: Style,
 }
 
 impl OutputStyles {
@@ -127,6 +129,7 @@ impl OutputStyles {
             highlighted: Style::new().bold().white(),
             found: Style::new().bold().red(),
             label: Style::new().yellow(),
+            unconfirmed: Style::new().cyan(),
         }
     }
 
@@ -143,6 +146,7 @@ impl OutputStyles {
             highlighted: Style::new(),
             found: Style::new(),
             label: Style::new(),
+            unconfirmed: Style::new(),
         }
     }
 }
@@ -291,38 +295,46 @@ pub fn format_outcome_detail(outcome: &CopyFileOutcome) -> String {
 
 /// The widths of the four columns of a row, derived from the terminal width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RowLayout {
+pub(crate) struct RowLayout {
     filename: usize,
     media_type: usize,
     size: usize,
     detail: usize,
 }
 
-fn row_layout(terminal_width: usize) -> RowLayout {
-    let terminal_width = if terminal_width == 0 {
-        FALLBACK_TERMINAL_WIDTH
-    } else {
-        terminal_width
-    };
-    let available = terminal_width.saturating_sub(ROW_FIXED_WIDTH);
-    let mut detail = (available / 3).clamp(MIN_DETAIL_WIDTH, MAX_DETAIL_WIDTH);
-    if available.saturating_sub(detail) < MIN_FILENAME_WIDTH {
-        detail = available.saturating_sub(MIN_FILENAME_WIDTH);
+impl RowLayout {
+    /// The layout for rows written to a file rather than a terminal: no file name up to
+    /// `filename_width` columns is shortened, and the detail column is at its widest.
+    pub(crate) fn for_report(filename_width: usize) -> Self {
+        Self {
+            filename: filename_width.max(MIN_FILENAME_WIDTH),
+            media_type: MEDIA_TYPE_WIDTH,
+            size: SIZE_WIDTH,
+            detail: MAX_DETAIL_WIDTH,
+        }
     }
-    let filename = available.saturating_sub(detail).max(MIN_FILENAME_WIDTH);
-    RowLayout {
-        filename,
-        media_type: MEDIA_TYPE_WIDTH,
-        size: SIZE_WIDTH,
-        detail,
-    }
-}
 
-/// The row width at which a file name `filename_width` columns wide is not shortened and the
-/// detail column is at its widest, for rows written to a file rather than a terminal.
-pub(crate) fn row_width_for(filename_width: usize) -> usize {
-    // `row_layout` gives the detail a third of the width the fixed columns leave.
-    ROW_FIXED_WIDTH + (filename_width + MAX_DETAIL_WIDTH).max(3 * MAX_DETAIL_WIDTH)
+    /// The layout for rows written to a terminal `terminal_width` columns wide, 80 when that is
+    /// unknown (0): the file name takes what the other columns leave.
+    pub(crate) fn for_terminal(terminal_width: usize) -> Self {
+        let terminal_width = if terminal_width == 0 {
+            FALLBACK_TERMINAL_WIDTH
+        } else {
+            terminal_width
+        };
+        let available = terminal_width.saturating_sub(ROW_FIXED_WIDTH);
+        let mut detail = (available / 3).clamp(MIN_DETAIL_WIDTH, MAX_DETAIL_WIDTH);
+        if available.saturating_sub(detail) < MIN_FILENAME_WIDTH {
+            detail = available.saturating_sub(MIN_FILENAME_WIDTH);
+        }
+        let filename = available.saturating_sub(detail).max(MIN_FILENAME_WIDTH);
+        RowLayout {
+            filename,
+            media_type: MEDIA_TYPE_WIDTH,
+            size: SIZE_WIDTH,
+            detail,
+        }
+    }
 }
 
 /// Truncates `s` to at most `width` display columns, keeping a prefix and a
@@ -430,25 +442,52 @@ pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String 
         .to_string()
 }
 
+/// Text from a scanned file or a model, or a name in the source, for a terminal or a text
+/// report: whoever wrote it decides what it holds. Control characters are written out, since a
+/// newline would break a row and an escape sequence would reach the terminal, and so are the
+/// bidirectional controls, which reorder the text around them. Everything else is left as it is,
+/// as names are full of backslashes, quotes and joined emoji.
+pub(crate) fn escaped(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ if character.is_control() || is_bidirectional_control(character) => {
+                escaped.extend(character.escape_unicode());
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn is_bidirectional_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// One row of the table, written when a file's processing finishes.
 pub fn format_file_row(
-    terminal_width: usize,
+    layout: RowLayout,
     filename: &str,
     media_type: &str,
     size: &str,
     outcome: &RowOutcome,
     styles: &OutputStyles,
 ) -> String {
-    let layout = row_layout(terminal_width);
     let outcome_style = outcome.style;
-    let detail = truncate_end(&outcome.detail, layout.detail);
+    let detail = truncate_end(&escaped(&outcome.detail), layout.detail);
 
     let mut row = format!(
         "{} {} {} ",
         outcome_style.apply_to(outcome.glyph),
         styles
             .filename
-            .apply_to(fit_column(filename, layout.filename)),
+            .apply_to(fit_column(&escaped(filename), layout.filename)),
         styles
             .media_type
             .apply_to(fit_column_head(media_type, layout.media_type)),
@@ -552,13 +591,47 @@ mod tests {
     ) -> String {
         let styles = OutputStyles::plain();
         format_file_row(
-            width,
+            RowLayout::for_terminal(width),
             filename,
             media_type,
             size,
             &outcome.row(&styles),
             &styles,
         )
+    }
+
+    #[test]
+    fn a_filename_is_escaped_in_the_row() {
+        let outcome = CopyFileOutcome::Copied;
+
+        let line = row(100, "a\n\u{1b}[31m b.txt", "text/plain", "1 B", &outcome);
+
+        assert!(line.contains("a\\n\\u{1b}[31m b.txt "), "{line}");
+        assert!(!line.contains(['\n', '\u{1b}']));
+    }
+
+    #[test]
+    fn only_what_changes_terminal_output_is_escaped() {
+        let escaped_text = escaped("a\tb\rc\n\u{1b}\u{7f}\u{85}\u{202e}\u{200f}\u{2066}");
+        assert_eq!(
+            escaped_text,
+            "a\\tb\\rc\\n\\u{1b}\\u{7f}\\u{85}\\u{202e}\\u{200f}\\u{2066}"
+        );
+
+        let unchanged = "sub\\file.txt it's \"q\" no\u{a0}break \u{1f469}\u{200d}\u{1f4bb} \u{e9}";
+        assert_eq!(escaped(unchanged), unchanged);
+    }
+
+    #[test]
+    fn a_detail_is_escaped_in_the_row() {
+        let outcome = CopyFileOutcome::Error {
+            message: "read a\n\u{1b}[31m b".to_string(),
+        };
+
+        let line = row(100, "b.txt", "text/plain", "1 B", &outcome);
+
+        assert!(line.contains("read a\\n\\u{1b}[31m b"), "{line}");
+        assert!(!line.contains(['\n', '\u{1b}']));
     }
 
     fn redacted(
@@ -923,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn row_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
-        assert_eq!(row_layout(0), row_layout(80));
+    fn terminal_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
+        assert_eq!(RowLayout::for_terminal(0), RowLayout::for_terminal(80));
     }
 }

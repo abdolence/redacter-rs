@@ -32,7 +32,7 @@ pub struct LocalNerRedacterOptions {
 }
 
 impl LocalNerRedacterOptions {
-    /// Rejects an empty entity list and a score outside `0.0..=1.0` (NaN included).
+    /// Rejects an empty entity list.
     pub fn validated(entities: BTreeSet<Entity>, min_score: Score) -> Result<Self, LocalNerError> {
         if entities.is_empty() {
             return Err(LocalNerError::NoEntities);

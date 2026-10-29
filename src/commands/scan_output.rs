@@ -5,10 +5,10 @@
 //! Everything here is pure: it takes what the scan found and returns what to write, so the
 //! layout is unit tested without running a scan.
 
-use crate::args::RedacterType;
+use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
-    format_file_row, format_legend, row_width_for, NotRedactedReason, OutputStyles, RowOutcome,
-    SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+    escaped, format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout,
+    RowOutcome, SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
@@ -22,10 +22,15 @@ use std::collections::BTreeMap;
 /// The glyph of a scanned file with findings.
 const GLYPH_FINDINGS: &str = "!";
 
+/// The glyph of a scanned file without findings from which the redacters named values they
+/// could not place in it, so the file may still hold what they meant.
+const GLYPH_UNCONFIRMED: &str = "?";
+
 /// What each glyph of a `scan` row means.
-pub const SCAN_LEGEND: [(&str, &str); 4] = [
+pub const SCAN_LEGEND: [(&str, &str); 5] = [
     (GLYPH_OK, "clean"),
     (GLYPH_FINDINGS, "findings"),
+    (GLYPH_UNCONFIRMED, "unconfirmed"),
     (GLYPH_SKIPPED, "skipped"),
     (GLYPH_ERROR, "error"),
 ];
@@ -91,15 +96,15 @@ impl FindingReport {
         }
     }
 
-    /// The value for a terminal or a text report: a scanned file decides what the value holds,
-    /// and a newline would break its row while an escape sequence would reach the terminal. Both
-    /// quotes stay as they are, since they are common in names.
+    /// The value for a terminal or a text report, see [`escaped`].
     fn escaped_value(&self) -> String {
-        self.value
-            .escape_debug()
-            .to_string()
-            .replace("\\'", "'")
-            .replace("\\\"", "\"")
+        escaped(&self.value)
+    }
+
+    /// The label for a terminal or a text report, see [`escaped`]. A model chooses a label
+    /// while reading the scanned file, so it can hold what a value can.
+    fn escaped_label(&self) -> String {
+        escaped(&self.label.to_string())
     }
 }
 
@@ -116,8 +121,9 @@ pub struct ScanFileReport {
     reason: Option<String>,
     findings: Vec<FindingReport>,
     /// How many values the redacters named in the file without being able to place them in it,
-    /// so a file without findings may still hold what they meant. Only the count is kept, since
-    /// a value is the sensitive data itself.
+    /// so a file without findings may still hold what they meant. Such a file is unconfirmed:
+    /// not known to be clean, and a model's hallucination looks the same, so it is neither a
+    /// finding nor clean. Only the count is kept, since a value is the sensitive data itself.
     unlocated_values: usize,
 }
 
@@ -164,17 +170,20 @@ impl ScanFileReport {
         Self::new(file_ref, ScanFileStatus::Failed, Some(message), Vec::new())
     }
 
-    /// What the file's row shows: `!` and the number of findings, `✓` for a clean file, `↷` for
-    /// a file left out or that no redacter reads, and `✗` for one that failed or is blocked,
-    /// since both make the scan incomplete.
+    /// What the file's row shows: `!` and the number of findings, `?` for a file without findings
+    /// whose values could not be located, `✓` for a clean file, `↷` for a file left out or that
+    /// no redacter reads, and `✗` for one that failed or is blocked, since both make the scan
+    /// incomplete.
     pub fn row<'a>(&self, styles: &'a OutputStyles) -> RowOutcome<'a> {
         let reason = self.reason.clone().unwrap_or_default();
         match self.status {
             ScanFileStatus::Scanned => {
-                let (glyph, style) = if self.findings.is_empty() {
-                    (GLYPH_OK, &styles.ok)
-                } else {
+                let (glyph, style) = if !self.findings.is_empty() {
                     (GLYPH_FINDINGS, &styles.found)
+                } else if self.unlocated_values > 0 {
+                    (GLYPH_UNCONFIRMED, &styles.unconfirmed)
+                } else {
+                    (GLYPH_OK, &styles.ok)
                 };
                 let mut counts = Vec::new();
                 if !self.findings.is_empty() {
@@ -241,6 +250,7 @@ pub struct FindingsByLabel(BTreeMap<DetectionLabel, usize>);
 pub struct ScanCommandResult {
     pub files_scanned: usize,
     pub files_with_findings: usize,
+    pub files_unconfirmed: usize,
     pub files_skipped: usize,
     pub files_unsupported: usize,
     pub files_blocked: usize,
@@ -258,6 +268,8 @@ impl ScanCommandResult {
                 self.files_scanned += 1;
                 if !file.findings.is_empty() {
                     self.files_with_findings += 1;
+                } else if file.unlocated_values > 0 {
+                    self.files_unconfirmed += 1;
                 }
             }
             ScanFileStatus::Unsupported => self.files_unsupported += 1,
@@ -277,12 +289,17 @@ impl ScanCommandResult {
     }
 
     /// The process exit code: 1 when a file that should have been scanned was not, because it
-    /// failed or because the run lacks a converter it needs; 2 when something was found,
-    /// unless `no_fail`; 0 otherwise.
-    pub fn exit_code(&self, no_fail: bool) -> i32 {
+    /// failed or because the run lacks a converter it needs; 2 when `fail_on` counts what was
+    /// found; 0 otherwise.
+    pub fn exit_code(&self, fail_on: FailOn) -> i32 {
+        let fails = match fail_on {
+            FailOn::Never => false,
+            FailOn::Findings => self.findings > 0,
+            FailOn::Unconfirmed => self.findings > 0 || self.files_unconfirmed > 0,
+        };
         if self.files_failed > 0 || self.files_blocked > 0 {
             1
-        } else if self.findings > 0 && !no_fail {
+        } else if fails {
             2
         } else {
             0
@@ -296,16 +313,16 @@ impl ScanCommandResult {
     /// path is shortened.
     pub fn to_text(&self) -> String {
         let styles = OutputStyles::plain();
-        let width = row_width_for(
+        let layout = RowLayout::for_report(
             self.files
                 .iter()
-                .map(|file| measure_text_width(&file.path))
+                .map(|file| measure_text_width(&escaped(&file.path)))
                 .max()
                 .unwrap_or(0),
         );
         let mut lines = vec![format_legend(&SCAN_LEGEND, &styles)];
         for file in &self.files {
-            lines.extend(format_file_lines(file, width, &styles));
+            lines.extend(format_file_lines(file, layout, &styles));
         }
         lines.push(String::new());
         lines.push(format_scan_summary(self, &styles));
@@ -313,14 +330,14 @@ impl ScanCommandResult {
     }
 }
 
-/// The lines of one file: its row for a terminal `width` columns wide, then its findings.
+/// The lines of one file: its row in `layout`, then its findings.
 pub fn format_file_lines(
     file: &ScanFileReport,
-    width: usize,
+    layout: RowLayout,
     styles: &OutputStyles,
 ) -> Vec<String> {
     let mut lines = vec![format_file_row(
-        width,
+        layout,
         &file.path,
         file.mime_type.as_deref().unwrap_or_default(),
         &HumanBytes(file.size.unwrap_or(0) as u64).to_string(),
@@ -349,7 +366,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
             .unwrap_or_default()
     };
     let location_width = widest(&file.findings, |finding| finding.location.to_string());
-    let label_width = widest(&file.findings, |finding| finding.label.to_string());
+    let label_width = widest(&file.findings, FindingReport::escaped_label);
     let redacter_width = widest(&file.findings, |finding| finding.redacter.to_string());
     let score_width = widest(&file.findings, score);
     let pad = |cell: String, width| pad_str(&cell, width, Alignment::Left, None).into_owned();
@@ -361,7 +378,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
                 pad(finding.location.to_string(), location_width),
                 styles
                     .label
-                    .apply_to(pad(finding.label.to_string(), label_width)),
+                    .apply_to(pad(finding.escaped_label(), label_width)),
                 styles
                     .dimmed
                     .apply_to(pad(finding.redacter.to_string(), redacter_width)),
@@ -386,16 +403,25 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         + result.files_blocked
         + result.files_failed;
     let mut line = format!(
-        "{} {}: {} with findings, {} clean, {} skipped, {} unsupported",
+        "{} {}: {} with findings, {} clean",
         styles.highlighted.apply_to(total),
         if total == 1 { "file" } else { "files" },
         styles.found.apply_to(result.files_with_findings),
         styles
             .highlighted
-            .apply_to(result.files_scanned - result.files_with_findings),
+            .apply_to(result.files_scanned - result.files_with_findings - result.files_unconfirmed),
+    );
+    if result.files_unconfirmed > 0 {
+        line.push_str(&format!(
+            ", {} unconfirmed",
+            styles.unconfirmed.apply_to(result.files_unconfirmed)
+        ));
+    }
+    line.push_str(&format!(
+        ", {} skipped, {} unsupported",
         styles.highlighted.apply_to(result.files_skipped),
         styles.highlighted.apply_to(result.files_unsupported),
-    );
+    ));
     if result.files_blocked > 0 {
         line.push_str(&format!(
             ", {} blocked",
@@ -422,7 +448,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
             .findings_by_label
             .0
             .iter()
-            .map(|(label, count)| format!("{} {count}", styles.label.apply_to(label)))
+            .map(|(label, count)| {
+                format!(
+                    "{} {count}",
+                    styles.label.apply_to(escaped(&label.to_string()))
+                )
+            })
             .collect();
         line.push_str(&format!(": {}", by_label.join(", ")));
     }
@@ -437,6 +468,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ValueEnum;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -606,7 +638,11 @@ mod tests {
             0,
         ));
 
-        let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
         assert_eq!(
             rows[1..],
             ["    1:6  email  local-rules  -----BEGIN KEY-----\\nabc\\n\\u{1b}[31m O'Brien"]
@@ -620,6 +656,103 @@ mod tests {
     }
 
     #[test]
+    fn a_label_is_escaped_in_the_rows_the_text_report_and_the_summary() {
+        let label = "ssn\n\u{1b}[31mred";
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![finding(
+                label,
+                DetectionLocation::Text {
+                    start: 0,
+                    end: 6,
+                    line: 1,
+                    column: 1,
+                },
+                None,
+                "a@b.io",
+            )],
+            0,
+        ));
+
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
+        assert_eq!(
+            rows[1..],
+            ["    1:1  ssn\\n\\u{1b}[31mred  local-rules  a****o"]
+        );
+        let text = result.to_text();
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert_eq!(text.lines().count(), 5, "{text}");
+        let summary = format_scan_summary(&result, &OutputStyles::plain());
+        assert!(summary.contains("ssn\\n\\u{1b}[31mred 1"), "{summary}");
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(json["files"][0]["findings"][0]["label"], label);
+    }
+
+    #[test]
+    fn a_path_is_escaped_in_the_rows_and_the_text_report_but_not_in_the_json_report() {
+        let path = "notes\n\u{1b}[31m red.txt";
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref(path, mime::TEXT_PLAIN),
+            Vec::new(),
+            0,
+        ));
+
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
+        assert!(
+            rows[0].starts_with("✓ notes\\n\\u{1b}[31m red.txt "),
+            "{rows:?}"
+        );
+        let text = result.to_text();
+        assert!(
+            text.contains("✓ notes\\n\\u{1b}[31m red.txt "),
+            "the whole escaped path is in the row: {text}"
+        );
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            4,
+            "a raw newline in the path would add a line: {text}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(json["files"][0]["path"], path);
+    }
+
+    #[test]
+    fn the_text_report_pads_the_path_to_the_longest_path_and_no_further() {
+        let mut result = ScanCommandResult::default();
+        for name in ["customer-note.txt", "a.txt"] {
+            result.push(ScanFileReport::scanned(
+                &file_ref(name, mime::TEXT_PLAIN),
+                Vec::new(),
+                0,
+            ));
+        }
+
+        let text = result.to_text();
+
+        let rows: Vec<&str> = text.lines().skip(1).take(2).collect();
+        assert_eq!(
+            rows,
+            [
+                format!("✓ {:<17} {:<24} 0 B", "customer-note.txt", "text/plain"),
+                format!("✓ {:<17} {:<24} 0 B", "a.txt", "text/plain"),
+            ]
+        );
+    }
+
+    #[test]
     fn the_json_report_counts_files_and_places_each_finding() {
         // Read back from the written text: a value built in memory would widen every `f32`.
         let written = serde_json::to_string(&sample_result()).unwrap();
@@ -629,6 +762,7 @@ mod tests {
             serde_json::json!({
                 "files_scanned": 4,
                 "files_with_findings": 3,
+                "files_unconfirmed": 0,
                 "files_skipped": 1,
                 "files_unsupported": 1,
                 "files_blocked": 1,
@@ -663,6 +797,31 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn the_json_report_counts_a_file_with_only_unlocated_values_as_unconfirmed() {
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("reformatted.txt", mime::TEXT_PLAIN),
+            Vec::new(),
+            2,
+        ));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+
+        assert_eq!(
+            [
+                &json["files_scanned"],
+                &json["files_with_findings"],
+                &json["files_unconfirmed"],
+                &json["findings"],
+            ],
+            [1, 0, 1, 0]
+        );
+        assert_eq!(json["files"][0]["unlocated_values"], 2);
+        assert_eq!(json["files"][0]["findings"], serde_json::json!([]));
     }
 
     #[test]
@@ -710,7 +869,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "✓ clean ! findings ↷ skipped ✗ error",
+                "✓ clean ! findings ? unconfirmed ↷ skipped ✗ error",
                 "! customer-note.txt text/plain 0 B 1 finding",
                 "3:15 email local-rules j********************m",
                 "! customers.csv text/csv 0 B 1 finding, 1 value not located",
@@ -725,11 +884,11 @@ mod tests {
                 "! two.txt text/plain 0 B 2 findings",
                 "1:1 email local-rules a****o",
                 "2:1 email local-rules c****o",
-                "✓ reformatted.txt text/plain 0 B 2 values not located",
+                "? reformatted.txt text/plain 0 B 2 values not located",
                 "✗ broken.txt text/plain 0 B provider unavailable",
                 "",
-                "11 files: 4 with findings, 2 clean, 2 skipped, 1 unsupported, 1 blocked, \
-                 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
+                "11 files: 4 with findings, 1 clean, 1 unconfirmed, 2 skipped, 1 unsupported, \
+                 1 blocked, 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
             ]
         );
         assert!(
@@ -795,7 +954,7 @@ mod tests {
         );
 
         assert_eq!(
-            format_file_lines(&mixed, 100, &styles)[1..],
+            format_file_lines(&mixed, RowLayout::for_terminal(100), &styles)[1..],
             [
                 "    3:11   per           local-ner    1.00  J***h",
                 "    4:8    email         local-rules        j***m",
@@ -803,7 +962,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            format_file_lines(&unscored, 100, &styles)[1..],
+            format_file_lines(&unscored, RowLayout::for_terminal(100), &styles)[1..],
             ["    1:10  email  local-rules  j***m"]
         );
     }
@@ -860,6 +1019,7 @@ mod tests {
                 0,
             )
         };
+        let unconfirmed = || ScanFileReport::scanned(&note, Vec::new(), 1);
         let not_read = |name, media_type, reason| {
             ScanFileReport::not_scanned(
                 &file_ref(name, media_type),
@@ -873,26 +1033,28 @@ mod tests {
                 NotRedactedReason::OcrUnavailable,
             )
         };
-        for (files, exit_code, exit_code_with_no_fail) in [
-            (vec![], 0, 0),
-            (vec![found()], 2, 0),
+        // Exit codes for each `FailOn`, in the order of its variants: never, findings, unconfirmed.
+        for (files, expected) in [
+            (vec![], [0, 0, 0]),
+            (vec![found()], [0, 2, 2]),
+            (vec![unconfirmed()], [0, 0, 2]),
+            (vec![found(), unconfirmed()], [0, 2, 2]),
             (
                 vec![
                     found(),
                     ScanFileReport::failed(&note, "unavailable".to_string()),
                 ],
-                1,
-                1,
+                [1, 1, 1],
             ),
-            (vec![found(), blocked()], 1, 1),
+            (vec![found(), blocked()], [1, 1, 1]),
+            (vec![unconfirmed(), blocked()], [1, 1, 1]),
             (
                 vec![not_read(
                     "blob.bin",
                     mime::APPLICATION_OCTET_STREAM,
                     NotRedactedReason::TypeNotSupported,
                 )],
-                0,
-                0,
+                [0, 0, 0],
             ),
             (
                 vec![not_read(
@@ -900,16 +1062,18 @@ mod tests {
                     mime::IMAGE_SVG,
                     NotRedactedReason::OcrImageFormatNotSupported,
                 )],
-                0,
-                0,
+                [0, 0, 0],
             ),
         ] {
             let mut result = ScanCommandResult::default();
             for file in files {
                 result.push(file);
             }
-            assert_eq!(result.exit_code(false), exit_code, "{result:?}");
-            assert_eq!(result.exit_code(true), exit_code_with_no_fail, "{result:?}");
+            let exit_codes: Vec<i32> = FailOn::value_variants()
+                .iter()
+                .map(|fail_on| result.exit_code(*fail_on))
+                .collect();
+            assert_eq!(exit_codes, expected, "{result:?}");
         }
     }
 }
