@@ -14,26 +14,40 @@
     $ErrorActionPreference = 'Stop'
     # Progress rendering makes Invoke-WebRequest very slow in Windows PowerShell 5.1.
     $ProgressPreference = 'SilentlyContinue'
-    # Windows PowerShell 5.1 does not enable TLS 1.2 by default, and GitHub requires it.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $repo = 'abdolence/redacter-rs'
     $apiUrl = "https://api.github.com/repos/$repo/releases"
     $downloadUrl = "https://github.com/$repo/releases/download"
 
-    # Returns the release archive name for a PROCESSOR_ARCHITECTURE value.
+    # Takes an OSArchitecture name (X64, Arm64, X86) or a PROCESSOR_ARCHITECTURE value.
     function Get-AssetName([string] $Architecture) {
         switch ($Architecture) {
-            'AMD64' { 'redacter-Windows-x86_64.zip' }
+            { $_ -in 'AMD64', 'X64' } { 'redacter-Windows-x86_64.zip' }
             'ARM64' { 'redacter-Windows-aarch64.zip' }
             'x86' { 'redacter-Windows-i686.zip' }
             default { throw "Unsupported processor architecture '$Architecture'. Supported: AMD64, ARM64, x86." }
         }
     }
 
-    # A 32-bit PowerShell on 64-bit Windows reports x86 in PROCESSOR_ARCHITECTURE and
-    # the real architecture in PROCESSOR_ARCHITEW6432.
-    $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    # Returns the user Path with $Dir appended, or $null when an entry already points
+    # at $Dir. $RawPath is the unexpanded registry value, so entries such as
+    # %USERPROFILE%\bin stay as they are written and are only expanded to be compared.
+    function Get-UpdatedUserPath([string] $RawPath, [string] $Dir) {
+        $entries = @($RawPath -split ';' | Where-Object { $_ })
+        $wanted = $Dir.TrimEnd('\')
+        foreach ($entry in $entries) {
+            if ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -ieq $wanted) { return $null }
+        }
+        (@($entries) + $Dir) -join ';'
+    }
+
+    # PROCESSOR_ARCHITECTURE reports AMD64 for an x64 PowerShell running emulated on Windows
+    # ARM64, and x86 for a 32-bit PowerShell on 64-bit Windows. OSArchitecture is the real
+    # one, but it is missing from older Windows PowerShell 5.1 installations.
+    $architecture = try { [string] [Runtime.InteropServices.RuntimeInformation]::OSArchitecture } catch { $null }
+    if (-not $architecture) {
+        $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    }
     $asset = Get-AssetName $architecture
 
     $installDir = $env:REDACTER_INSTALL_DIR
@@ -48,8 +62,7 @@
         $releaseUrl = "$apiUrl/latest"
     }
     else {
-        if ($version -notmatch '^[A-Za-z0-9._+-]+$') { throw "Invalid REDACTER_VERSION '$version'." }
-        if ($version -match '^[0-9]') { $version = "v$version" }
+        if ($version -notmatch '^v[0-9][A-Za-z0-9._+-]*$') { throw "REDACTER_VERSION must be a release tag such as v0.21.0, got '$version'." }
         $releaseUrl = "$apiUrl/tags/$version"
     }
 
@@ -70,7 +83,7 @@
         if ($expected -notmatch '^sha256:([0-9a-f]{64})$') {
             throw "Release $tag has no SHA-256 digest for $asset, refusing to install it."
         }
-        $expected = $Matches[1]
+        $expected = $Matches[1].ToLowerInvariant()
 
         Write-Host "Installing redacter $tag ($asset) to $installDir"
         $archive = Join-Path $tempDir $asset
@@ -82,9 +95,18 @@
         }
 
         $extractDir = Join-Path $tempDir 'extract'
-        Expand-Archive -Path $archive -DestinationPath $extractDir
+        Expand-Archive -LiteralPath $archive -DestinationPath $extractDir
         $binary = Join-Path $extractDir 'redacter.exe'
         if (-not (Test-Path -LiteralPath $binary)) { throw "$asset does not contain redacter.exe." }
+
+        $ErrorActionPreference = 'Continue'
+        $output = & $binary --help 2>&1
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($exitCode -ne 0) {
+            throw "$asset does not run on this system: $(($output | ForEach-Object { "$_" }) -join "`n")`nNothing was installed. Build from source with 'cargo install redacter'."
+        }
+        $banner = "$($output | Select-Object -First 1)"
 
         New-Item -ItemType Directory -Path $installDir -Force | Out-Null
         $target = Join-Path $installDir 'redacter.exe'
@@ -99,16 +121,25 @@
         Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Host "Installed $target"
-    $installed = try { & $target --version 2>$null | Select-Object -First 1 } catch { $null }
-    Write-Host "Version: $(if ($installed) { $installed } else { $tag })"
+    Write-Host "Installed ${target}: $banner"
 
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $entries = @($userPath -split ';' | Where-Object { $_ })
-    $normalised = $installDir.TrimEnd('\')
-    if (-not ($entries | Where-Object { $_.TrimEnd('\') -ieq $normalised })) {
-        $newPath = (@($entries) + $installDir) -join ';'
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $rawPath = [string] $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $updatedPath = Get-UpdatedUserPath $rawPath $installDir
+        if ($updatedPath) {
+            $key.SetValue('Path', $updatedPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        }
+    }
+    finally {
+        $key.Dispose()
+    }
+    if ($updatedPath) {
+        # Writing the registry value does not notify running programs. Setting and clearing a
+        # user variable through the .NET API broadcasts WM_SETTINGCHANGE, so Explorer and new
+        # terminals pick up the change.
+        [Environment]::SetEnvironmentVariable('REDACTER_PATH_REFRESH', '1', 'User')
+        [Environment]::SetEnvironmentVariable('REDACTER_PATH_REFRESH', $null, 'User')
         $env:Path = "$env:Path;$installDir"
         Write-Host "Added $installDir to your user PATH. Open a new terminal for other windows to pick it up."
     }
