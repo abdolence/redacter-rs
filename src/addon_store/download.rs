@@ -83,7 +83,6 @@ pub async fn download_file(
     progress: &ProgressBar,
 ) -> Result<PathBuf, AddonStoreError> {
     std::fs::create_dir_all(dir).map_err(|source| AddonStoreError::io(dir, source))?;
-    remove_stale_parts(dir, file.name)?;
     let part = tempfile::Builder::new()
         .prefix(&format!("{}.", file.name))
         .suffix(".part")
@@ -143,22 +142,6 @@ pub async fn download_file(
     part.persist(&target)
         .map_err(|err| AddonStoreError::io(&target, err.error))?;
     Ok(target)
-}
-
-/// Deletes `<name>.*.part` leftovers of a run that was killed mid-download.
-fn remove_stale_parts(dir: &Path, name: &str) -> Result<(), AddonStoreError> {
-    let prefix = format!("{name}.");
-    let entries = std::fs::read_dir(dir).map_err(|source| AddonStoreError::io(dir, source))?;
-    for entry in entries {
-        let entry = entry.map_err(|source| AddonStoreError::io(dir, source))?;
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name.starts_with(&prefix) && file_name.ends_with(".part") {
-            std::fs::remove_file(entry.path())
-                .map_err(|source| AddonStoreError::io(&entry.path(), source))?;
-        }
-    }
-    Ok(())
 }
 
 /// The SHA-256 of the file at `path`, in lower-case hex like the manifests.
@@ -383,21 +366,6 @@ mod tests {
         assert!(
             matches!(err, AddonStoreError::HttpStatus { status: 404, .. }),
             "{err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn stale_part_files_of_the_same_name_are_removed_first() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("weights.bin.abc123.part"), b"junk").unwrap();
-        std::fs::write(dir.path().join("config.json.zzz.part"), b"junk").unwrap();
-        let fetcher = FakeFetcher::good();
-        download_file(&fetcher, &TEST_FILES[0], dir.path(), &ProgressBar::hidden())
-            .await
-            .unwrap();
-        assert_eq!(
-            part_files(dir.path()),
-            vec!["config.json.zzz.part".to_string()]
         );
     }
 

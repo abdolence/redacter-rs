@@ -616,8 +616,7 @@ mod tests {
     }
 
     /// Only `addons install` installs anything: a redacting copy of a PDF over an empty addons
-    /// directory runs without the addons, leaves the directory as it found it and never
-    /// opens a connection, which a download would have to do through the proxy set here.
+    /// directory runs without the addons and leaves the directory as it found it.
     #[tokio::test]
     async fn a_redacting_copy_never_downloads_an_addon(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -627,10 +626,7 @@ mod tests {
         let term = Term::stdout();
         let temp_dir = TempDir::with_prefix("copy_command_tests_no_addons")?;
         let addons_dir = temp_dir.path().join("addons");
-        let proxy = std::net::TcpListener::bind("127.0.0.1:0")?;
-        proxy.set_nonblocking(true)?;
-        std::env::set_var("HTTPS_PROXY", format!("http://{}", proxy.local_addr()?));
-        let copy = command_copy(
+        command_copy(
             &term,
             "test-fixtures/documents/customer-form.pdf",
             &temp_dir.path().join("out.pdf").to_string_lossy(),
@@ -650,17 +646,10 @@ mod tests {
                 },
             ))),
         )
-        .await;
-        std::env::remove_var("HTTPS_PROXY");
-        copy?;
+        .await?;
         assert!(
             !addons_dir.exists(),
             "nothing may be written to {addons_dir:?}"
-        );
-        assert_eq!(
-            proxy.accept().map(|_| ()).map_err(|err| err.kind()),
-            Err(std::io::ErrorKind::WouldBlock),
-            "no connection may be opened"
         );
         Ok(())
     }

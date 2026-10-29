@@ -21,7 +21,7 @@ mod manifest;
 mod pdfium;
 
 #[cfg(test)]
-pub use download::ByteStream;
+pub(crate) use download::test_support;
 pub use download::{download_file, Fetcher, HttpFetcher};
 pub use error::AddonStoreError;
 pub use manifest::{Addon, AddonFile, AddonManifest};
@@ -77,38 +77,6 @@ enum FileState {
     Damaged,
 }
 
-/// Where one addon stands, as `addons ls` reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddonStatus {
-    /// Found in this directory, in the addons root or as a manual copy.
-    Installed(PathBuf),
-    NotInstalled,
-    /// The addons root holds this file with other contents than the pinned ones.
-    Damaged(PathBuf),
-    NotAvailableForPlatform,
-}
-
-impl std::fmt::Display for AddonStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            AddonStatus::Installed(_) => "installed",
-            AddonStatus::NotInstalled => "not installed",
-            AddonStatus::Damaged(_) => "damaged",
-            AddonStatus::NotAvailableForPlatform => "not available for this platform",
-        })
-    }
-}
-
-impl AddonStatus {
-    /// The directory of an installed addon, or the damaged file.
-    pub fn location(&self) -> Option<&Path> {
-        match self {
-            AddonStatus::Installed(path) | AddonStatus::Damaged(path) => Some(path),
-            AddonStatus::NotInstalled | AddonStatus::NotAvailableForPlatform => None,
-        }
-    }
-}
-
 impl AddonStore {
     pub fn new(options: &AddonStoreOptions) -> Self {
         Self {
@@ -130,20 +98,15 @@ impl AddonStore {
     /// Finds an installed addon and never downloads. Lookup order: the addons root, where
     /// every file must match its pinned size (and its SHA-256 for native code); then, for
     /// anything but native code, the manual directories, where every file only has to exist.
-    /// Native code is loaded from the addons root alone, never from an unverified copy.
+    /// An addon directory in the addons root that holds some of its files, or any with other
+    /// contents than pinned, is `Damaged` and never passed over for a manual copy. Native
+    /// code is never returned from a manual directory; the Pdfium converter searches the
+    /// tool's own directories by hand itself, outside this store.
     pub fn find(&self, addon: Addon) -> Result<AddonFiles, AddonStoreError> {
         let manifest = addon
             .manifest()
             .ok_or(AddonStoreError::NotAvailableForPlatform { addon })?;
         self.find_manifest(addon, manifest)
-    }
-
-    /// Looks an addon up like `find`, reporting each outcome as a status.
-    pub fn status(&self, addon: Addon) -> Result<AddonStatus, AddonStoreError> {
-        let Some(manifest) = addon.manifest() else {
-            return Ok(AddonStatus::NotAvailableForPlatform);
-        };
-        self.status_manifest(addon, manifest)
     }
 
     /// Downloads the files of an addon that are missing in the addons root or differ from
@@ -157,21 +120,6 @@ impl AddonStore {
             .manifest()
             .ok_or(AddonStoreError::NotAvailableForPlatform { addon })?;
         self.install_manifest(manifest, fetcher).await
-    }
-
-    fn status_manifest(
-        &self,
-        addon: Addon,
-        manifest: &AddonManifest,
-    ) -> Result<AddonStatus, AddonStoreError> {
-        match self.find_manifest(addon, manifest) {
-            Ok(files) => Ok(AddonStatus::Installed(files.dir)),
-            Err(AddonStoreError::NotInstalled { .. }) => Ok(AddonStatus::NotInstalled),
-            Err(AddonStoreError::Damaged { path, .. }) => {
-                Ok(AddonStatus::Damaged(PathBuf::from(path)))
-            }
-            Err(err) => Err(err),
-        }
     }
 
     fn find_manifest(
@@ -245,23 +193,30 @@ impl AddonManifest {
         }
     }
 
-    /// Whether every file is in `dir` as pinned. A file that is there but differs is an
-    /// error rather than a miss, so that a damaged install is never passed over for an
-    /// unverified manual copy.
+    /// Whether every file is in `dir` as pinned; `false` when none of them is. A file that
+    /// differs, or a directory that holds only some of the files, is an error rather than a
+    /// miss, so that a damaged install is never passed over for an unverified manual copy.
     fn is_installed_in(&self, addon: Addon, dir: &Path) -> Result<bool, AddonStoreError> {
+        let damaged = |file: &AddonFile| AddonStoreError::Damaged {
+            addon,
+            path: dir.join(file.name).display().to_string(),
+        };
+        let mut first_missing = None;
+        let mut present = 0;
         for file in self.files {
             match file.state_in(dir, self.verification())? {
-                FileState::Verified => {}
-                FileState::Missing => return Ok(false),
-                FileState::Damaged => {
-                    return Err(AddonStoreError::Damaged {
-                        addon,
-                        path: dir.join(file.name).display().to_string(),
-                    })
+                FileState::Verified => present += 1,
+                FileState::Missing => {
+                    first_missing.get_or_insert(file);
                 }
+                FileState::Damaged => return Err(damaged(file)),
             }
         }
-        Ok(true)
+        match first_missing {
+            None => Ok(true),
+            Some(_) if present == 0 => Ok(false),
+            Some(file) => Err(damaged(file)),
+        }
     }
 }
 
@@ -443,8 +398,8 @@ mod tests {
         );
     }
 
-    /// Native code the process loads is only ever taken from the verified copy in the addons
-    /// root: a manual copy is never looked at, whatever its size.
+    /// The store only ever returns native code from the verified copy in the addons root: a
+    /// manual copy is never looked at, whatever its size.
     #[test]
     fn a_manual_copy_of_native_code_is_not_found() {
         static NATIVE_MANIFEST: AddonManifest = AddonManifest {
@@ -467,32 +422,22 @@ mod tests {
     }
 
     #[test]
-    fn status_tells_installed_from_a_manual_copy_not_installed_and_damaged() {
+    fn a_partly_installed_addon_is_damaged_not_a_fall_through_to_a_manual_copy() {
         let fx = Fixture::new();
-        let store = fx.store();
-        assert_eq!(
-            store.status_manifest(TEST_ADDON, &TEST_MANIFEST).unwrap(),
-            AddonStatus::NotInstalled
-        );
-
+        fx.write(&fx.managed, "weights.bin", b"hello world");
         fx.write(&fx.manual, "weights.bin", b"hello world");
         fx.write(&fx.manual, "config.json", b"abc");
-        assert_eq!(
-            store.status_manifest(TEST_ADDON, &TEST_MANIFEST).unwrap(),
-            AddonStatus::Installed(fx.manual.clone())
-        );
-
-        fx.write_installed();
-        assert_eq!(
-            store.status_manifest(TEST_ADDON, &TEST_MANIFEST).unwrap(),
-            AddonStatus::Installed(fx.managed.clone())
-        );
-
-        fx.write(&fx.managed, "weights.bin", b"stale");
-        assert_eq!(
-            store.status_manifest(TEST_ADDON, &TEST_MANIFEST).unwrap(),
-            AddonStatus::Damaged(fx.managed.join("weights.bin"))
-        );
+        let err = fx
+            .store()
+            .find_manifest(TEST_ADDON, &TEST_MANIFEST)
+            .unwrap_err();
+        match err {
+            AddonStoreError::Damaged { addon, path } => {
+                assert_eq!(addon, TEST_ADDON);
+                assert_eq!(path, fx.managed.join("config.json").display().to_string());
+            }
+            other => panic!("expected Damaged, got {other}"),
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub enum AddonStoreError {
     #[error("{addon} is not installed; run `redacter addons install {addon}`")]
     NotInstalled { addon: Addon },
     #[error(
-        "{path} is not the file {addon} pins; run `redacter addons install {addon}` to replace it"
+        "{path} is missing or is not the file {addon} pins; run `redacter addons install {addon}` to repair it"
     )]
     Damaged { addon: Addon, path: String },
     #[error("{addon} is not available for this platform; install it by hand, see the README")]

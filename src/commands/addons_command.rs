@@ -1,5 +1,5 @@
 use crate::addon_store::{
-    Addon, AddonStatus, AddonStore, AddonStoreOptions, Fetcher, HttpFetcher, Installation,
+    Addon, AddonStore, AddonStoreError, AddonStoreOptions, Fetcher, HttpFetcher, Installation,
 };
 use crate::errors::AppError;
 use crate::AppResult;
@@ -60,10 +60,6 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
     let store = AddonStore::new(options);
     let dimmed = Style::new().dim();
     let highlighted = Style::new().bold().white();
-    let rows = Addon::value_variants()
-        .iter()
-        .map(|&addon| Ok((addon, store.status(addon)?)))
-        .collect::<AppResult<Vec<(Addon, AddonStatus)>>>()?;
 
     let header = |text: &str, width: usize| {
         dimmed.apply_to(pad_str(text, width, Alignment::Left, None).into_owned())
@@ -75,16 +71,21 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
         header("Size", SIZE_WIDTH),
         header("Location", 0),
     ))?;
-    for (addon, status) in &rows {
+    for &addon in Addon::value_variants() {
+        let (state, location) = match store.find(addon) {
+            Ok(files) => ("installed", files.dir().display().to_string()),
+            Err(AddonStoreError::NotInstalled { .. }) => ("not installed", String::new()),
+            Err(AddonStoreError::Damaged { path, .. }) => ("damaged", path),
+            Err(AddonStoreError::NotAvailableForPlatform { .. }) => {
+                ("not available for this platform", String::new())
+            }
+            Err(err) => ("unreadable", err.to_string()),
+        };
         let size = addon
             .manifest()
             .map(|manifest| {
                 HumanBytes(manifest.files.iter().map(|file| file.size).sum()).to_string()
             })
-            .unwrap_or_default();
-        let location = status
-            .location()
-            .map(|path| path.display().to_string())
             .unwrap_or_default();
         let row = format!(
             "- {} {} {} {}",
@@ -94,7 +95,7 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
                 Alignment::Left,
                 None
             )),
-            pad_str(&status.to_string(), STATE_WIDTH, Alignment::Left, None),
+            pad_str(state, STATE_WIDTH, Alignment::Left, None),
             pad_str(&size, SIZE_WIDTH, Alignment::Left, None),
             location,
         );
@@ -110,22 +111,8 @@ const SIZE_WIDTH: usize = 12;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::addon_store::{AddonStoreError, ByteStream};
-    use futures::future::BoxFuture;
+    use crate::addon_store::test_support::FakeFetcher;
     use tempfile::TempDir;
-
-    struct UnreachableServer;
-
-    impl Fetcher for UnreachableServer {
-        fn fetch<'s>(&'s self, url: &'s str) -> BoxFuture<'s, Result<ByteStream, AddonStoreError>> {
-            Box::pin(async move {
-                Err(AddonStoreError::HttpStatus {
-                    url: url.to_string(),
-                    status: 503,
-                })
-            })
-        }
-    }
 
     #[tokio::test]
     async fn install_tries_every_addon_and_fails_when_any_failed() {
@@ -137,7 +124,7 @@ mod tests {
             &Term::stdout(),
             &[Addon::Ocr, Addon::LocalGliner],
             &store,
-            &UnreachableServer,
+            &FakeFetcher::new(&[]),
         )
         .await
         .unwrap_err();
