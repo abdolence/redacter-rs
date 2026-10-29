@@ -9,7 +9,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    redact_image_with_mode, Detection, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
@@ -233,11 +233,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
 
     /// Asks the model for the boxes of personal information in the image, which is scaled
     /// down to the model's input limit first.
-    async fn find_image_pii(
+    async fn find_image_boxes(
         &self,
         mime_type: &mime::Mime,
         data: &gcloud_sdk::prost::bytes::Bytes,
-    ) -> AppResult<ImagePii> {
+    ) -> AppResult<ImageBoxes> {
         let prepared_image = prepare_image_for_llm(mime_type, data)?;
 
         let analyze_request = OpenAiLlmAnalyzeRequest {
@@ -296,11 +296,11 @@ impl<'a> OpenAiLlmRedacter<'a> {
             })
         };
         let answer = self
-            .complete(&analyze_request, "locate the personal information")
+            .complete(&analyze_request, "locate the sensitive data")
             .await?
             .into_text()?;
         let pii_image_coords: OpenAiLlmTextCoordsResponse = parse_answer(&answer)?;
-        Ok(ImagePii {
+        Ok(ImageBoxes {
             image: prepared_image,
             coords: pii_image_coords.text_coords,
         })
@@ -312,7 +312,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
     ) -> AppResult<RedacterDataItem> {
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                let found = self.find_image_pii(&mime_type, &data).await?;
+                let found = self.find_image_boxes(&mime_type, &data).await?;
                 Ok(RedacterDataItem {
                     file_ref: input.file_ref,
                     content: RedacterDataItemContent::Image {
@@ -433,7 +433,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             }),
         };
         let answer = self
-            .complete(&request, "find the personal information")
+            .complete(&request, "find the sensitive data")
             .await?
             .into_text()?;
         OpenAiLlmTextFindings::detections_from_answer(&answer, text)
@@ -567,7 +567,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
-                self.find_image_pii(mime_type, data)
+                self.find_image_boxes(mime_type, data)
                     .await?
                     .into_labelled_detections(
                         |text| async move { self.detect_in_text(&text).await },

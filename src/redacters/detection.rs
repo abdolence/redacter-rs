@@ -185,6 +185,36 @@ impl DetectionLocation {
     }
 }
 
+/// How a report shows a location: `line:column` in a text, `row:column` of a table cell, and
+/// `[x1,y1,x2,y2]` in whole pixels of an image, after `page:` on a PDF page.
+impl Display for DetectionLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text { line, column, .. } => write!(f, "{line}:{column}"),
+            Self::TableCell { row, column, .. } => write!(f, "{row}:{column}"),
+            Self::Image {
+                page,
+                x1,
+                y1,
+                x2,
+                y2,
+            } => {
+                if let Some(page) = page {
+                    write!(f, "{page}:")?;
+                }
+                write!(
+                    f,
+                    "[{},{},{},{}]",
+                    x1.round(),
+                    y1.round(),
+                    x2.round(),
+                    y2.round()
+                )
+            }
+        }
+    }
+}
+
 /// A text with the byte offset of each line start, so many detections are placed in it without
 /// rescanning it for each one.
 pub struct TextLines<'a> {
@@ -494,17 +524,13 @@ mod tests {
         for valid in [0.0_f32, 0.5, 1.0] {
             assert_eq!(Score::try_from(valid).unwrap().value(), valid);
         }
+        assert_eq!("0.8".parse::<Score>().unwrap(), score(0.8));
         for invalid in [-0.01_f32, 1.01, f32::NAN, f32::INFINITY] {
             assert!(
                 matches!(Score::try_from(invalid), Err(AppError::InvalidScore { .. })),
                 "{invalid}"
             );
         }
-    }
-
-    #[test]
-    fn a_score_parses_from_the_command_line_and_rejects_what_is_not_a_probability() {
-        assert_eq!("0.8".parse::<Score>().unwrap(), score(0.8));
         for invalid in ["high", "", "1.5", "-1"] {
             assert!(
                 matches!(invalid.parse::<Score>(), Err(AppError::InvalidScore { .. })),
@@ -645,60 +671,22 @@ mod tests {
     }
 
     #[test]
-    fn accents_are_not_folded() {
-        assert!(values_found("Herr Muller", "Müller").is_empty());
-        assert!(values_found("Herr Müller", "Muller").is_empty());
-    }
-
-    #[test]
-    fn greek_final_sigma_and_capitals_match_each_other() {
-        assert_eq!(values_found("Ο ΟΔΥΣΣΕΥΣ ήρθε", "Οδυσσευς"), ["ΟΔΥΣΣΕΥΣ"]);
-        assert_eq!(values_found("Ο ΓΙΑΝΝΗΣ ήρθε", "Γιαννης"), ["ΓΙΑΝΝΗΣ"]);
-        assert_eq!(values_found("Ο Γιαννης ήρθε", "ΓΙΑΝΝΗΣ"), ["Γιαννης"]);
-    }
-
-    #[test]
-    fn the_long_s_matches_s_and_sharp_s_stays_distinct_from_ss() {
-        assert_eq!(values_found("Ma\u{17f}on", "Mason"), ["Ma\u{17f}on"]);
-        assert!(values_found("STRASSE", "Straße").is_empty());
-    }
-
-    #[test]
-    fn a_value_without_an_exact_match_is_located_ignoring_case() {
-        let person = DetectionLabel::new("PERSON");
-        let detections =
-            Detection::locate_values("Ask JOHN SMITH.", &[("john smith".to_string(), person)])
-                .unwrap();
-        assert_eq!(located(&detections), vec![(4..14, "JOHN SMITH")]);
-    }
-
-    #[test]
-    fn every_occurrence_is_found_whatever_its_case() {
-        let person = DetectionLabel::new("PERSON");
-        let detections =
-            Detection::locate_values("john and John", &[("john".to_string(), person)]).unwrap();
-        let values: Vec<&str> = detections.iter().map(|d| d.value.as_str()).collect();
-        assert_eq!(values, ["john", "John"]);
-    }
-
-    #[test]
-    fn a_dotted_capital_i_matches_the_letter_i() {
-        let place = DetectionLabel::new("LOCATION");
-        let values_found = |text: &str, value: &str| -> Vec<String> {
-            Detection::locate_values(text, &[(value.to_string(), place.clone())])
-                .unwrap()
-                .into_iter()
-                .map(|detection| detection.value)
-                .collect()
-        };
-        assert_eq!(
-            values_found("Flights to İstanbul", "istanbul"),
-            ["İstanbul"]
-        );
-        assert_eq!(
-            values_found("Flights to ISTANBUL", "İstanbul"),
-            ["ISTANBUL"]
-        );
+    fn values_are_matched_letter_by_letter_ignoring_case_and_not_accents() {
+        for (text, value, found) in [
+            ("john and John", "john", &["john", "John"][..]),
+            ("Ask JOHN SMITH.", "john smith", &["JOHN SMITH"]),
+            ("Ο ΟΔΥΣΣΕΥΣ ήρθε", "Οδυσσευς", &["ΟΔΥΣΣΕΥΣ"]),
+            ("Ο ΓΙΑΝΝΗΣ ήρθε", "Γιαννης", &["ΓΙΑΝΝΗΣ"]),
+            ("Ο Γιαννης ήρθε", "ΓΙΑΝΝΗΣ", &["Γιαννης"]),
+            ("Ma\u{17f}on", "Mason", &["Ma\u{17f}on"]),
+            ("STRASSE", "Straße", &[]),
+            ("Flights to İstanbul", "istanbul", &["İstanbul"]),
+            ("Flights to ISTANBUL", "İstanbul", &["ISTANBUL"]),
+            ("Herr Muller", "Müller", &[]),
+            ("Herr Müller", "Muller", &[]),
+        ] {
+            assert_eq!(values_found(text, value), found, "{value:?} in {text:?}");
+        }
     }
 
     #[test]

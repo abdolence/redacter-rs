@@ -3,7 +3,7 @@
 //! offsets are located locally and image boxes are scaled back to the image as given.
 
 use crate::errors::AppError;
-use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImagePii};
+use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImageBoxes};
 use crate::AppResult;
 use rand::RngExt;
 use serde::de::DeserializeOwned;
@@ -83,11 +83,11 @@ impl LlmTextFinding {
     }
 }
 
-impl ImagePii {
+impl ImageBoxes {
     /// The boxes as detections, each labelled with the kind the text detection gives the
     /// text in it. The box texts go through `detect_text` as one text, a line per box, in a
     /// single call made only when some box has text. A box whose text no finding overlaps
-    /// keeps the label of [`ImagePii::into_detections`].
+    /// keeps the label of [`ImageBoxes::into_detections`].
     pub async fn into_labelled_detections<DetectText, DetectTextFuture>(
         self,
         detect_text: DetectText,
@@ -206,8 +206,8 @@ mod tests {
         assert!(prompt.instruction.contains(prompt.fence.trim_end()));
     }
 
-    fn found_boxes(texts: &[Option<&str>]) -> ImagePii {
-        ImagePii {
+    fn found_boxes(texts: &[Option<&str>]) -> ImageBoxes {
+        ImageBoxes {
             image: crate::redacters::PreparedImage {
                 format: image::ImageFormat::Png,
                 data: Default::default(),
@@ -271,8 +271,8 @@ mod tests {
             [
                 "person_name",
                 "email_address",
-                "personal_information",
-                "personal_information"
+                "sensitive_data",
+                "sensitive_data"
             ]
         );
     }

@@ -121,7 +121,9 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                 redacter_args.map(|args| args.try_into()).transpose()?,
             )
             .await?;
-            report.write(term, &copy_result).await?;
+            report
+                .write(term, &copy_result, &copy_result.to_text())
+                .await?;
             Ok(0)
         }
         CliCommand::Scan {
@@ -151,7 +153,9 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             );
             let scan_result =
                 command_scan(term, &source, options, redacter_args.try_into()?).await?;
-            report.write(term, &scan_result).await?;
+            report
+                .write(term, &scan_result, &scan_result.to_text())
+                .await?;
             Ok(scan_result.exit_code(no_fail))
         }
         CliCommand::Ls {

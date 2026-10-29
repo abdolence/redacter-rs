@@ -1,5 +1,6 @@
 //! Rendering of the `cp` command's terminal output: the capabilities line, the
-//! legend, one row per file and the closing summary.
+//! legend, one row per file and the closing summary. `scan` prints its rows, legend and
+//! capabilities line with the same functions.
 //!
 //! Everything here is pure: it takes what happened to a file and returns the
 //! line to print, so the layout is unit tested without running a copy.
@@ -68,10 +69,18 @@ pub enum CopyFileOutcome {
 }
 
 /// The glyph that carries the outcome in the first column of a row.
-const GLYPH_REDACTED: &str = "✓";
+pub(crate) const GLYPH_OK: &str = "✓";
 const GLYPH_COPIED: &str = "→";
-const GLYPH_SKIPPED: &str = "↷";
-const GLYPH_ERROR: &str = "✗";
+pub(crate) const GLYPH_SKIPPED: &str = "↷";
+pub(crate) const GLYPH_ERROR: &str = "✗";
+
+/// What each glyph of a `cp` row means.
+pub const COPY_LEGEND: [(&str, &str); 4] = [
+    (GLYPH_OK, "redacted"),
+    (GLYPH_COPIED, "copied as is"),
+    (GLYPH_SKIPPED, "skipped"),
+    (GLYPH_ERROR, "error"),
+];
 
 const MEDIA_TYPE_WIDTH: usize = 24;
 const SIZE_WIDTH: usize = 10;
@@ -79,54 +88,64 @@ const MIN_FILENAME_WIDTH: usize = 12;
 const MIN_DETAIL_WIDTH: usize = 20;
 const MAX_DETAIL_WIDTH: usize = 40;
 const FALLBACK_TERMINAL_WIDTH: usize = 80;
+/// The glyph and its trailing space, plus one space between each pair of columns, and the
+/// media type and size columns.
+const ROW_FIXED_WIDTH: usize = 2 + 3 + MEDIA_TYPE_WIDTH + SIZE_WIDTH;
 
-/// Styles used by the `cp` output, kept together so tests can render the same
+/// Styles of the `cp` and `scan` output, kept together so a text report renders the same
 /// lines without any styling at all.
 #[derive(Debug, Clone)]
-pub struct CopyOutputStyles {
+pub struct OutputStyles {
     pub filename: Style,
     pub media_type: Style,
     pub size: Style,
-    pub redacted: Style,
+    pub ok: Style,
     pub copied: Style,
     pub skipped: Style,
     pub error: Style,
     pub dimmed: Style,
     pub highlighted: Style,
+    /// The glyph of a file with findings, the finding counts and the values found.
+    pub found: Style,
+    /// The label of a finding.
+    pub label: Style,
 }
 
-impl CopyOutputStyles {
+impl OutputStyles {
     pub fn new() -> Self {
         Self {
             filename: Style::new().bold().white(),
             media_type: Style::new(),
             size: Style::new().bold(),
-            redacted: Style::new().green(),
+            ok: Style::new().green(),
             copied: Style::new(),
             skipped: Style::new().dim().yellow(),
             error: Style::new().red(),
             dimmed: Style::new().dim(),
             highlighted: Style::new().bold().white(),
+            found: Style::new().bold().red(),
+            label: Style::new().yellow(),
         }
     }
 
-    #[cfg(test)]
-    fn plain() -> Self {
+    pub fn plain() -> Self {
         Self {
             filename: Style::new(),
             media_type: Style::new(),
             size: Style::new(),
-            redacted: Style::new(),
+            ok: Style::new(),
             copied: Style::new(),
             skipped: Style::new(),
             error: Style::new(),
             dimmed: Style::new(),
             highlighted: Style::new(),
+            found: Style::new(),
+            label: Style::new(),
         }
     }
 }
 
-impl Default for CopyOutputStyles {
+impl Default for OutputStyles {
     fn default() -> Self {
         Self::new()
     }
@@ -135,7 +154,7 @@ impl Default for CopyOutputStyles {
 /// What the redacters and converters available for this run can do, as shown in
 /// the header of the command.
 #[derive(Debug, Clone)]
-pub struct CopyCapabilities {
+pub struct Capabilities {
     pub redacters: Vec<RedacterType>,
     pub pdf_rendering: Capability,
     pub ocr: Capability,
@@ -160,22 +179,28 @@ pub struct CopySummary {
     pub total_size: u64,
 }
 
-impl CopyFileOutcome {
-    fn glyph(&self) -> &'static str {
-        match self {
-            CopyFileOutcome::Redacted { .. } => GLYPH_REDACTED,
-            CopyFileOutcome::Copied | CopyFileOutcome::CopiedUnredacted { .. } => GLYPH_COPIED,
-            CopyFileOutcome::Skipped { .. } => GLYPH_SKIPPED,
-            CopyFileOutcome::Error { .. } => GLYPH_ERROR,
-        }
-    }
+/// What a row shows of a file's outcome: the glyph, the style of the glyph and the detail, and
+/// the detail itself.
+pub struct RowOutcome<'a> {
+    pub glyph: &'static str,
+    pub style: &'a Style,
+    pub detail: String,
+}
 
-    fn style<'a>(&self, styles: &'a CopyOutputStyles) -> &'a Style {
-        match self {
-            CopyFileOutcome::Redacted { .. } => &styles.redacted,
-            CopyFileOutcome::Copied | CopyFileOutcome::CopiedUnredacted { .. } => &styles.copied,
-            CopyFileOutcome::Skipped { .. } => &styles.skipped,
-            CopyFileOutcome::Error { .. } => &styles.error,
+impl CopyFileOutcome {
+    pub fn row<'a>(&self, styles: &'a OutputStyles) -> RowOutcome<'a> {
+        let (glyph, style) = match self {
+            CopyFileOutcome::Redacted { .. } => (GLYPH_OK, &styles.ok),
+            CopyFileOutcome::Copied | CopyFileOutcome::CopiedUnredacted { .. } => {
+                (GLYPH_COPIED, &styles.copied)
+            }
+            CopyFileOutcome::Skipped { .. } => (GLYPH_SKIPPED, &styles.skipped),
+            CopyFileOutcome::Error { .. } => (GLYPH_ERROR, &styles.error),
+        };
+        RowOutcome {
+            glyph,
+            style,
+            detail: format_outcome_detail(self),
         }
     }
 }
@@ -247,9 +272,7 @@ fn row_layout(terminal_width: usize) -> RowLayout {
     } else {
         terminal_width
     };
-    // The glyph and its trailing space, plus one space between each pair of columns.
-    let fixed = 2 + 3 + MEDIA_TYPE_WIDTH + SIZE_WIDTH;
-    let available = terminal_width.saturating_sub(fixed);
+    let available = terminal_width.saturating_sub(ROW_FIXED_WIDTH);
     let mut detail = (available / 3).clamp(MIN_DETAIL_WIDTH, MAX_DETAIL_WIDTH);
     if available.saturating_sub(detail) < MIN_FILENAME_WIDTH {
         detail = available.saturating_sub(MIN_FILENAME_WIDTH);
@@ -261,6 +284,13 @@ fn row_layout(terminal_width: usize) -> RowLayout {
         size: SIZE_WIDTH,
         detail,
     }
+}
+
+/// The row width at which a file name `filename_width` columns wide is not shortened and the
+/// detail column is at its widest, for rows written to a file rather than a terminal.
+pub(crate) fn row_width_for(filename_width: usize) -> usize {
+    // `row_layout` gives the detail a third of the width the fixed columns leave.
+    ROW_FIXED_WIDTH + (filename_width + MAX_DETAIL_WIDTH).max(3 * MAX_DETAIL_WIDTH)
 }
 
 /// Truncates `s` to at most `width` display columns, keeping a prefix and a
@@ -354,14 +384,17 @@ fn fit_column_head(s: &str, width: usize) -> String {
     }
 }
 
-/// The legend printed once, before the first row.
-pub fn format_legend(styles: &CopyOutputStyles) -> String {
+/// The legend printed once, before the first row: each glyph and what it means.
+pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String {
     styles
         .dimmed
-        .apply_to(format!(
-            "{GLYPH_REDACTED} redacted   {GLYPH_COPIED} copied as is   \
-             {GLYPH_SKIPPED} skipped   {GLYPH_ERROR} error"
-        ))
+        .apply_to(
+            entries
+                .iter()
+                .map(|(glyph, meaning)| format!("{glyph} {meaning}"))
+                .collect::<Vec<String>>()
+                .join("   "),
+        )
         .to_string()
 }
 
@@ -371,17 +404,16 @@ pub fn format_file_row(
     filename: &str,
     media_type: &str,
     size: &str,
-    outcome: &CopyFileOutcome,
-    styles: &CopyOutputStyles,
+    outcome: &RowOutcome,
+    styles: &OutputStyles,
 ) -> String {
     let layout = row_layout(terminal_width);
-    let outcome_style = outcome.style(styles);
-    let detail = format_outcome_detail(outcome);
-    let detail = truncate_end(&detail, layout.detail);
+    let outcome_style = outcome.style;
+    let detail = truncate_end(&outcome.detail, layout.detail);
 
     let mut row = format!(
         "{} {} {} ",
-        outcome_style.apply_to(outcome.glyph()),
+        outcome_style.apply_to(outcome.glyph),
         styles
             .filename
             .apply_to(fit_column(filename, layout.filename)),
@@ -405,14 +437,11 @@ pub fn format_file_row(
 }
 
 /// The header line describing what this run can do.
-pub fn format_capabilities_line(
-    capabilities: &CopyCapabilities,
-    styles: &CopyOutputStyles,
-) -> String {
-    let redacting = if capabilities.redacters.is_empty() {
+pub fn format_capabilities_line(capabilities: &Capabilities, styles: &OutputStyles) -> String {
+    let redacters = if capabilities.redacters.is_empty() {
         styles.dimmed.apply_to("no".to_string())
     } else {
-        styles.redacted.apply_to(
+        styles.ok.apply_to(
             capabilities
                 .redacters
                 .iter()
@@ -422,7 +451,7 @@ pub fn format_capabilities_line(
         )
     };
     let yes_no = |capability: Capability| match capability {
-        Capability::Yes => styles.redacted.apply_to("yes".to_string()),
+        Capability::Yes => styles.ok.apply_to("yes".to_string()),
         Capability::No(None) => styles.dimmed.apply_to("no".to_string()),
         Capability::No(Some(addon)) => styles
             .dimmed
@@ -433,8 +462,8 @@ pub fn format_capabilities_line(
         None => styles.dimmed.apply_to("off".to_string()),
     };
     format!(
-        "Redacting: {} · PDF rendering: {} · OCR: {} · Sampling: {}",
-        redacting,
+        "Redacters: {} · PDF rendering: {} · OCR: {} · Sampling: {}",
+        redacters,
         yes_no(capabilities.pdf_rendering),
         yes_no(capabilities.ocr),
         sampling
@@ -442,7 +471,7 @@ pub fn format_capabilities_line(
 }
 
 /// The closing summary, replacing the per-file step lines with one count line.
-pub fn format_summary_line(summary: &CopySummary, styles: &CopyOutputStyles) -> String {
+pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> String {
     let total = summary.redacted + summary.copied_as_is + summary.skipped + summary.errors;
     let mut line = format!(
         "{} {}: {} redacted, {} copied as is, {} skipped",
@@ -489,13 +518,14 @@ mod tests {
         size: &str,
         outcome: &CopyFileOutcome,
     ) -> String {
+        let styles = OutputStyles::plain();
         format_file_row(
             width,
             filename,
             media_type,
             size,
-            outcome,
-            &CopyOutputStyles::plain(),
+            &outcome.row(&styles),
+            &styles,
         )
     }
 
@@ -707,16 +737,16 @@ mod tests {
 
     #[test]
     fn legend_names_every_glyph_once() {
-        let legend = format_legend(&CopyOutputStyles::plain());
+        let legend = format_legend(&COPY_LEGEND, &OutputStyles::plain());
         assert_eq!(legend, "✓ redacted   → copied as is   ↷ skipped   ✗ error");
     }
 
     #[test]
     fn capabilities_line_shows_what_is_on_and_off() {
-        let styles = CopyOutputStyles::plain();
+        let styles = OutputStyles::plain();
         assert_eq!(
             format_capabilities_line(
-                &CopyCapabilities {
+                &Capabilities {
                     redacters: vec![RedacterType::GcpDlp],
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::No(None),
@@ -724,11 +754,11 @@ mod tests {
                 },
                 &styles
             ),
-            "Redacting: gcp-dlp · PDF rendering: yes · OCR: no · Sampling: off"
+            "Redacters: gcp-dlp · PDF rendering: yes · OCR: no · Sampling: off"
         );
         assert_eq!(
             format_capabilities_line(
-                &CopyCapabilities {
+                &Capabilities {
                     redacters: vec![],
                     pdf_rendering: Capability::No(None),
                     ocr: Capability::Yes,
@@ -736,11 +766,11 @@ mod tests {
                 },
                 &styles
             ),
-            "Redacting: no · PDF rendering: no · OCR: yes · Sampling: 1024 bytes"
+            "Redacters: no · PDF rendering: no · OCR: yes · Sampling: 1024 bytes"
         );
         assert_eq!(
             format_capabilities_line(
-                &CopyCapabilities {
+                &Capabilities {
                     redacters: vec![RedacterType::GcpDlp, RedacterType::AwsComprehend],
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::Yes,
@@ -748,7 +778,7 @@ mod tests {
                 },
                 &styles
             ),
-            "Redacting: gcp-dlp, aws-comprehend · PDF rendering: yes · OCR: yes · Sampling: off"
+            "Redacters: gcp-dlp, aws-comprehend · PDF rendering: yes · OCR: yes · Sampling: off"
         );
     }
 
@@ -756,22 +786,22 @@ mod tests {
     fn capabilities_line_names_the_subcommand_that_installs_a_missing_addon() {
         assert_eq!(
             format_capabilities_line(
-                &CopyCapabilities {
+                &Capabilities {
                     redacters: vec![RedacterType::LocalRules],
                     pdf_rendering: Capability::No(Some(Addon::Pdf)),
                     ocr: Capability::No(Some(Addon::Ocr)),
                     sampling_size: None,
                 },
-                &CopyOutputStyles::plain()
+                &OutputStyles::plain()
             ),
-            "Redacting: local-rules · PDF rendering: no (redacter addons install pdf) · \
+            "Redacters: local-rules · PDF rendering: no (redacter addons install pdf) · \
              OCR: no (redacter addons install ocr) · Sampling: off"
         );
     }
 
     #[test]
     fn summary_line_counts_files_and_only_mentions_errors_when_there_are_any() {
-        let styles = CopyOutputStyles::plain();
+        let styles = OutputStyles::plain();
         assert_eq!(
             format_summary_line(
                 &CopySummary {

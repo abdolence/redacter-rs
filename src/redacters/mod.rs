@@ -219,17 +219,17 @@ pub struct PreparedImage {
 }
 
 /// The kind of a box in an image whose text no text detection classified: the coordinate pass
-/// locates text a model takes for personal information, and does not classify it.
-const IMAGE_DETECTION_LABEL: &str = "personal_information";
+/// locates text a model takes for sensitive data, and does not classify it.
+const IMAGE_DETECTION_LABEL: &str = "sensitive_data";
 
 /// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
 #[derive(Debug, Clone)]
-pub struct ImagePii {
+pub struct ImageBoxes {
     pub image: PreparedImage,
     pub coords: Vec<TextImageCoords>,
 }
 
-impl ImagePii {
+impl ImageBoxes {
     /// The boxes as detections in pixels of the image as it was given, clamped to the image
     /// and ordered. The value is the text the model read, empty when it gave none.
     pub fn into_detections(self) -> Vec<Detection> {
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[test]
     fn image_boxes_are_reported_in_pixels_of_the_image_as_given() {
-        let found = ImagePii {
+        let found = ImageBoxes {
             image: PreparedImage {
                 format: image::ImageFormat::Png,
                 data: Default::default(),

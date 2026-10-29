@@ -2,11 +2,10 @@
 use crate::addon_store::Addon;
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
-    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capability,
-    CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
-    SkipReason,
+    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
+    Capability, CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason,
+    COPY_LEGEND,
 };
-use crate::commands::report::Report;
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
@@ -32,8 +31,9 @@ pub struct CopyCommandResult {
     pub files_skipped: usize,
 }
 
-impl Report for CopyCommandResult {
-    fn to_text(&self) -> String {
+impl CopyCommandResult {
+    /// The report for people.
+    pub fn to_text(&self) -> String {
         format!(
             "Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
             self.files_copied, self.files_redacted, self.files_skipped
@@ -86,7 +86,7 @@ pub async fn command_copy(
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
     let addons = AddonStore::new(&options.addon_store);
-    let styles = CopyOutputStyles::new();
+    let styles = OutputStyles::new();
 
     // The bar exists from here on because the file systems report through it, but it is
     // not drawn until the converters and redacters have been bound: they report straight to
@@ -171,7 +171,7 @@ pub async fn command_copy(
             .as_str(),
         );
         if files_found > 0 {
-            bar.println(format_legend(&styles));
+            bar.println(format_legend(&COPY_LEGEND, &styles));
         }
 
         bar.set_length(files_found as u64);
@@ -211,7 +211,7 @@ pub async fn command_copy(
             files_skipped: total_files_skipped,
         })
     } else {
-        bar.println(format_legend(&styles));
+        bar.println(format_legend(&COPY_LEGEND, &styles));
         let report = transfer_and_redact_file(
             term,
             &bar,
@@ -274,9 +274,9 @@ fn report_copy_info(
     destination: &str,
     redacter_options: &Option<RedacterOptions>,
     file_converters: &FileConverters<'_>,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) -> AppResult<()> {
-    let capabilities = CopyCapabilities {
+    let capabilities = Capabilities {
         redacters: redacter_options
             .as_ref()
             .map(|options| {
@@ -340,7 +340,7 @@ async fn transfer_and_redact_file<
     redacter: &Option<(RedacterBaseOptions, Vec<Redacters<'a>>)>,
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
 
@@ -406,7 +406,7 @@ fn print_file_row(
     bar: &ProgressBar,
     file_ref: &FileSystemRef,
     outcome: &CopyFileOutcome,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
 ) {
     bar.println(format_file_row(
         term.width() as usize,
@@ -420,7 +420,7 @@ fn print_file_row(
         HumanBytes(file_ref.file_size.map(|sz| sz as u64).unwrap_or(0_u64))
             .to_string()
             .as_str(),
-        outcome,
+        &outcome.row(styles),
         styles,
     ));
 }
@@ -434,7 +434,7 @@ async fn redact_upload_file<
 >(
     bar: &ProgressBar,
     destination_fs: &mut DFS,
-    styles: &CopyOutputStyles,
+    styles: &OutputStyles,
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,

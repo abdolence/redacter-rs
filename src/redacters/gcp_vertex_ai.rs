@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, retrying_once,
-    Detection, GeminiCandidate, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    Detection, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
     NATIVE_IMAGE_REDACTION_PROMPT,
@@ -452,11 +452,11 @@ impl<'a> GcpVertexAiRedacter<'a> {
 
     /// Asks the model for the boxes of personal information in the image, which is scaled
     /// down to the model's input limit first.
-    async fn find_image_pii(
+    async fn find_image_boxes(
         &self,
         mime_type: &Mime,
         data: &gcloud_sdk::prost::bytes::Bytes,
-    ) -> AppResult<ImagePii> {
+    ) -> AppResult<ImageBoxes> {
         let prepared_image = prepare_image_for_llm(mime_type, data)?;
         let answer = self
             .generate_json(
@@ -488,7 +488,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
             prepared_image.width,
             prepared_image.height,
         )?;
-        Ok(ImagePii {
+        Ok(ImageBoxes {
             image: prepared_image,
             coords,
         })
@@ -500,7 +500,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
     ) -> AppResult<RedacterDataItem> {
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
-                let found = self.find_image_pii(&mime_type, &data).await?;
+                let found = self.find_image_boxes(&mime_type, &data).await?;
                 Ok(RedacterDataItem {
                     file_ref: input.file_ref,
                     content: RedacterDataItemContent::Image {
@@ -553,7 +553,7 @@ impl<'a> Redacter for GcpVertexAiRedacter<'a> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
-                self.find_image_pii(mime_type, data)
+                self.find_image_boxes(mime_type, data)
                     .await?
                     .into_labelled_detections(
                         |text| async move { self.detect_in_text(&text).await },

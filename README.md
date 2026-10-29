@@ -893,38 +893,79 @@ configure the redacters are the ones of `cp`. Specific to `scan`, or worth knowi
 - `--min-score <0..1>`: drop the findings that have a score below this value;
 - `--no-fail`: exit with 0 when there are findings.
 
+`scan` reads a file the way `cp` would redact it with the same options: one plan for each file, shared by all the
+selected redacters. The plan picks one way to read the file, in this order: a redacter reads the type of the file
+itself; a CSV file is read as plain text; the pages of a PDF file are rendered and read as images; the pages of a PDF
+file or an image are read with OCR. A redacter that cannot read the file that way is skipped on that file, as in `cp`.
+For example:
+
+- `scan form.pdf -d gcp-dlp -d local-rules`: GCP DLP reads the rendered pages, local-rules is skipped on the file;
+- `scan photo.png -d gemini-llm -d local-rules`: only Gemini reads the image;
+- `scan data.csv -d local-rules -d ms-presidio`: local-rules reads the table, and Microsoft Presidio, which reads text
+  but not tables, is skipped.
+
+To have every redacter read a file its own way, run `scan` once for each redacter.
+
 ```sh
-redacter scan tmp/source/ -d local-rules
+redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
 ```
 
 ```
-Redacter v0.20.0 (https://github.com/abdolence/redacter-rs)
-Scanning tmp/source/ with local-rules. PDF rendering: no · OCR: no
+Redacter v0.20.0 (https://github.com/abdolence/redacter-rs)
+Scanning test-fixtures/documents.
+Redacters: local-rules, local-ner · PDF rendering: no · OCR: yes · Sampling: off
 
-customers.csv:1:2  email  local-rules  -  j***m
-customers.csv:2:2  email  local-rules  -  j***g
-notes.txt:1:10  email  local-rules  -  j***m
-notes.txt:2:8  phone-international  local-rules  -  +***8
-notes.txt:3:7  payment-card  local-rules  -  4***1
+Found 3 files. Total size: 1.85 KiB
+✓ clean   ! findings   ↷ skipped   ✗ error
+! customers.csv                                          text/csv                 290 B      13 findings
+    1:2  per                  local-ner    1.00  J***h
+    1:3  email                local-rules        j***m
+    1:4  phone-international  local-rules        +***7
+    1:5  loc                  local-ner    1.00  L***n
+    2:2  per                  local-ner    1.00  M***z
+    2:3  email                local-rules        m***g
+    2:4  phone-international  local-rules        +***8
+    2:5  loc                  local-ner    1.00  M***d
+    3:2  per                  local-ner    1.00  A***a
+    3:3  email                local-rules        a***t
+    3:4  phone-international  local-rules        +***8
+    3:5  loc                  local-ner    1.00  ***
+    3:6  passport             local-rules        X***7
+✗ customer-form.pdf                                      application/pdf          1.19 KiB   pdf renderer unavailable
+! customer-note.txt                                      text/plain               386 B      12 findings
+    3:11   per                  local-ner    1.00  J***h
+    4:8    email                local-rules        j***m
+    5:8    phone-international  local-rules        +***7
+    6:16   birth-date           local-rules        1***5
+    7:10   loc                  local-ner    0.59  ***
+    7:15   loc                  local-ner    0.96  B***t
+    7:29   loc                  local-ner    1.00  L***n
+    7:36   uk-postcode          local-rules        N***E
+    9:1    per                  local-ner    0.99  ***
+    10:14  phone-international  local-rules        +***7
+    10:57  email                local-rules        j***m
+    11:34  payment-card         local-rules        4***1
 
-3 files: 2 with findings, 1 clean, 0 skipped, 0 unsupported. 5 findings: email 3, payment-card 1, phone-international 1.
+9 files: 2 with findings, 0 clean, 6 skipped, 0 unsupported, 1 blocked. 25 findings: birth-date 1, email 5, loc 6, passport 1, payment-card 1, per 5, phone-international 5, uk-postcode 1. Total size: 1.85 KiB
 ```
 
-A finding is one line: the location, the label, the redacter that found it, the score and the value. A file without
-findings has no line, as with `grep`. The location depends on the content:
+Each file has a row, as in `cp`: the status, the path, the media type, the size and a detail. `!` is a file with
+findings, `✓` a clean file, `↷` a file that was skipped or that no selected redacter reads, and `✗` a file that
+failed or is blocked. The detail of a file that was not scanned says why, such as `pdf renderer unavailable` or
+`type not supported`.
 
-- text: `path:line:column`, both counted from 1, the column in characters;
-- a cell of a CSV table: `path:row:column`, both counted from 1, the header row not counted. A redacter that reads
-  text but not tables, such as Microsoft Presidio, gets the CSV file as plain text and reports `path:line:column` of
-  the file instead, where the header is line 1;
-- an image: `path:[x1,y1,x2,y2]`, a box in pixels of the image;
-- a page of a PDF file: `path:page:[x1,y1,x2,y2]`, the page counted from 1 and the box in pixels of the rendered page.
+The findings of a file follow its row, one line each and sorted by location: the location, the label, the redacter
+that found it, the score and the value. The location depends on the content:
+
+- text: `line:column`, both counted from 1, the column in characters;
+- a cell of a CSV table: `row:column`, both counted from 1, the header row not counted. When no selected redacter
+  reads tables, the CSV file is read as plain text and the location is `line:column` of the file, where the header is
+  line 1;
+- an image: `[x1,y1,x2,y2]`, a box in pixels of the image;
+- a page of a PDF file: `page:[x1,y1,x2,y2]`, the page counted from 1 and the box in pixels of the rendered page.
 
 On an image or a PDF page the box covers the words OCR recognised for the matched text. A redacter that reads
 images itself reports the box it found.
-
-A file that is not scanned or failed gets a line with the reason instead, such as
-`customer-form.pdf  blocked: pdf renderer unavailable` or `blob.bin  unsupported: type not supported`.
 
 ### Masking
 
@@ -939,7 +980,8 @@ Be aware that a report written with `--show-values` contains the sensitive data 
 
 A score is the confidence of the redacter that the value is what the label says, between 0 and 1. The local-ner,
 local-gliner, AWS Comprehend, Microsoft Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
-redacters and AWS Bedrock Guardrails do not: their findings show `-` in the terminal and `null` in the JSON report.
+redacters and AWS Bedrock Guardrails do not: their findings have an empty score in the terminal and `null` in the JSON
+report.
 
 `--min-score` drops the findings below the given score. A finding without a score is kept, so the option never hides
 what a rule-based or an LLM redacter found.
@@ -949,21 +991,22 @@ redacter scan test-fixtures/documents/customer-note.txt -d local-rules -d local-
 ```
 
 ```
-customer-note.txt:4:8  email  local-rules  -  j***m
-customer-note.txt:5:8  phone-international  local-rules  -  +***7
-customer-note.txt:6:16  birth-date  local-rules  -  1***5
-customer-note.txt:7:36  uk-postcode  local-rules  -  N***E
-customer-note.txt:10:14  phone-international  local-rules  -  +***7
-customer-note.txt:10:57  email  local-rules  -  j***m
-customer-note.txt:11:34  payment-card  local-rules  -  4***1
-customer-note.txt:3:11  per  local-ner  1.00  J***h
-customer-note.txt:7:15  loc  local-ner  0.96  B***t
-customer-note.txt:7:29  loc  local-ner  1.00  L***n
-customer-note.txt:9:1  per  local-ner  0.99  ***
+! customer-note.txt                                      text/plain               386 B      11 findings
+    3:11   per                  local-ner    1.00  J***h
+    4:8    email                local-rules        j***m
+    5:8    phone-international  local-rules        +***7
+    6:16   birth-date           local-rules        1***5
+    7:15   loc                  local-ner    0.96  B***t
+    7:29   loc                  local-ner    1.00  L***n
+    7:36   uk-postcode          local-rules        N***E
+    9:1    per                  local-ner    0.99  ***
+    10:14  phone-international  local-rules        +***7
+    10:57  email                local-rules        j***m
+    11:34  payment-card         local-rules        4***1
 ```
 
-Without `--min-score` the same scan also reports `customer-note.txt:7:10  loc  local-ner  0.59  ***`. Every
-local-rules finding is kept in both runs.
+Without `--min-score` the same scan also reports `7:10  loc  local-ner  0.59  ***` on line 7. Every local-rules finding is
+kept in both runs.
 
 GCP DLP does not give a number. It rates each finding with a likelihood, one of five levels of how likely the
 value is to be of the reported info type, and `scan` turns it into a fixed score:
@@ -1076,8 +1119,9 @@ Each entry of `files` has the `path` relative to the source, the `mime_type`, th
 file. The `status` is `scanned`, `unsupported`, `blocked` (a converter is missing, counted in `files_blocked`),
 `skipped` or `failed`. The `reason` is `null` for a scanned file and says why for the others.
 
-Each finding has the `redacter` that found it, the `label`, the `score` (`null` when the redacter gives none), the
-`location` and the `value`, masked unless `--show-values` is set. The `location` has a `kind`:
+The `findings` of a file are sorted by location, as in the terminal. Each finding has the `redacter` that found it, the
+`label`, the `score` (`null` when the redacter gives none), the `location` and the `value`, masked unless
+`--show-values` is set. The `location` has a `kind`:
 
 - `text`: `start` and `end` are byte offsets in the text of the file, with the `line` and `column` of the start;
 - `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
@@ -1089,17 +1133,57 @@ Fields are only ever added to the report, never renamed or removed.
 
 ### Text report
 
-`--report-format text` writes what the terminal shows for the files and the summary, without colours.
+`--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are
+wide enough for the longest path, so no path is shortened.
 
 ```sh
-redacter scan tmp/source/ -d local-rules --report-file scan-report.txt --report-format text
+redacter scan test-fixtures/documents -d local-rules --report-file scan-report.txt --report-format text
 ```
 
 ```
-notes.txt:1:10  email  local-rules  -  j***m
-notes.txt:2:7  payment-card  local-rules  -  4***1
+✓ clean   ! findings   ↷ skipped   ✗ error
+! customers.csv                                                                    text/csv                 290 B      7 findings
+    1:3  email                local-rules  j***m
+    1:4  phone-international  local-rules  +***7
+    2:3  email                local-rules  m***g
+    2:4  phone-international  local-rules  +***8
+    3:3  email                local-rules  a***t
+    3:4  phone-international  local-rules  +***8
+    3:6  passport             local-rules  X***7
+! customer-profile.html                                                            text/html                627 B      6 findings
+    11:43  email                local-rules  j***m
+    11:67  email                local-rules  j***m
+    12:27  phone-international  local-rules  +***7
+    13:35  birth-date           local-rules  1***5
+    14:55  uk-postcode          local-rules  N***E
+    15:34  passport             local-rules  X***7
+✗ customer-form.pdf                                                                application/pdf          1.19 KiB   pdf renderer unavailable
+✓ contextual-en.txt                                                                text/plain               797 B
+! customer.json                                                                    application/json         444 B      5 findings
+    5:15   email                local-rules  j***m
+    6:15   phone-international  local-rules  +***7
+    7:23   birth-date           local-rules  1***4
+    11:20  uk-postcode          local-rules  N***E
+    14:23  payment-card         local-rules  4***1
+! multilingual.txt                                                                 text/plain               753 B      6 findings
+    3:1    email                local-rules  k***e
+    3:60   phone-international  local-rules  +***8
+    7:1    email                local-rules  s***r
+    7:42   phone-international  local-rules  +***0
+    10:58  email                local-rules  c***s
+    11:17  phone-international  local-rules  +***6
+✓ dates-en.txt                                                                     text/plain               86 B
+✓ false-positives-en.txt                                                           text/plain               340 B
+! customer-note.txt                                                                text/plain               386 B      7 findings
+    4:8    email                local-rules  j***m
+    5:8    phone-international  local-rules  +***7
+    6:16   birth-date           local-rules  1***5
+    7:36   uk-postcode          local-rules  N***E
+    10:14  phone-international  local-rules  +***7
+    10:57  email                local-rules  j***m
+    11:34  payment-card         local-rules  4***1
 
-1 file: 1 with findings, 0 clean, 0 skipped, 0 unsupported. 2 findings: email 1, payment-card 1.
+9 files: 5 with findings, 3 clean, 0 skipped, 0 unsupported, 1 blocked. 31 findings: birth-date 3, email 11, passport 2, payment-card 2, phone-international 10, uk-postcode 3. Total size: 4.83 KiB
 ```
 
 ### Detection per redacter
@@ -1119,10 +1203,11 @@ for AWS Comprehend.
 | `aws-bedrock-guardrails` | The PII type of the guardrail, or the name of its regex | None | OCR |
 | `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
 
-- Images and PDF pages go through OCR for the redacters that cannot read images, and need the OCR models and, for PDF
-  files, Pdfium, as for redaction. Without them the file is reported as `blocked`.
-- A CSV file is read as a table by the redacters that support tables, and the findings have a `table_cell` location.
-  A redacter that reads text but not tables, such as Microsoft Presidio, gets the file as plain text.
+- An image or the pages of a PDF file go through OCR when no selected redacter reads images, and need the OCR models
+  and, for PDF files, Pdfium, as for redaction. Without them the file is reported as `blocked`.
+- A CSV file is read as a table when a selected redacter reads tables, and the findings have a `table_cell`
+  location; a redacter that reads text but not tables, such as Microsoft Presidio, is skipped on the file. When no
+  selected redacter reads tables, the file is read as plain text.
 - Microsoft Presidio needs `--ms-presidio-text-analyze-url` to detect. The image redaction endpoint reports no
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.

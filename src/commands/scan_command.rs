@@ -1,12 +1,14 @@
 //! The `scan` command: runs the selected redacters in detect-only mode over every file of a
 //! source and reports what they found and where. The source is only read.
 
-use crate::args::RedacterType;
 use crate::commands::copy_command::{plan_blocked_reason, run_needs_ocr, single_source_needs_ocr};
-use crate::commands::copy_output::{NotRedactedReason, SkipReason};
+use crate::commands::copy_output::{
+    format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
+    SkipReason,
+};
 use crate::commands::scan_output::{
-    format_file_lines, format_scan_header, format_scan_summary, FindingReport, ScanCommandResult,
-    ScanFileReport, ScanOutputStyles, ValueDisplay,
+    format_file_lines, format_scan_summary, FindingReport, ScanCommandResult, ScanFileReport,
+    ValueDisplay, SCAN_LEGEND,
 };
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -20,7 +22,7 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::Term;
 use futures::Stream;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{HumanBytes, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::error::Error;
 use std::time::{Duration, Instant};
 use tokio_util::bytes;
@@ -65,7 +67,7 @@ struct ScanContext<'s> {
     options: &'s ScanCommandOptions,
     redacters: &'s [Redacters<'s>],
     stream_redacter: &'s StreamRedacter<'s>,
-    styles: &'s ScanOutputStyles,
+    styles: &'s OutputStyles,
     bar: &'s ProgressBar,
 }
 
@@ -77,7 +79,7 @@ pub async fn command_scan(
 ) -> AppResult<ScanCommandResult> {
     let term_reporter = AppReporter::from(term);
     let models = ModelStore::new(&options.model_store, &term_reporter);
-    let styles = ScanOutputStyles::new();
+    let styles = OutputStyles::new();
 
     // Hidden until every model is resolved, so a consent prompt or a download bar never
     // lands under a live progress bar.
@@ -113,16 +115,21 @@ pub async fn command_scan(
         .init(&term_reporter, &models, needs_ocr)
         .await?;
 
-    let redacter_types: Vec<RedacterType> = redacter_options
-        .provider_options
-        .iter()
-        .map(|provider| provider.redacter_type())
-        .collect();
-    term.write_line(&format_scan_header(
-        source,
-        &redacter_types,
-        file_converters.pdf_image_converter.is_some(),
-        file_converters.ocr.is_some(),
+    term.write_line(&format!(
+        "Scanning {}.",
+        styles.highlighted.apply_to(source)
+    ))?;
+    term.write_line(&format_capabilities_line(
+        &Capabilities {
+            redacters: redacter_options
+                .provider_options
+                .iter()
+                .map(|provider| provider.redacter_type())
+                .collect(),
+            pdf_rendering: file_converters.pdf_image_converter.is_some(),
+            ocr: file_converters.ocr.is_some(),
+            sampling_size: redacter_options.base_options.sampling_size,
+        },
         &styles,
     ))?;
     term.write_line("")?;
@@ -157,6 +164,16 @@ pub async fn command_scan(
     let mut result = ScanCommandResult::default();
     match source_listing {
         Some(listing) => {
+            let total_size: usize = listing.files.iter().filter_map(|file| file.file_size).sum();
+            let mut header = vec![format!(
+                "Found {} files. Total size: {}",
+                styles.highlighted.apply_to(listing.files.len()),
+                styles.highlighted.apply_to(HumanBytes(total_size as u64))
+            )];
+            if !listing.files.is_empty() {
+                header.push(format_legend(&SCAN_LEGEND, &styles));
+            }
+            write_lines(term, &bar, &header)?;
             result.files_skipped += listing.skipped;
             bar.set_length(listing.files.len() as u64);
             for file in &listing.files {
@@ -166,6 +183,7 @@ pub async fn command_scan(
             }
         }
         None => {
+            write_lines(term, &bar, &[format_legend(&SCAN_LEGEND, &styles)])?;
             let report = scan_file(&context, None, &mut source_fs, &mut throttler).await?;
             result.push(report);
         }
@@ -212,16 +230,20 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
             failed_report(&file_ref, &error)
         }
     };
-    // Written to the terminal rather than through the bar, which drops what it is given to
-    // print when stdout is not a terminal, as in CI.
-    context.bar.suspend(|| -> AppResult<()> {
-        for line in format_file_lines(&report, context.styles) {
-            context.term.write_line(&line)?;
-        }
-        Ok(())
-    })?;
+    write_lines(
+        context.term,
+        context.bar,
+        &format_file_lines(&report, usize::from(context.term.size().1), context.styles),
+    )?;
     context.bar.inc(1);
     Ok(report)
+}
+
+/// Writes `lines` to the terminal rather than through the bar, which drops what it is given to
+/// print when stdout is not a terminal, as in CI.
+fn write_lines(term: &Term, bar: &ProgressBar, lines: &[String]) -> AppResult<()> {
+    bar.suspend(|| lines.iter().try_for_each(|line| term.write_line(line)))?;
+    Ok(())
 }
 
 fn failed_report(file_ref: &FileSystemRef, error: &AppError) -> ScanFileReport {

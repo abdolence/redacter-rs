@@ -14,7 +14,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImagePii, LlmImageMode, LlmTextFinding, ModelAnswer,
+    redact_image_with_mode, Detection, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt,
 };
@@ -417,11 +417,11 @@ impl<'a> AwsBedrockRedacter<'a> {
 
     /// Asks the model for the boxes of personal information in the image, which is scaled
     /// down to the model's input limit first.
-    async fn find_image_pii(
+    async fn find_image_boxes(
         &self,
         mime_type: &mime::Mime,
         data: &gcloud_sdk::prost::bytes::Bytes,
-    ) -> AppResult<ImagePii> {
+    ) -> AppResult<ImageBoxes> {
         let model_id = self.text_model_id();
         let family = require_supported_family(&model_id)?;
         let prepared_image = prepare_image_for_llm(mime_type, data)?;
@@ -477,7 +477,7 @@ impl<'a> AwsBedrockRedacter<'a> {
             }
         };
 
-        Ok(ImagePii {
+        Ok(ImageBoxes {
             image: prepared_image,
             coords,
         })
@@ -492,7 +492,7 @@ impl<'a> AwsBedrockRedacter<'a> {
                 message: "Unsupported item for image redacting".to_string(),
             });
         };
-        let found = self.find_image_pii(&mime_type, &data).await?;
+        let found = self.find_image_boxes(&mime_type, &data).await?;
         Ok(RedacterDataItem {
             file_ref: input.file_ref,
             content: RedacterDataItemContent::Image {
@@ -538,7 +538,7 @@ impl<'a> AwsBedrockRedacter<'a> {
             .converse_text(
                 self.text_model_id(),
                 message,
-                "Failed to detect personal information in the text",
+                "Failed to detect sensitive data in the text",
             )
             .await?
             .into_text()?;
@@ -598,7 +598,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
-                self.find_image_pii(mime_type, data)
+                self.find_image_boxes(mime_type, data)
                     .await?
                     .into_labelled_detections(
                         |text| async move { self.detect_in_text(&text).await },

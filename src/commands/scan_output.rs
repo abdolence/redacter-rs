@@ -1,18 +1,33 @@
 //! The `scan` command's results: the JSON report, and the lines the terminal and the text
-//! report show for each finding, each file that was not scanned, and the closing summary.
+//! report show: a row per file in the layout of `cp`, the findings of a file under its row,
+//! and the closing summary.
 //!
 //! Everything here is pure: it takes what the scan found and returns what to write, so the
 //! layout is unit tested without running a scan.
 
 use crate::args::RedacterType;
-use crate::commands::copy_output::{NotRedactedReason, SkipReason};
-use crate::commands::report::Report;
+use crate::commands::copy_output::{
+    format_file_row, format_legend, row_width_for, NotRedactedReason, OutputStyles, RowOutcome,
+    SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
-use console::Style;
+use console::{measure_text_width, pad_str, Alignment};
+use indicatif::HumanBytes;
 use rvstruct::ValueStruct;
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+/// The glyph of a scanned file with findings.
+const GLYPH_FINDINGS: &str = "!";
+
+/// What each glyph of a `scan` row means.
+pub const SCAN_LEGEND: [(&str, &str); 4] = [
+    (GLYPH_OK, "clean"),
+    (GLYPH_FINDINGS, "findings"),
+    (GLYPH_SKIPPED, "skipped"),
+    (GLYPH_ERROR, "error"),
+];
 
 /// How a finding's matched text is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +94,9 @@ impl FindingReport {
 pub struct ScanFileReport {
     path: String,
     mime_type: Option<String>,
+    /// Shown in the file's row and summed in the summary; not part of the JSON report.
+    #[serde(skip)]
+    size: Option<usize>,
     status: ScanFileStatus,
     reason: Option<String>,
     findings: Vec<FindingReport>,
@@ -116,6 +134,38 @@ impl ScanFileReport {
         Self::new(file_ref, ScanFileStatus::Failed, Some(message), Vec::new())
     }
 
+    /// What the file's row shows: `!` and the number of findings, `✓` for a clean file, `↷` for
+    /// a file left out or that no redacter reads, and `✗` for one that failed or is blocked,
+    /// since both make the scan incomplete.
+    pub fn row<'a>(&self, styles: &'a OutputStyles) -> RowOutcome<'a> {
+        let reason = self.reason.clone().unwrap_or_default();
+        match self.status {
+            ScanFileStatus::Scanned if self.findings.is_empty() => RowOutcome {
+                glyph: GLYPH_OK,
+                style: &styles.ok,
+                detail: String::new(),
+            },
+            ScanFileStatus::Scanned => RowOutcome {
+                glyph: GLYPH_FINDINGS,
+                style: &styles.found,
+                detail: match self.findings.len() {
+                    1 => "1 finding".to_string(),
+                    count => format!("{count} findings"),
+                },
+            },
+            ScanFileStatus::Unsupported | ScanFileStatus::Skipped => RowOutcome {
+                glyph: GLYPH_SKIPPED,
+                style: &styles.skipped,
+                detail: reason,
+            },
+            ScanFileStatus::Blocked | ScanFileStatus::Failed => RowOutcome {
+                glyph: GLYPH_ERROR,
+                style: &styles.error,
+                detail: reason,
+            },
+        }
+    }
+
     fn new(
         file_ref: &FileSystemRef,
         status: ScanFileStatus,
@@ -125,6 +175,7 @@ impl ScanFileReport {
         Self {
             path: file_ref.relative_path.value().clone(),
             mime_type: file_ref.media_type.as_ref().map(ToString::to_string),
+            size: file_ref.file_size,
             status,
             reason,
             findings,
@@ -191,176 +242,96 @@ impl ScanCommandResult {
     }
 }
 
-impl Report for ScanCommandResult {
-    fn to_text(&self) -> String {
-        let styles = ScanOutputStyles::plain();
-        let mut text = String::new();
+impl ScanCommandResult {
+    /// The report for people, without terminal colours: the legend, each file's row with its
+    /// findings under it, and the summary. Rows are as wide as the longest path needs, so no
+    /// path is shortened.
+    pub fn to_text(&self) -> String {
+        let styles = OutputStyles::plain();
+        let width = row_width_for(
+            self.files
+                .iter()
+                .map(|file| measure_text_width(&file.path))
+                .max()
+                .unwrap_or(0),
+        );
+        let mut lines = vec![format_legend(&SCAN_LEGEND, &styles)];
         for file in &self.files {
-            for line in format_file_lines(file, &styles) {
-                text.push_str(&line);
-                text.push('\n');
-            }
+            lines.extend(format_file_lines(file, width, &styles));
         }
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&format_scan_summary(self, &styles));
-        text.push('\n');
-        text
+        lines.push(String::new());
+        lines.push(format_scan_summary(self, &styles));
+        lines.join("\n") + "\n"
     }
 }
 
-/// Styles used by the `scan` output, kept together so the text report renders the same
-/// lines without any styling at all.
-#[derive(Debug, Clone)]
-pub struct ScanOutputStyles {
-    pub location: Style,
-    pub label: Style,
-    pub value: Style,
-    pub dimmed: Style,
-    pub highlighted: Style,
-    pub found: Style,
-    pub skipped: Style,
-    pub error: Style,
+/// The lines of one file: its row for a terminal `width` columns wide, then its findings.
+pub fn format_file_lines(
+    file: &ScanFileReport,
+    width: usize,
+    styles: &OutputStyles,
+) -> Vec<String> {
+    let mut lines = vec![format_file_row(
+        width,
+        &file.path,
+        file.mime_type.as_deref().unwrap_or_default(),
+        &HumanBytes(file.size.unwrap_or(0) as u64).to_string(),
+        &file.row(styles),
+        styles,
+    )];
+    lines.extend(format_finding_lines(file, styles));
+    lines
 }
 
-impl ScanOutputStyles {
-    pub fn new() -> Self {
-        Self {
-            location: Style::new().bold().white(),
-            label: Style::new().yellow(),
-            value: Style::new().red(),
-            dimmed: Style::new().dim(),
-            highlighted: Style::new().bold().white(),
-            found: Style::new().bold().red(),
-            skipped: Style::new().dim().yellow(),
-            error: Style::new().red(),
-        }
+/// The findings of a file, a line each, indented under its row and in columns as wide as the
+/// widest value of the file: the location, the label, the redacter, the score, and the value.
+/// The score column is left out when no finding of the file has a score.
+fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<String> {
+    fn widest(findings: &[FindingReport], cell: impl Fn(&FindingReport) -> String) -> usize {
+        findings
+            .iter()
+            .map(|finding| measure_text_width(&cell(finding)))
+            .max()
+            .unwrap_or(0)
     }
-
-    pub fn plain() -> Self {
-        Self {
-            location: Style::new(),
-            label: Style::new(),
-            value: Style::new(),
-            dimmed: Style::new(),
-            highlighted: Style::new(),
-            found: Style::new(),
-            skipped: Style::new(),
-            error: Style::new(),
-        }
-    }
-}
-
-impl Default for ScanOutputStyles {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// The line that opens a scan: what is scanned, by what, and which converters this run has.
-pub fn format_scan_header(
-    source: &str,
-    redacters: &[RedacterType],
-    pdf_rendering: bool,
-    ocr: bool,
-    styles: &ScanOutputStyles,
-) -> String {
-    let yes_no = |enabled: bool| {
-        if enabled {
-            styles.highlighted.apply_to("yes")
-        } else {
-            styles.dimmed.apply_to("no")
-        }
+    let score = |finding: &FindingReport| {
+        finding
+            .score
+            .map(|score| score.to_string())
+            .unwrap_or_default()
     };
-    format!(
-        "Scanning {} with {}. PDF rendering: {} · OCR: {}",
-        styles.highlighted.apply_to(source),
-        styles.label.apply_to(
-            redacters
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<String>>()
-                .join(", ")
-        ),
-        yes_no(pdf_rendering),
-        yes_no(ocr),
-    )
-}
-
-/// Where a finding is, grep-style: `path:line:column` for text, `path:row:column` for a
-/// table cell, `path:[x1,y1,x2,y2]` for an image and `path:page:[x1,y1,x2,y2]` for a PDF page.
-fn format_location(path: &str, location: &DetectionLocation) -> String {
-    match location {
-        DetectionLocation::Text { line, column, .. } => format!("{path}:{line}:{column}"),
-        DetectionLocation::TableCell { row, column, .. } => format!("{path}:{row}:{column}"),
-        DetectionLocation::Image {
-            page,
-            x1,
-            y1,
-            x2,
-            y2,
-        } => {
-            let image_box = format!(
-                "[{},{},{},{}]",
-                x1.round(),
-                y1.round(),
-                x2.round(),
-                y2.round()
+    let location_width = widest(&file.findings, |finding| finding.location.to_string());
+    let label_width = widest(&file.findings, |finding| finding.label.to_string());
+    let redacter_width = widest(&file.findings, |finding| finding.redacter.to_string());
+    let score_width = widest(&file.findings, score);
+    let pad = |cell: String, width| pad_str(&cell, width, Alignment::Left, None).into_owned();
+    file.findings
+        .iter()
+        .map(|finding| {
+            let mut line = format!(
+                "    {}  {}  {}  ",
+                pad(finding.location.to_string(), location_width),
+                styles
+                    .label
+                    .apply_to(pad(finding.label.to_string(), label_width)),
+                styles
+                    .dimmed
+                    .apply_to(pad(finding.redacter.to_string(), redacter_width)),
             );
-            match page {
-                Some(page) => format!("{path}:{page}:{image_box}"),
-                None => format!("{path}:{image_box}"),
+            if score_width > 0 {
+                line.push_str(&format!(
+                    "{}  ",
+                    styles.dimmed.apply_to(pad(score(finding), score_width))
+                ));
             }
-        }
-    }
-}
-
-/// The lines for one file: a line per finding, or one line saying why it was not scanned.
-/// A scanned file without findings has none, as with grep.
-pub fn format_file_lines(file: &ScanFileReport, styles: &ScanOutputStyles) -> Vec<String> {
-    let (status, status_style) = match file.status {
-        ScanFileStatus::Scanned => {
-            return file
-                .findings
-                .iter()
-                .map(|finding| format_finding_line(&file.path, finding, styles))
-                .collect()
-        }
-        ScanFileStatus::Unsupported => ("unsupported", &styles.skipped),
-        ScanFileStatus::Blocked => ("blocked", &styles.skipped),
-        ScanFileStatus::Skipped => ("skipped", &styles.skipped),
-        ScanFileStatus::Failed => ("failed", &styles.error),
-    };
-    vec![format!(
-        "{}  {}",
-        styles.location.apply_to(&file.path),
-        status_style.apply_to(match &file.reason {
-            Some(reason) => format!("{status}: {reason}"),
-            None => status.to_string(),
+            line.push_str(&styles.found.apply_to(&finding.value).to_string());
+            line
         })
-    )]
+        .collect()
 }
 
-fn format_finding_line(path: &str, finding: &FindingReport, styles: &ScanOutputStyles) -> String {
-    format!(
-        "{}  {}  {}  {}  {}",
-        styles
-            .location
-            .apply_to(format_location(path, &finding.location)),
-        styles.label.apply_to(&finding.label),
-        styles.dimmed.apply_to(finding.redacter),
-        styles.dimmed.apply_to(
-            finding
-                .score
-                .map_or_else(|| "-".to_string(), |score| score.to_string())
-        ),
-        styles.value.apply_to(&finding.value),
-    )
-}
-
-/// The closing summary: the file counts, then the findings by label.
-pub fn format_scan_summary(result: &ScanCommandResult, styles: &ScanOutputStyles) -> String {
+/// The closing summary: the file counts, the findings by label, and the size of the files.
+pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) -> String {
     let total = result.files_scanned
         + result.files_skipped
         + result.files_unsupported
@@ -407,7 +378,11 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &ScanOutputStyles
             .collect();
         line.push_str(&format!(": {}", by_label.join(", ")));
     }
-    line.push('.');
+    let total_size: usize = result.files.iter().filter_map(|file| file.size).sum();
+    line.push_str(&format!(
+        ". Total size: {}",
+        styles.highlighted.apply_to(HumanBytes(total_size as u64))
+    ));
     line
 }
 
@@ -576,23 +551,177 @@ mod tests {
     }
 
     #[test]
-    fn the_text_report_has_a_grep_like_line_per_finding_and_per_unscanned_file() {
-        let text = sample_result().to_text();
+    fn the_text_report_lists_each_file_with_its_findings_under_it() {
+        let long_path = format!("{}/notes.txt", "nested".repeat(20));
+        let mut result = sample_result();
+        result.push(ScanFileReport::not_scanned(
+            &file_ref(&long_path, mime::TEXT_PLAIN),
+            SkipReason::NameFilter,
+        ));
+
+        let text = result.to_text();
+
+        let lines: Vec<String> = text
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<&str>>().join(" "))
+            .collect();
         assert_eq!(
-            text,
-            "customer-note.txt:3:15  email  local-rules  -  j***m\n\
-             customers.csv:1:2  person  local-rules  0.75  ***\n\
-             form.pdf:1:[310,193,622,218]  email  local-rules  -  j***o\n\
-             scan.png  blocked: ocr unavailable\n\
-             archive.bin  unsupported: type not supported\n\
-             huge.txt  skipped: over size limit\n\
-             \n\
-             7 files: 3 with findings, 1 clean, 1 skipped, 1 unsupported, 1 blocked. 3 findings: email 2, person 1.\n"
+            lines,
+            [
+                "✓ clean ! findings ↷ skipped ✗ error",
+                "! customer-note.txt text/plain 0 B 1 finding",
+                "3:15 email local-rules j***m",
+                "! customers.csv text/csv 0 B 1 finding",
+                "1:2 person local-rules 0.75 ***",
+                "! form.pdf application/pdf 0 B 1 finding",
+                "1:[310,193,622,218] email local-rules j***o",
+                "✓ clean.txt text/plain 0 B",
+                "✗ scan.png image/png 0 B ocr unavailable",
+                "↷ archive.bin application/octet-stream 0 B type not supported",
+                "↷ huge.txt text/plain 0 B over size limit",
+                &format!("↷ {long_path} text/plain 0 B name filter"),
+                "",
+                "8 files: 3 with findings, 1 clean, 2 skipped, 1 unsupported, 1 blocked. \
+                 3 findings: email 2, person 1. Total size: 0 B",
+            ]
         );
         assert!(
             !text.contains('\u{1b}'),
             "the text report has no ANSI escapes"
         );
+    }
+
+    #[test]
+    fn the_findings_of_a_file_are_aligned_and_an_unscored_one_has_an_empty_score() {
+        let text_at = |line, column| DetectionLocation::Text {
+            start: 0,
+            end: 1,
+            line,
+            column,
+        };
+        let found =
+            |redacter, label: &str, location, score: Option<f32>, value: &str| FindingReport {
+                redacter,
+                label: DetectionLabel::new(label),
+                score: score.map(|score| Score::try_from(score).unwrap()),
+                location,
+                value: value.to_string(),
+            };
+        let styles = OutputStyles::plain();
+        let mixed = ScanFileReport::scanned(
+            &file_ref("customer-note.txt", mime::TEXT_PLAIN),
+            vec![
+                found(
+                    RedacterType::LocalNer,
+                    "per",
+                    text_at(3, 11),
+                    Some(1.0),
+                    "J***h",
+                ),
+                found(
+                    RedacterType::LocalRules,
+                    "email",
+                    text_at(4, 8),
+                    None,
+                    "j***m",
+                ),
+                found(
+                    RedacterType::LocalRules,
+                    "payment-card",
+                    text_at(11, 34),
+                    None,
+                    "4***1",
+                ),
+            ],
+        );
+        let unscored = ScanFileReport::scanned(
+            &file_ref("notes.txt", mime::TEXT_PLAIN),
+            vec![found(
+                RedacterType::LocalRules,
+                "email",
+                text_at(1, 10),
+                None,
+                "j***m",
+            )],
+        );
+
+        assert_eq!(
+            format_file_lines(&mixed, 100, &styles)[1..],
+            [
+                "    3:11   per           local-ner    1.00  J***h",
+                "    4:8    email         local-rules        j***m",
+                "    11:34  payment-card  local-rules        4***1",
+            ]
+        );
+        assert_eq!(
+            format_file_lines(&unscored, 100, &styles)[1..],
+            ["    1:10  email  local-rules  j***m"]
+        );
+    }
+
+    #[test]
+    fn a_row_carries_the_glyph_and_the_detail_of_the_file_status() {
+        let note = file_ref("note.txt", mime::TEXT_PLAIN);
+        let email_at = |line| {
+            finding(
+                "email",
+                DetectionLocation::Text {
+                    start: 0,
+                    end: 6,
+                    line,
+                    column: 1,
+                },
+                None,
+                "a@b.io",
+            )
+        };
+        let styles = OutputStyles::plain();
+        for (file, glyph, detail) in [
+            (
+                ScanFileReport::scanned(&note, vec![email_at(1), email_at(2)]),
+                "!",
+                "2 findings",
+            ),
+            (
+                ScanFileReport::scanned(&note, vec![email_at(1)]),
+                "!",
+                "1 finding",
+            ),
+            (ScanFileReport::scanned(&note, Vec::new()), "✓", ""),
+            (
+                ScanFileReport::not_scanned(
+                    &note,
+                    SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported),
+                ),
+                "↷",
+                "type not supported",
+            ),
+            (
+                ScanFileReport::not_scanned(&note, SkipReason::OverSizeLimit),
+                "↷",
+                "over size limit",
+            ),
+            (
+                ScanFileReport::not_scanned(
+                    &note,
+                    SkipReason::NotRedacted(NotRedactedReason::OcrUnavailable),
+                ),
+                "✗",
+                "ocr unavailable",
+            ),
+            (
+                ScanFileReport::failed(&note, "provider unavailable".to_string()),
+                "✗",
+                "provider unavailable",
+            ),
+        ] {
+            let row = file.row(&styles);
+            assert_eq!(
+                (row.glyph, row.detail.as_str()),
+                (glyph, detail),
+                "{file:?}"
+            );
+        }
     }
 
     #[test]
