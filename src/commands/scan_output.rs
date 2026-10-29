@@ -7,8 +7,8 @@
 
 use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
-    format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout, RowOutcome,
-    SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+    escaped, format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout,
+    RowOutcome, SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
@@ -106,16 +106,6 @@ impl FindingReport {
     fn escaped_label(&self) -> String {
         escaped(&self.label.to_string())
     }
-}
-
-/// Text from a scanned file or a model for a terminal or a text report: it decides what the
-/// text holds, and a newline would break a row while an escape sequence would reach the
-/// terminal. Both quotes stay as they are, since they are common in names.
-fn escaped(text: &str) -> String {
-    text.escape_debug()
-        .to_string()
-        .replace("\\'", "'")
-        .replace("\\\"", "\"")
 }
 
 /// One file of the scan. Built only through its constructors, which keep `status`, `reason`
@@ -326,7 +316,7 @@ impl ScanCommandResult {
         let layout = RowLayout::for_report(
             self.files
                 .iter()
-                .map(|file| measure_text_width(&file.path))
+                .map(|file| measure_text_width(&escaped(&file.path)))
                 .max()
                 .unwrap_or(0),
         );
@@ -701,6 +691,33 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(json["files"][0]["findings"][0]["label"], label);
+    }
+
+    #[test]
+    fn a_path_is_escaped_in_the_rows_and_the_text_report_but_not_in_the_json_report() {
+        let path = "notes\n\u{1b}[31m red.txt";
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref(path, mime::TEXT_PLAIN),
+            Vec::new(),
+            0,
+        ));
+
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
+        assert!(
+            rows[0].starts_with("✓ notes\\n\\u{1b}[31m red.txt "),
+            "{rows:?}"
+        );
+        let text = result.to_text();
+        assert!(!text.contains(['\u{1b}', '\r']));
+        assert_eq!(text.lines().count(), 4, "{text}");
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(json["files"][0]["path"], path);
     }
 
     #[test]

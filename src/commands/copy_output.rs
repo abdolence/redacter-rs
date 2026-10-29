@@ -442,6 +442,17 @@ pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String 
         .to_string()
 }
 
+/// Text from a scanned file or a model, or a name in the scanned repository, for a terminal or a
+/// text report: whoever wrote it decides what it holds, and a newline would break a row while an
+/// escape sequence would reach the terminal. Both quotes stay as they are, since they are common
+/// in names.
+pub(crate) fn escaped(text: &str) -> String {
+    text.escape_debug()
+        .to_string()
+        .replace("\\'", "'")
+        .replace("\\\"", "\"")
+}
+
 /// One row of the table, written when a file's processing finishes.
 pub fn format_file_row(
     layout: RowLayout,
@@ -459,7 +470,7 @@ pub fn format_file_row(
         outcome_style.apply_to(outcome.glyph),
         styles
             .filename
-            .apply_to(fit_column(filename, layout.filename)),
+            .apply_to(fit_column(&escaped(filename), layout.filename)),
         styles
             .media_type
             .apply_to(fit_column_head(media_type, layout.media_type)),
@@ -570,6 +581,16 @@ mod tests {
             &outcome.row(&styles),
             &styles,
         )
+    }
+
+    #[test]
+    fn a_filename_is_escaped_in_the_row() {
+        let outcome = CopyFileOutcome::Copied;
+
+        let line = row(100, "a\n\u{1b}[31m b.txt", "text/plain", "1 B", &outcome);
+
+        assert!(line.contains("a\\n\\u{1b}[31m b.txt "), "{line}");
+        assert!(!line.contains(['\n', '\u{1b}']));
     }
 
     fn redacted(
