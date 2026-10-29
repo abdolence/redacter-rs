@@ -442,15 +442,32 @@ pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String 
         .to_string()
 }
 
-/// Text from a scanned file or a model, or a name in the scanned repository, for a terminal or a
-/// text report: whoever wrote it decides what it holds, and a newline would break a row while an
-/// escape sequence would reach the terminal. Both quotes stay as they are, since they are common
-/// in names.
+/// Text from a scanned file or a model, or a name in the source, for a terminal or a text
+/// report: whoever wrote it decides what it holds. Control characters are written out, since a
+/// newline would break a row and an escape sequence would reach the terminal, and so are the
+/// bidirectional controls, which reorder the text around them. Everything else is left as it is,
+/// as names are full of backslashes, quotes and joined emoji.
 pub(crate) fn escaped(text: &str) -> String {
-    text.escape_debug()
-        .to_string()
-        .replace("\\'", "'")
-        .replace("\\\"", "\"")
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ if character.is_control() || is_bidirectional_control(character) => {
+                escaped.extend(character.escape_unicode());
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn is_bidirectional_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// One row of the table, written when a file's processing finishes.
@@ -463,7 +480,7 @@ pub fn format_file_row(
     styles: &OutputStyles,
 ) -> String {
     let outcome_style = outcome.style;
-    let detail = truncate_end(&outcome.detail, layout.detail);
+    let detail = truncate_end(&escaped(&outcome.detail), layout.detail);
 
     let mut row = format!(
         "{} {} {} ",
@@ -590,6 +607,30 @@ mod tests {
         let line = row(100, "a\n\u{1b}[31m b.txt", "text/plain", "1 B", &outcome);
 
         assert!(line.contains("a\\n\\u{1b}[31m b.txt "), "{line}");
+        assert!(!line.contains(['\n', '\u{1b}']));
+    }
+
+    #[test]
+    fn only_what_changes_terminal_output_is_escaped() {
+        let escaped_text = escaped("a\tb\rc\n\u{1b}\u{7f}\u{85}\u{202e}\u{200f}\u{2066}");
+        assert_eq!(
+            escaped_text,
+            "a\\tb\\rc\\n\\u{1b}\\u{7f}\\u{85}\\u{202e}\\u{200f}\\u{2066}"
+        );
+
+        let unchanged = "sub\\file.txt it's \"q\" no\u{a0}break \u{1f469}\u{200d}\u{1f4bb} \u{e9}";
+        assert_eq!(escaped(unchanged), unchanged);
+    }
+
+    #[test]
+    fn a_detail_is_escaped_in_the_row() {
+        let outcome = CopyFileOutcome::Error {
+            message: "read a\n\u{1b}[31m b".to_string(),
+        };
+
+        let line = row(100, "b.txt", "text/plain", "1 B", &outcome);
+
+        assert!(line.contains("read a\\n\\u{1b}[31m b"), "{line}");
         assert!(!line.contains(['\n', '\u{1b}']));
     }
 

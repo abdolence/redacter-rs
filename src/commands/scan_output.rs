@@ -713,8 +713,16 @@ mod tests {
             "{rows:?}"
         );
         let text = result.to_text();
-        assert!(!text.contains(['\u{1b}', '\r']));
-        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(
+            text.contains("✓ notes\\n\\u{1b}[31m red.txt "),
+            "the whole escaped path is in the row: {text}"
+        );
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            4,
+            "a raw newline in the path would add a line: {text}"
+        );
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(json["files"][0]["path"], path);
