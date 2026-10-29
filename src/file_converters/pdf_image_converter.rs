@@ -4,7 +4,7 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::AppResult;
 use bytes::Bytes;
 use pdfium_render::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct PdfImageConverter {
     pdfium: Pdfium,
@@ -15,7 +15,7 @@ impl PdfImageConverter {
     /// copy that is there but does not match its pin is an error and never falls back to
     /// another library. Without an installed copy, a Pdfium installed by hand is used: the
     /// `lib` directory beside the tool's own, the tool's own directory, then the system
-    /// library path.
+    /// library directories of the platform. The current directory is never searched.
     pub fn new(addons: &AddonStore) -> AppResult<Self> {
         let bindings = match addons.find(Addon::Pdf) {
             Ok(files) => {
@@ -37,36 +37,45 @@ impl PdfImageConverter {
         let executable_dir = executable.parent().ok_or(AppError::SystemError {
             message: "No parent directory for executable".to_string(),
         })?;
-        let beside_executable_dir = executable_dir.parent().map(|parent| parent.join("lib"));
-        let bindings = beside_executable_dir
+        let lib_dir = executable_dir.parent().map(|parent| parent.join("lib"));
+        let bound = lib_dir
             .iter()
             .map(PathBuf::as_path)
             .chain([executable_dir])
+            .chain(SYSTEM_LIBRARY_DIRS.iter().map(Path::new))
             .find_map(|dir| {
                 Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir)).ok()
             })
-            .map_or_else(bind_to_system_library, Ok)?;
-        Ok(bindings)
+            .map_or_else(bind_by_system_loader, Ok);
+        bound
     }
 }
 
-/// The libraries the platform's loader finds by name.
+/// System library directories tried by full path. A bare library name would also be resolved
+/// against the current directory by the macOS loader, so a library planted next to the files
+/// being redacted would be loaded.
+#[cfg(target_os = "macos")]
+const SYSTEM_LIBRARY_DIRS: [&str; 3] = ["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"];
+
+/// Only macOS has a fixed list. The Windows loader resolves a bare name against the current
+/// directory too, so there only the addons root and the tool's own directories are searched.
 #[cfg(not(target_os = "macos"))]
-fn bind_to_system_library() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
-    Pdfium::bind_to_system_library()
+const SYSTEM_LIBRARY_DIRS: [&str; 0] = [];
+
+/// The Linux loader takes the library by its bare name from the system directories and
+/// `LD_LIBRARY_PATH`, in which an empty entry means the current directory.
+#[cfg(target_os = "linux")]
+fn bind_by_system_loader() -> AppResult<Box<dyn PdfiumLibraryBindings>> {
+    Ok(Pdfium::bind_to_system_library()?)
 }
 
-/// On macOS the loader resolves a bare library name against the current directory too, so a
-/// library planted next to the files being redacted would be loaded. The directories of its
-/// default library search path are tried by full path instead.
-#[cfg(target_os = "macos")]
-fn bind_to_system_library() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
-    const SYSTEM_LIBRARY_DIRS: [&str; 3] = ["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"];
-    let bind =
-        |dir: &str| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir));
-    let [first, rest @ ..] = SYSTEM_LIBRARY_DIRS;
-    rest.iter()
-        .fold(bind(first), |bound, dir| bound.or_else(|_| bind(dir)))
+#[cfg(not(target_os = "linux"))]
+fn bind_by_system_loader() -> AppResult<Box<dyn PdfiumLibraryBindings>> {
+    Err(AppError::SystemError {
+        message: "No Pdfium library found beside the executable or in the system library \
+                  directories"
+            .to_string(),
+    })
 }
 
 impl PdfToImage for PdfImageConverter {
@@ -113,8 +122,8 @@ mod tests {
     use super::*;
     use crate::addon_store::AddonStoreOptions;
 
-    /// pdfium is bound to a native library that is not committed to the repo (see
-    /// `lib/libpdfium.so`, gitignored). Machines without it should skip rather than fail.
+    /// pdfium is bound to a native library that is not committed to the repo. Machines
+    /// without one installed should skip rather than fail.
     fn converter_or_skip(test_name: &str) -> Option<PdfImageConverter> {
         match PdfImageConverter::new(&AddonStore::new(&AddonStoreOptions::default())) {
             Ok(converter) => Some(converter),

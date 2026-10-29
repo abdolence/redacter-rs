@@ -687,10 +687,15 @@ Chromium project). `redacter addons install pdf` installs the build the tool is 
 - The addon is available for Linux (glibc) on x86_64 and aarch64, macOS on x86_64 and aarch64, and Windows on x86,
   x86_64 and aarch64. Other platforms, such as FreeBSD and the static musl builds, need Pdfium installed by hand.
 
-Without the addon the tool looks for a Pdfium installed by hand, in this order: the `lib` directory beside the
-directory of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`), the directory of the tool itself,
-then the system library path (on macOS `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`). The current
-directory is not searched.
+Without the addon the tool looks for a Pdfium installed by hand. It tries the `lib` directory beside the directory
+of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`) and the directory of the tool itself, then:
+
+- on Linux, the system loader, which finds `libpdfium.so` in the system library directories and in
+  `LD_LIBRARY_PATH`; an empty entry in `LD_LIBRARY_PATH` means the current directory;
+- on macOS, `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`;
+- on Windows, nothing else.
+
+The current directory is not searched otherwise.
 
 Manual installation:
 
@@ -725,7 +730,8 @@ redacter addons ls
 
 `redacter addons ls` only looks: it prints one line per addon of this build with its state (`installed`,
 `not installed`, `damaged` or `not available for this platform`), its size and where it was found. It downloads
-nothing.
+nothing. For `pdf` it checks the addons directory only, so a Pdfium installed by hand, which `cp` uses, is listed
+as `not installed`.
 
 The files are hosted as assets of GitHub releases in this repository, copied unmodified from the sources listed
 below:
@@ -743,6 +749,8 @@ and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
 
 - `addons install` checks an installed addon against its digests and skips it when it matches, and replaces a
   damaged one;
+- an addon directory that holds only some of the addon's files is reported as damaged, and the manual copies below
+  are not used in its place;
 - a run checks the Pdfium library against its digest every time it loads it, and a model against its pinned size;
 - `--addons-dir <DIR>` (or the `REDACTER_ADDONS_DIR` environment variable) moves that directory, for
   `addons install`, `addons ls` and `cp` alike;
@@ -751,13 +759,14 @@ and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
 For air-gapped machines, download the files listed above on another computer and copy them into the addon's
 directory under the names in the table, for example `~/.cache/redacter/addons/ocrs/text-detection.rten`. This works
 for Pdfium too, which is checked against its digest. For the models the tool also looks in
-`addons/<addon directory>/` next to its own executable, and the OCR models are still found in `~/.cache/ocrs` and
+`addons/<addon directory>/` next to its own executable (`models/<addon directory>/` in earlier versions), and the OCR models are still found in `~/.cache/ocrs` and
 `../share/ocrs` as in earlier versions; these copies are used as they are, checked against nothing.
 
 `--download-models` and its download prompt are removed: install the addons with `addons install` instead.
 `--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
 directory is `addons` instead of `models`: move the old `models` directory to `addons` or run
-`redacter addons install` again.
+`redacter addons install` again. For the same reason the `models` directory next to the executable is now named
+`addons`.
 
 ## OCR
 
