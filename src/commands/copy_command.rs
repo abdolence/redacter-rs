@@ -578,6 +578,7 @@ mod tests {
             provider_options: vec![provider_options],
             base_options: RedacterBaseOptions {
                 allow_unsupported_copies: false,
+                unsupported_as_text: false,
                 csv_headers_disable: false,
                 csv_delimiter: None,
                 sampling_size: None,

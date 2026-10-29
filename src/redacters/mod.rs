@@ -455,6 +455,8 @@ pub struct RedacterOptions {
 #[derive(Debug, Clone)]
 pub struct RedacterBaseOptions {
     pub allow_unsupported_copies: bool,
+    /// Read a file whose type no redacter supports as text, when its content is text.
+    pub unsupported_as_text: bool,
     pub csv_headers_disable: bool,
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,

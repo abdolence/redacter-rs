@@ -39,13 +39,16 @@ pub enum ValueDisplay {
     Raw,
 }
 
-/// Masks a value without hashing it: a hash of a phone number or an ID is reversed by trying
-/// every candidate.
+/// Masks a value without hashing it, since a hash of a phone number or an ID is reversed by
+/// trying every candidate. Each character becomes a `*`, so the length shows, except the first
+/// and the last of a value longer than 4 characters.
 fn mask_value(value: &str) -> String {
-    let mut chars = value.chars();
-    match (chars.next(), chars.next_back()) {
-        (Some(first), Some(last)) if value.chars().count() >= 6 => format!("{first}***{last}"),
-        _ => "***".to_string(),
+    let length = value.chars().count();
+    match (value.chars().next(), value.chars().next_back()) {
+        (Some(first), Some(last)) if length > 4 => {
+            format!("{first}{}{last}", "*".repeat(length - 2))
+        }
+        _ => "*".repeat(length),
     }
 }
 
@@ -479,10 +482,15 @@ mod tests {
 
     #[test]
     fn a_long_value_keeps_only_its_first_and_last_characters() {
-        assert_eq!(mask_value("john.smith@example.com"), "j***m");
-        assert_eq!(mask_value("Jürgen"), "J***n");
-        assert_eq!(mask_value("Akira"), "***");
-        assert_eq!(mask_value(""), "***");
+        assert_eq!(
+            mask_value("john.smith@example.com"),
+            "j********************m"
+        );
+        assert_eq!(mask_value("S3cret!"), "S*****!");
+        assert_eq!(mask_value("Jürgen"), "J****n");
+        assert_eq!(mask_value("Akira"), "A***a");
+        assert_eq!(mask_value("1234"), "****");
+        assert_eq!(mask_value("ab"), "**");
     }
 
     #[test]
@@ -500,7 +508,7 @@ mod tests {
         };
         let scanned =
             |values| FindingReport::new(RedacterType::LocalRules, &detection, values).value;
-        assert_eq!(scanned(ValueDisplay::Masked), "j***m");
+        assert_eq!(scanned(ValueDisplay::Masked), "j********************m");
         assert_eq!(scanned(ValueDisplay::Raw), "john.smith@example.com");
     }
 
@@ -525,18 +533,18 @@ mod tests {
                      "reason": null, "findings": [
                         {"redacter": "local-rules", "label": "email", "score": null,
                          "location": {"kind": "text", "start": 40, "end": 62, "line": 3, "column": 15},
-                         "value": "j***m"}]},
+                         "value": "j********************m"}]},
                     {"path": "customers.csv", "mime_type": "text/csv", "status": "scanned",
                      "reason": null, "findings": [
                         {"redacter": "local-rules", "label": "person", "score": 0.75,
                          "location": {"kind": "table_cell", "row": 1, "column": 2, "start": 0, "end": 4},
-                         "value": "***"}]},
+                         "value": "A***a"}]},
                     {"path": "form.pdf", "mime_type": "application/pdf", "status": "scanned",
                      "reason": null, "findings": [
                         {"redacter": "local-rules", "label": "email", "score": null,
                          "location": {"kind": "image", "page": 1, "x1": 310.2, "y1": 193.0,
                                       "x2": 621.6, "y2": 218.0},
-                         "value": "j***o"}]},
+                         "value": "j****o"}]},
                     {"path": "clean.txt", "mime_type": "text/plain", "status": "scanned",
                      "reason": null, "findings": []},
                     {"path": "scan.png", "mime_type": "image/png", "status": "blocked",
@@ -570,11 +578,11 @@ mod tests {
             [
                 "✓ clean ! findings ↷ skipped ✗ error",
                 "! customer-note.txt text/plain 0 B 1 finding",
-                "3:15 email local-rules j***m",
+                "3:15 email local-rules j********************m",
                 "! customers.csv text/csv 0 B 1 finding",
-                "1:2 person local-rules 0.75 ***",
+                "1:2 person local-rules 0.75 A***a",
                 "! form.pdf application/pdf 0 B 1 finding",
-                "1:[310,193,622,218] email local-rules j***o",
+                "1:[310,193,622,218] email local-rules j****o",
                 "✓ clean.txt text/plain 0 B",
                 "✗ scan.png image/png 0 B ocr unavailable",
                 "↷ archive.bin application/octet-stream 0 B type not supported",

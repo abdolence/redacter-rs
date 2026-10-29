@@ -4,8 +4,9 @@
 
 # Redacter
 
-Detect & Redact cli tool to find Personal Identifiable Information (PII) in files, and to securely copy and redact
-files removing it, across various sources and destinations and utilising Data Leak/Loss Prevention (DLP) capabilities.
+Detect & Redact cli tool to find sensitive data in files, such as personal information (PII), passwords, API keys and
+other secrets, and to securely copy and redact files removing it, across various sources and destinations and utilising
+Data Leak/Loss Prevention (DLP) capabilities.
 `redacter cp` copies files and redacts them on the way; `redacter scan` only reads them and reports what was found and
 where, with an exit code a CI pipeline can gate on.
 
@@ -132,6 +133,9 @@ Options:
 
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
+
+      --unsupported-as-text
+          Read files of a type no redacter supports, such as .env files, keys and source code, as text when they are valid UTF-8 without NUL bytes
 
       --gcp-project-id <GCP_PROJECT_ID>
           GCP project id that will be used to redact and bill API calls
@@ -864,6 +868,15 @@ Override media types based on filenames:
 redacter cp --mime-override "text/plain=*.bin" ...
 ```
 
+Read the files of a type no redacter supports, such as `.env` files, private keys and source code, as text:
+
+```sh
+redacter cp -d local-rules --unsupported-as-text tmp/source/ tmp/redacted/
+```
+
+A file read this way is redacted as text when its content is valid UTF-8 without NUL bytes. Any other file stays
+unsupported: it is skipped, or copied as it is with `--allow-unsupported-copies`.
+
 Redact an image from clipboard:
 
 ```sh
@@ -887,6 +900,9 @@ configure the redacters are the ones of `cp`. Specific to `scan`, or worth knowi
   original file on its own, with no chain and no merge between them, so a value found by two redacters is reported
   twice, once for each;
 - `-m`, `-n`, `-f`, `--mime-override`, `--sampling-size`, `--csv-headers-disable`, `--csv-delimiter`: as in `cp`;
+- `--unsupported-as-text`: read a file of a type no redacter supports, such as `.env`, `id_rsa`, a `.pem` key or
+  source code, as text when its content is valid UTF-8 without NUL bytes. Off by default: such files are reported as
+  unsupported and do not change the exit code;
 - `--report-file <FILE>`: write the report to a file, besides the terminal output;
 - `--report-format <json|text>`: the format of that file, `json` by default; requires `--report-file`;
 - `--show-values`: show the matched values instead of masking them;
@@ -918,33 +934,33 @@ Redacters: local-rules, local-ner · PDF rendering: no · OCR: yes · Sampling: 
 Found 3 files. Total size: 1.85 KiB
 ✓ clean   ! findings   ↷ skipped   ✗ error
 ! customers.csv                                          text/csv                 290 B      13 findings
-    1:2  per                  local-ner    1.00  J***h
-    1:3  email                local-rules        j***m
-    1:4  phone-international  local-rules        +***7
-    1:5  loc                  local-ner    1.00  L***n
-    2:2  per                  local-ner    1.00  M***z
-    2:3  email                local-rules        m***g
-    2:4  phone-international  local-rules        +***8
-    2:5  loc                  local-ner    1.00  M***d
-    3:2  per                  local-ner    1.00  A***a
-    3:3  email                local-rules        a***t
-    3:4  phone-international  local-rules        +***8
-    3:5  loc                  local-ner    1.00  ***
-    3:6  passport             local-rules        X***7
+    1:2  per                  local-ner    1.00  J****************h
+    1:3  email                local-rules        j********************m
+    1:4  phone-international  local-rules        +***************7
+    1:5  loc                  local-ner    1.00  L****n
+    2:2  per                  local-ner    1.00  M****************z
+    2:3  email                local-rules        m**********************g
+    2:4  phone-international  local-rules        +*************8
+    2:5  loc                  local-ner    1.00  M****d
+    3:2  per                  local-ner    1.00  A**********a
+    3:3  email                local-rules        a**********************t
+    3:4  phone-international  local-rules        +**************8
+    3:5  loc                  local-ner    1.00  O***a
+    3:6  passport             local-rules        X******7
 ✗ customer-form.pdf                                      application/pdf          1.19 KiB   pdf renderer unavailable
 ! customer-note.txt                                      text/plain               386 B      12 findings
-    3:11   per                  local-ner    1.00  J***h
-    4:8    email                local-rules        j***m
-    5:8    phone-international  local-rules        +***7
-    6:16   birth-date           local-rules        1***5
-    7:10   loc                  local-ner    0.59  ***
-    7:15   loc                  local-ner    0.96  B***t
-    7:29   loc                  local-ner    1.00  L***n
-    7:36   uk-postcode          local-rules        N***E
-    9:1    per                  local-ner    0.99  ***
-    10:14  phone-international  local-rules        +***7
-    10:57  email                local-rules        j***m
-    11:34  payment-card         local-rules        4***1
+    3:11   per                  local-ner    1.00  J****************h
+    4:8    email                local-rules        j********************m
+    5:8    phone-international  local-rules        +***************7
+    6:16   birth-date           local-rules        1***********5
+    7:10   loc                  local-ner    0.59  ****
+    7:15   loc                  local-ner    0.96  B**********t
+    7:29   loc                  local-ner    1.00  L****n
+    7:36   uk-postcode          local-rules        N*****E
+    9:1    per                  local-ner    0.99  ****
+    10:14  phone-international  local-rules        +***************7
+    10:57  email                local-rules        j********************m
+    11:34  payment-card         local-rules        4*****************1
 
 9 files: 2 with findings, 0 clean, 6 skipped, 0 unsupported, 1 blocked. 25 findings: birth-date 1, email 5, loc 6, passport 1, payment-card 1, per 5, phone-international 5, uk-postcode 1. Total size: 1.85 KiB
 ```
@@ -969,9 +985,10 @@ images itself reports the box it found.
 
 ### Masking
 
-Values are masked by default, so a report can be shared without spreading what it found: the first and the last
-character with `***` between them for a value of 6 or more characters, and `***` for a shorter one. There is no
-hash of the value, since a hash of a phone number or an ID can be reversed by trying every candidate.
+Values are masked by default, so a report can be shared without spreading what it found. Every character is replaced
+by `*`, so the length shows, except the first and the last character of a value longer than 4 characters: the password
+`S3cret!` is shown as `S*****!` and the PIN `1234` as `****`. There is no hash of the value, since a hash of a phone
+number or an ID can be reversed by trying every candidate.
 
 `--show-values` shows the values as found, in the terminal output and in the report file.
 Be aware that a report written with `--show-values` contains the sensitive data itself.
@@ -992,21 +1009,21 @@ redacter scan test-fixtures/documents/customer-note.txt -d local-rules -d local-
 
 ```
 ! customer-note.txt                                      text/plain               386 B      11 findings
-    3:11   per                  local-ner    1.00  J***h
-    4:8    email                local-rules        j***m
-    5:8    phone-international  local-rules        +***7
-    6:16   birth-date           local-rules        1***5
-    7:15   loc                  local-ner    0.96  B***t
-    7:29   loc                  local-ner    1.00  L***n
-    7:36   uk-postcode          local-rules        N***E
-    9:1    per                  local-ner    0.99  ***
-    10:14  phone-international  local-rules        +***7
-    10:57  email                local-rules        j***m
-    11:34  payment-card         local-rules        4***1
+    3:11   per                  local-ner    1.00  J****************h
+    4:8    email                local-rules        j********************m
+    5:8    phone-international  local-rules        +***************7
+    6:16   birth-date           local-rules        1***********5
+    7:15   loc                  local-ner    0.96  B**********t
+    7:29   loc                  local-ner    1.00  L****n
+    7:36   uk-postcode          local-rules        N*****E
+    9:1    per                  local-ner    0.99  ****
+    10:14  phone-international  local-rules        +***************7
+    10:57  email                local-rules        j********************m
+    11:34  payment-card         local-rules        4*****************1
 ```
 
-Without `--min-score` the same scan also reports `7:10  loc  local-ner  0.59  ***` on line 7. Every local-rules finding is
-kept in both runs.
+Without `--min-score` the same scan also reports `7:10  loc  local-ner  0.59  ****`. Every local-rules finding is kept
+in both runs.
 
 GCP DLP does not give a number. It rates each finding with a likelihood, one of five levels of how likely the
 value is to be of the reported info type, and `scan` turns it into a fixed score:
@@ -1038,12 +1055,16 @@ Skipped and unsupported files do not change the exit code. `--no-fail` does not 
 A gate in a CI pipeline is the command itself, as the job fails on a non-zero exit code:
 
 ```sh
-# Exits with 2 and fails the job when anything is found
-redacter scan ./docs -d local-rules --report-file scan-report.json
+# Exits with 2 and fails the job when a secret is found in the repository
+redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text --report-file scan-report.json
 
 # Writes the same report and always exits with 0, for a first run over an existing tree
-redacter scan ./docs -d local-rules --report-file scan-report.json --no-fail
+redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text --report-file scan-report.json --no-fail
 ```
+
+A repository keeps its secrets in `.env` files, keys and source code, which have no text media type, so
+`--unsupported-as-text` reads them. Only the `secrets` and `url` rule groups are selected, since the other groups match
+code: `::de` in a Rust path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
 ### JSON report
 
@@ -1081,7 +1102,7 @@ whatever the report options are; there is no mode that prints the JSON to stdout
             "line": 1,
             "column": 10
           },
-          "value": "j***m"
+          "value": "j******************m"
         },
         {
           "redacter": "local-rules",
@@ -1094,7 +1115,7 @@ whatever the report options are; there is no mode that prints the JSON to stdout
             "line": 2,
             "column": 7
           },
-          "value": "4***1"
+          "value": "4*****************1"
         }
       ]
     }
@@ -1143,45 +1164,45 @@ redacter scan test-fixtures/documents -d local-rules --report-file scan-report.t
 ```
 ✓ clean   ! findings   ↷ skipped   ✗ error
 ! customers.csv                                                                    text/csv                 290 B      7 findings
-    1:3  email                local-rules  j***m
-    1:4  phone-international  local-rules  +***7
-    2:3  email                local-rules  m***g
-    2:4  phone-international  local-rules  +***8
-    3:3  email                local-rules  a***t
-    3:4  phone-international  local-rules  +***8
-    3:6  passport             local-rules  X***7
+    1:3  email                local-rules  j********************m
+    1:4  phone-international  local-rules  +***************7
+    2:3  email                local-rules  m**********************g
+    2:4  phone-international  local-rules  +*************8
+    3:3  email                local-rules  a**********************t
+    3:4  phone-international  local-rules  +**************8
+    3:6  passport             local-rules  X******7
 ! customer-profile.html                                                            text/html                627 B      6 findings
-    11:43  email                local-rules  j***m
-    11:67  email                local-rules  j***m
-    12:27  phone-international  local-rules  +***7
-    13:35  birth-date           local-rules  1***5
-    14:55  uk-postcode          local-rules  N***E
-    15:34  passport             local-rules  X***7
+    11:43  email                local-rules  j********************m
+    11:67  email                local-rules  j********************m
+    12:27  phone-international  local-rules  +***************7
+    13:35  birth-date           local-rules  1***********5
+    14:55  uk-postcode          local-rules  N*****E
+    15:34  passport             local-rules  X******7
 ✗ customer-form.pdf                                                                application/pdf          1.19 KiB   pdf renderer unavailable
 ✓ contextual-en.txt                                                                text/plain               797 B
 ! customer.json                                                                    application/json         444 B      5 findings
-    5:15   email                local-rules  j***m
-    6:15   phone-international  local-rules  +***7
-    7:23   birth-date           local-rules  1***4
-    11:20  uk-postcode          local-rules  N***E
-    14:23  payment-card         local-rules  4***1
+    5:15   email                local-rules  j********************m
+    6:15   phone-international  local-rules  +***************7
+    7:23   birth-date           local-rules  1********4
+    11:20  uk-postcode          local-rules  N*****E
+    14:23  payment-card         local-rules  4*****************1
 ! multilingual.txt                                                                 text/plain               753 B      6 findings
-    3:1    email                local-rules  k***e
-    3:60   phone-international  local-rules  +***8
-    7:1    email                local-rules  s***r
-    7:42   phone-international  local-rules  +***0
-    10:58  email                local-rules  c***s
-    11:17  phone-international  local-rules  +***6
+    3:1    email                local-rules  k*********************************e
+    3:60   phone-international  local-rules  +**************8
+    7:1    email                local-rules  s********************************r
+    7:42   phone-international  local-rules  +***************0
+    10:58  email                local-rules  c*******************************s
+    11:17  phone-international  local-rules  +**************6
 ✓ dates-en.txt                                                                     text/plain               86 B
 ✓ false-positives-en.txt                                                           text/plain               340 B
 ! customer-note.txt                                                                text/plain               386 B      7 findings
-    4:8    email                local-rules  j***m
-    5:8    phone-international  local-rules  +***7
-    6:16   birth-date           local-rules  1***5
-    7:36   uk-postcode          local-rules  N***E
-    10:14  phone-international  local-rules  +***7
-    10:57  email                local-rules  j***m
-    11:34  payment-card         local-rules  4***1
+    4:8    email                local-rules  j********************m
+    5:8    phone-international  local-rules  +***************7
+    6:16   birth-date           local-rules  1***********5
+    7:36   uk-postcode          local-rules  N*****E
+    10:14  phone-international  local-rules  +***************7
+    10:57  email                local-rules  j********************m
+    11:34  payment-card         local-rules  4*****************1
 
 9 files: 5 with findings, 3 clean, 0 skipped, 0 unsupported, 1 blocked. 31 findings: birth-date 3, email 11, passport 2, payment-card 2, phone-international 10, uk-postcode 3. Total size: 4.83 KiB
 ```

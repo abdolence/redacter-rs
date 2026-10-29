@@ -33,6 +33,9 @@ pub enum RedactionBlocked {
     OcrUnavailable,
     /// The OCR engine cannot read the image format of the file.
     OcrImageFormatNotSupported,
+    /// No redacter supports the type of the file, which was to be read as text, and its content
+    /// is not text.
+    NotText,
 }
 
 /// What the pipeline actually did to a file, so the caller can report it once the
@@ -59,8 +62,9 @@ pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
     /// in the order the redacter reported.
     pub detections: Vec<(RedacterType, Detection)>,
-    /// Set when the OCR step could not decode the image format. The plan was not blocked; the
-    /// step was, so the caller reports the file as unsupported.
+    /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
+    /// file read as text is not text. The plan was not blocked; the step was, so the caller
+    /// reports the file as unsupported.
     pub blocked: Option<RedactionBlocked>,
 }
 
@@ -79,6 +83,9 @@ pub struct StreamRedactPlan<'a> {
     pub apply_pdf_image_converter: bool,
     pub apply_ocr: bool,
     pub leave_data_table_as_text: bool,
+    /// No redacter supports the type of the file, and `--unsupported-as-text` asks for it to be
+    /// read as text.
+    pub read_unsupported_as_text: bool,
     pub supported_redacters: Vec<&'a Redacters<'a>>,
     /// Set when `supported_redacters` is empty because a PDF or image needs a conversion
     /// engine (pdfium, OCR) that this build does not have, rather than because none of the
@@ -132,21 +139,23 @@ impl<'a> StreamRedacter<'a> {
             apply_pdf_image_converter: false,
             apply_ocr: false,
             leave_data_table_as_text: false,
+            read_unsupported_as_text: false,
             // Supports natively
             supported_redacters: Self::supporting(redacters, file_ref, None, &supports).await?,
             blocked: None,
         };
 
         if stream_redact_plan.supported_redacters.is_empty() {
-            if let Some(file_ref_media) = &file_ref.media_type {
-                // Supports with conversion
-                if Redacters::is_mime_table(file_ref_media) {
+            // Supports with conversion
+            match &file_ref.media_type {
+                Some(file_ref_media) if Redacters::is_mime_table(file_ref_media) => {
                     stream_redact_plan.supported_redacters =
                         Self::supporting(redacters, file_ref, Some(mime::TEXT_PLAIN), &supports)
                             .await?;
                     stream_redact_plan.leave_data_table_as_text =
                         !stream_redact_plan.supported_redacters.is_empty();
-                } else if Redacters::is_mime_pdf(file_ref_media) {
+                }
+                Some(file_ref_media) if Redacters::is_mime_pdf(file_ref_media) => {
                     if self.file_converters.pdf_image_converter.is_some() {
                         stream_redact_plan.supported_redacters =
                             Self::supporting(redacters, file_ref, Some(mime::IMAGE_PNG), &supports)
@@ -174,7 +183,8 @@ impl<'a> StreamRedacter<'a> {
                     } else {
                         stream_redact_plan.blocked = Some(RedactionBlocked::PdfRendererUnavailable);
                     }
-                } else if Redacters::is_mime_image(file_ref_media) {
+                }
+                Some(file_ref_media) if Redacters::is_mime_image(file_ref_media) => {
                     if self.file_converters.ocr.is_some() {
                         stream_redact_plan.supported_redacters = Self::supporting(
                             redacters,
@@ -190,6 +200,14 @@ impl<'a> StreamRedacter<'a> {
                         stream_redact_plan.blocked = Some(RedactionBlocked::OcrUnavailable);
                     }
                 }
+                _ if self.redacter_base_options.unsupported_as_text => {
+                    stream_redact_plan.supported_redacters =
+                        Self::supporting(redacters, file_ref, Some(mime::TEXT_PLAIN), &supports)
+                            .await?;
+                    stream_redact_plan.read_unsupported_as_text =
+                        !stream_redact_plan.supported_redacters.is_empty();
+                }
+                _ => {}
             }
         }
 
@@ -224,9 +242,29 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult> {
-        let mut redacted = self
-            .stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
-            .await?;
+        let mut redacted = if redact_plan.read_unsupported_as_text {
+            let data = bytes::Bytes::from(input.try_collect::<Vec<_>>().await?.concat());
+            if !is_text(&data) {
+                return Ok(RedactStreamResult {
+                    number_of_redactions: 0,
+                    summary: RedactionSummary {
+                        blocked: Some(RedactionBlocked::NotText),
+                        ..RedactionSummary::default()
+                    },
+                    stream: Box::new(futures::stream::iter(vec![Ok(data)])),
+                });
+            }
+            self.stream_to_redact_item(
+                self.redacter_base_options,
+                futures::stream::iter(vec![Ok(data)]),
+                file_ref,
+                &redact_plan,
+            )
+            .await?
+        } else {
+            self.stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
+                .await?
+        };
         let mut number_of_redactions = 0;
         let mut summary = RedactionSummary::default();
 
@@ -363,9 +401,25 @@ impl<'a> StreamRedacter<'a> {
         plan: &StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<DetectStreamResult> {
-        let item = self
-            .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
-            .await?;
+        let item = if plan.read_unsupported_as_text {
+            let data = bytes::Bytes::from(input.try_collect::<Vec<_>>().await?.concat());
+            if !is_text(&data) {
+                return Ok(DetectStreamResult {
+                    detections: Vec::new(),
+                    blocked: Some(RedactionBlocked::NotText),
+                });
+            }
+            self.stream_to_redact_item(
+                self.redacter_base_options,
+                futures::stream::iter(vec![Ok(data)]),
+                file_ref,
+                plan,
+            )
+            .await?
+        } else {
+            self.stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
+                .await?
+        };
         let redacters = &plan.supported_redacters;
         let mut detections = Vec::new();
         let mut blocked = None;
@@ -516,6 +570,9 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: &StreamRedactPlan<'a>,
     ) -> AppResult<RedacterDataItem> {
         match file_ref.media_type {
+            _ if redact_plan.read_unsupported_as_text => {
+                self.stream_to_text_redact_item(input, file_ref).await
+            }
             Some(ref mime)
                 if Redacters::is_mime_text(mime)
                     || (Redacters::is_mime_table(mime) && redact_plan.leave_data_table_as_text) =>
@@ -814,6 +871,12 @@ impl<'a> StreamRedacter<'a> {
     }
 }
 
+/// Whether a file's content is text: valid UTF-8 without a NUL byte, which binary formats such as
+/// images, archives and executables carry and text does not.
+fn is_text(data: &[u8]) -> bool {
+    !data.contains(&0) && std::str::from_utf8(data).is_ok()
+}
+
 /// One OCR line (`TextImageCoords::line`) with its text-bearing words and vertical extent.
 struct LineSpan<'a> {
     words: Vec<&'a TextImageCoords>,
@@ -1100,6 +1163,7 @@ mod tests {
     fn base_options() -> RedacterBaseOptions {
         RedacterBaseOptions {
             allow_unsupported_copies: false,
+            unsupported_as_text: false,
             csv_headers_disable: false,
             csv_delimiter: None,
             sampling_size: None,
@@ -1637,6 +1701,104 @@ mod tests {
                 "{path}: the {label} box {:?} reaches past its value",
                 (x1, y1, x2, y2)
             );
+        }
+    }
+
+    fn one_chunk(
+        data: &[u8],
+    ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
+        futures::stream::iter(vec![Ok(bytes::Bytes::copy_from_slice(data))])
+    }
+
+    /// A file without an extension, which no redacter supports by its type.
+    fn env_file() -> FileSystemRef {
+        FileSystemRef {
+            relative_path: ".env".into(),
+            media_type: None,
+            file_size: None,
+        }
+    }
+
+    /// Valid UTF-8 with a NUL byte, and bytes that are not UTF-8.
+    const NOT_TEXT: [&[u8]; 2] = [b"ADMIN_EMAIL=a@b.io\0", &[0xff, 0xfe, b'a', b'@']];
+
+    #[tokio::test]
+    async fn an_unsupported_file_is_scanned_as_text_only_when_asked_and_when_it_is_text() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        let by_default = StreamRedacter::new(&options, &converters)
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap()
+            .supported_redacters
+            .len();
+        assert_eq!(by_default, 0);
+
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let text = stream_redacter
+            .detect_stream(one_chunk(b"ADMIN_EMAIL=a@b.io\n"), &plan, &env_file())
+            .await
+            .unwrap();
+        assert_eq!(
+            located(&text),
+            vec![(
+                DetectionLocation::Text {
+                    start: 12,
+                    end: 18,
+                    line: 1,
+                    column: 13
+                },
+                "a@b.io"
+            )]
+        );
+        for data in NOT_TEXT {
+            let result = stream_redacter
+                .detect_stream(one_chunk(data), &plan, &env_file())
+                .await
+                .unwrap();
+            assert_eq!(result.blocked, Some(RedactionBlocked::NotText), "{data:?}");
+            assert!(result.detections.is_empty(), "{data:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_file_that_is_not_text_is_left_as_it_is_by_redaction() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let redacted = stream_redacter
+            .redact_stream(one_chunk(b"ADMIN_EMAIL=a@b.io"), plan, &env_file())
+            .await
+            .unwrap();
+        let output: Vec<bytes::Bytes> = redacted.stream.try_collect().await.unwrap();
+        assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
+
+        for data in NOT_TEXT {
+            let plan = stream_redacter
+                .create_redact_plan(&redacters, &env_file())
+                .await
+                .unwrap();
+            let result = stream_redacter
+                .redact_stream(one_chunk(data), plan, &env_file())
+                .await
+                .unwrap();
+            assert_eq!(result.number_of_redactions, 0, "{data:?}");
+            assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
+            let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+            assert_eq!(output.concat(), data, "the file is left as it is");
         }
     }
 }

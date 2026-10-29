@@ -290,6 +290,12 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
+        help = "Read files of a type no redacter supports, such as .env files, keys and source code, as text when they are valid UTF-8 without NUL bytes"
+    )]
+    pub unsupported_as_text: bool,
+
+    #[arg(
+        long,
         help = "GCP project id that will be used to redact and bill API calls"
     )]
     pub gcp_project_id: Option<GcpProjectId>,
@@ -653,6 +659,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
 
         let base_options = RedacterBaseOptions {
             allow_unsupported_copies: self.allow_unsupported_copies,
+            unsupported_as_text: self.unsupported_as_text,
             csv_headers_disable: self.csv_headers_disable,
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,

@@ -34,6 +34,7 @@ impl From<RedactionBlocked> for NotRedactedReason {
             RedactionBlocked::OcrImageFormatNotSupported => {
                 NotRedactedReason::OcrImageFormatNotSupported
             }
+            RedactionBlocked::NotText => NotRedactedReason::TypeNotSupported,
         }
     }
 }
