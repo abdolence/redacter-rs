@@ -32,6 +32,4 @@ pub enum LocalNerError {
     InferenceTask { reason: String },
     #[error("no entity types selected for the local-ner redacter; valid values: per, org, loc")]
     NoEntities,
-    #[error("local-ner minimum score {value} is outside 0.0..=1.0")]
-    InvalidMinScore { value: f32 },
 }

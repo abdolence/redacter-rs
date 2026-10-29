@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, TextLines,
+    RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -28,17 +28,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalNerRedacterOptions {
     pub entities: BTreeSet<Entity>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 impl LocalNerRedacterOptions {
     /// Rejects an empty entity list and a score outside `0.0..=1.0` (NaN included).
-    pub fn validated(entities: BTreeSet<Entity>, min_score: f32) -> Result<Self, LocalNerError> {
+    pub fn validated(entities: BTreeSet<Entity>, min_score: Score) -> Result<Self, LocalNerError> {
         if entities.is_empty() {
             return Err(LocalNerError::NoEntities);
-        }
-        if !(0.0..=1.0).contains(&min_score) {
-            return Err(LocalNerError::InvalidMinScore { value: min_score });
         }
         Ok(Self {
             entities,
@@ -219,18 +216,7 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
             RedacterDataItemContent::Value(text) => {
                 let text = text.clone();
                 self.run_blocking(move |engine, options| {
-                    let lines = TextLines::new(&text);
-                    engine
-                        .find(&text, options)?
-                        .into_iter()
-                        .map(|finding| {
-                            lines.detection(
-                                finding.start..finding.end,
-                                finding.rule.into(),
-                                finding.score,
-                            )
-                        })
-                        .collect()
+                    Detection::in_text(&text, engine.find(&text, options)?)
                 })
                 .await
             }
@@ -267,23 +253,10 @@ mod tests {
     use mime::Mime;
 
     #[test]
-    fn options_default_to_every_entity_and_reject_bad_values() {
-        let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
-        assert_eq!(options.entities, Entity::all());
-        assert_eq!(options.min_score, 0.5);
-        assert!(
-            LocalNerRedacterOptions::validated([Entity::Per].into_iter().collect(), 0.0).is_ok()
-        );
-        assert!(LocalNerRedacterOptions::validated(Entity::all(), 1.0).is_ok());
-        let err = LocalNerRedacterOptions::validated(BTreeSet::new(), 0.5).unwrap_err();
+    fn options_reject_an_empty_entity_set() {
+        let err = LocalNerRedacterOptions::validated(BTreeSet::new(), Score::from_static(0.5))
+            .unwrap_err();
         assert!(matches!(err, LocalNerError::NoEntities), "{err}");
-        for bad in [-0.1_f32, 1.5, f32::NAN] {
-            let err = LocalNerRedacterOptions::validated(Entity::all(), bad).unwrap_err();
-            assert!(
-                matches!(err, LocalNerError::InvalidMinScore { .. }),
-                "{bad}: {err}"
-            );
-        }
     }
 
     /// The redacter answers `redact_support` with the shared text/table rule, so the media
@@ -495,7 +468,8 @@ mod tests {
     /// downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalNerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());
-        let options = LocalNerRedacterOptions::validated(Entity::all(), 0.5).unwrap();
+        let options =
+            LocalNerRedacterOptions::validated(Entity::all(), Score::from_static(0.5)).unwrap();
         LocalNerRedacter::new(options, reporter, &store)
             .await
             .unwrap()
@@ -579,7 +553,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no person among {detections:?}"));
         assert_eq!(person.label, DetectionLabel::new("per"));
         assert!(
-            person.score.is_some_and(|score| score.value() >= 0.5),
+            person
+                .score
+                .is_some_and(|score| score >= Score::from_static(0.5)),
             "{person:?}"
         );
         let DetectionLocation::Text { start, end, .. } = person.location else {

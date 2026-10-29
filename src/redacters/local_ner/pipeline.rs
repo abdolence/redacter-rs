@@ -310,7 +310,7 @@ pub fn collapse_words(
 #[derive(Clone, Debug, PartialEq)]
 pub struct NerOptions {
     pub entities: BTreeSet<Entity>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 /// Merges BIO-tagged words into findings. A word tagged `O`, of an unselected entity, or
@@ -324,7 +324,7 @@ pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Find
         // A NaN score is no probability and clears no floor.
         let score = Score::try_from(word.score)
             .ok()
-            .filter(|score| score.value() >= options.min_score);
+            .filter(|score| *score >= options.min_score);
         match (word.tag, score) {
             (Tag::Begin(entity), Some(score)) if options.entities.contains(&entity) => {
                 spans.push((entity, word.start, word.end, score));
@@ -473,7 +473,7 @@ mod tests {
     fn all_entities() -> NerOptions {
         NerOptions {
             entities: Entity::all(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         }
     }
 
@@ -835,7 +835,7 @@ mod tests {
         );
         let lenient = NerOptions {
             entities: Entity::all(),
-            min_score: 0.1,
+            min_score: Score::from_static(0.1),
         };
         assert_eq!(
             spans(text, &merge_spans(text, &words, &lenient)),
@@ -868,7 +868,7 @@ mod tests {
         ];
         let only_loc = NerOptions {
             entities: [Entity::Loc].into_iter().collect(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         };
         assert_eq!(
             spans(text, &merge_spans(text, &words, &only_loc)),

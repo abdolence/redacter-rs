@@ -17,7 +17,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, TextLines,
+    RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -110,20 +110,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
         match &input.content {
-            RedacterDataItemContent::Value(text) => {
-                let lines = TextLines::new(text);
-                self.rules
-                    .find(text)
-                    .into_iter()
-                    .map(|finding| {
-                        lines.detection(
-                            finding.start..finding.end,
-                            finding.rule.into(),
-                            finding.score,
-                        )
-                    })
-                    .collect()
-            }
+            RedacterDataItemContent::Value(text) => Detection::in_text(text, self.rules.find(text)),
             RedacterDataItemContent::Table { rows, .. } => {
                 Detection::in_table_cells(rows, |_, cell| Ok::<_, AppError>(self.rules.find(cell)))
             }

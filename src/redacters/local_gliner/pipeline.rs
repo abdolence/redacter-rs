@@ -5,13 +5,14 @@ use super::error::LocalGlinerError;
 use crate::redacters::text_spans::{Finding, RuleName};
 use crate::redacters::Score;
 use regex::Regex;
+use std::cmp::Ordering;
 use std::sync::OnceLock;
 
 /// What the redacter looks for and how sure the model must be about a span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlinerOptions {
     pub labels: Vec<String>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 /// A whitespace-split word: GLiNER's `WhitespaceTokenSplitter`
@@ -285,7 +286,7 @@ fn collect_candidates(
     window_words: &[Word],
     word_offset: usize,
     labels: &[String],
-    threshold: f32,
+    threshold: Score,
     out: &mut Vec<Candidate>,
 ) {
     for start in 0..logits.num_words {
@@ -300,7 +301,7 @@ fn collect_candidates(
                 else {
                     continue;
                 };
-                if score.value() >= threshold {
+                if score >= threshold {
                     out.push(Candidate {
                         start_word: word_offset + start,
                         end_word: word_offset + end,
@@ -334,7 +335,7 @@ pub fn score_document(
     max_len: usize,
     max_width: usize,
     overlap: usize,
-    threshold: f32,
+    threshold: Score,
 ) -> Result<Vec<Candidate>, LocalGlinerError> {
     if words.is_empty() {
         return Ok(Vec::new());
@@ -382,7 +383,7 @@ pub fn score_document(
 /// overlap a previously accepted span, highest-confidence spans winning ties for a word.
 /// Returned in document order.
 pub fn greedy_decode(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
-    candidates.sort_by(|a, b| b.score.value().total_cmp(&a.score.value()));
+    candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     let mut accepted: Vec<Candidate> = Vec::new();
     for candidate in candidates {
         let overlaps = accepted.iter().any(|kept| {
@@ -628,7 +629,7 @@ mod tests {
             384,
             12,
             32,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
         assert_eq!(candidates.len(), 1);
@@ -636,7 +637,7 @@ mod tests {
         assert_eq!(candidates[0].end_byte, 5);
         assert_eq!(candidates[0].label, "person");
         assert!(
-            candidates[0].score.value() > 0.99,
+            candidates[0].score > Score::from_static(0.99),
             "{}",
             candidates[0].score
         );
@@ -768,7 +769,7 @@ mod tests {
             14,
             12,
             4,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
         assert_eq!(candidates.len(), 1, "{candidates:?}");
@@ -833,7 +834,7 @@ mod tests {
             max_len,
             12,
             0,
-            0.5,
+            Score::from_static(0.5),
         )
         .unwrap();
 

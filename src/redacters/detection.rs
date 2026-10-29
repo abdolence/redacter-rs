@@ -5,7 +5,6 @@ use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
 use crate::AppResult;
 use serde::Serialize;
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::ops::Range;
@@ -47,15 +46,6 @@ impl Score {
     pub const fn from_static(value: f32) -> Self {
         assert!(value >= 0.0 && value <= 1.0, "a score is between 0 and 1");
         Self(value)
-    }
-
-    // Read by the model-backed redacters, which compare a score with their f32 floor.
-    #[cfg_attr(
-        not(any(feature = "local-ner", feature = "local-gliner")),
-        allow(dead_code)
-    )]
-    pub fn value(self) -> f32 {
-        self.0
     }
 }
 
@@ -104,7 +94,11 @@ pub struct Detection {
 
 /// Where a detection sits, as a report shows it. Byte offsets count from 0; lines, columns,
 /// table rows and columns, and PDF pages count from 1, as editors and spreadsheets do.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+///
+/// Locations are ordered the way a reader meets them: texts by offset, then cells by row and
+/// column, then image boxes by page, top to bottom and left to right. The fields are declared
+/// in that order for the derived `PartialOrd`.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetectionLocation {
     /// A half-open byte range of the item's text on character boundaries, and the line and
@@ -126,63 +120,11 @@ pub enum DetectionLocation {
     /// `x1 <= x2` and `y1 <= y2`.
     Image {
         page: Option<usize>,
-        x1: f32,
         y1: f32,
-        x2: f32,
+        x1: f32,
         y2: f32,
+        x2: f32,
     },
-}
-
-impl DetectionLocation {
-    /// The order a reader meets locations in: text by offset, cells by row and column, image
-    /// boxes by page, then top to bottom and left to right.
-    pub fn reading_order(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (
-                Self::Text { start, end, .. },
-                Self::Text {
-                    start: other_start,
-                    end: other_end,
-                    ..
-                },
-            ) => (start, end).cmp(&(other_start, other_end)),
-            (
-                Self::TableCell {
-                    row,
-                    column,
-                    start,
-                    end,
-                },
-                Self::TableCell {
-                    row: other_row,
-                    column: other_column,
-                    start: other_start,
-                    end: other_end,
-                },
-            ) => (row, column, start, end).cmp(&(other_row, other_column, other_start, other_end)),
-            (
-                Self::Image { page, x1, y1, .. },
-                Self::Image {
-                    page: other_page,
-                    x1: other_x1,
-                    y1: other_y1,
-                    ..
-                },
-            ) => page
-                .cmp(other_page)
-                .then(y1.total_cmp(other_y1))
-                .then(x1.total_cmp(other_x1)),
-            _ => self.kind_order().cmp(&other.kind_order()),
-        }
-    }
-
-    fn kind_order(&self) -> u8 {
-        match self {
-            Self::Text { .. } => 0,
-            Self::TableCell { .. } => 1,
-            Self::Image { .. } => 2,
-        }
-    }
 }
 
 /// How a report shows a location: `line:column` in a text, `row:column` of a table cell, and
@@ -296,6 +238,21 @@ impl Detection {
             score,
             value,
         })
+    }
+
+    /// The detections of `findings` in `text`, for providers that report ranges of the text.
+    pub fn in_text(text: &str, findings: Vec<Finding>) -> AppResult<Vec<Self>> {
+        let lines = TextLines::new(text);
+        findings
+            .into_iter()
+            .map(|finding| {
+                lines.detection(
+                    finding.start..finding.end,
+                    finding.rule.into(),
+                    finding.score,
+                )
+            })
+            .collect()
     }
 
     /// The findings of `find_in_cell(column, cell)` on every cell of `rows`, placed in their
@@ -522,7 +479,7 @@ mod tests {
     #[test]
     fn a_score_is_a_probability() {
         for valid in [0.0_f32, 0.5, 1.0] {
-            assert_eq!(Score::try_from(valid).unwrap().value(), valid);
+            assert!(Score::try_from(valid).is_ok(), "{valid}");
         }
         assert_eq!("0.8".parse::<Score>().unwrap(), score(0.8));
         for invalid in [-0.01_f32, 1.01, f32::NAN, f32::INFINITY] {
@@ -658,22 +615,19 @@ mod tests {
     }
 
     #[test]
-    fn a_value_is_reported_inside_longer_words_too() {
-        assert_eq!(
-            values_found("Johnson called John", "John"),
-            ["John", "John"]
-        );
-        assert_eq!(values_found("ticket 4242 and 42", "42"), ["42", "42", "42"]);
-        assert_eq!(
-            values_found("Herr Müller und Müllers Adresse", "Müller"),
-            ["Müller", "Müller"]
-        );
-    }
-
-    #[test]
-    fn values_are_matched_letter_by_letter_ignoring_case_and_not_accents() {
+    fn a_value_is_located_wherever_it_occurs_ignoring_case_and_not_accents() {
         for (text, value, found) in [
-            ("john and John", "john", &["john", "John"][..]),
+            ("Johnson called John", "John", &["John", "John"][..]),
+            ("ticket 4242 and 42", "42", &["42", "42", "42"]),
+            (
+                "Herr Müller und Müllers Adresse",
+                "Müller",
+                &["Müller", "Müller"],
+            ),
+            ("田中太郎さんに連絡してください", "田中太郎", &["田中太郎"]),
+            ("電話は09012345678です", "09012345678", &["09012345678"]),
+            ("Ask Ana.", "Zoe", &[]),
+            ("john and John", "john", &["john", "John"]),
             ("Ask JOHN SMITH.", "john smith", &["JOHN SMITH"]),
             ("Ο ΟΔΥΣΣΕΥΣ ήρθε", "Οδυσσευς", &["ΟΔΥΣΣΕΥΣ"]),
             ("Ο ΓΙΑΝΝΗΣ ήρθε", "Γιαννης", &["ΓΙΑΝΝΗΣ"]),
@@ -700,18 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn a_value_in_text_without_word_breaks_is_found() {
-        assert_eq!(
-            values_found("田中太郎さんに連絡してください", "田中太郎"),
-            ["田中太郎"]
-        );
-        assert_eq!(
-            values_found("電話は09012345678です", "09012345678"),
-            ["09012345678"]
-        );
-    }
-
-    #[test]
     fn partially_overlapping_values_are_both_reported() {
         let text = "Ana Lima Street 5";
         let detections = Detection::locate_values(
@@ -729,16 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_is_nowhere_in_the_text_is_not_reported() {
-        let person = DetectionLabel::new("PERSON");
-        assert!(
-            Detection::locate_values("Ask Ana.", &[("Zoe".to_string(), person)])
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn located_values_ignore_empty_and_repeated_values() {
         let detections = Detection::locate_values(
             "a@b.io",
@@ -750,6 +682,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(detections.len(), 1);
+    }
+
+    #[test]
+    fn locations_sort_in_the_order_a_reader_meets_them() {
+        let text = |start| DetectionLocation::Text {
+            start,
+            end: start + 1,
+            line: 1,
+            column: start + 1,
+        };
+        let cell = |row, column| DetectionLocation::TableCell {
+            row,
+            column,
+            start: 0,
+            end: 1,
+        };
+        let image = |page, x1, y1| DetectionLocation::Image {
+            page,
+            x1,
+            y1,
+            x2: x1 + 10.0,
+            y2: y1 + 10.0,
+        };
+        let in_order = vec![
+            text(0),
+            text(4),
+            cell(1, 2),
+            cell(2, 1),
+            image(None, 90.0, 90.0),
+            image(Some(1), 50.0, 10.0),
+            image(Some(1), 5.0, 20.0),
+            image(Some(1), 40.0, 20.0),
+            image(Some(2), 0.0, 0.0),
+        ];
+        let mut sorted = in_order.clone();
+        sorted.reverse();
+
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        assert_eq!(sorted, in_order);
+    }
+
+    #[test]
+    fn character_offsets_become_byte_ranges_and_none_past_the_text() {
+        let offsets = CharOffsets::new("Grüße, Zoë");
+        assert_eq!(offsets.byte_range(0, 5), Some(0..7));
+        assert_eq!(offsets.byte_range(7, 10), Some(9..13));
+        assert_eq!(offsets.byte_range(5, 5), Some(7..7));
+        for (start, end) in [(0, 11), (11, 12), (3, 2)] {
+            assert_eq!(offsets.byte_range(start, end), None, "{start}..{end}");
+        }
     }
 
     #[test]

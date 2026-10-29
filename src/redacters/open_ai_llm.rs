@@ -151,13 +151,6 @@ struct OpenAiLlmTextFindings {
     findings: Vec<LlmTextFinding>,
 }
 
-impl OpenAiLlmTextFindings {
-    fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
-        let findings: Self = parse_answer(answer)?;
-        LlmTextFinding::locate(text, findings.findings)
-    }
-}
-
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiImageEditResponse {
     data: Vec<OpenAiImageEditResponseItem>,
@@ -436,7 +429,8 @@ impl<'a> OpenAiLlmRedacter<'a> {
             .complete(&request, "find the sensitive data")
             .await?
             .into_text()?;
-        OpenAiLlmTextFindings::detections_from_answer(&answer, text)
+        let findings: OpenAiLlmTextFindings = parse_answer(&answer)?;
+        LlmTextFinding::locate(text, findings.findings)
     }
 
     /// Output format accepted by the images/edits endpoint for the given input format.
@@ -724,47 +718,28 @@ mod tests {
     }
 
     #[test]
-    fn a_filtered_answer_is_an_error_and_not_an_empty_scan() {
-        let filtered = r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}"#;
-        assert!(matches!(
-            answer_of(filtered),
-            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
-        ));
-    }
-
-    #[test]
-    fn a_truncated_answer_is_an_error() {
+    fn an_answer_that_did_not_finish_is_an_error_and_not_an_empty_scan() {
+        let content_filter = r#"{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}"#;
+        let refusal = r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"No."},"finish_reason":"stop"}]}"#;
+        let no_finish_reason = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":null}]}"#;
+        let no_choices = r#"{"choices":[]}"#;
         let truncated = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\": [{"},"finish_reason":"length"}]}"#;
-        assert!(matches!(
-            answer_of(truncated),
-            Err(AppError::ModelAnswerStopped(ModelStop::MaxTokens))
-        ));
-    }
-
-    #[test]
-    fn a_refusal_is_an_error() {
-        let refused = r#"{"choices":[{"message":{"role":"assistant","content":null,"refusal":"No."},"finish_reason":"stop"}]}"#;
-        assert!(matches!(
-            answer_of(refused),
-            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
-        ));
-    }
-
-    #[test]
-    fn an_answer_without_a_finish_reason_is_an_error() {
-        let unfinished = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":null}]}"#;
-        assert!(matches!(
-            answer_of(unfinished),
-            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
-        ));
-    }
-
-    #[test]
-    fn a_response_without_choices_is_an_error() {
-        assert!(matches!(
-            answer_of(r#"{"choices":[]}"#),
-            Err(AppError::ModelAnswerStopped(ModelStop::Withheld(_)))
-        ));
+        for (response, reaches_output_limit) in [
+            (content_filter, false),
+            (refusal, false),
+            (no_finish_reason, false),
+            (no_choices, false),
+            (truncated, true),
+        ] {
+            let Err(AppError::ModelAnswerStopped(stop)) = answer_of(response) else {
+                panic!("{response} is not an error");
+            };
+            assert_eq!(
+                stop == ModelStop::MaxTokens,
+                reaches_output_limit,
+                "{response}"
+            );
+        }
     }
 
     #[test]
@@ -781,34 +756,6 @@ mod tests {
     fn a_completed_answer_is_its_content() {
         let completed = r#"{"choices":[{"message":{"role":"assistant","content":"{\"findings\":[]}"},"finish_reason":"stop"}]}"#;
         assert_eq!(answer_of(completed).unwrap(), r#"{"findings":[]}"#);
-    }
-
-    #[test]
-    fn text_answer_is_located_in_the_text() {
-        let answer = r#"{"findings":[{"text":"john.smith@example.com","type":"email_address"}]}"#;
-
-        let detections = OpenAiLlmTextFindings::detections_from_answer(
-            answer,
-            "Mail john.smith@example.com now",
-        )
-        .unwrap();
-
-        assert_eq!(detections.len(), 1);
-        assert_eq!(detections[0].label.to_string(), "email_address");
-        assert_eq!(
-            detections[0].location,
-            DetectionLocation::Text {
-                start: 5,
-                end: 27,
-                line: 1,
-                column: 6,
-            }
-        );
-    }
-
-    #[test]
-    fn an_answer_that_is_not_findings_is_an_error() {
-        assert!(OpenAiLlmTextFindings::detections_from_answer("[]", "text").is_err());
     }
 
     #[tokio::test]

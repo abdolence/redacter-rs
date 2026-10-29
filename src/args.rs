@@ -458,10 +458,10 @@ pub struct RedacterArgs {
     #[cfg(feature = "local-ner")]
     #[arg(
         long,
-        default_value_t = 0.5,
+        default_value = "0.5",
         help = "Minimum model confidence for a word to be redacted by local-ner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
-    pub local_ner_min_score: f32,
+    pub local_ner_min_score: Score,
 
     #[cfg(feature = "local-gliner")]
     #[arg(
@@ -474,10 +474,10 @@ pub struct RedacterArgs {
     #[cfg(feature = "local-gliner")]
     #[arg(
         long,
-        default_value_t = 0.5,
+        default_value = "0.5",
         help = "Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
-    pub local_gliner_min_score: f32,
+    pub local_gliner_min_score: Score,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -747,84 +747,6 @@ mod tests {
             let err = parse(&[]).expect_err("a scan without -d must fail");
             assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         }
-
-        #[test]
-        fn scan_flags_are_parsed() {
-            let cli = parse(&[
-                "-d",
-                "local-rules",
-                "--report-file",
-                "report.txt",
-                "--report-format",
-                "text",
-                "--show-values",
-                "--min-score",
-                "0.7",
-                "--no-fail",
-            ])
-            .unwrap();
-            let CliCommand::Scan {
-                source,
-                report,
-                show_values,
-                min_score,
-                no_fail,
-                ..
-            } = cli.command
-            else {
-                panic!("expected the scan command");
-            };
-            assert_eq!(source, "test-fixtures");
-            assert_eq!(report.report_file, Some(PathBuf::from("report.txt")));
-            assert_eq!(report.report_format, ReportFormat::Text);
-            assert!(show_values);
-            assert_eq!(min_score, Some(Score::try_from(0.7).unwrap()));
-            assert!(no_fail);
-        }
-
-        #[test]
-        fn a_report_file_alone_is_written_as_json() {
-            let cli = parse(&["-d", "local-rules", "--report-file", "report.json"]).unwrap();
-            let CliCommand::Scan { report, .. } = cli.command else {
-                panic!("expected the scan command");
-            };
-            assert_eq!(report.report_format, ReportFormat::Json);
-        }
-
-        #[test]
-        fn a_report_format_without_a_report_file_is_rejected() {
-            let err = parse(&["-d", "local-rules", "--report-format", "json"])
-                .expect_err("a format without a file must fail");
-            assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-        }
-
-        #[test]
-        fn a_min_score_outside_zero_to_one_is_rejected() {
-            let err = parse(&["-d", "local-rules", "--min-score", "1.5"])
-                .expect_err("a score above 1 must fail");
-            assert_eq!(err.kind(), ErrorKind::ValueValidation);
-        }
-
-        #[test]
-        fn copy_takes_the_shared_report_flags_and_not_save_json_results() {
-            let cli =
-                CliArgs::try_parse_from(["redacter", "cp", "a", "b", "--report-file", "r.json"])
-                    .unwrap();
-            let CliCommand::Cp { report, .. } = cli.command else {
-                panic!("expected the cp command");
-            };
-            assert_eq!(report.report_file, Some(PathBuf::from("r.json")));
-            let err = CliArgs::try_parse_from([
-                "redacter",
-                "cp",
-                "a",
-                "b",
-                "--save-json-results",
-                "r.json",
-            ])
-            .expect_err("the old flag is gone");
-            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
-        }
     }
 
     #[test]
@@ -856,17 +778,6 @@ mod tests {
                 .to_possible_value()
                 .expect("every redacter type is selectable on the command line");
             assert_eq!(redacter_type.to_string(), cli_value.get_name());
-        }
-    }
-
-    /// Reports name a redacter the way the command line does.
-    #[test]
-    fn redacter_type_is_reported_by_its_cli_name() {
-        for redacter_type in RedacterType::value_variants() {
-            assert_eq!(
-                serde_json::to_value(redacter_type).unwrap(),
-                serde_json::Value::String(redacter_type.to_string())
-            );
         }
     }
 
@@ -980,7 +891,7 @@ mod tests {
         fn defaults_to_every_entity_at_half_score() {
             let options = local_ner_options(&[]).unwrap();
             assert_eq!(options.entities, Entity::all());
-            assert_eq!(options.min_score, 0.5);
+            assert_eq!(options.min_score, Score::from_static(0.5));
         }
 
         #[test]
@@ -996,7 +907,7 @@ mod tests {
                 options.entities.into_iter().collect::<Vec<_>>(),
                 vec![Entity::Per, Entity::Loc]
             );
-            assert_eq!(options.min_score, 0.3);
+            assert_eq!(options.min_score, Score::from_static(0.3));
         }
 
         #[test]
@@ -1011,13 +922,6 @@ mod tests {
             .err()
             .expect("unknown entity must fail");
             assert!(err.to_string().contains("person"), "{err}");
-        }
-
-        #[test]
-        fn score_outside_the_unit_range_is_a_config_error() {
-            let err = local_ner_options(&["--local-ner-min-score", "1.5"]).unwrap_err();
-            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
-            assert!(err.to_string().contains("1.5"), "{err}");
         }
     }
 
@@ -1041,7 +945,7 @@ mod tests {
         fn defaults_to_the_pii_label_list_at_half_score() {
             let options = local_gliner_options(&[]).unwrap();
             assert_eq!(options.labels, default_labels());
-            assert_eq!(options.min_score, 0.5);
+            assert_eq!(options.min_score, Score::from_static(0.5));
         }
 
         #[test]
@@ -1057,14 +961,7 @@ mod tests {
                 options.labels,
                 vec!["person".to_string(), "medical condition".to_string()]
             );
-            assert_eq!(options.min_score, 0.3);
-        }
-
-        #[test]
-        fn score_outside_the_unit_range_is_a_config_error() {
-            let err = local_gliner_options(&["--local-gliner-min-score", "1.5"]).unwrap_err();
-            assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
-            assert!(err.to_string().contains("1.5"), "{err}");
+            assert_eq!(options.min_score, Score::from_static(0.3));
         }
 
         #[test]

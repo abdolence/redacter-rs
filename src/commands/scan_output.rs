@@ -16,6 +16,7 @@ use console::{measure_text_width, pad_str, Alignment};
 use indicatif::HumanBytes;
 use rvstruct::ValueStruct;
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 /// The glyph of a scanned file with findings.
@@ -120,7 +121,11 @@ impl ScanFileReport {
     /// A scanned file, its findings in the order a reader meets them; findings at the same
     /// place keep the order they are given in.
     pub fn scanned(file_ref: &FileSystemRef, mut findings: Vec<FindingReport>) -> Self {
-        findings.sort_by(|a, b| a.location.reading_order(&b.location));
+        findings.sort_by(|a, b| {
+            a.location
+                .partial_cmp(&b.location)
+                .unwrap_or(Ordering::Equal)
+        });
         Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
     }
 
@@ -633,6 +638,27 @@ mod tests {
             &file_ref(&long_path, mime::TEXT_PLAIN),
             SkipReason::NameFilter,
         ));
+        let email_at = |line, start| {
+            finding(
+                "email",
+                DetectionLocation::Text {
+                    start,
+                    end: start + 6,
+                    line,
+                    column: 1,
+                },
+                None,
+                if line == 1 { "a@b.io" } else { "c@d.io" },
+            )
+        };
+        result.push(ScanFileReport::scanned(
+            &file_ref("two.txt", mime::TEXT_PLAIN),
+            vec![email_at(1, 0), email_at(2, 7)],
+        ));
+        result.push(ScanFileReport::failed(
+            &file_ref("broken.txt", mime::TEXT_PLAIN),
+            "provider unavailable".to_string(),
+        ));
 
         let text = result.to_text();
 
@@ -655,9 +681,13 @@ mod tests {
                 "↷ archive.bin application/octet-stream 0 B type not supported",
                 "↷ huge.txt text/plain 0 B over size limit",
                 &format!("↷ {long_path} text/plain 0 B name filter"),
+                "! two.txt text/plain 0 B 2 findings",
+                "1:1 email local-rules a****o",
+                "2:1 email local-rules c****o",
+                "✗ broken.txt text/plain 0 B provider unavailable",
                 "",
-                "8 files: 3 with findings, 1 clean, 2 skipped, 1 unsupported, 1 blocked. \
-                 3 findings: email 2, person 1. Total size: 0 B",
+                "10 files: 4 with findings, 1 clean, 2 skipped, 1 unsupported, 1 blocked, \
+                 1 failed. 5 findings: email 4, person 1. Total size: 0 B",
             ]
         );
         assert!(
@@ -735,71 +765,6 @@ mod tests {
     }
 
     #[test]
-    fn a_row_carries_the_glyph_and_the_detail_of_the_file_status() {
-        let note = file_ref("note.txt", mime::TEXT_PLAIN);
-        let email_at = |line| {
-            finding(
-                "email",
-                DetectionLocation::Text {
-                    start: 0,
-                    end: 6,
-                    line,
-                    column: 1,
-                },
-                None,
-                "a@b.io",
-            )
-        };
-        let styles = OutputStyles::plain();
-        for (file, glyph, detail) in [
-            (
-                ScanFileReport::scanned(&note, vec![email_at(1), email_at(2)]),
-                "!",
-                "2 findings",
-            ),
-            (
-                ScanFileReport::scanned(&note, vec![email_at(1)]),
-                "!",
-                "1 finding",
-            ),
-            (ScanFileReport::scanned(&note, Vec::new()), "✓", ""),
-            (
-                ScanFileReport::not_scanned(
-                    &note,
-                    SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported),
-                ),
-                "↷",
-                "type not supported",
-            ),
-            (
-                ScanFileReport::not_scanned(&note, SkipReason::OverSizeLimit),
-                "↷",
-                "over size limit",
-            ),
-            (
-                ScanFileReport::not_scanned(
-                    &note,
-                    SkipReason::NotRedacted(NotRedactedReason::OcrUnavailable),
-                ),
-                "✗",
-                "ocr unavailable",
-            ),
-            (
-                ScanFileReport::failed(&note, "provider unavailable".to_string()),
-                "✗",
-                "provider unavailable",
-            ),
-        ] {
-            let row = file.row(&styles);
-            assert_eq!(
-                (row.glyph, row.detail.as_str()),
-                (glyph, detail),
-                "{file:?}"
-            );
-        }
-    }
-
-    #[test]
     fn the_findings_of_a_file_are_listed_in_reading_order() {
         let at = |line, column, start| DetectionLocation::Text {
             start,
@@ -831,70 +796,74 @@ mod tests {
     }
 
     #[test]
-    fn the_exit_code_says_whether_anything_was_found_or_a_file_failed() {
-        let clean = ScanCommandResult::default();
-        assert_eq!(clean.exit_code(false), 0);
-
-        let mut found = ScanCommandResult::default();
-        found.push(ScanFileReport::scanned(
-            &file_ref("note.txt", mime::TEXT_PLAIN),
-            vec![finding(
-                "email",
-                DetectionLocation::Text {
-                    start: 0,
-                    end: 6,
-                    line: 1,
-                    column: 1,
-                },
-                None,
-                "a@b.io",
-            )],
-        ));
-        assert_eq!(found.exit_code(false), 2);
-        assert_eq!(found.exit_code(true), 0);
-
-        found.push(ScanFileReport::failed(
-            &file_ref("broken.txt", mime::TEXT_PLAIN),
-            "provider unavailable".to_string(),
-        ));
-        assert_eq!(found.exit_code(false), 1);
-        assert_eq!(found.exit_code(true), 1);
-    }
-
-    #[test]
-    fn a_blocked_file_makes_the_scan_incomplete_and_an_unsupported_one_does_not() {
-        let scan_of = |file: FileSystemRef, reason| {
-            let mut result = ScanCommandResult::default();
-            result.push(ScanFileReport::not_scanned(
-                &file,
-                SkipReason::NotRedacted(reason),
-            ));
-            result
+    fn the_exit_code_is_1_for_an_incomplete_scan_2_for_findings_and_0_otherwise() {
+        let note = file_ref("note.txt", mime::TEXT_PLAIN);
+        let found = || {
+            ScanFileReport::scanned(
+                &note,
+                vec![finding(
+                    "email",
+                    DetectionLocation::Text {
+                        start: 0,
+                        end: 6,
+                        line: 1,
+                        column: 1,
+                    },
+                    None,
+                    "a@b.io",
+                )],
+            )
         };
-
-        let scan = file_ref("scan.png", mime::IMAGE_PNG);
-        let blocked = scan_of(scan, NotRedactedReason::OcrUnavailable);
-        assert_eq!((blocked.files_blocked, blocked.files_unsupported), (1, 0));
-        assert_eq!(blocked.exit_code(false), 1);
-        assert_eq!(blocked.exit_code(true), 1);
-
-        for (file, reason) in [
+        let not_read = |name, media_type, reason| {
+            ScanFileReport::not_scanned(
+                &file_ref(name, media_type),
+                SkipReason::NotRedacted(reason),
+            )
+        };
+        let blocked = || {
+            not_read(
+                "scan.png",
+                mime::IMAGE_PNG,
+                NotRedactedReason::OcrUnavailable,
+            )
+        };
+        for (files, exit_code, exit_code_with_no_fail) in [
+            (vec![], 0, 0),
+            (vec![found()], 2, 0),
             (
-                file_ref("blob.bin", mime::APPLICATION_OCTET_STREAM),
-                NotRedactedReason::TypeNotSupported,
+                vec![
+                    found(),
+                    ScanFileReport::failed(&note, "unavailable".to_string()),
+                ],
+                1,
+                1,
+            ),
+            (vec![found(), blocked()], 1, 1),
+            (
+                vec![not_read(
+                    "blob.bin",
+                    mime::APPLICATION_OCTET_STREAM,
+                    NotRedactedReason::TypeNotSupported,
+                )],
+                0,
+                0,
             ),
             (
-                file_ref("logo.svg", mime::IMAGE_SVG),
-                NotRedactedReason::OcrImageFormatNotSupported,
+                vec![not_read(
+                    "logo.svg",
+                    mime::IMAGE_SVG,
+                    NotRedactedReason::OcrImageFormatNotSupported,
+                )],
+                0,
+                0,
             ),
         ] {
-            let unsupported = scan_of(file, reason);
-            assert_eq!(
-                (unsupported.files_blocked, unsupported.files_unsupported),
-                (0, 1),
-                "{reason:?}"
-            );
-            assert_eq!(unsupported.exit_code(false), 0, "{reason:?}");
+            let mut result = ScanCommandResult::default();
+            for file in files {
+                result.push(file);
+            }
+            assert_eq!(result.exit_code(false), exit_code, "{result:?}");
+            assert_eq!(result.exit_code(true), exit_code_with_no_fail, "{result:?}");
         }
     }
 }

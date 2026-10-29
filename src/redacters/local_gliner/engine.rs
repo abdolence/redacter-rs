@@ -444,6 +444,7 @@ mod tests {
     }
 
     use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
+    use crate::redacters::Score;
 
     /// The 1.16 GB model is installed with `redacter addons install local-gliner`; a test
     /// never downloads it.
@@ -457,7 +458,7 @@ mod tests {
     fn default_options() -> GlinerOptions {
         GlinerOptions {
             labels: super::super::labels::default_labels(),
-            min_score: 0.5,
+            min_score: Score::from_static(0.5),
         }
     }
 

@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, TextLines,
+    RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -27,14 +27,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalGlinerRedacterOptions {
     pub labels: Vec<String>,
-    pub min_score: f32,
+    pub min_score: Score,
 }
 
 impl LocalGlinerRedacterOptions {
     /// Rejects an empty or all-whitespace label, an empty label list and a score outside
     /// `0.0..=1.0` (NaN included). Every label is trimmed, since the model reads it as
     /// prompt text and leading or trailing whitespace changes nothing but the token count.
-    pub fn validated(labels: Vec<String>, min_score: f32) -> Result<Self, LocalGlinerError> {
+    pub fn validated(labels: Vec<String>, min_score: Score) -> Result<Self, LocalGlinerError> {
         if labels.is_empty() {
             return Err(LocalGlinerError::NoLabels);
         }
@@ -45,9 +45,6 @@ impl LocalGlinerRedacterOptions {
                 return Err(LocalGlinerError::EmptyLabel);
             }
             trimmed.push(label);
-        }
-        if !(0.0..=1.0).contains(&min_score) {
-            return Err(LocalGlinerError::InvalidMinScore { value: min_score });
         }
         Ok(Self {
             labels: trimmed,
@@ -230,18 +227,7 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
             RedacterDataItemContent::Value(text) => {
                 let text = text.clone();
                 self.run_blocking(move |engine, options| {
-                    let lines = TextLines::new(&text);
-                    engine
-                        .find(&text, options)?
-                        .into_iter()
-                        .map(|finding| {
-                            lines.detection(
-                                finding.start..finding.end,
-                                finding.rule.into(),
-                                finding.score,
-                            )
-                        })
-                        .collect()
+                    Detection::in_text(&text, engine.find(&text, options)?)
                 })
                 .await
             }
@@ -278,33 +264,23 @@ mod tests {
     use mime::Mime;
 
     #[test]
-    fn options_default_labels_and_reject_bad_values() {
-        let options = LocalGlinerRedacterOptions::validated(labels::default_labels(), 0.5).unwrap();
-        assert_eq!(options.labels, labels::default_labels());
-        assert_eq!(options.min_score, 0.5);
-        assert!(LocalGlinerRedacterOptions::validated(vec!["person".to_string()], 0.0).is_ok());
-        assert!(LocalGlinerRedacterOptions::validated(vec!["person".to_string()], 1.0).is_ok());
+    fn options_reject_no_labels_and_a_blank_label() {
+        let half = Score::from_static(0.5);
 
-        let err = LocalGlinerRedacterOptions::validated(Vec::new(), 0.5).unwrap_err();
+        let err = LocalGlinerRedacterOptions::validated(Vec::new(), half).unwrap_err();
         assert!(matches!(err, LocalGlinerError::NoLabels), "{err}");
 
-        let err = LocalGlinerRedacterOptions::validated(vec!["  ".to_string()], 0.5).unwrap_err();
+        let err = LocalGlinerRedacterOptions::validated(vec!["  ".to_string()], half).unwrap_err();
         assert!(matches!(err, LocalGlinerError::EmptyLabel), "{err}");
-
-        for bad in [-0.1_f32, 1.5, f32::NAN] {
-            let err =
-                LocalGlinerRedacterOptions::validated(vec!["person".to_string()], bad).unwrap_err();
-            assert!(
-                matches!(err, LocalGlinerError::InvalidMinScore { .. }),
-                "{bad}: {err}"
-            );
-        }
     }
 
     #[test]
     fn labels_are_trimmed() {
-        let options =
-            LocalGlinerRedacterOptions::validated(vec![" email \n".to_string()], 0.5).unwrap();
+        let options = LocalGlinerRedacterOptions::validated(
+            vec![" email \n".to_string()],
+            Score::from_static(0.5),
+        )
+        .unwrap();
         assert_eq!(options.labels, vec!["email".to_string()]);
     }
 
@@ -517,7 +493,11 @@ mod tests {
     /// never downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalGlinerRedacter<'a> {
         let store = AddonStore::new(&AddonStoreOptions::default());
-        let options = LocalGlinerRedacterOptions::validated(labels::default_labels(), 0.5).unwrap();
+        let options = LocalGlinerRedacterOptions::validated(
+            labels::default_labels(),
+            Score::from_static(0.5),
+        )
+        .unwrap();
         LocalGlinerRedacter::new(options, reporter, &store)
             .await
             .unwrap()
@@ -591,7 +571,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no email among {detections:?}"));
         assert_eq!(email.label, DetectionLabel::new("email"));
         assert!(
-            email.score.is_some_and(|score| score.value() >= 0.5),
+            email
+                .score
+                .is_some_and(|score| score >= Score::from_static(0.5)),
             "{email:?}"
         );
         let DetectionLocation::Text { start, end, .. } = email.location else {
