@@ -896,7 +896,7 @@ redacter scan [OPTIONS] --redact <REDACT> <SOURCE>
 The source is anything `cp` reads: a local file or directory, GCS, S3 or a zip archive. The options that select and
 configure the redacters are the ones of `cp`, and `redacter scan --help` lists the rest. Every redacter reads the same
 original file on its own, with no chain and no merge between them, so a value found by two redacters is reported twice,
-once for each.
+once for each. `--allow-unsupported-copies` is accepted and has no effect on `scan`, which copies nothing.
 
 `scan` reads a file the way `cp` would redact it with the same options: one plan for each file, shared by all the
 selected redacters. The plan picks one way to read the file, in this order: a redacter reads the type of the file
@@ -915,10 +915,15 @@ To have every redacter read a file its own way, run `scan` once for each redacte
 redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
 ```
 
-The terminal output has the layout of `cp`. Each file has a row with the status, the path, the media type, the size and a detail. `!` is a file with
-findings, `✓` a clean file, `↷` a file that was skipped or that no selected redacter reads, and `✗` a file that
+The terminal output has the layout of `cp`. Each file has a row with the status, the path, the media type, the size and
+a detail. `!` is a file with findings, `✓` a clean file, `?` a file without findings from which a redacter named values
+that could not be located in it, `↷` a file that was skipped or that no selected redacter reads, and `✗` a file that
 failed or is blocked. The detail of a file that was not scanned says why, such as `pdf renderer unavailable` or
 `type not supported`.
+
+An unconfirmed file, marked `?`, is not known to be clean: an LLM redacter may name a value it reformatted, or one that
+is not in the file at all. The row says how many values were not located, such as `2 values not located`. A file with
+findings keeps `!`, whatever else was not located in it.
 
 The findings of a file follow its row, one line each and sorted by location: the location, the label, the redacter
 that found it, the score and the value. The location depends on the content:
@@ -972,13 +977,15 @@ reported when its score reaches them (0.5 by default).
 ### Exit codes
 
 - `0`: nothing was found, or `--no-fail` is set;
-- `2`: at least one finding was reported;
+- `2`: at least one finding was reported, or with `--fail-on-unlocated` at least one file is unconfirmed;
 - `1`: an error. A file that could not be read or scanned is reported with the status `failed`, and a file that needs a
   converter the run lacks, such as OCR or PDF rendering, with the status `blocked`. The other files are still scanned,
   and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command line exits
   with 1 as well, for every command, so that 2 always means findings.
 
-Skipped and unsupported files do not change the exit code. `--no-fail` does not change an error exit code.
+Skipped and unsupported files do not change the exit code. An unconfirmed file does not either, unless
+`--fail-on-unlocated` is set, as a model may name a value that is not in the file and that should not fail a pipeline.
+`--no-fail` does not change an error exit code.
 
 A gate in a CI pipeline is the command itself, as the job fails on a non-zero exit code:
 
@@ -991,9 +998,10 @@ redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text -
 ```
 
 A repository keeps its secrets in `.env` files, keys and source code, which have no text media type, so
-`--unsupported-as-text` reads them as text when their content is valid UTF-8 without NUL bytes. Without the option such
-files are reported as unsupported and do not change the exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match
-code: `::de` in a Rust path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
+`--unsupported-as-text` reads them as text when their content is valid UTF-8 without NUL bytes. A file with a NUL byte
+in its first 8 KiB is not read further. Without the option such files are reported as unsupported and do not change the
+exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match code: `::de` in a Rust
+path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
 ### JSON report
 
@@ -1002,8 +1010,9 @@ whatever the report options are; there is no mode that prints the JSON to stdout
 
 The report is one JSON object with the counters of the run and an entry for each file:
 
-- `files_scanned`, `files_with_findings`, `files_skipped`, `files_unsupported`, `files_blocked` and `files_failed`:
-  the number of files in each state;
+- `files_scanned`, `files_with_findings`, `files_unconfirmed`, `files_skipped`, `files_unsupported`, `files_blocked`
+  and `files_failed`: the number of files in each state. `files_unconfirmed` counts the scanned files without findings
+  that have `unlocated_values`, and is part of `files_scanned`;
 - `findings`: the number of findings, and `findings_by_label`: the same count for each label;
 - `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
 
@@ -1020,15 +1029,18 @@ A finding has the fields `redacter`, `label`, `score`, `location` and `value`.
 
 The `status` of a file is `scanned`, `unsupported`, `blocked`, `skipped` or `failed`, and its `reason` is `null` for a
 scanned file and says why for the others. `unlocated_values` counts the values an LLM redacter or AWS Bedrock Guardrails
-named that are not in the file as written, such as a value the model reformatted. The values are not reported, and the
-row of the file shows the count as `2 values not located`: the file may hold more than its findings. The `findings` of a file are sorted by location, as in the terminal, and the
-`score` is `null` when the redacter gives none. The `value` is masked unless `--show-values` is set. The `location` has
-a `kind`:
+named that are not in the file as written, such as a value the model reformatted. The values are not reported. A
+scanned file without `findings` and with `unlocated_values` above 0 is the unconfirmed file of the terminal, and the row
+of any file with such values shows the count as `2 values not located`: the file may hold more than its findings.
 
-- `text`: `start` and `end` are byte offsets in the text of the file;
+The `findings` of a file are sorted by location, as in the terminal, and the `score` is `null` when the redacter gives
+none. The `value` is masked unless `--show-values` is set. The `location` has a `kind`:
+
+- `text`: `start` and `end` are byte offsets in the text of the file, and `line` and `column` are the position of
+  `start`, both counted from 1, the column in characters;
 - `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
   cell;
-- `image`: the box `x1`, `y1`, `x2`, `y2` in pixels, and the `page` of a PDF file counted from 1 (`null` for an image).
+- `image`: the `page` of a PDF file counted from 1 (`null` for an image), and the box `y1`, `x1`, `y2`, `x2` in pixels.
 
 Fields are only ever added to the report, never renamed or removed.
 
