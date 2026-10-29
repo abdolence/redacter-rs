@@ -4,8 +4,8 @@
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_command::plan_blocked_reason;
 use crate::commands::copy_output::{
-    format_capabilities_line, format_legend, row_layout, Capabilities, NotRedactedReason,
-    OutputStyles, SkipReason,
+    format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
+    RowLayout, SkipReason,
 };
 use crate::commands::scan_output::{
     format_file_lines, format_scan_summary, FindingReport, ScanCommandResult, ScanFileReport,
@@ -221,7 +221,7 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
         context.bar,
         &format_file_lines(
             &report,
-            row_layout(usize::from(context.term.size().1)),
+            RowLayout::for_terminal(usize::from(context.term.size().1)),
             context.styles,
         ),
     )?;

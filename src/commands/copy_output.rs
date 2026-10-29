@@ -313,25 +313,27 @@ impl RowLayout {
             detail: MAX_DETAIL_WIDTH,
         }
     }
-}
 
-pub(crate) fn row_layout(terminal_width: usize) -> RowLayout {
-    let terminal_width = if terminal_width == 0 {
-        FALLBACK_TERMINAL_WIDTH
-    } else {
-        terminal_width
-    };
-    let available = terminal_width.saturating_sub(ROW_FIXED_WIDTH);
-    let mut detail = (available / 3).clamp(MIN_DETAIL_WIDTH, MAX_DETAIL_WIDTH);
-    if available.saturating_sub(detail) < MIN_FILENAME_WIDTH {
-        detail = available.saturating_sub(MIN_FILENAME_WIDTH);
-    }
-    let filename = available.saturating_sub(detail).max(MIN_FILENAME_WIDTH);
-    RowLayout {
-        filename,
-        media_type: MEDIA_TYPE_WIDTH,
-        size: SIZE_WIDTH,
-        detail,
+    /// The layout for rows written to a terminal `terminal_width` columns wide, 80 when that is
+    /// unknown (0): the file name takes what the other columns leave.
+    pub(crate) fn for_terminal(terminal_width: usize) -> Self {
+        let terminal_width = if terminal_width == 0 {
+            FALLBACK_TERMINAL_WIDTH
+        } else {
+            terminal_width
+        };
+        let available = terminal_width.saturating_sub(ROW_FIXED_WIDTH);
+        let mut detail = (available / 3).clamp(MIN_DETAIL_WIDTH, MAX_DETAIL_WIDTH);
+        if available.saturating_sub(detail) < MIN_FILENAME_WIDTH {
+            detail = available.saturating_sub(MIN_FILENAME_WIDTH);
+        }
+        let filename = available.saturating_sub(detail).max(MIN_FILENAME_WIDTH);
+        RowLayout {
+            filename,
+            media_type: MEDIA_TYPE_WIDTH,
+            size: SIZE_WIDTH,
+            detail,
+        }
     }
 }
 
@@ -561,7 +563,7 @@ mod tests {
     ) -> String {
         let styles = OutputStyles::plain();
         format_file_row(
-            row_layout(width),
+            RowLayout::for_terminal(width),
             filename,
             media_type,
             size,
@@ -932,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn row_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
-        assert_eq!(row_layout(0), row_layout(80));
+    fn terminal_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
+        assert_eq!(RowLayout::for_terminal(0), RowLayout::for_terminal(80));
     }
 }

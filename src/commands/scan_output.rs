@@ -479,7 +479,6 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::copy_output::row_layout;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -649,7 +648,11 @@ mod tests {
             0,
         ));
 
-        let rows = format_file_lines(&result.files[0], row_layout(100), &OutputStyles::plain());
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
         assert_eq!(
             rows[1..],
             ["    1:6  email  local-rules  -----BEGIN KEY-----\\nabc\\n\\u{1b}[31m O'Brien"]
@@ -682,7 +685,11 @@ mod tests {
             0,
         ));
 
-        let rows = format_file_lines(&result.files[0], row_layout(100), &OutputStyles::plain());
+        let rows = format_file_lines(
+            &result.files[0],
+            RowLayout::for_terminal(100),
+            &OutputStyles::plain(),
+        );
         assert_eq!(
             rows[1..],
             ["    1:1  ssn\\n\\u{1b}[31mred  local-rules  a****o"]
@@ -897,7 +904,7 @@ mod tests {
         );
 
         assert_eq!(
-            format_file_lines(&mixed, row_layout(100), &styles)[1..],
+            format_file_lines(&mixed, RowLayout::for_terminal(100), &styles)[1..],
             [
                 "    3:11   per           local-ner    1.00  J***h",
                 "    4:8    email         local-rules        j***m",
@@ -905,7 +912,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            format_file_lines(&unscored, row_layout(100), &styles)[1..],
+            format_file_lines(&unscored, RowLayout::for_terminal(100), &styles)[1..],
             ["    1:10  email  local-rules  j***m"]
         );
     }
