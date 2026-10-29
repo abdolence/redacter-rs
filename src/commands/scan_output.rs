@@ -89,6 +89,17 @@ impl FindingReport {
             },
         }
     }
+
+    /// The value for a terminal or a text report: a scanned file decides what the value holds,
+    /// and a newline would break its row while an escape sequence would reach the terminal. Both
+    /// quotes stay as they are, since they are common in names.
+    fn escaped_value(&self) -> String {
+        self.value
+            .escape_debug()
+            .to_string()
+            .replace("\\'", "'")
+            .replace("\\\"", "\"")
+    }
 }
 
 /// One file of the scan. Built only through its constructors, which keep `status`, `reason`
@@ -327,7 +338,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
                     styles.dimmed.apply_to(pad(score(finding), score_width))
                 ));
             }
-            line.push_str(&styles.found.apply_to(&finding.value).to_string());
+            line.push_str(&styles.found.apply_to(finding.escaped_value()).to_string());
             line
         })
         .collect()
@@ -493,9 +504,8 @@ mod tests {
         assert_eq!(mask_value("ab"), "**");
     }
 
-    #[test]
-    fn raw_values_are_reported_only_when_asked_for() {
-        let detection = Detection {
+    fn email_detection() -> Detection {
+        Detection {
             label: DetectionLabel::new("email"),
             location: DetectionLocation::Text {
                 start: 5,
@@ -505,11 +515,68 @@ mod tests {
             },
             score: None,
             value: "john.smith@example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn raw_values_are_reported_only_when_asked_for_in_both_report_formats() {
+        for (values, shown, hidden) in [
+            (
+                ValueDisplay::Masked,
+                "j********************m",
+                "john.smith@example.com",
+            ),
+            (
+                ValueDisplay::Raw,
+                "john.smith@example.com",
+                "j********************m",
+            ),
+        ] {
+            let mut result = ScanCommandResult::default();
+            result.push(ScanFileReport::scanned(
+                &file_ref("note.txt", mime::TEXT_PLAIN),
+                vec![FindingReport::new(
+                    RedacterType::LocalRules,
+                    &email_detection(),
+                    values,
+                )],
+            ));
+            let json = serde_json::to_string(&result).unwrap();
+            for report in [result.to_text(), json] {
+                assert!(report.contains(shown), "{values:?}: {report}");
+                assert!(!report.contains(hidden), "{values:?}: {report}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_is_escaped_in_the_terminal_rows_and_the_text_report_but_not_in_the_json_report() {
+        let value = "-----BEGIN KEY-----\nabc\n\u{1b}[31m O'Brien";
+        let detection = Detection {
+            value: value.to_string(),
+            ..email_detection()
         };
-        let scanned =
-            |values| FindingReport::new(RedacterType::LocalRules, &detection, values).value;
-        assert_eq!(scanned(ValueDisplay::Masked), "j********************m");
-        assert_eq!(scanned(ValueDisplay::Raw), "john.smith@example.com");
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("key.pem", mime::TEXT_PLAIN),
+            vec![FindingReport::new(
+                RedacterType::LocalRules,
+                &detection,
+                ValueDisplay::Raw,
+            )],
+        ));
+
+        let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
+        assert_eq!(
+            rows[1..],
+            ["    1:6  email  local-rules  -----BEGIN KEY-----\\nabc\\n\\u{1b}[31m O'Brien"]
+        );
+        let text = result.to_text();
+        assert!(!text.contains(['\u{1b}', '\r']));
+        assert_eq!(text.lines().count(), 5, "{text}");
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(json["files"][0]["findings"][0]["value"], value);
     }
 
     #[test]
