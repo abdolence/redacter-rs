@@ -7,7 +7,7 @@
 
 use crate::args::RedacterType;
 use crate::commands::copy_output::{
-    format_file_row, format_legend, row_width_for, NotRedactedReason, OutputStyles, RowOutcome,
+    format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout, RowOutcome,
     SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::file_systems::FileSystemRef;
@@ -327,7 +327,7 @@ impl ScanCommandResult {
     /// path is shortened.
     pub fn to_text(&self) -> String {
         let styles = OutputStyles::plain();
-        let width = row_width_for(
+        let layout = RowLayout::for_report(
             self.files
                 .iter()
                 .map(|file| measure_text_width(&file.path))
@@ -336,7 +336,7 @@ impl ScanCommandResult {
         );
         let mut lines = vec![format_legend(&SCAN_LEGEND, &styles)];
         for file in &self.files {
-            lines.extend(format_file_lines(file, width, &styles));
+            lines.extend(format_file_lines(file, layout, &styles));
         }
         lines.push(String::new());
         lines.push(format_scan_summary(self, &styles));
@@ -344,14 +344,14 @@ impl ScanCommandResult {
     }
 }
 
-/// The lines of one file: its row for a terminal `width` columns wide, then its findings.
+/// The lines of one file: its row in `layout`, then its findings.
 pub fn format_file_lines(
     file: &ScanFileReport,
-    width: usize,
+    layout: RowLayout,
     styles: &OutputStyles,
 ) -> Vec<String> {
     let mut lines = vec![format_file_row(
-        width,
+        layout,
         &file.path,
         file.mime_type.as_deref().unwrap_or_default(),
         &HumanBytes(file.size.unwrap_or(0) as u64).to_string(),
@@ -479,6 +479,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::copy_output::row_layout;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -648,7 +649,7 @@ mod tests {
             0,
         ));
 
-        let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
+        let rows = format_file_lines(&result.files[0], row_layout(100), &OutputStyles::plain());
         assert_eq!(
             rows[1..],
             ["    1:6  email  local-rules  -----BEGIN KEY-----\\nabc\\n\\u{1b}[31m O'Brien"]
@@ -681,7 +682,7 @@ mod tests {
             0,
         ));
 
-        let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
+        let rows = format_file_lines(&result.files[0], row_layout(100), &OutputStyles::plain());
         assert_eq!(
             rows[1..],
             ["    1:1  ssn\\n\\u{1b}[31mred  local-rules  a****o"]
@@ -694,6 +695,29 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(json["files"][0]["findings"][0]["label"], label);
+    }
+
+    #[test]
+    fn the_text_report_pads_the_path_to_the_longest_path_and_no_further() {
+        let mut result = ScanCommandResult::default();
+        for name in ["customer-note.txt", "a.txt"] {
+            result.push(ScanFileReport::scanned(
+                &file_ref(name, mime::TEXT_PLAIN),
+                Vec::new(),
+                0,
+            ));
+        }
+
+        let text = result.to_text();
+
+        let rows: Vec<&str> = text.lines().skip(1).take(2).collect();
+        assert_eq!(
+            rows,
+            [
+                format!("✓ {:<17} {:<24} 0 B", "customer-note.txt", "text/plain"),
+                format!("✓ {:<17} {:<24} 0 B", "a.txt", "text/plain"),
+            ]
+        );
     }
 
     #[test]
@@ -873,7 +897,7 @@ mod tests {
         );
 
         assert_eq!(
-            format_file_lines(&mixed, 100, &styles)[1..],
+            format_file_lines(&mixed, row_layout(100), &styles)[1..],
             [
                 "    3:11   per           local-ner    1.00  J***h",
                 "    4:8    email         local-rules        j***m",
@@ -881,7 +905,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            format_file_lines(&unscored, 100, &styles)[1..],
+            format_file_lines(&unscored, row_layout(100), &styles)[1..],
             ["    1:10  email  local-rules  j***m"]
         );
     }

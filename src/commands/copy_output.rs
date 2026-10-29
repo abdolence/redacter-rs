@@ -295,14 +295,27 @@ pub fn format_outcome_detail(outcome: &CopyFileOutcome) -> String {
 
 /// The widths of the four columns of a row, derived from the terminal width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RowLayout {
+pub(crate) struct RowLayout {
     filename: usize,
     media_type: usize,
     size: usize,
     detail: usize,
 }
 
-fn row_layout(terminal_width: usize) -> RowLayout {
+impl RowLayout {
+    /// The layout for rows written to a file rather than a terminal: no file name up to
+    /// `filename_width` columns is shortened, and the detail column is at its widest.
+    pub(crate) fn for_report(filename_width: usize) -> Self {
+        Self {
+            filename: filename_width.max(MIN_FILENAME_WIDTH),
+            media_type: MEDIA_TYPE_WIDTH,
+            size: SIZE_WIDTH,
+            detail: MAX_DETAIL_WIDTH,
+        }
+    }
+}
+
+pub(crate) fn row_layout(terminal_width: usize) -> RowLayout {
     let terminal_width = if terminal_width == 0 {
         FALLBACK_TERMINAL_WIDTH
     } else {
@@ -320,13 +333,6 @@ fn row_layout(terminal_width: usize) -> RowLayout {
         size: SIZE_WIDTH,
         detail,
     }
-}
-
-/// The row width at which a file name `filename_width` columns wide is not shortened and the
-/// detail column is at its widest, for rows written to a file rather than a terminal.
-pub(crate) fn row_width_for(filename_width: usize) -> usize {
-    // `row_layout` gives the detail a third of the width the fixed columns leave.
-    ROW_FIXED_WIDTH + (filename_width + MAX_DETAIL_WIDTH).max(3 * MAX_DETAIL_WIDTH)
 }
 
 /// Truncates `s` to at most `width` display columns, keeping a prefix and a
@@ -436,14 +442,13 @@ pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String 
 
 /// One row of the table, written when a file's processing finishes.
 pub fn format_file_row(
-    terminal_width: usize,
+    layout: RowLayout,
     filename: &str,
     media_type: &str,
     size: &str,
     outcome: &RowOutcome,
     styles: &OutputStyles,
 ) -> String {
-    let layout = row_layout(terminal_width);
     let outcome_style = outcome.style;
     let detail = truncate_end(&outcome.detail, layout.detail);
 
@@ -556,7 +561,7 @@ mod tests {
     ) -> String {
         let styles = OutputStyles::plain();
         format_file_row(
-            width,
+            row_layout(width),
             filename,
             media_type,
             size,

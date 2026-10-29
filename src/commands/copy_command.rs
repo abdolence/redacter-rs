@@ -1,7 +1,8 @@
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
-    format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
-    CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason, COPY_LEGEND,
+    format_capabilities_line, format_file_row, format_legend, format_summary_line, row_layout,
+    Capabilities, CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason,
+    COPY_LEGEND,
 };
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -393,7 +394,7 @@ fn print_file_row(
     styles: &OutputStyles,
 ) {
     bar.println(format_file_row(
-        term.width() as usize,
+        row_layout(term.width() as usize),
         file_ref.relative_path.value(),
         file_ref
             .media_type
