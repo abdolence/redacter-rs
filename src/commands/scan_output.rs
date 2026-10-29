@@ -91,16 +91,26 @@ impl FindingReport {
         }
     }
 
-    /// The value for a terminal or a text report: a scanned file decides what the value holds,
-    /// and a newline would break its row while an escape sequence would reach the terminal. Both
-    /// quotes stay as they are, since they are common in names.
+    /// The value for a terminal or a text report, see [`escaped`].
     fn escaped_value(&self) -> String {
-        self.value
-            .escape_debug()
-            .to_string()
-            .replace("\\'", "'")
-            .replace("\\\"", "\"")
+        escaped(&self.value)
     }
+
+    /// The label for a terminal or a text report: a model names it, so it is as much the
+    /// scanned file's doing as the value is.
+    fn escaped_label(&self) -> String {
+        escaped(&self.label.to_string())
+    }
+}
+
+/// Text from a scanned file or a model for a terminal or a text report: it decides what the
+/// text holds, and a newline would break a row while an escape sequence would reach the
+/// terminal. Both quotes stay as they are, since they are common in names.
+fn escaped(text: &str) -> String {
+    text.escape_debug()
+        .to_string()
+        .replace("\\'", "'")
+        .replace("\\\"", "\"")
 }
 
 /// One file of the scan. Built only through its constructors, which keep `status`, `reason`
@@ -349,7 +359,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
             .unwrap_or_default()
     };
     let location_width = widest(&file.findings, |finding| finding.location.to_string());
-    let label_width = widest(&file.findings, |finding| finding.label.to_string());
+    let label_width = widest(&file.findings, FindingReport::escaped_label);
     let redacter_width = widest(&file.findings, |finding| finding.redacter.to_string());
     let score_width = widest(&file.findings, score);
     let pad = |cell: String, width| pad_str(&cell, width, Alignment::Left, None).into_owned();
@@ -361,7 +371,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
                 pad(finding.location.to_string(), location_width),
                 styles
                     .label
-                    .apply_to(pad(finding.label.to_string(), label_width)),
+                    .apply_to(pad(finding.escaped_label(), label_width)),
                 styles
                     .dimmed
                     .apply_to(pad(finding.redacter.to_string(), redacter_width)),
@@ -422,7 +432,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
             .findings_by_label
             .0
             .iter()
-            .map(|(label, count)| format!("{} {count}", styles.label.apply_to(label)))
+            .map(|(label, count)| {
+                format!(
+                    "{} {count}",
+                    styles.label.apply_to(escaped(&label.to_string()))
+                )
+            })
             .collect();
         line.push_str(&format!(": {}", by_label.join(", ")));
     }
@@ -617,6 +632,41 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(json["files"][0]["findings"][0]["value"], value);
+    }
+
+    #[test]
+    fn a_label_is_escaped_in_the_rows_the_text_report_and_the_summary() {
+        let label = "ssn\n\u{1b}[31mred";
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![finding(
+                label,
+                DetectionLocation::Text {
+                    start: 0,
+                    end: 6,
+                    line: 1,
+                    column: 1,
+                },
+                None,
+                "a@b.io",
+            )],
+            0,
+        ));
+
+        let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
+        assert_eq!(
+            rows[1..],
+            ["    1:1  ssn\\n\\u{1b}[31mred  local-rules  a****o"]
+        );
+        let text = result.to_text();
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert_eq!(text.lines().count(), 5, "{text}");
+        let summary = format_scan_summary(&result, &OutputStyles::plain());
+        assert!(summary.contains("ssn\\n\\u{1b}[31mred 1"), "{summary}");
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(json["files"][0]["findings"][0]["label"], label);
     }
 
     #[test]
