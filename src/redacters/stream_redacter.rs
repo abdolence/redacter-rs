@@ -10,7 +10,7 @@ use crate::redacters::{
     Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::AppResult;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use image::ImageFormat;
 use mime::Mime;
 use rvstruct::ValueStruct;
@@ -55,8 +55,16 @@ pub struct RedactStreamResult {
     /// no-op (see `summary`), because it decides whether the file is uploaded.
     pub number_of_redactions: usize,
     pub summary: RedactionSummary,
-    pub stream: Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>,
+    pub stream: ContentStream,
 }
+
+/// The bytes of a file, in the order they were read.
+pub type ContentStream =
+    Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>;
+
+/// How much of a file is read before a NUL byte in it settles that it is not text, so that a
+/// large binary file is not read whole just to be skipped.
+const NOT_TEXT_PROBE_SIZE: usize = 8 * 1024;
 
 #[derive(Default)]
 pub struct DetectStreamResult {
@@ -64,7 +72,7 @@ pub struct DetectStreamResult {
     /// in the order the redacter reported.
     pub detections: Vec<(RedacterType, Detection)>,
     /// How many values the redacters named without being able to place them in the file, see
-    /// [`Detections::unlocated`].
+    /// [`crate::redacters::Detections::unlocated`].
     pub unlocated: usize,
     /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
     /// file read as text is not text. The plan was not blocked; the step was, so the caller
@@ -265,7 +273,7 @@ impl<'a> StreamRedacter<'a> {
                         blocked: Some(RedactionBlocked::NotText),
                         ..RedactionSummary::default()
                     },
-                    stream: Box::new(futures::stream::iter(vec![Ok(data)])),
+                    stream: data,
                 });
             }
         };
@@ -560,8 +568,8 @@ impl<'a> StreamRedacter<'a> {
 
     /// The item `input` is read as under the plan. With `--unsupported-as-text` the content
     /// is text when it is valid UTF-8 without a NUL byte, which binary formats carry and text
-    /// does not; otherwise the whole content comes back as `Err`, for a caller that leaves
-    /// the file as it is.
+    /// does not; otherwise the content comes back as `Err`, for a caller that leaves the file as
+    /// it is. A NUL byte near the start of the file settles that, before the rest is read.
     async fn stream_to_redact_item<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
@@ -570,13 +578,34 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
         redact_plan: &StreamRedactPlan<'a>,
-    ) -> AppResult<Result<RedacterDataItem, bytes::Bytes>> {
+    ) -> AppResult<Result<RedacterDataItem, ContentStream>> {
         if redact_plan.read_unsupported_as_text {
-            let data = input.try_collect::<Vec<_>>().await?.concat();
+            let mut input = input;
+            let mut head = Vec::new();
+            let mut head_size = 0;
+            let mut has_nul = false;
+            while head_size < NOT_TEXT_PROBE_SIZE && !has_nul {
+                let Some(chunk) = input.try_next().await? else {
+                    break;
+                };
+                head_size += chunk.len();
+                has_nul = chunk.contains(&0);
+                head.push(chunk);
+            }
+            if has_nul {
+                return Ok(Err(Box::new(
+                    futures::stream::iter(head.into_iter().map(Ok)).chain(input),
+                )));
+            }
+            let rest = input.try_collect::<Vec<_>>().await?;
+            let data = [head, rest].concat().concat();
+            let not_text = |data: Vec<u8>| -> ContentStream {
+                Box::new(futures::stream::iter(vec![Ok(bytes::Bytes::from(data))]))
+            };
             return Ok(match String::from_utf8(data) {
                 Ok(text) if !text.contains('\0') => Ok(self.text_redact_item(text, file_ref)),
-                Ok(text) => Err(text.into()),
-                Err(error) => Err(error.into_bytes().into()),
+                Ok(text) => Err(not_text(text.into_bytes())),
+                Err(error) => Err(not_text(error.into_bytes())),
             });
         }
         let item = match file_ref.media_type {
@@ -1810,5 +1839,57 @@ mod tests {
             let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
             assert_eq!(output.concat(), data, "the file is left as it is");
         }
+    }
+
+    #[tokio::test]
+    async fn a_binary_file_is_recognised_from_its_first_bytes_without_reading_the_rest() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let unreadable_after_the_head = futures::stream::iter(vec![
+            Ok(bytes::Bytes::from_static(b"\x7fELF\0\0\0")),
+            Err(AppError::SystemError {
+                message: "read past the first bytes".to_string(),
+            }),
+        ]);
+
+        let result = stream_redacter
+            .detect_stream(unreadable_after_the_head, &plan, &env_file())
+            .await
+            .expect("the rest of a binary file is not read");
+
+        assert_eq!(result.blocked, Some(RedactionBlocked::NotText));
+    }
+
+    #[tokio::test]
+    async fn a_binary_file_in_several_chunks_is_left_whole_by_redaction() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let chunks = futures::stream::iter(vec![
+            Ok(bytes::Bytes::from_static(b"\0head")),
+            Ok(bytes::Bytes::from_static(b"a@b.io")),
+        ]);
+
+        let result = stream_redacter
+            .redact_stream(chunks, plan, &env_file())
+            .await
+            .unwrap();
+
+        assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
+        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        assert_eq!(output.concat(), b"\0heada@b.io");
     }
 }
