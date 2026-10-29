@@ -1,3 +1,4 @@
+use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
     format_capabilities_line, format_file_row, format_legend, format_summary_line, Capability,
     CopyCapabilities, CopyFileOutcome, CopyOutputStyles, CopySummary, NotRedactedReason,
@@ -7,7 +8,6 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
-use crate::model_store::{ModelStore, ModelStoreOptions};
 use crate::redacters::{
     RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
@@ -34,7 +34,7 @@ pub struct CopyCommandOptions {
     pub file_matcher: FileMatcher,
     pub file_mime_override: FileMimeOverride,
     pub max_files_limit: Option<usize>,
-    pub model_store: ModelStoreOptions,
+    pub addon_store: AddonStoreOptions,
 }
 
 impl CopyCommandOptions {
@@ -43,7 +43,7 @@ impl CopyCommandOptions {
         max_size_limit: Option<usize>,
         max_files_limit: Option<usize>,
         mime_override: Vec<(mime::Mime, globset::Glob)>,
-        model_store: ModelStoreOptions,
+        addon_store: AddonStoreOptions,
     ) -> Self {
         let filename_matcher = filename_filter
             .as_ref()
@@ -52,7 +52,7 @@ impl CopyCommandOptions {
             file_matcher: FileMatcher::new(filename_matcher, max_size_limit),
             file_mime_override: FileMimeOverride::new(mime_override),
             max_files_limit,
-            model_store,
+            addon_store,
         }
     }
 }
@@ -73,7 +73,7 @@ pub async fn command_copy(
     redacter_options: Option<RedacterOptions>,
 ) -> AppResult<CopyCommandResult> {
     let term_reporter = AppReporter::from(term);
-    let models = ModelStore::new(&options.model_store);
+    let addons = AddonStore::new(&options.addon_store);
     let styles = CopyOutputStyles::new();
 
     // The bar exists from here on because the file systems report through it, but it is
@@ -107,7 +107,7 @@ pub async fn command_copy(
     } else {
         None
     };
-    let file_converters = FileConverters::new().init(&term_reporter, &models).await?;
+    let file_converters = FileConverters::new().init(&term_reporter, &addons).await?;
 
     report_copy_info(
         term,
@@ -131,7 +131,7 @@ pub async fn command_copy(
             let mut redacters = Vec::with_capacity(options.provider_options.len());
             for provider_options in options.provider_options {
                 let redacter =
-                    Redacters::new_redacter(provider_options, &app_reporter, &models).await?;
+                    Redacters::new_redacter(provider_options, &app_reporter, &addons).await?;
                 redacters.push(redacter);
             }
             Some((options.base_options, redacters))
@@ -277,14 +277,14 @@ fn report_copy_info(
         pdf_rendering: match file_converters.pdf_image_converter {
             Some(_) => Capability::Yes,
             #[cfg(feature = "pdf-render")]
-            None => Capability::No(Some(crate::model_store::Addon::Pdf)),
+            None => Capability::No(Some(crate::addon_store::Addon::Pdf)),
             #[cfg(not(feature = "pdf-render"))]
             None => Capability::No(None),
         },
         ocr: match file_converters.ocr {
             Some(_) => Capability::Yes,
             #[cfg(feature = "ocr")]
-            None => Capability::No(Some(crate::model_store::Addon::Ocr)),
+            None => Capability::No(Some(crate::addon_store::Addon::Ocr)),
             #[cfg(not(feature = "ocr"))]
             None => Capability::No(None),
         },
@@ -594,7 +594,7 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &temp_dir.path().to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
             None,
         )
         .await?;
@@ -632,7 +632,7 @@ mod tests {
                 None,
                 None,
                 vec![],
-                ModelStoreOptions {
+                AddonStoreOptions {
                     models_dir: Some(models_dir.clone()),
                 },
             ),
@@ -656,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn copies_over_a_stale_models_directory(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::model_store::Addon;
+        use crate::addon_store::Addon;
         let lock = pdfium_test_lock();
         let _guard = lock.lock().await;
 
@@ -677,7 +677,7 @@ mod tests {
                 None,
                 None,
                 vec![],
-                ModelStoreOptions {
+                AddonStoreOptions {
                     models_dir: Some(models_dir.clone()),
                 },
             )
@@ -813,7 +813,7 @@ mod tests {
 
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
-        let store = ModelStore::new(&ModelStoreOptions::default());
+        let store = AddonStore::new(&AddonStoreOptions::default());
         let converters = FileConverters::new().init(&reporter, &store).await?;
         let ocr = converters
             .ocr
@@ -896,7 +896,7 @@ mod tests {
             &term,
             SAMPLE_DOCUMENTS_DIR,
             &temp_dir.path().to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
             Some(redacter_options),
         )
         .await?;
@@ -973,7 +973,7 @@ mod tests {
             &term,
             "test-fixtures/documents/customer-form.pdf",
             &pdf_destination.to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
             Some(vertex_ai_options()),
         )
         .await?;
@@ -983,7 +983,7 @@ mod tests {
             &term,
             "test-fixtures/documents/customer-note.txt",
             &note_destination.to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![], ModelStoreOptions::default()),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
             Some(vertex_ai_options()),
         )
         .await?;

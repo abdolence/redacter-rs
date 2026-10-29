@@ -53,8 +53,8 @@ pub enum AppError {
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),
-    #[error("Model store error: {0}")]
-    ModelStoreError(#[from] crate::model_store::ModelStoreError),
+    #[error("Addon store error: {0}")]
+    AddonStoreError(#[from] crate::addon_store::AddonStoreError),
     #[error("{failed} of {requested} addons are not installed")]
     AddonsNotInstalled { failed: usize, requested: usize },
     #[cfg(feature = "local-ner")]

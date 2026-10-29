@@ -20,19 +20,19 @@ mod manifest;
 mod pdfium;
 
 pub use download::{download_file, Fetcher, HttpFetcher};
-pub use error::ModelStoreError;
-pub use manifest::{Addon, ModelFile, ModelManifest};
+pub use error::AddonStoreError;
+pub use manifest::{Addon, AddonFile, AddonManifest};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 
 /// The directory of one installed addon; every file of its manifest lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelFiles {
+pub struct AddonFiles {
     dir: PathBuf,
 }
 
-impl ModelFiles {
+impl AddonFiles {
     // Only the ocr and local-ner features open an addon's files by name; a
     // `--no-default-features` (or pdf-render-only) build has no caller. Gated rather than
     // `#[allow(dead_code)]`'d so a future consumer just adds its feature to the list.
@@ -51,17 +51,17 @@ impl ModelFiles {
 
 /// Where manually placed copies of an addon may live besides the models root, in lookup
 /// order. Injected so tests can point it at a temporary directory.
-pub type ManualDirs = Box<dyn Fn(&ModelManifest) -> Vec<PathBuf> + Send + Sync>;
+pub type ManualDirs = Box<dyn Fn(&AddonManifest) -> Vec<PathBuf> + Send + Sync>;
 
 /// `--models-dir`, or `REDACTER_MODELS_DIR`; without either, the platform cache directory.
 #[derive(Debug, Clone, Default)]
-pub struct ModelStoreOptions {
+pub struct AddonStoreOptions {
     pub models_dir: Option<PathBuf>,
 }
 
 /// `<exe dir>/models/<dir_name>` for addons bundled next to the binary, then the addon's own
 /// legacy directories. None of these is verified.
-pub fn default_manual_dirs(manifest: &ModelManifest) -> Vec<PathBuf> {
+pub fn default_manual_dirs(manifest: &AddonManifest) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
@@ -82,7 +82,7 @@ pub enum Installation {
     Downloaded(PathBuf),
 }
 
-pub struct ModelStore {
+pub struct AddonStore {
     /// `None` on a system with no cache directory and no `--models-dir`: lookups still find
     /// manual copies, and only an install fails for the lack of it.
     root: Option<PathBuf>,
@@ -95,8 +95,8 @@ enum FileState {
     Damaged,
 }
 
-impl ModelStore {
-    pub fn new(options: &ModelStoreOptions) -> Self {
+impl AddonStore {
+    pub fn new(options: &AddonStoreOptions) -> Self {
         Self {
             root: options
                 .models_dir
@@ -114,10 +114,10 @@ impl ModelStore {
     /// Finds an installed addon and never downloads. Lookup order: the models root, where
     /// every file must match its pinned size (and its SHA-256 for native code), then the
     /// manual directories, where every file only has to exist.
-    pub fn find(&self, addon: Addon) -> Result<ModelFiles, ModelStoreError> {
+    pub fn find(&self, addon: Addon) -> Result<AddonFiles, AddonStoreError> {
         let manifest = addon
             .manifest()
-            .ok_or(ModelStoreError::NotAvailableForPlatform)?;
+            .ok_or(AddonStoreError::NotAvailableForPlatform)?;
         self.find_manifest(addon, manifest)
     }
 
@@ -127,22 +127,22 @@ impl ModelStore {
         &self,
         addon: Addon,
         fetcher: &dyn Fetcher,
-    ) -> Result<Installation, ModelStoreError> {
+    ) -> Result<Installation, AddonStoreError> {
         let manifest = addon
             .manifest()
-            .ok_or(ModelStoreError::NotAvailableForPlatform)?;
+            .ok_or(AddonStoreError::NotAvailableForPlatform)?;
         self.install_manifest(manifest, fetcher).await
     }
 
     fn find_manifest(
         &self,
         addon: Addon,
-        manifest: &ModelManifest,
-    ) -> Result<ModelFiles, ModelStoreError> {
+        manifest: &AddonManifest,
+    ) -> Result<AddonFiles, AddonStoreError> {
         if let Some(root) = &self.root {
             let dir = root.join(manifest.dir_name);
             if manifest.is_installed_in(addon, &dir)? {
-                return Ok(ModelFiles { dir });
+                return Ok(AddonFiles { dir });
             }
         }
         let manual = (self.manual_dirs)(manifest).into_iter().find(|dir| {
@@ -152,17 +152,17 @@ impl ModelStore {
                 .all(|file| dir.join(file.name).is_file())
         });
         match manual {
-            Some(dir) => Ok(ModelFiles { dir }),
-            None => Err(ModelStoreError::NotInstalled { addon }),
+            Some(dir) => Ok(AddonFiles { dir }),
+            None => Err(AddonStoreError::NotInstalled { addon }),
         }
     }
 
     async fn install_manifest(
         &self,
-        manifest: &ModelManifest,
+        manifest: &AddonManifest,
         fetcher: &dyn Fetcher,
-    ) -> Result<Installation, ModelStoreError> {
-        let root = self.root.as_ref().ok_or(ModelStoreError::NoCacheDir)?;
+    ) -> Result<Installation, AddonStoreError> {
+        let root = self.root.as_ref().ok_or(AddonStoreError::NoCacheDir)?;
         let dir = root.join(manifest.dir_name);
         let mut downloaded = false;
         for file in manifest.files {
@@ -183,17 +183,17 @@ impl ModelStore {
     }
 }
 
-impl ModelManifest {
+impl AddonManifest {
     /// Whether every file is in `dir` as pinned. A file that is there but differs is an
     /// error rather than a miss, so that a damaged install is never passed over for an
     /// unverified manual copy.
-    fn is_installed_in(&self, addon: Addon, dir: &Path) -> Result<bool, ModelStoreError> {
+    fn is_installed_in(&self, addon: Addon, dir: &Path) -> Result<bool, AddonStoreError> {
         for file in self.files {
             match file.state_in(dir, self.native_code)? {
                 FileState::Verified => {}
                 FileState::Missing => return Ok(false),
                 FileState::Damaged => {
-                    return Err(ModelStoreError::Damaged {
+                    return Err(AddonStoreError::Damaged {
                         addon,
                         path: dir.join(file.name).display().to_string(),
                     })
@@ -204,10 +204,10 @@ impl ModelManifest {
     }
 }
 
-impl ModelFile {
+impl AddonFile {
     /// Checks the copy of this file in `dir` against its pinned size and, when asked, its
     /// pinned SHA-256.
-    fn state_in(&self, dir: &Path, check_digest: bool) -> Result<FileState, ModelStoreError> {
+    fn state_in(&self, dir: &Path, check_digest: bool) -> Result<FileState, AddonStoreError> {
         let path = dir.join(self.name);
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => metadata,
@@ -215,7 +215,7 @@ impl ModelFile {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(FileState::Missing)
             }
-            Err(source) => return Err(ModelStoreError::io(&path, source)),
+            Err(source) => return Err(AddonStoreError::io(&path, source)),
         };
         if metadata.len() != self.size
             || (check_digest && download::sha256_of_file(&path)? != self.sha256)
@@ -226,11 +226,11 @@ impl ModelFile {
     }
 }
 
-fn progress_bar(file: &ModelFile) -> Result<ProgressBar, ModelStoreError> {
+fn progress_bar(file: &AddonFile) -> Result<ProgressBar, AddonStoreError> {
     let style = ProgressStyle::with_template(
         "{spinner:.green} {msg} [{wide_bar:.green/237}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
     )
-    .map_err(|err| ModelStoreError::Progress {
+    .map_err(|err| AddonStoreError::Progress {
         reason: err.to_string(),
     })?;
     let bar = ProgressBar::new(file.size).with_style(style.progress_chars("━>─"));
@@ -245,7 +245,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    static TEST_MANIFEST: ModelManifest = ModelManifest {
+    static TEST_MANIFEST: AddonManifest = AddonManifest {
         dir_name: "test-model",
         files: &TEST_FILES,
         legacy_dirs: no_legacy_dirs,
@@ -273,15 +273,15 @@ mod tests {
             }
         }
 
-        fn store(&self) -> ModelStore {
+        fn store(&self) -> AddonStore {
             self.store_rooted(Some(self.managed.parent().unwrap().to_path_buf()))
         }
 
-        fn store_rooted(&self, root: Option<PathBuf>) -> ModelStore {
+        fn store_rooted(&self, root: Option<PathBuf>) -> AddonStore {
             let manual_root = self.manual.parent().unwrap().to_path_buf();
-            ModelStore::with_parts(
+            AddonStore::with_parts(
                 root,
-                Box::new(move |m: &ModelManifest| vec![manual_root.join(m.dir_name)]),
+                Box::new(move |m: &AddonManifest| vec![manual_root.join(m.dir_name)]),
             )
         }
 
@@ -329,7 +329,7 @@ mod tests {
             .find_manifest(TEST_ADDON, &TEST_MANIFEST)
             .unwrap_err();
         assert!(
-            matches!(err, ModelStoreError::NotInstalled { addon } if addon == TEST_ADDON),
+            matches!(err, AddonStoreError::NotInstalled { addon } if addon == TEST_ADDON),
             "{err}"
         );
         assert!(!fx.managed.exists());
@@ -347,7 +347,7 @@ mod tests {
             .find_manifest(TEST_ADDON, &TEST_MANIFEST)
             .unwrap_err();
         match err {
-            ModelStoreError::Damaged { addon, path } => {
+            AddonStoreError::Damaged { addon, path } => {
                 assert_eq!(addon, TEST_ADDON);
                 assert_eq!(path, fx.managed.join("weights.bin").display().to_string());
             }
@@ -374,7 +374,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                ModelStoreError::Damaged {
+                AddonStoreError::Damaged {
                     addon: Addon::Pdf,
                     ..
                 }
@@ -465,7 +465,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, ModelStoreError::ChecksumMismatch { .. }),
+            matches!(err, AddonStoreError::ChecksumMismatch { .. }),
             "{err}"
         );
         assert!(!fx.managed.join("weights.bin").exists());
@@ -480,7 +480,7 @@ mod tests {
             .install_manifest(&TEST_MANIFEST, &FakeFetcher::good())
             .await
             .unwrap_err();
-        assert!(matches!(err, ModelStoreError::NoCacheDir), "{err}");
+        assert!(matches!(err, AddonStoreError::NoCacheDir), "{err}");
     }
 
     #[test]
@@ -488,7 +488,7 @@ mod tests {
         fn legacy() -> Vec<PathBuf> {
             vec![PathBuf::from("/legacy/one"), PathBuf::from("/legacy/two")]
         }
-        static WITH_LEGACY: ModelManifest = ModelManifest {
+        static WITH_LEGACY: AddonManifest = AddonManifest {
             dir_name: "test-model",
             files: &TEST_FILES,
             legacy_dirs: legacy,
@@ -507,11 +507,11 @@ mod tests {
 
     #[test]
     fn new_uses_the_models_dir_override_as_root() {
-        let options = ModelStoreOptions {
+        let options = AddonStoreOptions {
             models_dir: Some(PathBuf::from("/override/models")),
         };
         assert_eq!(
-            ModelStore::new(&options).root,
+            AddonStore::new(&options).root,
             Some(PathBuf::from("/override/models")),
             "--models-dir is the models root"
         );

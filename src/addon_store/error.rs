@@ -4,7 +4,7 @@ use std::path::Path;
 /// Failures of the addon store. Every variant names the value the user has to act on: the
 /// addon, the directory, the URL, the file, or the expected and actual size or digest.
 #[derive(Debug, thiserror::Error)]
-pub enum ModelStoreError {
+pub enum AddonStoreError {
     #[error("{addon} is not installed; run `redacter setup-addons {addon}`")]
     NotInstalled { addon: Addon },
     #[error(
@@ -52,9 +52,9 @@ pub enum ModelStoreError {
     Progress { reason: String },
 }
 
-impl ModelStoreError {
+impl AddonStoreError {
     pub(super) fn io(path: &Path, source: std::io::Error) -> Self {
-        ModelStoreError::Io {
+        AddonStoreError::Io {
             path: path.display().to_string(),
             source,
         }

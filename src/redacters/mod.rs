@@ -1,6 +1,6 @@
+use crate::addon_store::AddonStore;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::model_store::ModelStore;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_sdk_bedrockruntime::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -435,7 +435,7 @@ impl<'a> Redacters<'a> {
     pub async fn new_redacter(
         provider_options: RedacterProviderOptions,
         reporter: &'a AppReporter<'a>,
-        models: &ModelStore,
+        addons: &AddonStore,
     ) -> AppResult<Self> {
         match provider_options {
             RedacterProviderOptions::GcpDlp(options) => Ok(Redacters::GcpDlp(
@@ -469,11 +469,11 @@ impl<'a> Redacters<'a> {
             )),
             #[cfg(feature = "local-ner")]
             RedacterProviderOptions::LocalNer(options) => Ok(Redacters::LocalNer(
-                LocalNerRedacter::new(options, reporter, models).await?,
+                LocalNerRedacter::new(options, reporter, addons).await?,
             )),
             #[cfg(feature = "local-gliner")]
             RedacterProviderOptions::LocalGliner(options) => Ok(Redacters::LocalGliner(
-                LocalGlinerRedacter::new(options, reporter, models).await?,
+                LocalGlinerRedacter::new(options, reporter, addons).await?,
             )),
         }
     }

@@ -4,9 +4,9 @@
 
 use std::error::Error;
 
+use crate::addon_store::AddonStoreOptions;
 use crate::commands::*;
 use crate::errors::AppError;
-use crate::model_store::ModelStoreOptions;
 use args::*;
 use clap::Parser;
 use console::{Style, Term};
@@ -29,7 +29,7 @@ mod common_types;
 
 mod file_converters;
 
-mod model_store;
+mod addon_store;
 
 pub fn config_env_var(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|e| format!("{name}: {e}"))
@@ -83,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
-    let model_store = ModelStoreOptions {
+    let addon_store = AddonStoreOptions {
         models_dir: resolve_models_dir(cli.models_dir, std::env::var_os("REDACTER_MODELS_DIR")),
     };
     match cli.command {
@@ -102,7 +102,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
                 max_size_limit,
                 max_files_limit,
                 mime_override,
-                model_store,
+                addon_store,
             );
             let copy_result = command_copy(
                 term,
@@ -134,7 +134,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<()> {
             command_ls(term, &source, options).await?;
         }
         CliCommand::SetupAddons { addons } => {
-            command_setup_addons(term, &addons, &model_store).await?;
+            command_setup_addons(term, &addons, &addon_store).await?;
         }
     }
 

@@ -21,7 +21,7 @@ pub enum Addon {
 
 impl Addon {
     /// The files this addon installs, or `None` on a platform it has no build for.
-    pub fn manifest(self) -> Option<&'static ModelManifest> {
+    pub fn manifest(self) -> Option<&'static AddonManifest> {
         match self {
             #[cfg(any(feature = "ocr", test))]
             Addon::Ocr => Some(&OCRS),
@@ -46,7 +46,7 @@ impl std::fmt::Display for Addon {
 
 /// One file of an addon: where it comes from and what it must look like on disk.
 #[derive(Debug)]
-pub struct ModelFile {
+pub struct AddonFile {
     pub name: &'static str,
     pub url: &'static str,
     pub size: u64,
@@ -55,10 +55,10 @@ pub struct ModelFile {
 
 /// Everything the store knows about the files of one addon, declared once.
 #[derive(Debug)]
-pub struct ModelManifest {
+pub struct AddonManifest {
     /// Directory name under the models root.
     pub dir_name: &'static str,
-    pub files: &'static [ModelFile],
+    pub files: &'static [AddonFile],
     /// Directories from earlier versions where a manual copy may still live; never verified.
     pub legacy_dirs: fn() -> Vec<PathBuf>,
     /// Native code the process loads and runs. A lookup checks its SHA-256 every time; a
@@ -77,20 +77,20 @@ macro_rules! ner_url {
 }
 
 #[cfg(any(feature = "local-ner", test))]
-static NER_MULTILINGUAL_HRL_FILES: [ModelFile; 3] = [
-    ModelFile {
+static NER_MULTILINGUAL_HRL_FILES: [AddonFile; 3] = [
+    AddonFile {
         name: "model_uint8.onnx",
         url: ner_url!("model_uint8.onnx"),
         size: 135_115_742,
         sha256: "5b54455882ff2f242af18932b9da308d1f902f9f65d1d8f56ce9eb9bfcd5bf9e",
     },
-    ModelFile {
+    AddonFile {
         name: "tokenizer.json",
         url: ner_url!("tokenizer.json"),
         size: 2_919_362,
         sha256: "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088",
     },
-    ModelFile {
+    AddonFile {
         name: "config.json",
         url: ner_url!("config.json"),
         size: 927,
@@ -120,20 +120,20 @@ macro_rules! gliner_url {
 }
 
 #[cfg(any(feature = "local-gliner", test))]
-static GLINER_MULTI_PII_FILES: [ModelFile; 3] = [
-    ModelFile {
+static GLINER_MULTI_PII_FILES: [AddonFile; 3] = [
+    AddonFile {
         name: "model.onnx",
         url: gliner_url!("model.onnx"),
         size: 1_157_129_714,
         sha256: "7704865e414f24591da6aee08716a25677855bc8a84af81396d90e40df1e68d2",
     },
-    ModelFile {
+    AddonFile {
         name: "tokenizer.json",
         url: gliner_url!("tokenizer.json"),
         size: 16_331_948,
         sha256: "914bd3c8fb7b525af9e23b60d0ec7b1248ddb2b99014efd9c02ebeb022f8cab7",
     },
-    ModelFile {
+    AddonFile {
         name: "gliner_config.json",
         url: gliner_url!("gliner_config.json"),
         size: 732,
@@ -142,14 +142,14 @@ static GLINER_MULTI_PII_FILES: [ModelFile; 3] = [
 ];
 
 #[cfg(any(feature = "ocr", test))]
-static OCRS_FILES: [ModelFile; 2] = [
-    ModelFile {
+static OCRS_FILES: [AddonFile; 2] = [
+    AddonFile {
         name: "text-detection.rten",
         url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-detection.rten",
         size: 2_510_284,
         sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
     },
-    ModelFile {
+    AddonFile {
         name: "text-recognition.rten",
         url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-recognition.rten",
         size: 9_716_568,
@@ -175,7 +175,7 @@ fn ocrs_legacy_dirs() -> Vec<PathBuf> {
 }
 
 #[cfg(any(feature = "ocr", test))]
-static OCRS: ModelManifest = ModelManifest {
+static OCRS: AddonManifest = AddonManifest {
     dir_name: "ocrs",
     files: &OCRS_FILES,
     legacy_dirs: ocrs_legacy_dirs,
@@ -183,7 +183,7 @@ static OCRS: ModelManifest = ModelManifest {
 };
 
 #[cfg(any(feature = "local-ner", test))]
-static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
+static NER_MULTILINGUAL_HRL: AddonManifest = AddonManifest {
     dir_name: "distilbert-base-multilingual-cased-ner-hrl",
     files: &NER_MULTILINGUAL_HRL_FILES,
     legacy_dirs: no_legacy_dirs,
@@ -191,7 +191,7 @@ static NER_MULTILINGUAL_HRL: ModelManifest = ModelManifest {
 };
 
 #[cfg(any(feature = "local-gliner", test))]
-static GLINER_MULTI_PII: ModelManifest = ModelManifest {
+static GLINER_MULTI_PII: AddonManifest = AddonManifest {
     dir_name: "gliner_multi_pii-v1",
     files: &GLINER_MULTI_PII_FILES,
     legacy_dirs: no_legacy_dirs,

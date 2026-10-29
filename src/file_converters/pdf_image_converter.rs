@@ -1,6 +1,6 @@
+use crate::addon_store::{Addon, AddonStore};
 use crate::errors::AppError;
 use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
-use crate::model_store::{Addon, ModelStore};
 use crate::AppResult;
 use bytes::Bytes;
 use pdfium_render::prelude::*;
@@ -11,7 +11,7 @@ pub struct PdfImageConverter {
 }
 
 impl PdfImageConverter {
-    pub fn new(models: &ModelStore) -> AppResult<Self> {
+    pub fn new(addons: &AddonStore) -> AppResult<Self> {
         let executable = std::env::current_exe()?;
         let current_dir = executable
             .parent()
@@ -19,7 +19,7 @@ impl PdfImageConverter {
                 message: "No parent directory for executable".to_string(),
             })?
             .to_path_buf();
-        let installed = match models.find(Addon::Pdf) {
+        let installed = match addons.find(Addon::Pdf) {
             Ok(files) => Some(files.dir().to_path_buf()),
             Err(err) => {
                 tracing::debug!(%err, "no Pdfium from setup-addons");
@@ -99,12 +99,12 @@ impl PdfToImage for PdfImageConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_store::ModelStoreOptions;
+    use crate::addon_store::AddonStoreOptions;
 
     /// pdfium is bound to a native library that is not committed to the repo (see
     /// `lib/libpdfium.so`, gitignored). Machines without it should skip rather than fail.
     fn converter_or_skip(test_name: &str) -> Option<PdfImageConverter> {
-        match PdfImageConverter::new(&ModelStore::new(&ModelStoreOptions::default())) {
+        match PdfImageConverter::new(&AddonStore::new(&AddonStoreOptions::default())) {
             Ok(converter) => Some(converter),
             Err(error) => {
                 println!("Skipping {test_name}: pdfium is not available ({error})");
@@ -150,7 +150,7 @@ mod tests {
     /// comes before any Pdfium installed by hand.
     #[test]
     fn the_installed_pdfium_is_tried_before_any_installed_by_hand() {
-        let installed = PathBuf::from("/models/pdfium-7881");
+        let installed = PathBuf::from("/addons/pdfium-7881");
         assert_eq!(
             library_dirs(Some(installed.clone()), Path::new("/opt/redacter/bin")),
             [

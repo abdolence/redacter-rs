@@ -4,12 +4,12 @@
 //! of that crate means publishing a new models release and replacing this table together. A
 //! platform missing from the table, such as FreeBSD or a static musl build, has no download.
 
-use super::manifest::{no_legacy_dirs, ModelFile, ModelManifest};
+use super::manifest::{no_legacy_dirs, AddonFile, AddonManifest};
 
-pub(super) static PDFIUM: Option<ModelManifest> = if LIBRARY.is_empty() {
+pub(super) static PDFIUM: Option<AddonManifest> = if LIBRARY.is_empty() {
     None
 } else {
-    Some(ModelManifest {
+    Some(AddonManifest {
         dir_name: "pdfium-7881",
         files: LIBRARY,
         legacy_dirs: no_legacy_dirs,
@@ -18,7 +18,7 @@ pub(super) static PDFIUM: Option<ModelManifest> = if LIBRARY.is_empty() {
 };
 
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.so",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-x64.so",
     size: 7_645_184,
@@ -26,7 +26,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.so",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-arm64.so",
     size: 7_834_256,
@@ -34,7 +34,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.dylib",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-x64.dylib",
     size: 7_471_800,
@@ -42,7 +42,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.dylib",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-arm64.dylib",
     size: 7_732_336,
@@ -50,7 +50,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x64.dll",
     size: 7_211_520,
@@ -58,7 +58,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-arm64.dll",
     size: 6_658_048,
@@ -66,7 +66,7 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86"))]
-const LIBRARY: &[ModelFile] = &[ModelFile {
+const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
     url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x86.dll",
     size: 6_710_272,
@@ -88,4 +88,4 @@ const LIBRARY: &[ModelFile] = &[ModelFile {
         any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")
     ),
 )))]
-const LIBRARY: &[ModelFile] = &[];
+const LIBRARY: &[AddonFile] = &[];

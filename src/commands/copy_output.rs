@@ -4,8 +4,8 @@
 //! Everything here is pure: it takes what happened to a file and returns the
 //! line to print, so the layout is unit tested without running a copy.
 
+use crate::addon_store::Addon;
 use crate::args::RedacterType;
-use crate::model_store::Addon;
 use crate::redacters::RedactionConversion;
 use console::{pad_str, Alignment, Style};
 

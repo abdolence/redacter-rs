@@ -1,6 +1,6 @@
+use crate::addon_store::AddonFiles;
 use crate::common_types::TextImageCoords;
 use crate::file_converters::ocr::Ocr;
-use crate::model_store::ModelFiles;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams, OcrInput, TextChar, TextItem};
@@ -68,13 +68,13 @@ pub struct Ocrs<'a> {
 }
 
 impl<'a> Ocrs<'a> {
-    pub fn new(models: &ModelFiles, app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
+    pub fn new(files: &AddonFiles, app_reporter: &'a AppReporter<'a>) -> AppResult<Self> {
         app_reporter.report(format!(
             "Loading OCR models from {}",
-            models.dir().to_string_lossy()
+            files.dir().to_string_lossy()
         ))?;
-        let detection_model = rten::Model::load_file(models.path("text-detection.rten"))?;
-        let recognition_model = rten::Model::load_file(models.path("text-recognition.rten"))?;
+        let detection_model = rten::Model::load_file(files.path("text-detection.rten"))?;
+        let recognition_model = rten::Model::load_file(files.path("text-recognition.rten"))?;
         let ocr_engine = OcrEngine::new(OcrEngineParams {
             detection_model: Some(detection_model),
             recognition_model: Some(recognition_model),
@@ -115,7 +115,7 @@ impl Ocr for Ocrs<'_> {
 #[allow(unused_imports)]
 mod tests {
     use super::*;
-    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
+    use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
     use console::Term;
     use rten_imageproc::Rect;
 
@@ -124,7 +124,7 @@ mod tests {
     async fn test_recognise_png_file() -> AppResult<()> {
         let term = Term::stdout();
         let app_reporter = AppReporter::from(&term);
-        let files = ModelStore::new(&ModelStoreOptions::default()).find(Addon::Ocr)?;
+        let files = AddonStore::new(&AddonStoreOptions::default()).find(Addon::Ocr)?;
         let ocrs = Ocrs::new(&files, &app_reporter)?;
         let image = image::open("test-fixtures/media/form-example.png")?;
         let text_image_coords = ocrs.image_to_text(image)?;

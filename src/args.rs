@@ -1,6 +1,6 @@
+use crate::addon_store::Addon;
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
-use crate::model_store::Addon;
 #[cfg(feature = "local-gliner")]
 use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{

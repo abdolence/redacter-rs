@@ -1,5 +1,5 @@
+use crate::addon_store::{Addon, AddonStore, AddonStoreOptions, HttpFetcher, Installation};
 use crate::errors::AppError;
-use crate::model_store::{Addon, HttpFetcher, Installation, ModelStore, ModelStoreOptions};
 use crate::AppResult;
 use console::Term;
 
@@ -8,9 +8,9 @@ use console::Term;
 pub async fn command_setup_addons(
     term: &Term,
     addons: &[Addon],
-    options: &ModelStoreOptions,
+    options: &AddonStoreOptions,
 ) -> AppResult<()> {
-    let store = ModelStore::new(options);
+    let store = AddonStore::new(options);
     let fetcher = HttpFetcher::new()?;
     let mut failed = 0;
     for &addon in addons {
