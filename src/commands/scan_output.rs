@@ -5,7 +5,7 @@
 //! Everything here is pure: it takes what the scan found and returns what to write, so the
 //! layout is unit tested without running a scan.
 
-use crate::args::RedacterType;
+use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
     format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout, RowOutcome,
     SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
@@ -299,13 +299,17 @@ impl ScanCommandResult {
     }
 
     /// The process exit code: 1 when a file that should have been scanned was not, because it
-    /// failed or because the run lacks a converter it needs; 2 when something was found,
-    /// or with `fail_on_unlocated` when a file is unconfirmed, unless `no_fail`; 0 otherwise.
-    pub fn exit_code(&self, no_fail: bool, fail_on_unlocated: bool) -> i32 {
-        let found = self.findings > 0 || (fail_on_unlocated && self.files_unconfirmed > 0);
+    /// failed or because the run lacks a converter it needs; 2 when `fail_on` counts what was
+    /// found; 0 otherwise.
+    pub fn exit_code(&self, fail_on: FailOn) -> i32 {
+        let fails = match fail_on {
+            FailOn::Never => false,
+            FailOn::Findings => self.findings > 0,
+            FailOn::FindingsOrUnconfirmed => self.findings > 0 || self.files_unconfirmed > 0,
+        };
         if self.files_failed > 0 || self.files_blocked > 0 {
             1
-        } else if found && !no_fail {
+        } else if fails {
             2
         } else {
             0
@@ -770,6 +774,31 @@ mod tests {
     }
 
     #[test]
+    fn the_json_report_counts_a_file_with_only_unlocated_values_as_unconfirmed() {
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("reformatted.txt", mime::TEXT_PLAIN),
+            Vec::new(),
+            2,
+        ));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+
+        assert_eq!(
+            [
+                &json["files_scanned"],
+                &json["files_with_findings"],
+                &json["files_unconfirmed"],
+                &json["findings"],
+            ],
+            [1, 0, 1, 0]
+        );
+        assert_eq!(json["files"][0]["unlocated_values"], 2);
+        assert_eq!(json["files"][0]["findings"], serde_json::json!([]));
+    }
+
+    #[test]
     fn the_text_report_lists_each_file_with_its_findings_under_it() {
         let long_path = format!("{}/notes.txt", "nested".repeat(20));
         let mut result = sample_result();
@@ -978,28 +1007,28 @@ mod tests {
                 NotRedactedReason::OcrUnavailable,
             )
         };
-        // Exit codes by default, with `no_fail`, with `fail_on_unlocated`, and with both.
+        // Exit codes for each `FailOn`: findings, never, findings or unconfirmed.
         for (files, expected) in [
-            (vec![], [0, 0, 0, 0]),
-            (vec![found()], [2, 0, 2, 0]),
-            (vec![unconfirmed()], [0, 0, 2, 0]),
-            (vec![found(), unconfirmed()], [2, 0, 2, 0]),
+            (vec![], [0, 0, 0]),
+            (vec![found()], [2, 0, 2]),
+            (vec![unconfirmed()], [0, 0, 2]),
+            (vec![found(), unconfirmed()], [2, 0, 2]),
             (
                 vec![
                     found(),
                     ScanFileReport::failed(&note, "unavailable".to_string()),
                 ],
-                [1, 1, 1, 1],
+                [1, 1, 1],
             ),
-            (vec![found(), blocked()], [1, 1, 1, 1]),
-            (vec![unconfirmed(), blocked()], [1, 1, 1, 1]),
+            (vec![found(), blocked()], [1, 1, 1]),
+            (vec![unconfirmed(), blocked()], [1, 1, 1]),
             (
                 vec![not_read(
                     "blob.bin",
                     mime::APPLICATION_OCTET_STREAM,
                     NotRedactedReason::TypeNotSupported,
                 )],
-                [0, 0, 0, 0],
+                [0, 0, 0],
             ),
             (
                 vec![not_read(
@@ -1007,15 +1036,19 @@ mod tests {
                     mime::IMAGE_SVG,
                     NotRedactedReason::OcrImageFormatNotSupported,
                 )],
-                [0, 0, 0, 0],
+                [0, 0, 0],
             ),
         ] {
             let mut result = ScanCommandResult::default();
             for file in files {
                 result.push(file);
             }
-            let exit_codes = [(false, false), (true, false), (false, true), (true, true)]
-                .map(|(no_fail, fail_on_unlocated)| result.exit_code(no_fail, fail_on_unlocated));
+            let exit_codes = [
+                FailOn::Findings,
+                FailOn::Never,
+                FailOn::FindingsOrUnconfirmed,
+            ]
+            .map(|fail_on| result.exit_code(fail_on));
             assert_eq!(exit_codes, expected, "{result:?}");
         }
     }

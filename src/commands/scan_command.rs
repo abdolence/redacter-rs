@@ -319,6 +319,7 @@ async fn detect_in_file(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::args::FailOn;
     use crate::redacters::{
         LocalRulesRedacterOptions, RedacterBaseOptions, RedacterProviderOptions, RuleGroup,
     };
@@ -389,6 +390,6 @@ mod tests {
             (result.files_scanned, result.files_failed, result.findings),
             (1, 1, 1)
         );
-        assert_eq!(result.exit_code(false, false), 1);
+        assert_eq!(result.exit_code(FailOn::Findings), 1);
     }
 }

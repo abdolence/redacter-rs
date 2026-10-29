@@ -976,15 +976,15 @@ reported when its score reaches them (0.5 by default).
 
 ### Exit codes
 
-- `0`: nothing was found, or `--no-fail` is set;
-- `2`: at least one finding was reported, or with `--fail-on-unlocated` at least one file is unconfirmed;
+- `0`: nothing was found, or `--no-fail` is set, which also wins over `--fail-on-unconfirmed`;
+- `2`: at least one finding was reported, or with `--fail-on-unconfirmed` at least one file is unconfirmed;
 - `1`: an error. A file that could not be read or scanned is reported with the status `failed`, and a file that needs a
   converter the run lacks, such as OCR or PDF rendering, with the status `blocked`. The other files are still scanned,
   and the command exits with 1 even if there are findings, since the scan is incomplete. An invalid command line exits
-  with 1 as well, for every command, so that 2 always means findings.
+  with 1 as well, for every command, so that 2 is never a usage error.
 
 Skipped and unsupported files do not change the exit code. An unconfirmed file does not either, unless
-`--fail-on-unlocated` is set, as a model may name a value that is not in the file and that should not fail a pipeline.
+`--fail-on-unconfirmed` is set, as a model may name a value that is not in the file and that should not fail a pipeline.
 `--no-fail` does not change an error exit code.
 
 A gate in a CI pipeline is the command itself, as the job fails on a non-zero exit code:
