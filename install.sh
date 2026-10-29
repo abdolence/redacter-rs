@@ -17,8 +17,6 @@ REPO="abdolence/redacter-rs"
 API_URL="https://api.github.com/repos/$REPO/releases"
 DOWNLOAD_URL="https://github.com/$REPO/releases/download"
 
-SUPPORTED_PLATFORMS="macOS (arm64, x86_64), Linux (x86_64, aarch64, armv6l, armv7l), FreeBSD (x86_64)"
-
 TMP_DIR=""
 
 die() {
@@ -32,48 +30,49 @@ cleanup() {
     fi
 }
 
-# Prints the release archive name for the given `uname -s` and `uname -m`
-# values and fails for a combination that has no release archive.
 asset_for() {
-    case "$1" in
-        Darwin) os="Darwin" ;;
-        Linux) os="Linux" ;;
-        FreeBSD) os="FreeBSD" ;;
-        *) return 1 ;;
-    esac
-
-    case "$2" in
-        x86_64 | amd64) arch="x86_64" ;;
-        aarch64 | arm64) arch="aarch64" ;;
-        armv6l | armv7l) arch="arm-musl" ;;
-        *) return 1 ;;
-    esac
-
-    case "$os-$arch" in
-        Darwin-x86_64 | Darwin-aarch64 | FreeBSD-x86_64 | Linux-x86_64 | Linux-aarch64 | Linux-arm-musl)
-            printf 'redacter-%s-%s.tar.gz\n' "$os" "$arch"
-            ;;
+    case "$1-$2" in
+        Darwin-arm64) printf 'redacter-Darwin-aarch64.tar.gz\n' ;;
+        Darwin-x86_64) printf 'redacter-Darwin-x86_64.tar.gz\n' ;;
+        Linux-x86_64 | Linux-amd64) printf 'redacter-Linux-x86_64.tar.gz\n' ;;
+        Linux-aarch64 | Linux-arm64) printf 'redacter-Linux-aarch64.tar.gz\n' ;;
+        Linux-armv6l | Linux-armv7l) printf 'redacter-Linux-arm-musl.tar.gz\n' ;;
+        FreeBSD-amd64 | FreeBSD-x86_64) printf 'redacter-FreeBSD-x86_64.tar.gz\n' ;;
         *) return 1 ;;
     esac
 }
 
 # Prints the machine name to pick the archive by. A shell started under Rosetta
 # on Apple silicon reports x86_64, and the native build is the better choice there.
+# A 32-bit userland on a 64-bit ARM kernel reports aarch64 and can only run the
+# 32-bit static build.
 detect_machine() {
     machine=$(uname -m)
-    if [ "$(uname -s)" = "Darwin" ] && [ "$machine" = "x86_64" ] &&
-        [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
-        machine="arm64"
-    fi
+    case "$(uname -s)-$machine" in
+        Darwin-x86_64)
+            if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+                machine="arm64"
+            fi
+            ;;
+        Linux-aarch64 | Linux-arm64)
+            if [ "$(getconf LONG_BIT 2>/dev/null || true)" = "32" ]; then
+                machine="armv7l"
+            fi
+            ;;
+    esac
     printf '%s\n' "$machine"
 }
 
-# download URL [FILE]: writes to FILE, or to standard output when FILE is omitted.
+# The glibc archives cannot run on musl systems such as Alpine.
+is_musl() {
+    ldd --version 2>&1 | grep -qi musl
+}
+
 download() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1" -o "${2:--}"
+        curl -fsSL "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "${2:--}" "$1"
+        wget -q -O "$2" "$1"
     else
         die "neither curl nor wget is installed"
     fi
@@ -86,15 +85,18 @@ release_tag() {
 }
 
 # asset_digest ASSET: the SHA-256 GitHub records for ASSET, read from the release JSON on
-# standard input. The text is cut at the next "name" key, so an asset whose digest is
-# null never picks up the digest of the asset after it.
+# standard input. The assets are split into one line per object, so the name and the
+# digest are matched within the same asset whatever order the keys come in, and an
+# asset whose digest is null never picks up the digest of its neighbour.
 asset_digest() {
     tr -d '\n' |
-        sed -n "s/.*\"name\": *\"$1\"//p" |
-        sed 's/"name".*//' |
-        grep -o '"digest": *"sha256:[0-9a-f]\{64\}"' |
+        sed 's/}, *{/\
+/g' |
+        grep "\"name\": *\"$1\"" |
+        grep -o '"digest": *"sha256:[0-9a-fA-F]\{64\}"' |
         head -n 1 |
-        sed 's/.*sha256:\([0-9a-f]*\)".*/\1/'
+        sed 's/.*sha256:\([0-9a-fA-F]*\)".*/\1/' |
+        tr 'A-F' 'a-f'
 }
 
 sha256_of() {
@@ -120,9 +122,18 @@ verify_sha256() {
 main() {
     umask 022
 
-    asset=$(asset_for "$(uname -s)" "$(detect_machine)") ||
-        die "unsupported platform $(uname -s) $(uname -m). Supported: $SUPPORTED_PLATFORMS.
-On Windows use install.ps1; other platforms can build from source with 'cargo install redacter'"
+    os=$(uname -s)
+    machine=$(detect_machine)
+    asset=$(asset_for "$os" "$machine") ||
+        die "unsupported platform $os $machine. Supported: macOS (arm64, x86_64), Linux (x86_64, aarch64, armv6l, armv7l), FreeBSD (x86_64).
+On Windows use install.ps1. Other platforms: build from source with 'cargo install redacter', or look for an archive at https://github.com/$REPO/releases"
+    case "$asset" in
+        redacter-Linux-x86_64.tar.gz | redacter-Linux-aarch64.tar.gz)
+            if is_musl; then
+                die "this system uses musl libc and the $os $machine archives need glibc. Build from source with 'cargo install redacter'"
+            fi
+            ;;
+    esac
 
     install_dir="${REDACTER_INSTALL_DIR:-}"
     if [ -z "$install_dir" ]; then
@@ -134,8 +145,7 @@ On Windows use install.ps1; other platforms can build from source with 'cargo in
     version="${REDACTER_VERSION:-}"
     case "$version" in
         "") release_url="$API_URL/latest" ;;
-        *[!A-Za-z0-9._+-]*) die "invalid REDACTER_VERSION '$version'" ;;
-        [0-9]*) release_url="$API_URL/tags/v$version" ;;
+        *[!A-Za-z0-9._+-]* | [!v]* | v | v[!0-9]*) die "REDACTER_VERSION must be a release tag such as v0.21.0, got '$version'" ;;
         *) release_url="$API_URL/tags/$version" ;;
     esac
 
@@ -166,19 +176,20 @@ On Windows use install.ps1; other platforms can build from source with 'cargo in
     [ -f "$TMP_DIR/extract/redacter" ] || die "$asset does not contain a redacter binary"
 
     mkdir -p "$install_dir"
-    # Replacing through a rename lets an upgrade succeed while the old binary is running.
+    # The new binary is staged beside the old one and run before it replaces it, so a binary
+    # that cannot run here leaves an existing installation alone. Replacing through a rename
+    # also lets an upgrade succeed while the old binary is running.
     target="$install_dir/redacter"
     cp "$TMP_DIR/extract/redacter" "$target.new"
     chmod 755 "$target.new"
+    if ! banner=$("$target.new" --help 2>&1); then
+        rm -f "$target.new"
+        die "$asset does not run on this system: $banner
+Nothing was installed. Build from source with 'cargo install redacter'"
+    fi
     mv -f "$target.new" "$target"
 
-    if [ "$(uname -s)" = "Darwin" ] && xattr -p com.apple.quarantine "$target" >/dev/null 2>&1; then
-        xattr -d com.apple.quarantine "$target"
-    fi
-
-    printf 'Installed %s\n' "$target"
-    installed_version=$("$target" --version 2>/dev/null | head -n 1 || true)
-    printf 'Version: %s\n' "${installed_version:-$tag}"
+    printf 'Installed %s: %s\n' "$target" "$(printf '%s\n' "$banner" | head -n 1)"
 
     case ":${PATH:-}:" in
         *":$install_dir:"*) ;;
