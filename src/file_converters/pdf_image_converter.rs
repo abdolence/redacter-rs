@@ -15,7 +15,9 @@ impl PdfImageConverter {
     /// copy that is there but does not match its pin is an error and never falls back to
     /// another library. Without an installed copy, a Pdfium installed by hand is used: the
     /// `lib` directory beside the tool's own, the tool's own directory, then the system
-    /// library directories of the platform. The current directory is never searched.
+    /// library directories of the platform. The current directory is never searched by the
+    /// tool itself; on Linux and other Unix systems the system loader follows
+    /// `LD_LIBRARY_PATH`, where an empty entry means the current directory.
     pub fn new(addons: &AddonStore) -> AppResult<Self> {
         let bindings = match addons.find(Addon::Pdf) {
             Ok(files) => {
@@ -62,18 +64,19 @@ const SYSTEM_LIBRARY_DIRS: [&str; 3] = ["/opt/homebrew/lib", "/usr/local/lib", "
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_LIBRARY_DIRS: [&str; 0] = [];
 
-/// The Linux loader takes the library by its bare name from the system directories and
-/// `LD_LIBRARY_PATH`, in which an empty entry means the current directory.
-#[cfg(target_os = "linux")]
+/// On Linux and other Unix systems (not macOS), the loader takes the library by its bare name
+/// from the system directories and `LD_LIBRARY_PATH`, in which an empty entry means the current
+/// directory.
+#[cfg(all(unix, not(target_vendor = "apple")))]
 fn bind_by_system_loader() -> AppResult<Box<dyn PdfiumLibraryBindings>> {
     Ok(Pdfium::bind_to_system_library()?)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(unix, not(target_vendor = "apple"))))]
 fn bind_by_system_loader() -> AppResult<Box<dyn PdfiumLibraryBindings>> {
     Err(AppError::SystemError {
-        message: "No Pdfium library found beside the executable or in the system library \
-                  directories"
+        message: "No Pdfium library found in the addons directory, the tool's directory or \
+                  `../lib` beside it"
             .to_string(),
     })
 }

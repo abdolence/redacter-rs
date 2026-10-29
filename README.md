@@ -690,8 +690,8 @@ Chromium project). `redacter addons install pdf` installs the build the tool is 
 Without the addon the tool looks for a Pdfium installed by hand. It tries the `lib` directory beside the directory
 of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`) and the directory of the tool itself, then:
 
-- on Linux, the system loader, which finds `libpdfium.so` in the system library directories and in
-  `LD_LIBRARY_PATH`; an empty entry in `LD_LIBRARY_PATH` means the current directory;
+- on Linux and other Unix systems (not macOS), the system loader, which finds `libpdfium.so` in the system
+  library directories and in `LD_LIBRARY_PATH`; an empty entry in `LD_LIBRARY_PATH` means the current directory;
 - on macOS, `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`;
 - on Windows, nothing else.
 
@@ -729,7 +729,8 @@ redacter addons ls
 ```
 
 `redacter addons ls` only looks: it prints one line per addon of this build with its state (`installed`,
-`not installed`, `damaged` or `not available for this platform`), its size and where it was found. It downloads
+`not installed`, `damaged`, `not available for this platform` or `unreadable`, which means the addon's files
+could not be read), its size and where it was found. It downloads
 nothing. For `pdf` it checks the addons directory only, so a Pdfium installed by hand, which `cp` uses, is listed
 as `not installed`.
 
@@ -756,10 +757,13 @@ and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
   `addons install`, `addons ls` and `cp` alike;
 - downloads honour the `HTTPS_PROXY` environment variable.
 
+An interrupted install can leave `*.part` files in the addon's directory; they are safe to delete while no install is running.
+
 For air-gapped machines, download the files listed above on another computer and copy them into the addon's
 directory under the names in the table, for example `~/.cache/redacter/addons/ocrs/text-detection.rten`. This works
 for Pdfium too, which is checked against its digest. For the models the tool also looks in
-`addons/<addon directory>/` next to its own executable (`models/<addon directory>/` in earlier versions), and the OCR models are still found in `~/.cache/ocrs` and
+`addons/<addon directory>/` next to its own executable. Breaking change: earlier versions used `models/<addon directory>/`;
+move it to `addons/` or run `redacter addons install` again. The OCR models are still found in `~/.cache/ocrs` and
 `../share/ocrs` as in earlier versions; these copies are used as they are, checked against nothing.
 
 `--download-models` and its download prompt are removed: install the addons with `addons install` instead.
