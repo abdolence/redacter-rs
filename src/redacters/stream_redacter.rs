@@ -597,16 +597,17 @@ impl<'a> StreamRedacter<'a> {
                     futures::stream::iter(head.into_iter().map(Ok)).chain(input),
                 )));
             }
-            let rest = input.try_collect::<Vec<_>>().await?;
-            let data = [head, rest].concat().concat();
-            let not_text = |data: Vec<u8>| -> ContentStream {
-                Box::new(futures::stream::iter(vec![Ok(bytes::Bytes::from(data))]))
+            head.extend(input.try_collect::<Vec<_>>().await?);
+            let bytes = match String::from_utf8(head.concat()) {
+                Ok(text) if !text.contains('\0') => {
+                    return Ok(Ok(self.text_redact_item(text, file_ref)));
+                }
+                Ok(text) => text.into_bytes(),
+                Err(error) => error.into_bytes(),
             };
-            return Ok(match String::from_utf8(data) {
-                Ok(text) if !text.contains('\0') => Ok(self.text_redact_item(text, file_ref)),
-                Ok(text) => Err(not_text(text.into_bytes())),
-                Err(error) => Err(not_text(error.into_bytes())),
-            });
+            return Ok(Err(Box::new(futures::stream::iter(vec![Ok(
+                bytes::Bytes::from(bytes),
+            )]))));
         }
         let item = match file_ref.media_type {
             Some(ref mime)
@@ -1749,6 +1750,18 @@ mod tests {
         futures::stream::iter(vec![Ok(bytes::Bytes::copy_from_slice(data))])
     }
 
+    /// The bytes in chunks of the size the probe for a NUL byte reads, as a file arrives from a
+    /// bucket or a disk.
+    fn in_probe_chunks(
+        data: &[u8],
+    ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
+        futures::stream::iter(
+            data.chunks(NOT_TEXT_PROBE_SIZE)
+                .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
     /// A file without an extension, which no redacter supports by its type.
     fn env_file() -> FileSystemRef {
         FileSystemRef {
@@ -1758,8 +1771,17 @@ mod tests {
         }
     }
 
-    /// Valid UTF-8 with a NUL byte, and bytes that are not UTF-8.
-    const NOT_TEXT: [&[u8]; 2] = [b"ADMIN_EMAIL=a@b.io\0", &[0xff, 0xfe, b'a', b'@']];
+    /// Valid UTF-8 with a NUL byte, bytes that are not UTF-8, and valid UTF-8 whose first NUL
+    /// byte comes after the probe has read its fill.
+    fn not_text_files() -> Vec<Vec<u8>> {
+        let mut nul_after_the_probe = b"ADMIN_EMAIL=a@b.io\n".repeat(NOT_TEXT_PROBE_SIZE / 16);
+        nul_after_the_probe.push(0);
+        vec![
+            b"ADMIN_EMAIL=a@b.io\0".to_vec(),
+            vec![0xff, 0xfe, b'a', b'@'],
+            nul_after_the_probe,
+        ]
+    }
 
     #[tokio::test]
     async fn an_unsupported_file_is_scanned_as_text_only_when_asked_and_when_it_is_text() {
@@ -1796,14 +1818,44 @@ mod tests {
                 "a@b.io"
             )]
         );
-        for data in NOT_TEXT {
+        for data in not_text_files() {
             let result = stream_redacter
-                .detect_stream(one_chunk(data), &plan, &env_file())
+                .detect_stream(in_probe_chunks(&data), &plan, &env_file())
                 .await
                 .unwrap();
             assert_eq!(result.blocked, Some(RedactionBlocked::NotText), "{data:?}");
             assert!(result.detections.is_empty(), "{data:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_text_file_longer_than_the_probe_is_scanned_whole() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_detect_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let mut text = "# padding\n".repeat(NOT_TEXT_PROBE_SIZE / 4);
+        text.push_str("ADMIN_EMAIL=a@b.io\n");
+
+        let result = stream_redacter
+            .detect_stream(in_probe_chunks(text.as_bytes()), &plan, &env_file())
+            .await
+            .unwrap();
+
+        assert_eq!(result.blocked, None);
+        assert_eq!(
+            result
+                .detections
+                .iter()
+                .map(|(_, detection)| detection.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a@b.io"]
+        );
     }
 
     #[tokio::test]
@@ -1825,13 +1877,13 @@ mod tests {
         let output: Vec<bytes::Bytes> = redacted.stream.try_collect().await.unwrap();
         assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
 
-        for data in NOT_TEXT {
+        for data in not_text_files() {
             let plan = stream_redacter
                 .create_redact_plan(&redacters, &env_file())
                 .await
                 .unwrap();
             let result = stream_redacter
-                .redact_stream(one_chunk(data), plan, &env_file())
+                .redact_stream(in_probe_chunks(&data), plan, &env_file())
                 .await
                 .unwrap();
             assert_eq!(result.number_of_redactions, 0, "{data:?}");
