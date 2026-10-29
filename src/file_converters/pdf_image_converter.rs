@@ -45,9 +45,28 @@ impl PdfImageConverter {
             .find_map(|dir| {
                 Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir)).ok()
             })
-            .map_or_else(Pdfium::bind_to_system_library, Ok)?;
+            .map_or_else(bind_to_system_library, Ok)?;
         Ok(bindings)
     }
+}
+
+/// The libraries the platform's loader finds by name.
+#[cfg(not(target_os = "macos"))]
+fn bind_to_system_library() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
+    Pdfium::bind_to_system_library()
+}
+
+/// On macOS the loader resolves a bare library name against the current directory too, so a
+/// library planted next to the files being redacted would be loaded. The directories of its
+/// default library search path are tried by full path instead.
+#[cfg(target_os = "macos")]
+fn bind_to_system_library() -> Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
+    const SYSTEM_LIBRARY_DIRS: [&str; 3] = ["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"];
+    let bind =
+        |dir: &str| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir));
+    let [first, rest @ ..] = SYSTEM_LIBRARY_DIRS;
+    rest.iter()
+        .fold(bind(first), |bound, dir| bound.or_else(|_| bind(dir)))
 }
 
 impl PdfToImage for PdfImageConverter {

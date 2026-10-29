@@ -86,7 +86,7 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
             .location()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        term.write_line(&format!(
+        let row = format!(
             "- {} {} {} {}",
             highlighted.apply_to(pad_str(
                 &addon.to_string(),
@@ -97,7 +97,8 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
             pad_str(&status.to_string(), STATE_WIDTH, Alignment::Left, None),
             pad_str(&size, SIZE_WIDTH, Alignment::Left, None),
             location,
-        ))?;
+        );
+        term.write_line(row.trim_end())?;
     }
     Ok(())
 }

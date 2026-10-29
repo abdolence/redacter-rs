@@ -689,7 +689,8 @@ Chromium project). `redacter addons install pdf` installs the build the tool is 
 
 Without the addon the tool looks for a Pdfium installed by hand, in this order: the `lib` directory beside the
 directory of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`), the directory of the tool itself,
-then the system library path. The current directory is not searched.
+then the system library path (on macOS `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`). The current
+directory is not searched.
 
 Manual installation:
 
