@@ -77,16 +77,31 @@ use crate::common_types::{DlpRequestLimit, TextImageCoords};
 pub const LLM_MAX_IMAGE_DIMENSION: u32 = 1024;
 
 /// Formats a Bedrock SDK failure, keeping the service error code and message when the call
-/// reached the service and the whole source chain when it did not.
-pub(crate) fn bedrock_error<E, R>(context: &str, err: &SdkError<E, R>) -> AppError
+/// reached the service. Without a code the message names only the kind of failure and the
+/// HTTP status: the source chain of a response error can carry the response, which echoes the
+/// scanned content, and the message reaches reports. The chain goes to the debug log.
+pub(crate) fn bedrock_error<E>(context: &str, err: &SdkError<E>) -> AppError
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
-    R: std::fmt::Debug,
 {
     let message = match (err.code(), err.message()) {
         (Some(code), Some(message)) => format!("{context}: {code}: {message}"),
         (Some(code), None) => format!("{context}: {code}"),
-        (None, _) => format!("{context}: {}", DisplayErrorContext(err)),
+        (None, _) => {
+            tracing::debug!(error = %DisplayErrorContext(err), "Bedrock call failed");
+            let kind = match err {
+                SdkError::ConstructionFailure(_) => "the request could not be built",
+                SdkError::TimeoutError(_) => "the request timed out",
+                SdkError::DispatchFailure(_) => "the request could not be sent",
+                SdkError::ResponseError(_) => "the response could not be read",
+                SdkError::ServiceError(_) => "the service returned an error",
+                _ => "the call failed",
+            };
+            match err.raw_response() {
+                Some(response) => format!("{context}: {kind} (HTTP {})", response.status()),
+                None => format!("{context}: {kind}"),
+            }
+        }
     };
     AppError::AwsBedrockError { message }
 }
@@ -1045,6 +1060,21 @@ mod tests {
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {
         AppReporter::from(term)
+    }
+
+    #[test]
+    fn a_bedrock_failure_without_a_service_code_keeps_its_source_chain_out_of_the_message() {
+        use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+
+        let failure = SdkError::<ConverseError>::construction_failure("body: patient Jane Doe");
+
+        let AppError::AwsBedrockError { message } = bedrock_error("Failed to converse", &failure)
+        else {
+            panic!("a Bedrock failure is an AwsBedrockError");
+        };
+
+        assert!(message.starts_with("Failed to converse"), "{message}");
+        assert!(!message.contains("Jane Doe"), "{message}");
     }
 
     #[tokio::test]
