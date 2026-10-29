@@ -915,46 +915,7 @@ To have every redacter read a file its own way, run `scan` once for each redacte
 redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
 ```
 
-```
-Redacter v0.20.0 (https://github.com/abdolence/redacter-rs)
-Scanning test-fixtures/documents.
-Redacters: local-rules, local-ner · PDF rendering: no (redacter setup-addons pdf) · OCR: yes · Sampling: off
-
-Found 3 files. Total size: 1.85 KiB
-✓ clean   ! findings   ↷ skipped   ✗ error
-! customers.csv                                          text/csv                 290 B      13 findings
-    1:2  per                  local-ner    1.00  J****************h
-    1:3  email                local-rules        j********************m
-    1:4  phone-international  local-rules        +***************7
-    1:5  loc                  local-ner    1.00  L****n
-    2:2  per                  local-ner    1.00  M****************z
-    2:3  email                local-rules        m**********************g
-    2:4  phone-international  local-rules        +*************8
-    2:5  loc                  local-ner    1.00  M****d
-    3:2  per                  local-ner    1.00  A**********a
-    3:3  email                local-rules        a**********************t
-    3:4  phone-international  local-rules        +**************8
-    3:5  loc                  local-ner    1.00  O***a
-    3:6  passport             local-rules        X******7
-✗ customer-form.pdf                                      application/pdf          1.19 KiB   pdf renderer unavailable
-! customer-note.txt                                      text/plain               386 B      12 findings
-    3:11   per                  local-ner    1.00  J****************h
-    4:8    email                local-rules        j********************m
-    5:8    phone-international  local-rules        +***************7
-    6:16   birth-date           local-rules        1***********5
-    7:10   loc                  local-ner    0.59  ****
-    7:15   loc                  local-ner    0.96  B**********t
-    7:29   loc                  local-ner    1.00  L****n
-    7:36   uk-postcode          local-rules        N*****E
-    9:1    per                  local-ner    0.99  ****
-    10:14  phone-international  local-rules        +***************7
-    10:57  email                local-rules        j********************m
-    11:34  payment-card         local-rules        4*****************1
-
-9 files: 2 with findings, 0 clean, 6 skipped, 0 unsupported, 1 blocked. 25 findings: birth-date 1, email 5, loc 6, passport 1, payment-card 1, per 5, phone-international 5, uk-postcode 1. Total size: 1.85 KiB
-```
-
-Each file has a row, as in `cp`: the status, the path, the media type, the size and a detail. `!` is a file with
+The terminal output has the layout of `cp`. Each file has a row with the status, the path, the media type, the size and a detail. `!` is a file with
 findings, `✓` a clean file, `↷` a file that was skipped or that no selected redacter reads, and `✗` a file that
 failed or is blocked. The detail of a file that was not scanned says why, such as `pdf renderer unavailable` or
 `type not supported`.
@@ -1039,58 +1000,14 @@ code: `::de` in a Rust path is a valid IPv6 address, and a Unix timestamp has th
 `--report-file <FILE>` writes the report to a file in JSON by default. The terminal always shows the usual output,
 whatever the report options are; there is no mode that prints the JSON to stdout.
 
-```json
-{
-  "files_scanned": 1,
-  "files_with_findings": 1,
-  "files_skipped": 0,
-  "files_unsupported": 0,
-  "files_blocked": 0,
-  "files_failed": 0,
-  "findings": 2,
-  "findings_by_label": {
-    "email": 1,
-    "payment-card": 1
-  },
-  "files": [
-    {
-      "path": "notes.txt",
-      "mime_type": "text/plain",
-      "status": "scanned",
-      "reason": null,
-      "unlocated_values": 0,
-      "findings": [
-        {
-          "redacter": "local-rules",
-          "label": "email",
-          "score": null,
-          "location": {
-            "kind": "text",
-            "start": 9,
-            "end": 29,
-            "line": 1,
-            "column": 10
-          },
-          "value": "j******************m"
-        },
-        {
-          "redacter": "local-rules",
-          "label": "payment-card",
-          "score": null,
-          "location": {
-            "kind": "text",
-            "start": 36,
-            "end": 55,
-            "line": 2,
-            "column": 7
-          },
-          "value": "4*****************1"
-        }
-      ]
-    }
-  ]
-}
-```
+The report is one JSON object with the counters of the run and an entry for each file:
+
+- `files_scanned`, `files_with_findings`, `files_skipped`, `files_unsupported`, `files_blocked` and `files_failed`:
+  the number of files in each state;
+- `findings`: the number of findings, and `findings_by_label`: the same count for each label;
+- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
+
+A finding has the fields `redacter`, `label`, `score`, `location` and `value`.
 
 `files_scanned` counts the files the redacters read, and these count the files they did not:
 
