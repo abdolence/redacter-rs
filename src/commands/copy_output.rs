@@ -7,6 +7,7 @@
 
 use crate::addon_store::Addon;
 use crate::args::RedacterType;
+use crate::file_converters::FileConverters;
 use crate::redacters::{RedactionBlocked, RedactionConversion};
 use console::{pad_str, Alignment, Style};
 
@@ -160,6 +161,36 @@ pub struct Capabilities {
     pub pdf_rendering: Capability,
     pub ocr: Capability,
     pub sampling_size: Option<usize>,
+}
+
+impl Capabilities {
+    /// The capabilities of a run with `redacters`, the converters this build bound, and
+    /// `--sampling-size`. A converter that is off names the addon that turns it on, in a build
+    /// that has the converter.
+    pub fn new(
+        redacters: Vec<RedacterType>,
+        file_converters: &FileConverters<'_>,
+        sampling_size: Option<usize>,
+    ) -> Self {
+        Self {
+            redacters,
+            pdf_rendering: match file_converters.pdf_image_converter {
+                Some(_) => Capability::Yes,
+                #[cfg(feature = "pdf-render")]
+                None => Capability::No(Addon::Pdf.manifest().map(|_| Addon::Pdf)),
+                #[cfg(not(feature = "pdf-render"))]
+                None => Capability::No(None),
+            },
+            ocr: match file_converters.ocr {
+                Some(_) => Capability::Yes,
+                #[cfg(feature = "ocr")]
+                None => Capability::No(Some(Addon::Ocr)),
+                #[cfg(not(feature = "ocr"))]
+                None => Capability::No(None),
+            },
+            sampling_size,
+        }
+    }
 }
 
 /// A converter on the capabilities line.

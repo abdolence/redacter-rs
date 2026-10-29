@@ -1650,9 +1650,9 @@ mod tests {
         use crate::model_store::{ModelStore, ModelStoreOptions};
         use crate::redacters::test_support::pdfium_test_lock;
         let _guard = pdfium_test_lock().lock().await;
-        let store = ModelStore::new(&ModelStoreOptions::default(), reporter());
+        let store = ModelStore::new(&ModelStoreOptions::default());
         let converters = FileConverters::new()
-            .init(reporter(), &store, true)
+            .init(reporter(), &store)
             .await
             .unwrap();
         assert!(

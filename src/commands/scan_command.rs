@@ -1,7 +1,7 @@
 //! The `scan` command: runs the selected redacters in detect-only mode over every file of a
 //! source and reports what they found and where. The source is only read.
 
-use crate::commands::copy_command::{plan_blocked_reason, run_needs_ocr, single_source_needs_ocr};
+use crate::commands::copy_command::plan_blocked_reason;
 use crate::commands::copy_output::{
     format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
     SkipReason,
@@ -78,11 +78,11 @@ pub async fn command_scan(
     redacter_options: RedacterOptions,
 ) -> AppResult<ScanCommandResult> {
     let term_reporter = AppReporter::from(term);
-    let models = ModelStore::new(&options.model_store, &term_reporter);
+    let models = ModelStore::new(&options.model_store);
     let styles = OutputStyles::new();
 
-    // Hidden until every model is resolved, so a consent prompt or a download bar never
-    // lands under a live progress bar.
+    // Hidden until the converters have been bound: they report straight to the terminal, and
+    // those lines must not land under a live progress bar.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -103,41 +103,25 @@ pub async fn command_scan(
     } else {
         None
     };
-    let needs_ocr = match &source_listing {
-        Some(listing) => run_needs_ocr(true, &listing.files, &options.file_mime_override),
-        None => single_source_needs_ocr(
-            true,
-            source_fs.resolve(None).file_path.as_str(),
-            &options.file_mime_override,
-        ),
-    };
-    let file_converters = FileConverters::new()
-        .init(&term_reporter, &models, needs_ocr)
-        .await?;
+    let file_converters = FileConverters::new().init(&term_reporter, &models).await?;
 
     term.write_line(&format!(
         "Scanning {}.",
         styles.highlighted.apply_to(source)
     ))?;
     term.write_line(&format_capabilities_line(
-        &Capabilities {
-            redacters: redacter_options
+        &Capabilities::new(
+            redacter_options
                 .provider_options
                 .iter()
                 .map(|provider| provider.redacter_type())
                 .collect(),
-            pdf_rendering: file_converters.pdf_image_converter.is_some(),
-            ocr: file_converters.ocr.is_some(),
-            sampling_size: redacter_options.base_options.sampling_size,
-        },
+            &file_converters,
+            redacter_options.base_options.sampling_size,
+        ),
         &styles,
     ))?;
     term.write_line("")?;
-    for provider in &redacter_options.provider_options {
-        for id in provider.required_models() {
-            models.resolve(id).await?;
-        }
-    }
 
     bar.set_draw_target(ProgressDrawTarget::stderr());
     bar.enable_steady_tick(Duration::from_millis(100));

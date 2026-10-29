@@ -1,10 +1,7 @@
-#[cfg(any(feature = "pdf-render", feature = "ocr"))]
-use crate::addon_store::Addon;
 use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_output::{
     format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
-    Capability, CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason,
-    COPY_LEGEND,
+    CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, SkipReason, COPY_LEGEND,
 };
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -276,8 +273,8 @@ fn report_copy_info(
     file_converters: &FileConverters<'_>,
     styles: &OutputStyles,
 ) -> AppResult<()> {
-    let capabilities = Capabilities {
-        redacters: redacter_options
+    let capabilities = Capabilities::new(
+        redacter_options
             .as_ref()
             .map(|options| {
                 options
@@ -287,24 +284,11 @@ fn report_copy_info(
                     .collect()
             })
             .unwrap_or_default(),
-        pdf_rendering: match file_converters.pdf_image_converter {
-            Some(_) => Capability::Yes,
-            #[cfg(feature = "pdf-render")]
-            None => Capability::No(Addon::Pdf.manifest().map(|_| Addon::Pdf)),
-            #[cfg(not(feature = "pdf-render"))]
-            None => Capability::No(None),
-        },
-        ocr: match file_converters.ocr {
-            Some(_) => Capability::Yes,
-            #[cfg(feature = "ocr")]
-            None => Capability::No(Some(Addon::Ocr)),
-            #[cfg(not(feature = "ocr"))]
-            None => Capability::No(None),
-        },
-        sampling_size: redacter_options
+        file_converters,
+        redacter_options
             .as_ref()
             .and_then(|o| o.base_options.sampling_size),
-    };
+    );
 
     term.write_line(
         format!(
@@ -557,6 +541,8 @@ pub(crate) fn plan_blocked_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "pdf-render", feature = "ocr"))]
+    use crate::addon_store::Addon;
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
         initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,

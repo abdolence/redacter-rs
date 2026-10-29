@@ -929,7 +929,7 @@ redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.
 ```
 Redacter v0.20.0 (https://github.com/abdolence/redacter-rs)
 Scanning test-fixtures/documents.
-Redacters: local-rules, local-ner · PDF rendering: no · OCR: yes · Sampling: off
+Redacters: local-rules, local-ner · PDF rendering: no (redacter setup-addons pdf) · OCR: yes · Sampling: off
 
 Found 3 files. Total size: 1.85 KiB
 ✓ clean   ! findings   ↷ skipped   ✗ error
@@ -1225,7 +1225,8 @@ for AWS Comprehend.
 | `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
 
 - An image or the pages of a PDF file go through OCR when no selected redacter reads images, and need the OCR models
-  and, for PDF files, Pdfium, as for redaction. Without them the file is reported as `blocked`.
+  and, for PDF files, Pdfium, as for redaction. Without them the file is reported as `blocked`;
+  `redacter setup-addons ocr,pdf` installs them, see [Addons](#addons).
 - A CSV file is read as a table when a selected redacter reads tables, and the findings have a `table_cell`
   location; a redacter that reads text but not tables, such as Microsoft Presidio, is skipped on the file. When no
   selected redacter reads tables, the file is read as plain text.
