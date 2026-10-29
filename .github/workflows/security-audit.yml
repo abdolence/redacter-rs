@@ -4,6 +4,7 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - '.cargo/audit.toml'
   schedule:
     - cron: '5 4 * * 6'
 concurrency:
