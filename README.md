@@ -83,6 +83,52 @@ cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
 
 ## Installation
 
+### Install script
+
+On macOS, Linux and FreeBSD:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | sh
+```
+
+On Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.ps1 | iex
+```
+
+The scripts pick the archive for your operating system and architecture from the latest release
+and verify it against the SHA-256 digest GitHub records for it; nothing is installed if the digest
+is missing or does not match. Running a script again upgrades redacter in place.
+
+* `REDACTER_INSTALL_DIR`: the install directory. Default is `~/.local/bin` on macOS, Linux and FreeBSD
+  and `%LOCALAPPDATA%\Programs\redacter` on Windows, which the Windows script adds to your user `PATH`;
+* `REDACTER_VERSION`: the release to install, such as `v0.21.0`. Default is the latest release.
+
+To install a specific version on macOS, Linux and FreeBSD:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | REDACTER_VERSION=v0.21.0 sh
+```
+
+On Windows:
+
+```powershell
+$env:REDACTER_VERSION = 'v0.21.0'; irm https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.ps1 | iex
+```
+
+To install into a custom directory on macOS, Linux and FreeBSD:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | REDACTER_INSTALL_DIR=$HOME/bin sh
+```
+
+On Windows:
+
+```powershell
+$env:REDACTER_INSTALL_DIR = 'C:\Tools\redacter'; irm https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.ps1 | iex
+```
+
 ### Binary releases
 
 Download the latest release from [the GitHub releases](https://github.com/abdolence/redacter-rs/releases).
