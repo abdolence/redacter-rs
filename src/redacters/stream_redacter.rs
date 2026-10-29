@@ -1657,10 +1657,10 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-ocr"), ignore)]
     async fn detections_in_the_form_fixtures_are_boxed_where_the_values_are_printed() {
-        use crate::model_store::{ModelStore, ModelStoreOptions};
+        use crate::addon_store::{AddonStore, AddonStoreOptions};
         use crate::redacters::test_support::pdfium_test_lock;
         let _guard = pdfium_test_lock().lock().await;
-        let store = ModelStore::new(&ModelStoreOptions::default());
+        let store = AddonStore::new(&AddonStoreOptions::default());
         let converters = FileConverters::new()
             .init(reporter(), &store)
             .await

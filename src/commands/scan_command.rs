@@ -1,6 +1,7 @@
 //! The `scan` command: runs the selected redacters in detect-only mode over every file of a
 //! source and reports what they found and where. The source is only read.
 
+use crate::addon_store::{AddonStore, AddonStoreOptions};
 use crate::commands::copy_command::plan_blocked_reason;
 use crate::commands::copy_output::{
     format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
@@ -14,7 +15,6 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
-use crate::model_store::{ModelStore, ModelStoreOptions};
 use crate::redacters::{
     DetectStreamResult, RedacterOptions, RedacterThrottler, Redacters, Score, StreamRedacter,
 };
@@ -32,7 +32,7 @@ pub struct ScanCommandOptions {
     pub file_matcher: FileMatcher,
     pub file_mime_override: FileMimeOverride,
     pub max_files_limit: Option<usize>,
-    pub model_store: ModelStoreOptions,
+    pub addon_store: AddonStoreOptions,
     pub min_score: Option<Score>,
     pub values: ValueDisplay,
 }
@@ -43,7 +43,7 @@ impl ScanCommandOptions {
         max_size_limit: Option<usize>,
         max_files_limit: Option<usize>,
         mime_override: Vec<(mime::Mime, globset::Glob)>,
-        model_store: ModelStoreOptions,
+        addon_store: AddonStoreOptions,
         min_score: Option<Score>,
         values: ValueDisplay,
     ) -> Self {
@@ -54,7 +54,7 @@ impl ScanCommandOptions {
             file_matcher: FileMatcher::new(filename_matcher, max_size_limit),
             file_mime_override: FileMimeOverride::new(mime_override),
             max_files_limit,
-            model_store,
+            addon_store,
             min_score,
             values,
         }
@@ -78,11 +78,13 @@ pub async fn command_scan(
     redacter_options: RedacterOptions,
 ) -> AppResult<ScanCommandResult> {
     let term_reporter = AppReporter::from(term);
-    let models = ModelStore::new(&options.model_store);
+    let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
 
-    // Hidden until the converters have been bound: they report straight to the terminal, and
-    // those lines must not land under a live progress bar.
+    // The bar exists from here on because the file systems report through it, but it is not
+    // drawn until the converters and redacters have been bound: they report straight to the
+    // terminal, those lines must not land under a live progress bar, and a failure to bind one
+    // must not leave a bar running.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -103,7 +105,7 @@ pub async fn command_scan(
     } else {
         None
     };
-    let file_converters = FileConverters::new().init(&term_reporter, &models).await?;
+    let file_converters = FileConverters::new().init(&term_reporter, &addons).await?;
 
     term.write_line(&format!(
         "Scanning {}.",
@@ -123,9 +125,6 @@ pub async fn command_scan(
     ))?;
     term.write_line("")?;
 
-    bar.set_draw_target(ProgressDrawTarget::stderr());
-    bar.enable_steady_tick(Duration::from_millis(100));
-
     let mut throttler = redacter_options
         .base_options
         .limit_dlp_requests
@@ -133,8 +132,11 @@ pub async fn command_scan(
         .map(|limit| limit.to_throttling_counter());
     let mut redacters = Vec::with_capacity(redacter_options.provider_options.len());
     for provider_options in redacter_options.provider_options {
-        redacters.push(Redacters::new_redacter(provider_options, &app_reporter, &models).await?);
+        redacters.push(Redacters::new_redacter(provider_options, &term_reporter, &addons).await?);
     }
+
+    bar.set_draw_target(ProgressDrawTarget::stderr());
+    bar.enable_steady_tick(Duration::from_millis(100));
     let stream_redacter = StreamRedacter::new(&redacter_options.base_options, &file_converters);
     let context = ScanContext {
         term,
@@ -357,7 +359,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
-                ModelStoreOptions::default(),
+                AddonStoreOptions::default(),
                 Some(Score::from_static(0.9)),
                 ValueDisplay::Masked,
             ),
