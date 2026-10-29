@@ -6,7 +6,7 @@ use super::pipeline::{
     collapse_words, merge_spans, tag_tokens, LabelSet, Logits, NerOptions, TokenizedText,
     WindowScorer, OVERLAP,
 };
-use crate::model_store::ModelFiles;
+use crate::addon_store::AddonFiles;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, REDACTED};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
@@ -33,12 +33,12 @@ pub struct NerEngine {
 impl NerEngine {
     /// Loads `config.json`, `tokenizer.json` and `model_uint8.onnx` from the resolved model
     /// directory. Every missing piece is a typed error naming it.
-    pub fn load(files: &ModelFiles) -> Result<Self, LocalNerError> {
-        let (labels, body) = read_config(&files.path("config.json"))?;
-        let tokenizer = load_tokenizer(&files.path("tokenizer.json"))?;
+    pub fn load(files: &AddonFiles) -> Result<Self, LocalNerError> {
+        let (labels, body) = read_config(&files.dir().join("config.json"))?;
+        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"))?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
-        let model_path = files.path("model_uint8.onnx");
+        let model_path = files.dir().join("model_uint8.onnx");
         let model = Model::load_file(&model_path).map_err(|source| LocalNerError::ModelLoad {
             path: model_path.display().to_string(),
             source,
@@ -252,7 +252,7 @@ fn graph_node(model: &Model, name: &str) -> Result<NodeId, LocalNerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
+    use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
     use crate::redacters::local_ner::pipeline::{Entity, Tag};
 
     const REAL_CONFIG: &str = r#"{
@@ -413,10 +413,10 @@ mod tests {
         assert_eq!(body, 65);
     }
 
-    /// The model is installed with `redacter setup-addons local-ner`; a test never
+    /// The model is installed with `redacter addons install local-ner`; a test never
     /// downloads it.
     fn engine() -> NerEngine {
-        let files = ModelStore::new(&ModelStoreOptions::default())
+        let files = AddonStore::new(&AddonStoreOptions::default())
             .find(Addon::LocalNer)
             .unwrap();
         NerEngine::load(&files).unwrap()

@@ -4,17 +4,17 @@ use std::path::Path;
 /// Failures of the addon store. Every variant names the value the user has to act on: the
 /// addon, the directory, the URL, the file, or the expected and actual size or digest.
 #[derive(Debug, thiserror::Error)]
-pub enum ModelStoreError {
-    #[error("{addon} is not installed; run `redacter setup-addons {addon}`")]
+pub enum AddonStoreError {
+    #[error("{addon} is not installed; run `redacter addons install {addon}`")]
     NotInstalled { addon: Addon },
     #[error(
-        "{path} is not the file {addon} pins; run `redacter setup-addons {addon}` to replace it"
+        "{path} is missing or is not the file {addon} pins; run `redacter addons install {addon}` to repair it"
     )]
     Damaged { addon: Addon, path: String },
-    #[error("not available for this platform; install it by hand (README, \"PDF redaction\")")]
-    NotAvailableForPlatform,
+    #[error("{addon} is not available for this platform; install it by hand, see the README")]
+    NotAvailableForPlatform { addon: Addon },
     #[error(
-        "no cache directory is known on this system; pass --models-dir or set REDACTER_MODELS_DIR"
+        "no cache directory is known on this system; pass --addons-dir or set REDACTER_ADDONS_DIR"
     )]
     NoCacheDir,
     #[error("cannot build the HTTP client: {source}")]
@@ -52,9 +52,9 @@ pub enum ModelStoreError {
     Progress { reason: String },
 }
 
-impl ModelStoreError {
+impl AddonStoreError {
     pub(super) fn io(path: &Path, source: std::io::Error) -> Self {
-        ModelStoreError::Io {
+        AddonStoreError::Io {
             path: path.display().to_string(),
             source,
         }

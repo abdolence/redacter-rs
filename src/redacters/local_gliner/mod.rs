@@ -8,9 +8,9 @@ pub mod pipeline;
 
 pub use error::LocalGlinerError;
 
+use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::file_systems::FileSystemRef;
-use crate::model_store::{Addon, ModelStore};
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, unsupported_type_error, RedactSupport, Redacter, RedacterDataItem,
@@ -130,9 +130,9 @@ impl<'a> LocalGlinerRedacter<'a> {
     pub async fn new(
         options: LocalGlinerRedacterOptions,
         reporter: &'a AppReporter<'a>,
-        models: &ModelStore,
+        addons: &AddonStore,
     ) -> AppResult<Self> {
-        let files = models.find(Addon::LocalGliner)?;
+        let files = addons.find(Addon::LocalGliner)?;
         reporter.report(format!(
             "Loading local GLiNER model from {}",
             files.dir().to_string_lossy()
@@ -216,7 +216,7 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_store::ModelStoreOptions;
+    use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
     use crate::redacters::text_spans::RuleName;
     use console::Term;
@@ -422,10 +422,10 @@ mod tests {
         assert_eq!(row, ["Madrid", "[REDACTED]"]);
     }
 
-    /// The 1.16 GB model is installed with `redacter setup-addons local-gliner`; a test
+    /// The 1.16 GB model is installed with `redacter addons install local-gliner`; a test
     /// never downloads it.
     async fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalGlinerRedacter<'a> {
-        let store = ModelStore::new(&ModelStoreOptions::default());
+        let store = AddonStore::new(&AddonStoreOptions::default());
         let options = LocalGlinerRedacterOptions::validated(labels::default_labels(), 0.5).unwrap();
         LocalGlinerRedacter::new(options, reporter, &store)
             .await

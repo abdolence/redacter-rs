@@ -91,7 +91,7 @@ cargo install redacter
 
 PDF redaction, OCR (for the DLP providers that can't read images) and the `local-ner` and `local-gliner`
 redacters need addons that are not bundled with the tool. Install the ones you need with
-`redacter setup-addons`, see [Addons](#addons).
+`redacter addons install`, see [Addons](#addons).
 
 ## Command line options
 
@@ -111,8 +111,8 @@ Options:
   -m, --max-size-limit <MAX_SIZE_LIMIT>
           Maximum size of files to copy in bytes
 
-      --models-dir <MODELS_DIR>
-          Directory holding the addons that setup-addons installs and manually placed models, one subdirectory per addon. Overrides the REDACTER_MODELS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/models
+      --addons-dir <ADDONS_DIR>
+          Directory holding the addons that `addons install` installs and manually placed copies, one subdirectory per addon. Overrides the REDACTER_ADDONS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/addons
 
   -n, --max-files-limit <MAX_FILES_LIMIT>
           Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
@@ -495,7 +495,7 @@ with a multilingual named-entity model running entirely on your machine, and rep
 with `[REDACTED]`. It uses the `distilbert-base-multilingual-cased-ner-hrl` model, trained on ten
 high-resource languages: Arabic, German, English, Spanish, French, Italian, Latvian, Dutch,
 Portuguese and Chinese. Nothing leaves your computer; the only network access is
-`redacter setup-addons local-ner`, which installs the model files described in [Addons](#addons).
+`redacter addons install local-ner`, which installs the model files described in [Addons](#addons).
 
 Like `local-rules`, an image or a PDF first goes through the OCR engine: every recognised word is
 passed to the model as if it were reading the page as text, and every word the chain redacts is
@@ -547,7 +547,7 @@ and handles and usernames written as free text, none of which `local-rules` or `
 their own. It uses [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
 (the [onnx-community](https://huggingface.co/onnx-community/gliner_multi_pii-v1) ONNX export),
 trained on six languages: English, French, German, Spanish, Italian and Portuguese. Nothing leaves your
-computer; the only network access is `redacter setup-addons local-gliner`, which installs the model files
+computer; the only network access is `redacter addons install local-gliner`, which installs the model files
 described in [Addons](#addons).
 
 Like `local-rules` and `local-ner`, an image or a PDF first goes through the OCR engine: every recognised
@@ -679,24 +679,31 @@ Only if such redacters are not available, the tool will try to redact the file u
 
 PDF redaction is supported by rendering PDF files as images and redacting them.
 To render and convert PDF files the tool uses the external library `Pdfium` (the C++ PDF library used by the Google
-Chromium project). `redacter setup-addons pdf` installs the build the tool is compiled against:
+Chromium project). `redacter addons install pdf` installs the build the tool is compiled against:
 
-- The library is stored with the other addons, in `<models dir>/pdfium-7881/`, and is checked against its pinned
-  SHA-256 every time it is loaded. It is tried before any other Pdfium on the machine.
+- The library is stored with the other addons, in `<addons dir>/pdfium-7881/`, and is checked against its pinned
+  SHA-256 every time it is loaded. A copy that does not match turns PDF rendering off, reported as
+  `PDF rendering: no (redacter addons install pdf)`; no other Pdfium is tried in its place.
 - The addon is available for Linux (glibc) on x86_64 and aarch64, macOS on x86_64 and aarch64, and Windows on x86,
   x86_64 and aarch64. Other platforms, such as FreeBSD and the static musl builds, need Pdfium installed by hand.
 
-Without the addon the tool looks for a Pdfium installed by hand, in this order: the current directory and `./lib`,
-the `lib` directory beside the directory of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`),
-the directory of the tool itself, then the system library path.
+Without the addon the tool looks for a Pdfium installed by hand. It tries the `lib` directory beside the directory
+of the tool (for example `/usr/local/lib` for `/usr/local/bin/redacter`) and the directory of the tool itself, then:
+
+- on Linux and other Unix systems (not macOS), the system loader, which finds `libpdfium.so` in the system
+  library directories and in `LD_LIBRARY_PATH`; an empty entry in `LD_LIBRARY_PATH` means the current directory;
+- on macOS, `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`;
+- on Windows, nothing else.
+
+The current directory is not searched otherwise.
 
 Manual installation:
 
 - Download the Pdfium build of
   [release chromium/7881](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7881) for your system
   from the bblanchon/pdfium-binaries project. Other builds may not match the library the tool is compiled against.
-- Extract the archive and copy the library file (`libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`) to one of the
-  directories listed above.
+- Extract the archive and copy the library file (`libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`) to the directory
+  of the tool.
 
 If the library is detected correctly it is reported in the tool output as:
 > PDF rendering: yes
@@ -704,16 +711,28 @@ If the library is detected correctly it is reported in the tool output as:
 ## Addons
 
 The OCR engine, PDF rendering and the `local-ner` and `local-gliner` redacters need files that are not
-bundled with the tool. `redacter setup-addons` installs them and is the only command that downloads anything:
-`cp` uses what is installed, and a capability whose addon is missing is off for the run, reported for example
-as `OCR: no (redacter setup-addons ocr)`.
+bundled with the tool. `redacter addons install` installs them and is the only command that downloads anything:
+`cp` uses what is installed.
+
+- A missing OCR or Pdfium addon turns that capability off for the run, reported for example
+  as `OCR: no (redacter addons install ocr)`.
+- A missing `local-ner` or `local-gliner` addon stops the run with an error naming the command that installs it:
+  a file is never copied unredacted because the redacter asked for could not start.
 
 ```sh
 # OCR and PDF rendering
-redacter setup-addons ocr,pdf
+redacter addons install ocr,pdf
 # The local-ner model, into a directory of your choice
-redacter --models-dir /opt/redacter/models setup-addons local-ner
+redacter --addons-dir /opt/redacter/addons addons install local-ner
+# What this build offers, and what is installed
+redacter addons ls
 ```
+
+`redacter addons ls` only looks: it prints one line per addon of this build with its state (`installed`,
+`not installed`, `damaged`, `not available for this platform` or `unreadable`, which means the addon's files
+could not be read), its size and where it was found. It downloads
+nothing. For `pdf` it checks the addons directory only, so a Pdfium installed by hand, which `cp` uses, is listed
+as `not installed`.
 
 The files are hosted as assets of GitHub releases in this repository, copied unmodified from the sources listed
 below:
@@ -726,27 +745,37 @@ below:
 | `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 
 Every downloaded file is verified against a SHA-256 digest pinned in the tool before it takes its final name.
-The addons are stored under `~/.cache/redacter/models/` on Linux, `~/Library/Caches/redacter/models/` on macOS
-and `%LOCALAPPDATA%\redacter\models\` on Windows, one directory per addon:
+The addons are stored under `~/.cache/redacter/addons/` on Linux, `~/Library/Caches/redacter/addons/` on macOS
+and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
 
-- `setup-addons` checks an installed addon against its digests and skips it when it matches;
+- `addons install` checks an installed addon against its digests and skips it when it matches, and replaces a
+  damaged one;
+- an addon directory that holds only some of the addon's files is reported as damaged, and the manual copies below
+  are not used in its place;
 - a run checks the Pdfium library against its digest every time it loads it, and a model against its pinned size;
-- `--models-dir <DIR>` (or the `REDACTER_MODELS_DIR` environment variable) moves that directory, for
-  `setup-addons` and `cp` alike;
+- `--addons-dir <DIR>` (or the `REDACTER_ADDONS_DIR` environment variable) moves that directory, for
+  `addons install`, `addons ls` and `cp` alike;
 - downloads honour the `HTTPS_PROXY` environment variable.
 
-For air-gapped machines, download the files listed above on another computer and copy them into the addon's
-directory under the names in the table, for example `~/.cache/redacter/models/ocrs/text-detection.rten`. The tool
-also looks in `models/<addon directory>/` next to its own executable, and the OCR models are still found in
-`~/.cache/ocrs` and `../share/ocrs` as in earlier versions; these copies are used as they are, checked against
-nothing.
+An interrupted install can leave `*.part` files in the addon's directory; they are safe to delete while no install is running.
 
-`--download-models` and its download prompt are removed: install the addons with `setup-addons` instead.
+For air-gapped machines, download the files listed above on another computer and copy them into the addon's
+directory under the names in the table, for example `~/.cache/redacter/addons/ocrs/text-detection.rten`. This works
+for Pdfium too, which is checked against its digest. For the models the tool also looks in
+`addons/<addon directory>/` next to its own executable. Breaking change: earlier versions used `models/<addon directory>/`;
+move it to `addons/` or run `redacter addons install` again. The OCR models are still found in `~/.cache/ocrs` and
+`../share/ocrs` as in earlier versions; these copies are used as they are, checked against nothing.
+
+`--download-models` and its download prompt are removed: install the addons with `addons install` instead.
+`--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
+directory is `addons` instead of `models`: move the old `models` directory to `addons` or run
+`redacter addons install` again. For the same reason the `models` directory next to the executable is now named
+`addons`.
 
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
-Install the OCR models with `redacter setup-addons ocr`, see [Addons](#addons); `~/.cache/ocrs` from earlier
+Install the OCR models with `redacter addons install ocr`, see [Addons](#addons); `~/.cache/ocrs` from earlier
 versions keeps working.
 
 ## Examples:

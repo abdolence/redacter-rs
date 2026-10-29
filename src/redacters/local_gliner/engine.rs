@@ -10,7 +10,7 @@ use super::pipeline::{
     candidates_to_findings, greedy_decode, score_document, GlinerOptions, Logits, WindowInputs,
     WindowScorer, OVERLAP_WORDS,
 };
-use crate::model_store::ModelFiles;
+use crate::addon_store::AddonFiles;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, REDACTED};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
@@ -149,14 +149,14 @@ pub struct GlinerEngine {
 impl GlinerEngine {
     /// Loads `gliner_config.json`, `tokenizer.json` and `model.onnx` from the resolved model
     /// directory. Every missing or unexpected piece is a typed error naming it.
-    pub fn load(files: &ModelFiles) -> Result<Self, LocalGlinerError> {
-        let config = read_config(&files.path("gliner_config.json"))?;
-        let tokenizer = load_tokenizer(&files.path("tokenizer.json"))?;
+    pub fn load(files: &AddonFiles) -> Result<Self, LocalGlinerError> {
+        let config = read_config(&files.dir().join("gliner_config.json"))?;
+        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"))?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
         let ent = special_token(&tokenizer, &config.ent_token)?;
         let gliner_sep = special_token(&tokenizer, &config.sep_token)?;
-        let model_path = files.path("model.onnx");
+        let model_path = files.dir().join("model.onnx");
         let model =
             Model::load_file(&model_path).map_err(|source| LocalGlinerError::ModelLoad {
                 path: model_path.display().to_string(),
@@ -443,12 +443,12 @@ mod tests {
         }
     }
 
-    use crate::model_store::{Addon, ModelStore, ModelStoreOptions};
+    use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
 
-    /// The 1.16 GB model is installed with `redacter setup-addons local-gliner`; a test
+    /// The 1.16 GB model is installed with `redacter addons install local-gliner`; a test
     /// never downloads it.
     fn engine() -> GlinerEngine {
-        let files = ModelStore::new(&ModelStoreOptions::default())
+        let files = AddonStore::new(&AddonStoreOptions::default())
             .find(Addon::LocalGliner)
             .unwrap();
         GlinerEngine::load(&files).unwrap()
