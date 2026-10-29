@@ -269,7 +269,7 @@ With DLP enabled, the tool will redact files based on the DLP model and skip uns
 
 `--report-file` saves the result of the command to a file: `files_copied`, `files_redacted` and `files_skipped`
 as JSON by default, or the same three counts as text with `--report-format text`. The terminal output is the same
-with or without it. `--report-file` and `--report-format` replace `--save-json-results` of earlier versions, which
+with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
 is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
 
 ## Source and destinations
@@ -894,20 +894,9 @@ redacter scan [OPTIONS] --redact <REDACT> <SOURCE>
 ```
 
 The source is anything `cp` reads: a local file or directory, GCS, S3 or a zip archive. The options that select and
-configure the redacters are the ones of `cp`. Specific to `scan`, or worth knowing about:
-
-- `-d`, `--redact`: the redacters to run, at least one; repeat the option for more. Every redacter reads the same
-  original file on its own, with no chain and no merge between them, so a value found by two redacters is reported
-  twice, once for each;
-- `-m`, `-n`, `-f`, `--mime-override`, `--sampling-size`, `--csv-headers-disable`, `--csv-delimiter`: as in `cp`;
-- `--unsupported-as-text`: read a file of a type no redacter supports, such as `.env`, `id_rsa`, a `.pem` key or
-  source code, as text when its content is valid UTF-8 without NUL bytes. Off by default: such files are reported as
-  unsupported and do not change the exit code;
-- `--report-file <FILE>`: write the report to a file, besides the terminal output;
-- `--report-format <json|text>`: the format of that file, `json` by default; requires `--report-file`;
-- `--show-values`: show the matched values instead of masking them;
-- `--min-score <0..1>`: drop the findings that have a score below this value;
-- `--no-fail`: exit with 0 when there are findings.
+configure the redacters are the ones of `cp`, and `redacter scan --help` lists the rest. Every redacter reads the same
+original file on its own, with no chain and no merge between them, so a value found by two redacters is reported twice,
+once for each.
 
 `scan` reads a file the way `cp` would redact it with the same options: one plan for each file, shared by all the
 selected redacters. The plan picks one way to read the file, in this order: a redacter reads the type of the file
@@ -1003,28 +992,6 @@ report.
 `--min-score` drops the findings below the given score. A finding without a score is kept, so the option never hides
 what a rule-based or an LLM redacter found.
 
-```sh
-redacter scan test-fixtures/documents/customer-note.txt -d local-rules -d local-ner --min-score 0.9
-```
-
-```
-! customer-note.txt                                      text/plain               386 B      11 findings
-    3:11   per                  local-ner    1.00  J****************h
-    4:8    email                local-rules        j********************m
-    5:8    phone-international  local-rules        +***************7
-    6:16   birth-date           local-rules        1***********5
-    7:15   loc                  local-ner    0.96  B**********t
-    7:29   loc                  local-ner    1.00  L****n
-    7:36   uk-postcode          local-rules        N*****E
-    9:1    per                  local-ner    0.99  ****
-    10:14  phone-international  local-rules        +***************7
-    10:57  email                local-rules        j********************m
-    11:34  payment-card         local-rules        4*****************1
-```
-
-Without `--min-score` the same scan also reports `7:10  loc  local-ner  0.59  ****`. Every local-rules finding is kept
-in both runs.
-
 GCP DLP does not give a number. It rates each finding with a likelihood, one of five levels of how likely the
 value is to be of the reported info type, and `scan` turns it into a fixed score:
 
@@ -1063,7 +1030,8 @@ redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text -
 ```
 
 A repository keeps its secrets in `.env` files, keys and source code, which have no text media type, so
-`--unsupported-as-text` reads them. Only the `secrets` and `url` rule groups are selected, since the other groups match
+`--unsupported-as-text` reads them as text when their content is valid UTF-8 without NUL bytes. Without the option such
+files are reported as unsupported and do not change the exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match
 code: `::de` in a Rust path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
 ### JSON report
@@ -1090,6 +1058,7 @@ whatever the report options are; there is no mode that prints the JSON to stdout
       "mime_type": "text/plain",
       "status": "scanned",
       "reason": null,
+      "unlocated_values": 0,
       "findings": [
         {
           "redacter": "local-rules",
@@ -1123,89 +1092,33 @@ whatever the report options are; there is no mode that prints the JSON to stdout
 }
 ```
 
-At the top level:
+`files_scanned` counts the files the redacters read, and these count the files they did not:
 
-- `files_scanned`: files read by the redacters, with or without findings;
-- `files_with_findings`, `findings`: how many files and how many findings the report has;
-- `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`;
+- `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`. Files that the filters leave out of a
+  directory listing are only counted here, and have no entry in `files`;
 - `files_unsupported`: files that no selected redacter reads, including image formats that OCR cannot read, such as
   SVG;
 - `files_blocked`: files that need a converter the run lacks, such as OCR or PDF rendering;
-- `files_failed`: files that could not be read or scanned;
-- `findings_by_label`: the number of findings for each label;
-- `files`: one entry for every file that was scanned, unsupported or failed. Files that the filters leave out of a
-  directory listing are only counted in `files_skipped`.
+- `files_failed`: files that could not be read or scanned.
 
-Each entry of `files` has the `path` relative to the source, the `mime_type`, the `status` and the `findings` of the
-file. The `status` is `scanned`, `unsupported`, `blocked` (a converter is missing, counted in `files_blocked`),
-`skipped` or `failed`. The `reason` is `null` for a scanned file and says why for the others.
+The `status` of a file is `scanned`, `unsupported`, `blocked`, `skipped` or `failed`, and its `reason` is `null` for a
+scanned file and says why for the others. `unlocated_values` counts the values an LLM redacter or AWS Bedrock Guardrails
+named that are not in the file as written, such as a value the model reformatted. The values are not reported, and the
+row of the file shows the count as `2 values not located`: the file may hold more than its findings. The `findings` of a file are sorted by location, as in the terminal, and the
+`score` is `null` when the redacter gives none. The `value` is masked unless `--show-values` is set. The `location` has
+a `kind`:
 
-The `findings` of a file are sorted by location, as in the terminal. Each finding has the `redacter` that found it, the
-`label`, the `score` (`null` when the redacter gives none), the `location` and the `value`, masked unless
-`--show-values` is set. The `location` has a `kind`:
-
-- `text`: `start` and `end` are byte offsets in the text of the file, with the `line` and `column` of the start;
+- `text`: `start` and `end` are byte offsets in the text of the file;
 - `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
-  cell, for example `{"kind":"table_cell","row":1,"column":2,"start":0,"end":20}`;
-- `image`: the box `x1`, `y1`, `x2`, `y2` in pixels, and the `page` of a PDF file counted from 1 (`null` for an image),
-  for example `{"kind":"image","page":null,"x1":308.0,"y1":192.0,"x2":621.0,"y2":219.0}`.
+  cell;
+- `image`: the box `x1`, `y1`, `x2`, `y2` in pixels, and the `page` of a PDF file counted from 1 (`null` for an image).
 
 Fields are only ever added to the report, never renamed or removed.
 
 ### Text report
 
-`--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are
-wide enough for the longest path, so no path is shortened.
-
-```sh
-redacter scan test-fixtures/documents -d local-rules --report-file scan-report.txt --report-format text
-```
-
-```
-✓ clean   ! findings   ↷ skipped   ✗ error
-! customers.csv                                                                    text/csv                 290 B      7 findings
-    1:3  email                local-rules  j********************m
-    1:4  phone-international  local-rules  +***************7
-    2:3  email                local-rules  m**********************g
-    2:4  phone-international  local-rules  +*************8
-    3:3  email                local-rules  a**********************t
-    3:4  phone-international  local-rules  +**************8
-    3:6  passport             local-rules  X******7
-! customer-profile.html                                                            text/html                627 B      6 findings
-    11:43  email                local-rules  j********************m
-    11:67  email                local-rules  j********************m
-    12:27  phone-international  local-rules  +***************7
-    13:35  birth-date           local-rules  1***********5
-    14:55  uk-postcode          local-rules  N*****E
-    15:34  passport             local-rules  X******7
-✗ customer-form.pdf                                                                application/pdf          1.19 KiB   pdf renderer unavailable
-✓ contextual-en.txt                                                                text/plain               797 B
-! customer.json                                                                    application/json         444 B      5 findings
-    5:15   email                local-rules  j********************m
-    6:15   phone-international  local-rules  +***************7
-    7:23   birth-date           local-rules  1********4
-    11:20  uk-postcode          local-rules  N*****E
-    14:23  payment-card         local-rules  4*****************1
-! multilingual.txt                                                                 text/plain               753 B      6 findings
-    3:1    email                local-rules  k*********************************e
-    3:60   phone-international  local-rules  +**************8
-    7:1    email                local-rules  s********************************r
-    7:42   phone-international  local-rules  +***************0
-    10:58  email                local-rules  c*******************************s
-    11:17  phone-international  local-rules  +**************6
-✓ dates-en.txt                                                                     text/plain               86 B
-✓ false-positives-en.txt                                                           text/plain               340 B
-! customer-note.txt                                                                text/plain               386 B      7 findings
-    4:8    email                local-rules  j********************m
-    5:8    phone-international  local-rules  +***************7
-    6:16   birth-date           local-rules  1***********5
-    7:36   uk-postcode          local-rules  N*****E
-    10:14  phone-international  local-rules  +***************7
-    10:57  email                local-rules  j********************m
-    11:34  payment-card         local-rules  4*****************1
-
-9 files: 5 with findings, 3 clean, 0 skipped, 0 unsupported, 1 blocked. 31 findings: birth-date 3, email 11, passport 2, payment-card 2, phone-international 10, uk-postcode 3. Total size: 4.83 KiB
-```
+`--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
+enough for the longest path, so no path is shortened.
 
 ### Detection per redacter
 
@@ -1224,12 +1137,6 @@ for AWS Comprehend.
 | `aws-bedrock-guardrails` | The PII type of the guardrail, or the name of its regex | None | OCR |
 | `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
 
-- An image or the pages of a PDF file go through OCR when no selected redacter reads images, and need the OCR models
-  and, for PDF files, Pdfium, as for redaction. Without them the file is reported as `blocked`;
-  `redacter setup-addons ocr,pdf` installs them, see [Addons](#addons).
-- A CSV file is read as a table when a selected redacter reads tables, and the findings have a `table_cell`
-  location; a redacter that reads text but not tables, such as Microsoft Presidio, is skipped on the file. When no
-  selected redacter reads tables, the file is read as plain text.
 - Microsoft Presidio needs `--ms-presidio-text-analyze-url` to detect. The image redaction endpoint reports no
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.
