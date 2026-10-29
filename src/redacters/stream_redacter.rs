@@ -1894,6 +1894,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_text_file_longer_than_the_probe_is_redacted_whole() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &env_file())
+            .await
+            .unwrap();
+        let padding = "# padding\n".repeat(NOT_TEXT_PROBE_SIZE / 4);
+
+        let result = stream_redacter
+            .redact_stream(
+                in_probe_chunks(format!("{padding}ADMIN_EMAIL=a@b.io\n").as_bytes()),
+                plan,
+                &env_file(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.summary.blocked, None);
+        assert_eq!(result.number_of_redactions, 1);
+        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        assert_eq!(
+            output.concat(),
+            format!("{padding}ADMIN_EMAIL=[REDACTED]\n").as_bytes()
+        );
+    }
+
+    #[tokio::test]
     async fn a_binary_file_is_recognised_from_its_first_bytes_without_reading_the_rest() {
         let converters = FileConverters::new();
         let redacters = vec![email_rules().await];
