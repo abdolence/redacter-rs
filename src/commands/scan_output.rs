@@ -115,18 +115,29 @@ pub struct ScanFileReport {
     status: ScanFileStatus,
     reason: Option<String>,
     findings: Vec<FindingReport>,
+    /// How many values the redacters named in the file without being able to place them in it,
+    /// so a file without findings may still hold what they meant. Only the count is kept, since
+    /// a value is the sensitive data itself.
+    unlocated_values: usize,
 }
 
 impl ScanFileReport {
     /// A scanned file, its findings in the order a reader meets them; findings at the same
     /// place keep the order they are given in.
-    pub fn scanned(file_ref: &FileSystemRef, mut findings: Vec<FindingReport>) -> Self {
+    pub fn scanned(
+        file_ref: &FileSystemRef,
+        mut findings: Vec<FindingReport>,
+        unlocated_values: usize,
+    ) -> Self {
         findings.sort_by(|a, b| {
             a.location
                 .partial_cmp(&b.location)
                 .unwrap_or(Ordering::Equal)
         });
-        Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
+        Self {
+            unlocated_values,
+            ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
+        }
     }
 
     pub fn not_scanned(file_ref: &FileSystemRef, reason: SkipReason) -> Self {
@@ -159,19 +170,28 @@ impl ScanFileReport {
     pub fn row<'a>(&self, styles: &'a OutputStyles) -> RowOutcome<'a> {
         let reason = self.reason.clone().unwrap_or_default();
         match self.status {
-            ScanFileStatus::Scanned if self.findings.is_empty() => RowOutcome {
-                glyph: GLYPH_OK,
-                style: &styles.ok,
-                detail: String::new(),
-            },
-            ScanFileStatus::Scanned => RowOutcome {
-                glyph: GLYPH_FINDINGS,
-                style: &styles.found,
-                detail: match self.findings.len() {
-                    1 => "1 finding".to_string(),
-                    count => format!("{count} findings"),
-                },
-            },
+            ScanFileStatus::Scanned => {
+                let (glyph, style) = if self.findings.is_empty() {
+                    (GLYPH_OK, &styles.ok)
+                } else {
+                    (GLYPH_FINDINGS, &styles.found)
+                };
+                let mut counts = Vec::new();
+                if !self.findings.is_empty() {
+                    counts.push(counted(self.findings.len(), "finding"));
+                }
+                if self.unlocated_values > 0 {
+                    counts.push(format!(
+                        "{} not located",
+                        counted(self.unlocated_values, "value")
+                    ));
+                }
+                RowOutcome {
+                    glyph,
+                    style,
+                    detail: counts.join(", "),
+                }
+            }
             ScanFileStatus::Unsupported | ScanFileStatus::Skipped => RowOutcome {
                 glyph: GLYPH_SKIPPED,
                 style: &styles.skipped,
@@ -198,7 +218,16 @@ impl ScanFileReport {
             status,
             reason,
             findings,
+            unlocated_values: 0,
         }
+    }
+}
+
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -447,6 +476,7 @@ mod tests {
                 None,
                 "john.smith@example.com",
             )],
+            0,
         ));
         result.push(ScanFileReport::scanned(
             &file_ref("customers.csv", mime::TEXT_CSV),
@@ -461,6 +491,7 @@ mod tests {
                 Some(0.75),
                 "Akira",
             )],
+            1,
         ));
         result.push(ScanFileReport::scanned(
             &file_ref("form.pdf", mime::APPLICATION_PDF),
@@ -476,10 +507,12 @@ mod tests {
                 None,
                 "j@b.io",
             )],
+            0,
         ));
         result.push(ScanFileReport::scanned(
             &file_ref("clean.txt", mime::TEXT_PLAIN),
             Vec::new(),
+            0,
         ));
         result.push(ScanFileReport::not_scanned(
             &file_ref("scan.png", mime::IMAGE_PNG),
@@ -545,6 +578,7 @@ mod tests {
                     &email_detection(),
                     values,
                 )],
+                0,
             ));
             let json = serde_json::to_string(&result).unwrap();
             for report in [result.to_text(), json] {
@@ -569,6 +603,7 @@ mod tests {
                 &detection,
                 ValueDisplay::Raw,
             )],
+            0,
         ));
 
         let rows = format_file_lines(&result.files[0], 100, &OutputStyles::plain());
@@ -602,29 +637,29 @@ mod tests {
                 "findings_by_label": {"email": 2, "person": 1},
                 "files": [
                     {"path": "customer-note.txt", "mime_type": "text/plain", "status": "scanned",
-                     "reason": null, "findings": [
+                     "reason": null, "unlocated_values": 0, "findings": [
                         {"redacter": "local-rules", "label": "email", "score": null,
                          "location": {"kind": "text", "start": 40, "end": 62, "line": 3, "column": 15},
                          "value": "j********************m"}]},
                     {"path": "customers.csv", "mime_type": "text/csv", "status": "scanned",
-                     "reason": null, "findings": [
+                     "reason": null, "unlocated_values": 1, "findings": [
                         {"redacter": "local-rules", "label": "person", "score": 0.75,
                          "location": {"kind": "table_cell", "row": 1, "column": 2, "start": 0, "end": 4},
                          "value": "A***a"}]},
                     {"path": "form.pdf", "mime_type": "application/pdf", "status": "scanned",
-                     "reason": null, "findings": [
+                     "reason": null, "unlocated_values": 0, "findings": [
                         {"redacter": "local-rules", "label": "email", "score": null,
                          "location": {"kind": "image", "page": 1, "x1": 310.2, "y1": 193.0,
                                       "x2": 621.6, "y2": 218.0},
                          "value": "j****o"}]},
                     {"path": "clean.txt", "mime_type": "text/plain", "status": "scanned",
-                     "reason": null, "findings": []},
+                     "reason": null, "unlocated_values": 0, "findings": []},
                     {"path": "scan.png", "mime_type": "image/png", "status": "blocked",
-                     "reason": "ocr unavailable", "findings": []},
+                     "reason": "ocr unavailable", "unlocated_values": 0, "findings": []},
                     {"path": "archive.bin", "mime_type": "application/octet-stream",
-                     "status": "unsupported", "reason": "type not supported", "findings": []},
+                     "status": "unsupported", "reason": "type not supported", "unlocated_values": 0, "findings": []},
                     {"path": "huge.txt", "mime_type": "text/plain", "status": "skipped",
-                     "reason": "over size limit", "findings": []}
+                     "reason": "over size limit", "unlocated_values": 0, "findings": []}
                 ]
             })
         );
@@ -654,6 +689,12 @@ mod tests {
         result.push(ScanFileReport::scanned(
             &file_ref("two.txt", mime::TEXT_PLAIN),
             vec![email_at(1, 0), email_at(2, 7)],
+            0,
+        ));
+        result.push(ScanFileReport::scanned(
+            &file_ref("reformatted.txt", mime::TEXT_PLAIN),
+            Vec::new(),
+            2,
         ));
         result.push(ScanFileReport::failed(
             &file_ref("broken.txt", mime::TEXT_PLAIN),
@@ -672,7 +713,7 @@ mod tests {
                 "✓ clean ! findings ↷ skipped ✗ error",
                 "! customer-note.txt text/plain 0 B 1 finding",
                 "3:15 email local-rules j********************m",
-                "! customers.csv text/csv 0 B 1 finding",
+                "! customers.csv text/csv 0 B 1 finding, 1 value not located",
                 "1:2 person local-rules 0.75 A***a",
                 "! form.pdf application/pdf 0 B 1 finding",
                 "1:[310,193,622,218] email local-rules j****o",
@@ -684,9 +725,10 @@ mod tests {
                 "! two.txt text/plain 0 B 2 findings",
                 "1:1 email local-rules a****o",
                 "2:1 email local-rules c****o",
+                "✓ reformatted.txt text/plain 0 B 2 values not located",
                 "✗ broken.txt text/plain 0 B provider unavailable",
                 "",
-                "10 files: 4 with findings, 1 clean, 2 skipped, 1 unsupported, 1 blocked, \
+                "11 files: 4 with findings, 2 clean, 2 skipped, 1 unsupported, 1 blocked, \
                  1 failed. 5 findings: email 4, person 1. Total size: 0 B",
             ]
         );
@@ -738,6 +780,7 @@ mod tests {
                     "4***1",
                 ),
             ],
+            0,
         );
         let unscored = ScanFileReport::scanned(
             &file_ref("notes.txt", mime::TEXT_PLAIN),
@@ -748,6 +791,7 @@ mod tests {
                 None,
                 "j***m",
             )],
+            0,
         );
 
         assert_eq!(
@@ -779,6 +823,7 @@ mod tests {
                 finding("email", at(1, 5, 4), None, "a@b.io"),
                 finding("person", at(1, 5, 4), Some(0.9), "a@b.io"),
             ],
+            0,
         );
         let order: Vec<(&DetectionLocation, &DetectionLabel)> = file
             .findings
@@ -812,6 +857,7 @@ mod tests {
                     None,
                     "a@b.io",
                 )],
+                0,
             )
         };
         let not_read = |name, media_type, reason| {

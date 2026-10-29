@@ -6,7 +6,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, RedactSupport, Redacter,
+    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
     RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
@@ -232,9 +232,11 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
-            RedacterDataItemContent::Value(text) => self.detect_text(text).await,
+            RedacterDataItemContent::Value(text) => {
+                self.detect_text(text).await.map(Detections::from)
+            }
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
             | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),
@@ -430,7 +432,7 @@ mod tests {
         .await
         .unwrap();
 
-        let detections = redacter.detect(&input).await.unwrap();
+        let detections = redacter.detect(&input).await.unwrap().found;
 
         let email = text.find("zoe.keller@example.com").unwrap();
         assert!(

@@ -14,7 +14,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
 use crate::redacters::{
-    text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
@@ -211,7 +211,7 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => {
                 let text = text.clone();
@@ -429,7 +429,8 @@ mod tests {
                 })
             })
         })
-        .unwrap();
+        .unwrap()
+        .found;
         assert_eq!(
             detections,
             vec![Detection {
@@ -546,7 +547,8 @@ mod tests {
                 RedacterDataItemContent::Value(text.clone()),
             ))
             .await
-            .unwrap();
+            .unwrap()
+            .found;
         let person = detections
             .iter()
             .find(|detection| detection.value == "John Michael Smith")

@@ -636,7 +636,7 @@ pub trait Redacter {
 
     /// Finds sensitive data in `input` without changing it. Every location points into
     /// `input` itself: a text range for a text item, a cell for a table, a box for an image.
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>>;
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections>;
 
     /// Whether `detect` reads this file as it is. Unsupported images and PDF pages are read
     /// with OCR when the redacter supports text.
@@ -690,9 +690,9 @@ impl<'a> Redacter for Redacters<'a> {
         }
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         if input.is_blank_text() {
-            return Ok(Vec::new());
+            return Ok(Detections::default());
         }
         match self {
             Redacters::GcpDlp(redacter) => redacter.detect(input).await,
@@ -1043,6 +1043,7 @@ mod tests {
             .detect(&blank_text_item())
             .await
             .unwrap()
+            .found
             .is_empty());
     }
 

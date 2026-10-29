@@ -14,7 +14,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    redact_image_with_mode, Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt,
 };
@@ -521,7 +521,7 @@ impl<'a> AwsBedrockRedacter<'a> {
         Ok(response.into())
     }
 
-    async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+    async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
         let prompt = TextDetectionPrompt::new(text);
         let message = Message::builder()
             .role(ConversationRole::User)
@@ -594,7 +594,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
@@ -1177,7 +1177,8 @@ mod tests {
             strip_json_fence(answer),
             "Mail john.smith@example.com now",
         )
-        .unwrap();
+        .unwrap()
+        .found;
 
         assert_eq!(detections.len(), 1);
         assert_eq!(detections[0].label.to_string(), "email_address");
@@ -1216,7 +1217,7 @@ mod tests {
         let redacter = detection_test_redacter(&reporter).await?;
 
         let input = live_detection::note_item();
-        let detections = redacter.detect(&input).await?;
+        let detections = redacter.detect(&input).await?.found;
 
         live_detection::assert_note_found(&input, &detections);
         Ok(())
@@ -1231,7 +1232,8 @@ mod tests {
 
         let detections = redacter
             .detect(&live_detection::enlarged_form_item())
-            .await?;
+            .await?
+            .found;
 
         live_detection::assert_form_found(&detections);
         Ok(())

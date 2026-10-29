@@ -3,8 +3,8 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    Detection, DetectionLabel, DetectionLocation, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters, Score, TextLines,
+    Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -375,7 +375,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         let mut item: dlp::ContentItem = match &input.content {
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Value(_) => {
                 input.content.clone().try_into()?
@@ -396,7 +396,7 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
         };
         let field_names = unique_field_names(&mut item);
         let result = self.inspect(item).await?;
-        Self::detections_in(&input.content, &field_names, result)
+        Ok(Self::detections_in(&input.content, &field_names, result)?.into())
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -982,7 +982,12 @@ mod tests {
             content: RedacterDataItemContent::Value(text.to_string()),
         };
 
-        let detections = live_redacter(&reporter).await.detect(&input).await.unwrap();
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
 
         let email = text.find("zoe.keller@example.com").unwrap();
         assert!(
@@ -1030,7 +1035,12 @@ mod tests {
             },
         };
 
-        let detections = live_redacter(&reporter).await.detect(&input).await.unwrap();
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
 
         let email = "mail ".len();
         assert!(
@@ -1065,7 +1075,12 @@ mod tests {
         let reporter: AppReporter = AppReporter::from(&term);
         let input = crate::redacters::test_support::test_image_item();
 
-        let detections = live_redacter(&reporter).await.detect(&input).await.unwrap();
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
 
         let (horizontal_padding, vertical_padding) = (50.0_f32, 15.0_f32);
         for (info_type, [ink_x1, ink_y1, ink_x2, ink_y2]) in FORM_IMAGE_INK {

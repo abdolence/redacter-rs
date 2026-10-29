@@ -58,14 +58,25 @@ pub struct RedactStreamResult {
     pub stream: Box<dyn Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static>,
 }
 
+#[derive(Default)]
 pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
     /// in the order the redacter reported.
     pub detections: Vec<(RedacterType, Detection)>,
+    /// How many values the redacters named without being able to place them in the file, see
+    /// [`Detections::unlocated`].
+    pub unlocated: usize,
     /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
     /// file read as text is not text. The plan was not blocked; the step was, so the caller
     /// reports the file as unsupported.
     pub blocked: Option<RedactionBlocked>,
+}
+
+impl DetectStreamResult {
+    fn absorb(&mut self, other: Self) {
+        self.detections.extend(other.detections);
+        self.unlocated += other.unlocated;
+    }
 }
 
 /// The result of running one OCR conversion step.
@@ -399,13 +410,12 @@ impl<'a> StreamRedacter<'a> {
             .await?
         else {
             return Ok(DetectStreamResult {
-                detections: Vec::new(),
                 blocked: Some(RedactionBlocked::NotText),
+                ..DetectStreamResult::default()
             });
         };
         let redacters = &plan.supported_redacters;
-        let mut detections = Vec::new();
-        let mut blocked = None;
+        let mut result = DetectStreamResult::default();
         match &item.content {
             RedacterDataItemContent::Pdf { data } if plan.apply_pdf_image_converter => {
                 let converter = self
@@ -423,7 +433,7 @@ impl<'a> StreamRedacter<'a> {
                 {
                     let page = Some(index + 1);
                     if plan.apply_ocr {
-                        detections.extend(
+                        result.absorb(
                             Self::detect_with_ocr(
                                 redacters,
                                 &page_info.page_as_images,
@@ -445,7 +455,7 @@ impl<'a> StreamRedacter<'a> {
                             },
                             file_ref: file_ref.clone(),
                         };
-                        detections.extend(Self::detect_all(redacters, &page_item, page).await?);
+                        result.absorb(Self::detect_all(redacters, &page_item, page).await?);
                     }
                 }
             }
@@ -453,19 +463,16 @@ impl<'a> StreamRedacter<'a> {
                 match ImageFormat::from_mime_type(mime_type) {
                     Some(format) => {
                         let image = image::load_from_memory_with_format(data, format)?;
-                        detections =
+                        result =
                             Self::detect_with_ocr(redacters, &image, None, self.ocr()?, file_ref)
                                 .await?;
                     }
-                    None => blocked = Some(RedactionBlocked::OcrImageFormatNotSupported),
+                    None => result.blocked = Some(RedactionBlocked::OcrImageFormatNotSupported),
                 }
             }
-            _ => detections = Self::detect_all(redacters, &item, None).await?,
+            _ => result = Self::detect_all(redacters, &item, None).await?,
         }
-        Ok(DetectStreamResult {
-            detections,
-            blocked,
-        })
+        Ok(result)
     }
 
     fn ocr(&self) -> AppResult<&dyn Ocr> {
@@ -482,15 +489,17 @@ impl<'a> StreamRedacter<'a> {
         redacters: &[&Redacters<'a>],
         item: &RedacterDataItem,
         page: Option<usize>,
-    ) -> AppResult<Vec<(RedacterType, Detection)>> {
-        let mut detections = Vec::new();
+    ) -> AppResult<DetectStreamResult> {
+        let mut result = DetectStreamResult::default();
         for redacter in redacters {
             tracing::debug!(
                 redacter = %redacter.redacter_type(),
                 file = %item.file_ref.relative_path.value(),
                 "detecting"
             );
-            for mut detection in redacter.detect(item).await? {
+            let detected = redacter.detect(item).await?;
+            result.unlocated += detected.unlocated;
+            for mut detection in detected.found {
                 if let DetectionLocation::Image {
                     page: ref mut image_page,
                     ..
@@ -498,10 +507,12 @@ impl<'a> StreamRedacter<'a> {
                 {
                     *image_page = page;
                 }
-                detections.push((redacter.redacter_type(), detection));
+                result
+                    .detections
+                    .push((redacter.redacter_type(), detection));
             }
         }
-        Ok(detections)
+        Ok(result)
     }
 
     /// What `redacters` find in the text OCR reads from `image`, each detection boxed by the
@@ -513,19 +524,23 @@ impl<'a> StreamRedacter<'a> {
         page: Option<usize>,
         ocr: &dyn Ocr,
         file_ref: &FileSystemRef,
-    ) -> AppResult<Vec<(RedacterType, Detection)>> {
+    ) -> AppResult<DetectStreamResult> {
         let ocr_text = OcrText::from(ocr.image_to_text(image.clone())?.as_slice());
         let item = RedacterDataItem {
             content: RedacterDataItemContent::Value(ocr_text.text.clone()),
             file_ref: file_ref.clone(),
         };
-        let mut detections = Vec::new();
-        for (redacter, detection) in Self::detect_all(redacters, &item, page).await? {
+        let detected = Self::detect_all(redacters, &item, page).await?;
+        let mut result = DetectStreamResult {
+            unlocated: detected.unlocated,
+            ..DetectStreamResult::default()
+        };
+        for (redacter, detection) in detected.detections {
             let DetectionLocation::Text { start, end, .. } = detection.location else {
                 continue;
             };
             match ocr_text.image_location(start, end, page) {
-                Some(location) => detections.push((
+                Some(location) => result.detections.push((
                     redacter,
                     Detection {
                         location,
@@ -540,7 +555,7 @@ impl<'a> StreamRedacter<'a> {
                 ),
             }
         }
-        Ok(detections)
+        Ok(result)
     }
 
     /// The item `input` is read as under the plan. With `--unsupported-as-text` the content

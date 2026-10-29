@@ -9,7 +9,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, Detection, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    redact_image_with_mode, Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     ModelStop, NativeImageEditError, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
@@ -385,7 +385,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             .unwrap_or_else(|| Self::DEFAULT_MODEL.to_string())
     }
 
-    async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+    async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
         let system_message = |text: String| OpenAiLlmAnalyzeMessageRequest {
             role: "system".to_string(),
             content: vec![OpenAiLlmAnalyzeMessageContent::Text { text }],
@@ -557,7 +557,7 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
@@ -779,7 +779,7 @@ mod tests {
         .await?;
 
         let input = live_detection::note_item();
-        let detections = redacter.detect(&input).await?;
+        let detections = redacter.detect(&input).await?.found;
 
         live_detection::assert_note_found(&input, &detections);
         Ok(())
@@ -807,7 +807,8 @@ mod tests {
 
         let detections = redacter
             .detect(&live_detection::enlarged_form_item())
-            .await?;
+            .await?
+            .found;
 
         live_detection::assert_form_found(&detections);
         Ok(())

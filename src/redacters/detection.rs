@@ -92,6 +92,25 @@ pub struct Detection {
     pub value: String,
 }
 
+/// What a provider found in an item.
+#[derive(Debug, Default, PartialEq)]
+pub struct Detections {
+    pub found: Vec<Detection>,
+    /// How many values the provider named without being able to place them in the item, such
+    /// as a value a model reformatted. Only the count is kept, since the values are the
+    /// sensitive data. A file with unlocated values may hold findings that `found` lacks.
+    pub unlocated: usize,
+}
+
+impl From<Vec<Detection>> for Detections {
+    fn from(found: Vec<Detection>) -> Self {
+        Self {
+            found,
+            unlocated: 0,
+        }
+    }
+}
+
 /// Where a detection sits, as a report shows it. Byte offsets count from 0; lines, columns,
 /// table rows and columns, and PDF pages count from 1, as editors and spreadsheets do.
 ///
@@ -241,7 +260,7 @@ impl Detection {
     }
 
     /// The detections of `findings` in `text`, for providers that report ranges of the text.
-    pub fn in_text(text: &str, findings: Vec<Finding>) -> AppResult<Vec<Self>> {
+    pub fn in_text(text: &str, findings: Vec<Finding>) -> AppResult<Detections> {
         let lines = TextLines::new(text);
         findings
             .into_iter()
@@ -252,7 +271,8 @@ impl Detection {
                     finding.score,
                 )
             })
-            .collect()
+            .collect::<AppResult<Vec<Self>>>()
+            .map(Detections::from)
     }
 
     /// The findings of `find_in_cell(column, cell)` on every cell of `rows`, placed in their
@@ -260,7 +280,7 @@ impl Detection {
     pub fn in_table_cells<E: Into<AppError>>(
         rows: &[Vec<String>],
         mut find_in_cell: impl FnMut(usize, &str) -> Result<Vec<Finding>, E>,
-    ) -> AppResult<Vec<Self>> {
+    ) -> AppResult<Detections> {
         let mut detections = Vec::new();
         for (row_index, row) in rows.iter().enumerate() {
             for (column, cell) in row.iter().enumerate() {
@@ -276,7 +296,7 @@ impl Detection {
                 }
             }
         }
-        Ok(detections)
+        Ok(detections.into())
     }
 
     /// Each value's occurrences in `text` that do not overlap each other, for providers that
@@ -288,11 +308,12 @@ impl Detection {
     /// an extra one. An occurrence inside a longer one is dropped, so a name and its first
     /// word are reported once; partial overlaps are all kept. When two values have the same
     /// span, the first one's label is kept. An empty value or a repeated `(value, label)`
-    /// pair adds nothing. Sorted by position.
-    pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> AppResult<Vec<Self>> {
+    /// pair adds nothing. Sorted by position. A value with no occurrence is counted in
+    /// [`Detections::unlocated`].
+    pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> AppResult<Detections> {
         let mut seen = HashSet::new();
         let mut occurrences = Vec::new();
-        let mut unmatched = 0_usize;
+        let mut unlocated = 0;
         let folded_text = FoldedText::new(text);
         for (value, label) in values {
             if value.is_empty() || !seen.insert((value, label)) {
@@ -300,22 +321,16 @@ impl Detection {
             }
             let ranges = folded_text.occurrences_of(value);
             if ranges.is_empty() {
-                unmatched += 1;
+                unlocated += 1;
             }
             occurrences.extend(ranges.into_iter().map(|range| (range, label)));
         }
-        if unmatched > 0 {
-            // Counted, never named: the values are the sensitive data.
-            tracing::warn!(
-                unmatched,
-                "values named by the provider were not found in the text"
-            );
-        }
         let lines = TextLines::new(text);
-        without_contained(occurrences)
+        let found = without_contained(occurrences)
             .into_iter()
             .map(|(range, label)| lines.detection(range, label.clone(), None))
-            .collect()
+            .collect::<AppResult<_>>()?;
+        Ok(Detections { found, unlocated })
     }
 }
 
@@ -573,7 +588,8 @@ mod tests {
                 ("Jörg".to_string(), person.clone()),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .found;
         let second = text.rfind("Jörg").unwrap();
         assert_eq!(
             located(&detections),
@@ -599,7 +615,8 @@ mod tests {
                 ("John Michael Smith".to_string(), person),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .found;
         assert_eq!(
             located(&detections),
             vec![(0..18, "John Michael Smith"), (23..27, "John")]
@@ -609,6 +626,7 @@ mod tests {
     fn values_found(text: &str, value: &str) -> Vec<String> {
         Detection::locate_values(text, &[(value.to_string(), DetectionLabel::new("PERSON"))])
             .unwrap()
+            .found
             .into_iter()
             .map(|detection| detection.value)
             .collect()
@@ -647,8 +665,9 @@ mod tests {
     fn the_range_of_a_case_insensitive_match_is_in_bytes_of_the_original_text() {
         let place = DetectionLabel::new("LOCATION");
         let text = "Kelvin K, then İstanbul";
-        let detections =
-            Detection::locate_values(text, &[("istanbul".to_string(), place)]).unwrap();
+        let detections = Detection::locate_values(text, &[("istanbul".to_string(), place)])
+            .unwrap()
+            .found;
         let start = text.find('İ').unwrap();
         assert_eq!(located(&detections), vec![(start..text.len(), "İstanbul")]);
     }
@@ -663,7 +682,8 @@ mod tests {
                 ("Lima Street 5".to_string(), DetectionLabel::new("ADDRESS")),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .found;
         assert_eq!(
             located(&detections),
             vec![(0..8, "Ana Lima"), (4..17, "Lima Street 5")]
@@ -680,7 +700,8 @@ mod tests {
                 ("a@b.io".to_string(), email()),
             ],
         )
-        .unwrap();
+        .unwrap()
+        .found;
         assert_eq!(detections.len(), 1);
     }
 
@@ -733,6 +754,25 @@ mod tests {
         for (start, end) in [(0, 11), (11, 12), (3, 2)] {
             assert_eq!(offsets.byte_range(start, end), None, "{start}..{end}");
         }
+    }
+
+    #[test]
+    fn values_with_no_occurrence_are_counted_once_and_not_named() {
+        let person = DetectionLabel::new("PERSON");
+
+        let detections = Detection::locate_values(
+            "Ask Ana.",
+            &[
+                ("Zoe".to_string(), person.clone()),
+                ("Zoe".to_string(), person.clone()),
+                ("Max".to_string(), person.clone()),
+                ("Ana".to_string(), person),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(located(&detections.found), vec![(4..7, "Ana")]);
+        assert_eq!(detections.unlocated, 2);
     }
 
     #[test]

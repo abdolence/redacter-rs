@@ -9,8 +9,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, Detection, DetectionLabel, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    bedrock_error, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -126,7 +126,7 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
     /// The sensitive values the guardrail reported for `text`, found wherever they occur in
     /// it: the service names the matched strings but gives no offsets. Reads the assessments
     /// whatever the filters' actions are, since detection does not need the text anonymized.
-    fn detections_in(text: &str, output: &ApplyGuardrailOutput) -> AppResult<Vec<Detection>> {
+    fn detections_in(text: &str, output: &ApplyGuardrailOutput) -> AppResult<Detections> {
         let mut values = Vec::new();
         for policy in output
             .assessments()
@@ -187,7 +187,7 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => {
                 Self::detections_in(text, &self.apply_guardrail(text).await?)
@@ -291,7 +291,9 @@ mod tests {
                 .expect("action is set above")],
         );
 
-        let detections = AwsBedrockGuardrailsRedacter::detections_in(text, &output).unwrap();
+        let detections = AwsBedrockGuardrailsRedacter::detections_in(text, &output)
+            .unwrap()
+            .found;
 
         let located: Vec<(String, DetectionLocation, &str)> = detections
             .iter()
@@ -494,7 +496,7 @@ mod tests {
         };
 
         let text = "Grüße aus Köln, Zoë Keller schreibt an zoe.keller@example.com";
-        let detections = redacter.detect(&item(text)).await.unwrap();
+        let detections = redacter.detect(&item(text)).await.unwrap().found;
 
         let email = text.find("zoe.keller@example.com").unwrap();
         assert!(
@@ -516,6 +518,7 @@ mod tests {
             .detect(&item("Nothing sensitive here."))
             .await
             .unwrap()
+            .found
             .is_empty());
     }
 }

@@ -3,7 +3,7 @@
 //! offsets are located locally and image boxes are scaled back to the image as given.
 
 use crate::errors::AppError;
-use crate::redacters::{Detection, DetectionLabel, DetectionLocation, ImageBoxes};
+use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Detections, ImageBoxes};
 use crate::AppResult;
 use rand::RngExt;
 use serde::de::DeserializeOwned;
@@ -69,12 +69,12 @@ impl LlmTextFinding {
     /// does not occur in the text, even ignoring case, is not reported. An answer that is
     /// not a JSON array of findings is an error: reading it as "nothing found" would report
     /// a clean file.
-    pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Vec<Detection>> {
+    pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Detections> {
         Self::locate(text, parse_answer(answer)?)
     }
 
     /// Every occurrence in `text` of the values in `findings`.
-    pub fn locate(text: &str, findings: Vec<Self>) -> AppResult<Vec<Detection>> {
+    pub fn locate(text: &str, findings: Vec<Self>) -> AppResult<Detections> {
         let values: Vec<(String, DetectionLabel)> = findings
             .into_iter()
             .map(|finding| (finding.text, DetectionLabel::new(finding.label)))
@@ -91,10 +91,10 @@ impl ImageBoxes {
     pub async fn into_labelled_detections<DetectText, DetectTextFuture>(
         self,
         detect_text: DetectText,
-    ) -> AppResult<Vec<Detection>>
+    ) -> AppResult<Detections>
     where
         DetectText: FnOnce(String) -> DetectTextFuture,
-        DetectTextFuture: Future<Output = AppResult<Vec<Detection>>>,
+        DetectTextFuture: Future<Output = AppResult<Detections>>,
     {
         let mut joined = String::new();
         let box_ranges: Vec<Option<Range<usize>>> = self
@@ -112,10 +112,11 @@ impl ImageBoxes {
             .collect();
         let mut detections = self.into_detections();
         if joined.is_empty() {
-            return Ok(detections);
+            return Ok(detections.into());
         }
         let findings: Vec<(Range<usize>, DetectionLabel)> = detect_text(joined)
             .await?
+            .found
             .into_iter()
             .filter_map(|finding| match finding.location {
                 DetectionLocation::Text { start, end, .. } => Some((start..end, finding.label)),
@@ -140,7 +141,7 @@ impl ImageBoxes {
                 detection.label = label.clone();
             }
         }
-        Ok(detections)
+        Ok(detections.into())
     }
 }
 
@@ -154,7 +155,9 @@ mod tests {
         let answer =
             r#"[{"text":"a@b.com","type":"email_address"},{"text":"Åsa","type":"person_name"}]"#;
 
-        let detections = LlmTextFinding::detections_from_answer(answer, text).unwrap();
+        let detections = LlmTextFinding::detections_from_answer(answer, text)
+            .unwrap()
+            .found;
 
         let found: Vec<_> = detections
             .iter()
@@ -256,10 +259,11 @@ mod tests {
                     text_detection(&text, "email_address", 19..26),
                 ];
                 *asked.borrow_mut() = Some(text);
-                async { Ok(findings) }
+                async { Ok(findings.into()) }
             })
             .await
-            .unwrap();
+            .unwrap()
+            .found;
 
         assert_eq!(
             asked.into_inner().as_deref(),
@@ -284,10 +288,11 @@ mod tests {
         let detections = found_boxes(&[None, Some("")])
             .into_labelled_detections(|_| {
                 called.set(true);
-                async { Ok(Vec::new()) }
+                async { Ok(Detections::default()) }
             })
             .await
-            .unwrap();
+            .unwrap()
+            .found;
 
         assert!(!called.get());
         assert_eq!(detections.len(), 2);

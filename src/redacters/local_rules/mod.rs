@@ -16,7 +16,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    text_or_table_support, Detection, RedactSupport, Redacter, RedacterDataItem,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
@@ -108,7 +108,7 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
         Ok(text_or_table_support(file_ref))
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => Detection::in_text(text, self.rules.find(text)),
             RedacterDataItemContent::Table { rows, .. } => {
@@ -238,7 +238,8 @@ mod tests {
                 RedacterDataItemContent::Value(text.to_string()),
             ))
             .await
-            .unwrap();
+            .unwrap()
+            .found;
         assert_eq!(
             detections,
             vec![Detection {
@@ -267,7 +268,8 @@ mod tests {
                 },
             ))
             .await
-            .unwrap();
+            .unwrap()
+            .found;
         let locations: Vec<DetectionLocation> = detections
             .iter()
             .map(|detection| detection.location)

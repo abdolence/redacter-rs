@@ -303,6 +303,7 @@ async fn detect_in_file(
                         FindingReport::new(*redacter, detection, context.options.values)
                     })
                     .collect(),
+                scanned.unlocated,
             ),
             Err(error) => failed_report(file_ref, &error),
         },

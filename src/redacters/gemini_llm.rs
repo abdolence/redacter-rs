@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, retrying_once,
-    Detection, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    Detections, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
     NATIVE_IMAGE_REDACTION_PROMPT,
@@ -348,7 +348,7 @@ impl<'a> GeminiLlmRedacter<'a> {
         retrying_once(|| async { self.generate(request.clone()).await?.into_text() }).await
     }
 
-    async fn detect_in_text(&self, text: &str) -> AppResult<Vec<Detection>> {
+    async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
         let prompt = TextDetectionPrompt::new(text);
         let answer = self
             .generate_json(
@@ -509,7 +509,7 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
         })
     }
 
-    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Vec<Detection>> {
+    async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         match &input.content {
             RedacterDataItemContent::Value(text) => self.detect_in_text(text).await,
             RedacterDataItemContent::Image { mime_type, data } => {
@@ -725,7 +725,7 @@ mod tests {
         let redacter = detection_test_redacter(&reporter).await?;
 
         let input = live_detection::note_item();
-        let detections = redacter.detect(&input).await?;
+        let detections = redacter.detect(&input).await?.found;
 
         live_detection::assert_note_found(&input, &detections);
         Ok(())
@@ -740,7 +740,8 @@ mod tests {
 
         let detections = redacter
             .detect(&live_detection::enlarged_form_item())
-            .await?;
+            .await?
+            .found;
 
         live_detection::assert_form_found(&detections);
         Ok(())
