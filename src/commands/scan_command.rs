@@ -202,7 +202,7 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
             };
             match skip_reason {
                 Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
-                None => detect_in_file(context, reader, &file_ref, throttler).await,
+                None => detect_in_file(context, reader, &file_ref, throttler).await?,
             }
         }
         Err(error) => {
@@ -235,73 +235,78 @@ fn failed_report(file_ref: &FileSystemRef, error: &AppError) -> ScanFileReport {
     ScanFileReport::failed(file_ref, error.to_string())
 }
 
-/// What the redacters found in the file's content, or why they could not read it.
+/// What the redacters found in the file's content, or why they could not read it. The error is
+/// the terminal's, never the file's.
 async fn detect_in_file(
     context: &ScanContext<'_>,
     reader: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     file_ref: &FileSystemRef,
     throttler: &mut Option<RedacterThrottler>,
-) -> ScanFileReport {
+) -> AppResult<ScanFileReport> {
     let plan = match context
         .stream_redacter
         .create_detect_plan(context.redacters, file_ref)
         .await
     {
         Ok(plan) => plan,
-        Err(error) => return failed_report(file_ref, &error),
+        Err(error) => return Ok(failed_report(file_ref, &error)),
     };
     if plan.supported_redacters.is_empty() {
-        return ScanFileReport::not_scanned(
+        return Ok(ScanFileReport::not_scanned(
             file_ref,
             SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
-        );
+        ));
     }
     if let Some(throttler) = throttler {
         *throttler = throttler.update(Instant::now());
         let delay = *throttler.delay();
         if !delay.is_zero() {
-            context.bar.println(
-                context
+            write_lines(
+                context.term,
+                context.bar,
+                &[context
                     .styles
                     .dimmed
                     .apply_to(format!(
                         "⧗ Delaying detection for {} seconds",
                         delay.as_secs()
                     ))
-                    .to_string(),
-            );
+                    .to_string()],
+            )?;
             tokio::time::sleep(delay).await;
         }
     }
-    match context
-        .stream_redacter
-        .detect_stream(reader, &plan, file_ref)
-        .await
-    {
-        Ok(DetectStreamResult {
-            blocked: Some(blocked),
-            ..
-        }) => ScanFileReport::not_scanned(
-            file_ref,
-            SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
-        ),
-        Ok(scanned) => ScanFileReport::scanned(
-            file_ref,
-            scanned
-                .detections
-                .iter()
-                .filter(|(_, detection)| {
-                    context.options.min_score.is_none_or(|min_score| {
-                        detection.score.is_none_or(|score| score >= min_score)
+    Ok(
+        match context
+            .stream_redacter
+            .detect_stream(reader, &plan, file_ref)
+            .await
+        {
+            Ok(DetectStreamResult {
+                blocked: Some(blocked),
+                ..
+            }) => ScanFileReport::not_scanned(
+                file_ref,
+                SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
+            ),
+            Ok(scanned) => ScanFileReport::scanned(
+                file_ref,
+                scanned
+                    .detections
+                    .iter()
+                    .filter(|(_, detection)| {
+                        context.options.min_score.is_none_or(|min_score| {
+                            detection.score.is_none_or(|score| score >= min_score)
+                        })
                     })
-                })
-                .map(|(redacter, detection)| {
-                    FindingReport::new(*redacter, detection, context.options.values)
-                })
-                .collect(),
-        ),
-        Err(error) => failed_report(file_ref, &error),
-    }
+                    .map(|(redacter, detection)| {
+                        FindingReport::new(*redacter, detection, context.options.values)
+                    })
+                    .collect(),
+            ),
+            Err(error) => failed_report(file_ref, &error),
+        },
+    )
 }
 
 #[cfg(all(test, unix))]
