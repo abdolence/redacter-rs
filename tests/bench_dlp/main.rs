@@ -1,6 +1,6 @@
-//! Benchmark of the redacters of the `redacter` CLI: detection quality per category and
-//! latency, scored from the JSON report of `redacter scan`, over four datasets: the text
-//! fixtures, a synthetic secrets corpus, a seeded sample of a public PII dataset, and an image
+//! Benchmark of the redacters of the `redacter` CLI: detection quality per category and time
+//! per file, scored from the JSON report of `redacter scan`, over four datasets: the text
+//! fixtures, a synthetic secrets corpus, a fixed sample of a public PII dataset, and an image
 //! and a PDF form.
 //!
 //! This is not part of the normal test run: the harness is `#[ignore]`d because it shells out
@@ -22,7 +22,7 @@ mod scoring;
 mod summary;
 
 use datasets::{Dataset, DatasetKind, DatasetPaths};
-use runner::{median, required_addons, BenchEnv, Scanner, Spec};
+use runner::{required_addons, Scanner, Spec};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -30,11 +30,7 @@ use summary::{DatasetResult, Measurement, Outcome, ProviderResult, Results};
 
 const DEFAULT_PROVIDERS: &str =
     "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner";
-const DEFAULT_DATASETS: &str = "fixtures,secrets";
-const DEFAULT_SAMPLE_SIZE: usize = 200;
-/// A dataset with more files than this is timed as one run only: a run per file would start the
-/// binary, and for a cloud redacter send a request, once for each.
-const PER_FILE_TIMING_MAX_FILES: usize = 30;
+const DEFAULT_DATASETS: &str = "fixtures,secrets,public";
 
 fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> Vec<T> {
     let value = std::env::var(variable).unwrap_or_else(|_| default.to_string());
@@ -49,48 +45,21 @@ fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> V
 }
 
 /// Scans `dataset` with `spec` and scores the report.
-fn measure(scanner: &Scanner, env: &BenchEnv, spec: &Spec, dataset: &Dataset) -> Outcome {
-    if let Some(reason) = spec.missing_config(env) {
-        return Outcome::NotMeasured { reason };
-    }
+fn measure(scanner: &Scanner, spec: &Spec, dataset: &Dataset) -> Outcome {
     let files = dataset.truth.len();
     println!("  {spec} on {}: {files} files", dataset.kind);
-    let run = match scanner.scan(spec, env, &dataset.dir, dataset.scan_args) {
+    let run = match scanner.scan(spec, &dataset.dir, dataset.scan_args) {
         Ok(run) => run,
         Err(reason) => return Outcome::Failed { reason },
     };
     let whole_run_ms = run.wall.as_millis();
-    let (files_failed, files_blocked, files_unsupported) = (
-        run.report.files_failed,
-        run.report.files_blocked,
-        run.report.files_unsupported,
-    );
-    let tally = run.report.score(&dataset.truth);
-
-    let per_file_median_ms = if files <= PER_FILE_TIMING_MAX_FILES {
-        let mut timings = Vec::new();
-        for name in dataset.truth.keys() {
-            match scanner.scan(spec, env, &dataset.dir.join(name), dataset.scan_args) {
-                Ok(single) => timings.push(single.wall.as_millis()),
-                Err(reason) => {
-                    return Outcome::Failed {
-                        reason: format!("{name}: {reason}"),
-                    }
-                }
-            }
-        }
-        median(&timings)
-    } else {
-        None
-    };
-
     Outcome::Measured(Measurement {
         whole_run_ms,
-        per_file_median_ms,
-        files_failed,
-        files_blocked,
-        files_unsupported,
-        tally,
+        ms_per_file: whole_run_ms / files as u128,
+        files_failed: run.report.files_failed,
+        files_blocked: run.report.files_blocked,
+        files_unsupported: run.report.files_unsupported,
+        tally: run.report.score(&dataset.truth),
     })
 }
 
@@ -99,9 +68,6 @@ fn measure(scanner: &Scanner, env: &BenchEnv, spec: &Spec, dataset: &Dataset) ->
 fn bench_dlp() {
     let specs: Vec<Spec> = comma_separated("BENCH_DLP_PROVIDERS", DEFAULT_PROVIDERS);
     let kinds: Vec<DatasetKind> = comma_separated("BENCH_DLP_DATASETS", DEFAULT_DATASETS);
-    let sample_size = std::env::var("BENCH_DLP_DATASET_SAMPLE")
-        .map(|value| value.parse().expect("BENCH_DLP_DATASET_SAMPLE is a number"))
-        .unwrap_or(DEFAULT_SAMPLE_SIZE);
     let out_root = PathBuf::from(
         std::env::var("BENCH_DLP_OUT").unwrap_or_else(|_| "target/bench-dlp".to_string()),
     );
@@ -110,11 +76,15 @@ fn bench_dlp() {
     let addons_dir = std::env::var("BENCH_DLP_ADDONS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| out_root.join("addons"));
-    let env = BenchEnv::from_lookup(|name| std::env::var(name).ok());
 
     let scanner = Scanner {
         binary: Path::new(env!("CARGO_BIN_EXE_redacter")),
         addons_dir: &addons_dir,
+        scan_args: std::env::var("BENCH_DLP_SCAN_ARGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(String::from)
+            .collect(),
     };
     scanner
         .install_addons(&required_addons(&specs, &kinds))
@@ -129,27 +99,20 @@ fn bench_dlp() {
     };
     for kind in kinds {
         println!("=== dataset: {kind} ===");
-        let loaded = paths.load(kind, sample_size);
-        let (files, targets) = loaded.as_ref().map_or((0, 0), |dataset| {
-            (dataset.truth.len(), dataset.sensitive_count())
-        });
-        let providers = specs
-            .iter()
-            .map(|spec| ProviderResult {
-                provider: spec.to_string(),
-                outcome: match &loaded {
-                    Ok(dataset) => measure(&scanner, &env, spec, dataset),
-                    Err(reason) => Outcome::NotMeasured {
-                        reason: format!("dataset unavailable: {reason}"),
-                    },
-                },
-            })
-            .collect();
+        let dataset = paths
+            .load(kind)
+            .unwrap_or_else(|e| panic!("load the {kind} dataset: {e}"));
         results.datasets.push(DatasetResult {
             dataset: kind,
-            files,
-            targets,
-            providers,
+            files: dataset.truth.len(),
+            targets: dataset.sensitive_count(),
+            providers: specs
+                .iter()
+                .map(|spec| ProviderResult {
+                    provider: spec.to_string(),
+                    outcome: measure(&scanner, spec, &dataset),
+                })
+                .collect(),
         });
     }
 
