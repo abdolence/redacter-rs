@@ -587,42 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_assignment_skips_code_references() {
-        assert_untouched("use crate::signing::private_key::Pkcs8SigningKey;");
-        assert_untouched("let key = self::token::Token2::new();");
-        assert_untouched("const apiKey = process.env.API_KEY_V2;");
-        assert_untouched("apiKey = config.apiKeyV2;");
-        assert_untouched("token: process.env.TOKEN_V2");
-        assert_untouched("secret = settings::SECRET_VALUE_2;");
-        assert_untouched("PWD=/home/runner/work/app2");
-        assert_untouched("OLDPWD=/home/runner/work/app2");
-        assert_untouched("pwd: /var/log/app1");
-    }
-
-    #[test]
-    fn secret_assignment_redacts_dotted_random_tokens() {
-        let google_oauth = format!("ya29.{}", "a0AfH6SMBxq1w2e3r4t5q1w2e3r4t5q1w2e3r4t5");
-        assert_redacts(
-            &format!("Google token: {google_oauth}"),
-            "Google token: [REDACTED]",
-        );
-        assert_redacts("token: abcdefgh1234.ijklmnop5678", "token: [REDACTED]");
-    }
-
-    #[test]
-    fn secret_assignment_in_a_url_query_redacts_only_the_value() {
-        assert_redacts(
-            "https://example.com/api?token=abc123def456&user=alice&page=2",
-            "https://example.com/api?token=[REDACTED]&user=alice&page=2",
-        );
-        assert_redacts(
-            "https://example.com/api?user=alice&api_key=abc123def456&page=2",
-            "https://example.com/api?user=alice&api_key=[REDACTED]&page=2",
-        );
-        assert_redacts("password: P@ss&word1", "password: [REDACTED]");
-    }
-
-    #[test]
     fn quoted_secret_assignment_redacts_up_to_the_closing_quote() {
         assert_redacts(
             "password = \"supersecret,1234\"",
@@ -647,52 +611,177 @@ mod tests {
     }
 
     #[test]
-    fn quoted_secret_assignment_ends_at_a_quote_of_its_own_kind() {
-        assert_redacts(
-            "password = \"Sup3rS3cret'sTail\"",
-            "password = \"[REDACTED]\"",
+    fn secret_rule_cases() {
+        let google_oauth = format!("ya29.{}", "a0AfH6SMBxq1w2e3r4t5q1w2e3r4t5q1w2e3r4t5");
+        let slack_trigger = format!(
+            "hooks.slack.com/triggers/{}",
+            "T0123456789/3141592653589/0123456789abcdef0123456789abcdef"
         );
-        assert_redacts("password = 'Sup3rS3cret\"sTail'", "password = '[REDACTED]'");
-        assert_redacts(
-            "password = `Sup3rS3cret'\"sTail`",
-            "password = `[REDACTED]`",
+        let slack_workflow = format!(
+            "hooks.slack.com/workflows/{}",
+            "T0123456789/A0123456789/123456789012345678/abcdefghijklmnopqrstuvwx"
         );
-        assert_redacts("password = \"'Sup3rS3cret'\"", "password = \"[REDACTED]\"");
-    }
+        let huggingface = format!("hf_{}", "0123456789abcdefghijklmnopqrstuv");
+        let sendgrid = format!(
+            "SG.{}.{}-",
+            "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+        );
+        let discord = format!(
+            "{}.{}.{}",
+            "MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"
+        );
 
-    #[test]
-    fn quoted_secret_assignment_keeps_escaped_quotes_in_the_value() {
-        assert_redacts(
-            r#"{"password": "Sup3rS3cret\"!xtail"}"#,
-            r#"{"password": "[REDACTED]"}"#,
-        );
-        assert_redacts(
-            r#"{"password": "p@ss\"word123"}"#,
-            r#"{"password": "[REDACTED]"}"#,
-        );
-        assert_redacts(r"password = 'it\'s-Sup3r1'", r"password = '[REDACTED]'");
-        assert_redacts(
-            r#"password = "Sup3rS3cret\\" # next"#,
-            r#"password = "[REDACTED]" # next"#,
-        );
-    }
+        let redacted: Vec<(String, &str)> = vec![
+            // A quoted value ends at the next quote of its own kind and keeps the others.
+            (
+                r#"password = "Sup3rS3cret'sTail""#.into(),
+                r#"password = "[REDACTED]""#,
+            ),
+            (
+                r#"password = 'Sup3rS3cret"sTail'"#.into(),
+                r#"password = '[REDACTED]'"#,
+            ),
+            (
+                "password = `Sup3rS3cret'\"sTail`".into(),
+                "password = `[REDACTED]`",
+            ),
+            (
+                r#"password = "'Sup3rS3cret'""#.into(),
+                r#"password = "[REDACTED]""#,
+            ),
+            (
+                r#"password = "supersecret,1234""#.into(),
+                r#"password = "[REDACTED]""#,
+            ),
+            // Escaped quotes, backslashes and doubled quotes stay inside a quoted value.
+            (
+                r#"{"password": "Sup3rS3cret\"!xtail"}"#.into(),
+                r#"{"password": "[REDACTED]"}"#,
+            ),
+            (
+                r#"{"password": "p@ss\"word123"}"#.into(),
+                r#"{"password": "[REDACTED]"}"#,
+            ),
+            (
+                r"password = 'it\'s-Sup3r1'".into(),
+                "password = '[REDACTED]'",
+            ),
+            (
+                r#"password = "Sup3rS3cret\\" # next"#.into(),
+                r#"password = "[REDACTED]" # next"#,
+            ),
+            (r"PASSWORD='Sup3rS3cret1\'".into(), "PASSWORD='[REDACTED]'"),
+            (
+                "password: 'it''s-Sup3rS3cret1'".into(),
+                "password: '[REDACTED]'",
+            ),
+            (
+                "password: 'Sup3rS3cr''et-tail'".into(),
+                "password: '[REDACTED]'",
+            ),
+            // JSON inside a JSON string.
+            (
+                r#"{"msg":"{\"password\":\"Sup3rS3cret1\"}"}"#.into(),
+                r#"{"msg":"{\"password\":\"[REDACTED]\"}"}"#,
+            ),
+            // An unquoted value ends at a closing bracket as well.
+            (
+                "User(name=bob, password=Sup3rS3cret1)".into(),
+                "User(name=bob, password=[REDACTED])",
+            ),
+            (
+                "{user=bob, password=Sup3rS3cret1}".into(),
+                "{user=bob, password=[REDACTED]}",
+            ),
+            (
+                "{User:bob Password:Sup3rS3cret1}".into(),
+                "{User:bob Password:[REDACTED]}",
+            ),
+            (
+                "<td>Password: Sup3rS3cret1</td>".into(),
+                "<td>Password: [REDACTED]</td>",
+            ),
+            // An unquoted value keeps an `&` that does not start a `name=` pair.
+            (
+                "https://example.com/api?token=abc123def456&user=alice&page=2".into(),
+                "https://example.com/api?token=[REDACTED]&user=alice&page=2",
+            ),
+            (
+                "https://example.com/api?user=alice&api_key=abc123def456&page=2".into(),
+                "https://example.com/api?user=alice&api_key=[REDACTED]&page=2",
+            ),
+            ("password: P@ss&word1".into(), "password: [REDACTED]"),
+            // Paths are over-redacted rather than risk a secret that starts with `/`.
+            (
+                "client_secret=/aB3dEfGhIjKlMnOpQrStUv+wXyZ0123456789=".into(),
+                "client_secret=[REDACTED]",
+            ),
+            ("PWD=/home/runner/work/app2".into(), "PWD=[REDACTED]"),
+            (
+                "secret: /run/secrets/db_password1".into(),
+                "secret: [REDACTED]",
+            ),
+            // Dotted random tokens.
+            (
+                format!("Google token: {google_oauth}"),
+                "Google token: [REDACTED]",
+            ),
+            (
+                "token: abcdefgh1234.ijklmnop5678".into(),
+                "token: [REDACTED]",
+            ),
+            // Connection strings.
+            (
+                "Driver={ODBC Driver 17};Uid=sa;Pwd=Sup3rS3cret1;".into(),
+                "Driver={ODBC Driver 17};Uid=sa;Pwd=[REDACTED];",
+            ),
+            ("UID=sa;PWD=Sup3rS3cret1".into(), "UID=sa;PWD=[REDACTED]"),
+            ("pwd = \"Sup3rS3cret1\"".into(), "pwd = \"[REDACTED]\""),
+            (
+                "Server=tcp:db;Pwd={Sup3r;S3cret1};Encrypt=yes".into(),
+                "Server=tcp:db;Pwd={[REDACTED]};Encrypt=yes",
+            ),
+            // Vendor tokens.
+            (
+                format!("POST https://{slack_trigger} done"),
+                "POST https://[REDACTED] done",
+            ),
+            (
+                format!("POST https://{slack_workflow} done"),
+                "POST https://[REDACTED] done",
+            ),
+            (format!("HF {huggingface} end"), "HF [REDACTED] end"),
+            (format!("key {sendgrid} end"), "key [REDACTED] end"),
+            (format!("key {discord} end"), "key [REDACTED] end"),
+        ];
 
-    #[test]
-    fn secret_assignment_covers_connection_string_passwords() {
-        assert_redacts(
-            "Driver={ODBC Driver 17};Uid=sa;Pwd=Sup3rS3cret1;",
-            "Driver={ODBC Driver 17};Uid=sa;Pwd=[REDACTED];",
-        );
-        assert_redacts("UID=sa;PWD=Sup3rS3cret1", "UID=sa;PWD=[REDACTED]");
-        assert_redacts("pwd = \"Sup3rS3cret1\"", "pwd = \"[REDACTED]\"");
-    }
-
-    #[test]
-    fn secret_assignment_skips_values_that_are_paths() {
-        assert_untouched("secret: /run/secrets/db_password1");
-        assert_untouched("PWD=/home/runner/work/app2");
-        assert_untouched("OLDPWD=/home/runner/work/app2");
-        assert_untouched("pwd: /var/log/app1");
+        let kept = [
+            "use crate::signing::private_key::Pkcs8SigningKey;",
+            "let key = self::token::Token2::new();",
+            "const apiKey = process.env.API_KEY_V2;",
+            "apiKey = config.apiKeyV2;",
+            "token: process.env.TOKEN_V2",
+            "secret = settings::SECRET_VALUE_2;",
+            "${{ secrets.X }}",
+            r#""{{ vault_password }}""#,
+            "${DB_PASSWORD}",
+            "var.db_password",
+            "password: {required: true, minLength: 8}",
+            r#"println!("password={}", password)"#,
+            r#"println!("token={token}")"#,
+        ];
+        let mut mismatches: Vec<String> = redacted
+            .iter()
+            .map(|(input, expected)| (input.as_str(), *expected))
+            .chain(kept.iter().map(|input| (*input, *input)))
+            .filter_map(|(input, expected)| {
+                let actual = redact_all(input);
+                (actual != expected)
+                    .then(|| format!("{input}\n    expected: {expected}\n    actual:   {actual}"))
+            })
+            .collect();
+        mismatches.sort();
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 
     #[test]
@@ -731,39 +820,6 @@ mod tests {
         ] {
             assert_redacts(&format!("key {token} end"), "key [REDACTED] end");
         }
-    }
-
-    #[test]
-    fn slack_webhooks_are_redacted_to_the_end() {
-        let trigger = format!(
-            "hooks.slack.com/triggers/{}",
-            "T0123456789/3141592653589/0123456789abcdef0123456789abcdef"
-        );
-        let workflow = format!(
-            "hooks.slack.com/workflows/{}",
-            "T0123456789/A0123456789/123456789012345678/abcdefghijklmnopqrstuvwx"
-        );
-        for webhook in [&trigger, &workflow] {
-            assert_redacts(
-                &format!("POST https://{webhook} done"),
-                "POST https://[REDACTED] done",
-            );
-        }
-    }
-
-    #[test]
-    fn huggingface_tokens_may_contain_digits() {
-        let token = format!("hf_{}", "0123456789abcdefghijklmnopqrstuv");
-        assert_redacts(&format!("HF {token} end"), "HF [REDACTED] end");
-    }
-
-    #[test]
-    fn sendgrid_keys_keep_no_trailing_dash() {
-        let key = format!(
-            "SG.{}.{}-",
-            "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
-        );
-        assert_redacts(&format!("key {key} end"), "key [REDACTED] end");
     }
 
     #[test]
