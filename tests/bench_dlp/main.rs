@@ -22,7 +22,7 @@ mod scoring;
 mod summary;
 
 use datasets::{Dataset, DatasetKind, DatasetPaths};
-use runner::{required_addons, Scanner, Spec};
+use runner::{Scanner, Spec};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -73,22 +73,15 @@ fn bench_dlp() {
     );
     fs::create_dir_all(&out_root)
         .unwrap_or_else(|e| panic!("create BENCH_DLP_OUT {}: {e}", out_root.display()));
-    let addons_dir = std::env::var("BENCH_DLP_ADDONS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| out_root.join("addons"));
 
     let scanner = Scanner {
         binary: Path::new(env!("CARGO_BIN_EXE_redacter")),
-        addons_dir: &addons_dir,
         scan_args: std::env::var("BENCH_DLP_SCAN_ARGS")
             .unwrap_or_default()
             .split_whitespace()
             .map(String::from)
             .collect(),
     };
-    scanner
-        .install_addons(&required_addons(&specs, &kinds))
-        .unwrap_or_else(|e| panic!("install the addons into {}: {e}", addons_dir.display()));
 
     let paths = DatasetPaths {
         fixtures: &Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixtures"),

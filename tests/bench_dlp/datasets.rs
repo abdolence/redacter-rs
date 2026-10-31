@@ -2,7 +2,7 @@
 //! and, per file, the truth to score its report with.
 
 use crate::categories::Category;
-use crate::scoring::{FileTruth, Rect, Target};
+use crate::scoring::{FileTruth, Sensitive, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
@@ -23,15 +23,7 @@ impl DatasetKind {
     /// Whether the truth lists everything sensitive in the files, which is what makes a finding
     /// on no target a false alarm. The annotation of the public dataset is not exhaustive.
     pub fn has_complete_truth(self) -> bool {
-        matches!(self, DatasetKind::Fixtures | DatasetKind::Secrets)
-    }
-
-    /// Fewest targets a category needs in this dataset for its recall to be shown.
-    pub fn min_category_support(self) -> usize {
-        match self {
-            DatasetKind::Public => 10,
-            _ => 1,
-        }
+        self != DatasetKind::Public
     }
 }
 
@@ -89,10 +81,10 @@ impl DatasetPaths<'_> {
         let dir = self.dataset_dir(kind)?;
         let (truth, scan_args): (BTreeMap<String, FileTruth>, &'static [&'static str]) = match kind
         {
-            DatasetKind::Fixtures => (self.fixtures_truth(&dir)?, &[]),
+            DatasetKind::Fixtures => (self.copied_truth("bench-dlp/truth.json", &dir)?, &[]),
             DatasetKind::Secrets => (self.secrets_truth(&dir)?, &["--unsupported-as-text"]),
             DatasetKind::Public => (self.public_truth(&dir)?, &[]),
-            DatasetKind::Images => (self.images_truth(&dir)?, &[]),
+            DatasetKind::Images => (self.copied_truth("bench-dlp/images.json", &dir)?, &[]),
         };
         Ok(Dataset {
             kind,
@@ -118,7 +110,6 @@ impl DatasetPaths<'_> {
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 
-    /// Copies `test-fixtures/<relative>` into `dir` under its file name.
     fn copy_fixture(&self, relative: &str, dir: &Path) -> Result<String, String> {
         let source = self.fixtures.join(relative);
         let name = source
@@ -131,12 +122,17 @@ impl DatasetPaths<'_> {
         Ok(name)
     }
 
-    fn fixtures_truth(&self, dir: &Path) -> Result<BTreeMap<String, FileTruth>, String> {
-        let entries: BTreeMap<String, TextTruthEntry> = self.read_json("bench-dlp/truth.json")?;
+    /// Reads a truth file, which maps paths under `test-fixtures` to the truth of that file, and
+    /// copies each file into `dir` under its file name, which is how `scan` reports it.
+    fn copied_truth(
+        &self,
+        truth_file: &str,
+        dir: &Path,
+    ) -> Result<BTreeMap<String, FileTruth>, String> {
+        let entries: BTreeMap<String, FileTruth> = self.read_json(truth_file)?;
         let mut truth = BTreeMap::new();
-        for (name, entry) in entries {
-            let copied = self.copy_fixture(&format!("documents/{name}"), dir)?;
-            truth.insert(copied, FileTruth::from(entry));
+        for (relative, file_truth) in entries {
+            truth.insert(self.copy_fixture(&relative, dir)?, file_truth);
         }
         Ok(truth)
     }
@@ -147,16 +143,6 @@ impl DatasetPaths<'_> {
         for (name, (content, file_truth)) in corpus.assemble()? {
             fs::write(dir.join(&name), content).map_err(|e| format!("write {name}: {e}"))?;
             truth.insert(name, file_truth);
-        }
-        Ok(truth)
-    }
-
-    fn images_truth(&self, dir: &Path) -> Result<BTreeMap<String, FileTruth>, String> {
-        let entries: BTreeMap<String, ImageTruthEntry> = self.read_json("bench-dlp/images.json")?;
-        let mut truth = BTreeMap::new();
-        for (relative, entry) in entries {
-            let name = self.copy_fixture(&relative, dir)?;
-            truth.insert(name, FileTruth::from(entry));
         }
         Ok(truth)
     }
@@ -173,59 +159,6 @@ impl DatasetPaths<'_> {
             );
         }
         Ok(truth)
-    }
-}
-
-#[derive(Deserialize)]
-struct TextTruthEntry {
-    pii: Vec<PiiEntry>,
-    entities: Vec<String>,
-    keep: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct PiiEntry {
-    text: String,
-    category: Category,
-}
-
-impl From<TextTruthEntry> for FileTruth {
-    fn from(entry: TextTruthEntry) -> Self {
-        FileTruth::new(
-            entry
-                .pii
-                .into_iter()
-                .map(|pii| (pii.category, Target::Text(pii.text)))
-                .collect(),
-            entry.entities.into_iter().map(Target::Text).collect(),
-            entry.keep.into_iter().map(Target::Text).collect(),
-        )
-    }
-}
-
-#[derive(Deserialize)]
-struct ImageTruthEntry {
-    sensitive: Vec<ImageRegion>,
-    keep: Vec<Rect>,
-}
-
-#[derive(Deserialize)]
-struct ImageRegion {
-    category: Category,
-    region: Rect,
-}
-
-impl From<ImageTruthEntry> for FileTruth {
-    fn from(entry: ImageTruthEntry) -> Self {
-        FileTruth::new(
-            entry
-                .sensitive
-                .into_iter()
-                .map(|item| (item.category, Target::Region(item.region)))
-                .collect(),
-            Vec::new(),
-            entry.keep.into_iter().map(Target::Region).collect(),
-        )
     }
 }
 
@@ -258,9 +191,10 @@ impl SecretsCorpus {
                 if content.contains(&placeholder) {
                     let value = parts.concat();
                     content = content.replace(&placeholder, &value);
-                    truth
-                        .sensitive
-                        .push((Category::Credential, Target::Text(value)));
+                    truth.sensitive.push(Sensitive {
+                        category: Category::Credential,
+                        value: Target::Text(value),
+                    });
                 }
             }
             if let Some(start) = content.find("{{") {
@@ -308,11 +242,18 @@ impl TryFrom<&PublicRecord> for FileTruth {
                 .iter()
                 .collect();
             match Category::of_nemotron_label(&span.label) {
-                Some(category) => sensitive.push((category, Target::Text(value))),
+                Some(category) => sensitive.push(Sensitive {
+                    category,
+                    value: Target::Text(value),
+                }),
                 None => neutral.push(Target::Text(value)),
             }
         }
-        Ok(FileTruth::new(sensitive, neutral, Vec::new()))
+        Ok(FileTruth {
+            sensitive,
+            neutral,
+            keep: Vec::new(),
+        })
     }
 }
 
@@ -338,7 +279,10 @@ mod tests {
         assert_eq!(content, "TOKEN=abcd\n");
         assert_eq!(
             truth.sensitive,
-            vec![(Category::Credential, Target::Text("abcd".to_string()))]
+            vec![Sensitive {
+                category: Category::Credential,
+                value: Target::Text("abcd".to_string())
+            }]
         );
         assert_eq!(
             files["prose.txt"].1.keep,
@@ -362,7 +306,10 @@ mod tests {
 
         assert_eq!(
             truth.sensitive,
-            vec![(Category::Person, Target::Text("Zoë".to_string()))]
+            vec![Sensitive {
+                category: Category::Person,
+                value: Target::Text("Zoë".to_string())
+            }]
         );
         assert_eq!(truth.neutral, vec![Target::Text("Köln".to_string())]);
     }

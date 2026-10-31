@@ -25,19 +25,30 @@ A finding is on a text value when it contains the value, or lies inside it and s
 60% of it, and is at most 3 times as long as the value, ignoring case. A finding is on an
 image box when it overlaps the box and is at most 3 times its area, and the boxes on a target
 find it when together they cover at least 60% of it, since a value is often reported as one box
-per word. A finding that covers a whole sentence or page is therefore not on every value in it.
+per word. Sensitive values, neutral values and keep strings are all judged by this rule.
 
-Findings are counted once per span: the same value reported twice, by two redacters of a chain
-for instance, is one finding. A value that occurs more than once in a file is found when any
-finding is on it. A finding on a neutral entry and on no sensitive one is left out of the
-precision.
+The size cap keeps a finding that covers a whole sentence or page from being on every value in
+it. A finding more than 3 times longer than a value, such as a whole `KEY=value` line around a
+short password, does not find it. Without the cap a finding on an email would also find a
+name inside the email, and 22% of the person values of the public dataset sit inside a longer
+email or URL in the same record.
+
+Findings are counted once per place: the same span or box reported twice, by two redacters of
+a chain for instance, is one finding, and the same text at two places is two. A value that
+occurs more than once in a file is found when any finding is on it. A box target counts as one
+true finding however many word boxes find it.
+
+A finding that is not a false alarm is left out of the precision: one on a neutral entry, and
+one inside a sensitive entry that no finding finds, such as `Baker Street` from an address or
+one word box of a name. A text finding is inside an entry when it is a part of it, a box when
+at least 60% of its area lies in the entry.
 
 | Column | Meaning |
 |---|---|
 | Recall | sensitive entries found, over all categories |
-| Precision | findings on a found sensitive entry, over all findings that are not on a neutral entry. Shown for `fixtures` and `secrets`, where the truth lists everything sensitive |
-| Per category | found/total for person, contact, address, id_number, financial, date_of_birth, credential, network and other. On `public` a category with fewer than 10 entries is left out |
-| Keep hit | keep strings that a finding is on, out of all keep strings |
+| Precision | findings on a found sensitive entry, over those and the false alarms. Shown where the truth lists everything sensitive: every dataset but `public` |
+| Per category | found/total for person, contact, address, id_number, financial, date_of_birth, credential, network and other. `-` for a category the dataset has no entries in |
+| Keep hit | keep strings that a finding is on, out of all keep strings. Shown where precision is |
 | Whole run | wall time of one `scan` over the dataset |
 | Per file | whole run over the number of files |
 | Failed/blocked/unsupported | files `scan` could not read, files it lacked a converter for, and files no selected redacter reads. Their entries count as not found |
@@ -76,7 +87,8 @@ Select them with `BENCH_DLP_DATASETS`, a comma-separated list. The default is
 - `images`: `test-fixtures/media/form-example.png` and `test-fixtures/documents/customer-form.pdf`,
   the same customer form. `images.json` holds a pixel box for each value, measured on the
   PNG and, for the PDF, at the 1 pixel per point scale the PDF renderer uses. The local
-  redacters need the OCR and PDF addons.
+  redacters need the OCR and PDF addons. `images.json` is in the format of `truth.json`, with a
+  box in place of a text value.
 
 ## Public data
 
@@ -98,9 +110,16 @@ cargo build --release
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-The default runs the local redacters over `fixtures,secrets,public`. The harness runs
-`redacter addons install` for the models of the local redacters, which downloads anything
-missing, and makes no other network call. All datasets and every redacter that is configured:
+The harness reads the addons from the place the binary does, `REDACTER_ADDONS_DIR` or the user
+cache directory, and downloads nothing. Install the ones the run needs once:
+
+```sh
+redacter addons install local-ner,local-gliner,ocr,pdf
+```
+
+The default runs the local redacters over `fixtures,secrets,public`. A redacter whose addon is
+missing is listed as failed, and a dataset whose addon is missing shows its files as blocked.
+All datasets and every redacter that is configured:
 
 ```sh
 BENCH_DLP_DATASETS=fixtures,secrets,public,images \
@@ -117,11 +136,10 @@ Settings are environment variables:
 | `BENCH_DLP_DATASETS` | `fixtures`, `secrets`, `public`, `images`. Default is `fixtures,secrets,public` |
 | `BENCH_DLP_SCAN_ARGS` | Options added to every `redacter scan`, split on whitespace, so a value cannot hold a space. They configure the cloud redacters: see `redacter scan --help` |
 | `BENCH_DLP_OUT` | Output directory. Default is `target/bench-dlp` |
-| `BENCH_DLP_ADDONS_DIR` | Addons directory. Default is `<BENCH_DLP_OUT>/addons` |
 
-A spec for which `scan` writes no report is listed as failed with the last line of its error
-output, which names the setting a redacter lacks. It does not stop the run. Cloud redacters bill
-for what they read, and each dataset is sent once.
+A spec for which `scan` writes no report is listed as failed with the `Error:` line of its
+output, which names the setting or the addon a redacter lacks. It does not stop the run. Cloud
+redacters bill for what they read, and each dataset is sent once.
 
 ## Output
 

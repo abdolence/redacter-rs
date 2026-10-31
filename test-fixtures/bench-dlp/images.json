@@ -1,25 +1,27 @@
 {
   "media/form-example.png": {
     "sensitive": [
-      { "category": "person", "region": [309, 125, 537, 148] },
-      { "category": "contact", "region": [309, 195, 620, 218] },
-      { "category": "contact", "region": [312, 265, 538, 286] },
-      { "category": "date_of_birth", "region": [312, 335, 488, 353] },
-      { "category": "address", "region": [312, 405, 750, 426] },
-      { "category": "id_number", "region": [311, 475, 431, 493] },
-      { "category": "financial", "region": [311, 545, 575, 563] }
+      { "category": "person", "value": [309, 125, 537, 148] },
+      { "category": "contact", "value": [309, 195, 620, 218] },
+      { "category": "contact", "value": [312, 265, 538, 286] },
+      { "category": "date_of_birth", "value": [312, 335, 488, 353] },
+      { "category": "address", "value": [312, 405, 750, 426] },
+      { "category": "id_number", "value": [311, 475, 431, 493] },
+      { "category": "financial", "value": [311, 545, 575, 563] },
+      { "category": "person", "value": [181, 655, 308, 678] }
     ],
     "keep": [[312, 615, 787, 638]]
   },
   "documents/customer-form.pdf": {
     "sensitive": [
-      { "category": "person", "region": [119, 122, 224, 133] },
-      { "category": "contact", "region": [97, 147, 235, 161] },
-      { "category": "contact", "region": [101, 172, 200, 183] },
-      { "category": "date_of_birth", "region": [132, 197, 212, 208] },
-      { "category": "address", "region": [111, 222, 311, 235] },
-      { "category": "id_number", "region": [134, 247, 189, 258] },
-      { "category": "financial", "region": [125, 272, 242, 283] }
+      { "category": "person", "value": [119, 122, 224, 133] },
+      { "category": "contact", "value": [97, 147, 235, 161] },
+      { "category": "contact", "value": [101, 172, 200, 183] },
+      { "category": "date_of_birth", "value": [132, 197, 212, 208] },
+      { "category": "address", "value": [111, 222, 311, 235] },
+      { "category": "id_number", "value": [134, 247, 189, 258] },
+      { "category": "financial", "value": [125, 272, 242, 283] },
+      { "category": "person", "value": [118, 342, 178, 353] }
     ],
     "keep": [[98, 297, 308, 311]]
   }

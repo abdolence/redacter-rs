@@ -1,98 +1,100 @@
 {
-  "customer-note.txt": {
-    "pii": [
-      { "text": "John Michael Smith", "category": "person" },
-      { "text": "john.smith@example.com", "category": "contact" },
-      { "text": "+1 (555) 123-4567", "category": "contact" },
-      { "text": "14 March 1985", "category": "date_of_birth" },
-      { "text": "221B Baker Street, London NW1 6XE", "category": "address" },
-      { "text": "4111 1111 1111 1111", "category": "financial" }
+  "documents/customer-note.txt": {
+    "sensitive": [
+      { "category": "person", "value": "John Michael Smith" },
+      { "category": "contact", "value": "john.smith@example.com" },
+      { "category": "contact", "value": "+1 (555) 123-4567" },
+      { "category": "date_of_birth", "value": "14 March 1985" },
+      { "category": "address", "value": "221B Baker Street, London NW1 6XE" },
+      { "category": "financial", "value": "4111 1111 1111 1111" }
     ],
-    "entities": [],
+    "neutral": [],
     "keep": ["#A-10422", "6pm"]
   },
-  "customer.json": {
-    "pii": [
-      { "text": "John Michael Smith", "category": "person" },
-      { "text": "john.smith@example.com", "category": "contact" },
-      { "text": "+1 (555) 123-4567", "category": "contact" },
-      { "text": "1985-03-14", "category": "date_of_birth" },
-      { "text": "221B Baker Street", "category": "address" },
-      { "text": "NW1 6XE", "category": "address" },
-      { "text": "4111 1111 1111 1111", "category": "financial" }
+  "documents/customer.json": {
+    "sensitive": [
+      { "category": "person", "value": "John Michael Smith" },
+      { "category": "contact", "value": "john.smith@example.com" },
+      { "category": "contact", "value": "+1 (555) 123-4567" },
+      { "category": "date_of_birth", "value": "1985-03-14" },
+      { "category": "address", "value": "221B Baker Street" },
+      { "category": "address", "value": "NW1 6XE" },
+      { "category": "financial", "value": "4111 1111 1111 1111" }
     ],
-    "entities": ["London"],
+    "neutral": ["London"],
     "keep": ["12/28", "Prefers contact by email in the evening."]
   },
-  "customer-profile.html": {
-    "pii": [
-      { "text": "John Michael Smith", "category": "person" },
-      { "text": "john.smith@example.com", "category": "contact" },
-      { "text": "+1 (555) 123-4567", "category": "contact" },
-      { "text": "14 March 1985", "category": "date_of_birth" },
-      { "text": "221B Baker Street, London NW1 6XE", "category": "address" },
-      { "text": "X1234567", "category": "id_number" }
+  "documents/customer-profile.html": {
+    "sensitive": [
+      { "category": "person", "value": "John Michael Smith" },
+      { "category": "contact", "value": "john.smith@example.com" },
+      { "category": "contact", "value": "+1 (555) 123-4567" },
+      { "category": "date_of_birth", "value": "14 March 1985" },
+      { "category": "address", "value": "221B Baker Street, London NW1 6XE" },
+      { "category": "id_number", "value": "X1234567" }
     ],
-    "entities": [],
+    "neutral": [],
     "keep": ["Customer profile", "Passport no.", "Prefers contact by email in the evening."]
   },
-  "customers.csv": {
-    "pii": [
-      { "text": "John Michael Smith", "category": "person" },
-      { "text": "john.smith@example.com", "category": "contact" },
-      { "text": "+1 (555) 123-4567", "category": "contact" },
-      { "text": "Maria Garcia Lopez", "category": "person" },
-      { "text": "maria.garcia@example.org", "category": "contact" },
-      { "text": "+34 612 345 678", "category": "contact" },
-      { "text": "Akira Tanaka", "category": "person" },
-      { "text": "akira.tanaka@example.net", "category": "contact" },
-      { "text": "+81 90-1234-5678", "category": "contact" },
-      { "text": "X1234567", "category": "id_number" }
+  "documents/customers.csv": {
+    "sensitive": [
+      { "category": "person", "value": "John Michael Smith" },
+      { "category": "contact", "value": "john.smith@example.com" },
+      { "category": "contact", "value": "+1 (555) 123-4567" },
+      { "category": "person", "value": "Maria Garcia Lopez" },
+      { "category": "contact", "value": "maria.garcia@example.org" },
+      { "category": "contact", "value": "+34 612 345 678" },
+      { "category": "person", "value": "Akira Tanaka" },
+      { "category": "contact", "value": "akira.tanaka@example.net" },
+      { "category": "contact", "value": "+81 90-1234-5678" },
+      { "category": "id_number", "value": "X1234567" }
     ],
-    "entities": ["London", "Madrid", "Osaka"],
+    "neutral": ["London", "Madrid", "Osaka"],
     "keep": ["Called on 2026-08-30", "Prefers email"]
   },
-  "multilingual.txt": {
-    "pii": [
-      { "text": "Klaus Bergmann", "category": "person" },
-      { "text": "klaus.bergmann@nordwind-logistik.de", "category": "contact" },
-      { "text": "+49 30 1234 5678", "category": "contact" },
-      { "text": "Lindenstraße 47, 10115 Berlin", "category": "address" },
-      { "text": "Sophie Lefebvre", "category": "person" },
-      { "text": "sophie.lefebvre@banquepopulaire.fr", "category": "contact" },
-      { "text": "+33 1 42 68 53 00", "category": "contact" },
-      { "text": "12 rue de la Paix, 75002 Paris", "category": "address" },
-      { "text": "Carlos Ramírez Ortega", "category": "person" },
-      { "text": "carlos.ramirez@distribibericas.es", "category": "contact" },
-      { "text": "+34 915 22 44 66", "category": "contact" },
-      { "text": "Calle Gran Vía 28, 28013 Madrid", "category": "address" }
+  "documents/multilingual.txt": {
+    "sensitive": [
+      { "category": "person", "value": "Klaus Bergmann" },
+      { "category": "contact", "value": "klaus.bergmann@nordwind-logistik.de" },
+      { "category": "contact", "value": "+49 30 1234 5678" },
+      { "category": "address", "value": "Lindenstraße 47, 10115 Berlin" },
+      { "category": "person", "value": "Sophie Lefebvre" },
+      { "category": "contact", "value": "sophie.lefebvre@banquepopulaire.fr" },
+      { "category": "contact", "value": "+33 1 42 68 53 00" },
+      { "category": "address", "value": "12 rue de la Paix, 75002 Paris" },
+      { "category": "person", "value": "Carlos Ramírez Ortega" },
+      { "category": "contact", "value": "carlos.ramirez@distribibericas.es" },
+      { "category": "contact", "value": "+34 915 22 44 66" },
+      { "category": "address", "value": "Calle Gran Vía 28, 28013 Madrid" }
     ],
-    "entities": ["Nordwind Logistik GmbH", "Banque Populaire du Rhône", "Distribuciones Ibéricas S.L."],
+    "neutral": ["Nordwind Logistik GmbH", "Banque Populaire du Rhône", "Distribuciones Ibéricas S.L."],
     "keep": ["avant vendredi", "esta semana"]
   },
-  "false-positives-en.txt": {
-    "pii": [
+  "documents/false-positives-en.txt": {
+    "sensitive": [
+
     ],
-    "entities": [],
+    "neutral": [],
     "keep": ["Monday", "Apple", "Dutch", "Marketing", "Friday", "Tuesday", "March", "January", "December", "Support Desk"]
   },
-  "dates-en.txt": {
-    "pii": [
+  "documents/dates-en.txt": {
+    "sensitive": [
+
     ],
-    "entities": [],
+    "neutral": [],
     "keep": ["14 March 1985", "2026-08-30", "January 2024", "invoice"]
   },
-  "contextual-en.txt": {
-    "pii": [
-      { "text": "jonas petersen", "category": "person" },
-      { "text": "14 Rosewood Lane, Kettering", "category": "address" },
-      { "text": "type 2 diabetes", "category": "other" },
-      { "text": "Mira Kowalczyk", "category": "person" },
-      { "text": "12/03/1984", "category": "date_of_birth" },
-      { "text": "@mira_k84", "category": "person" },
-      { "text": "mkowalczyk", "category": "person" }
+  "documents/contextual-en.txt": {
+    "sensitive": [
+      { "category": "person", "value": "jonas petersen" },
+      { "category": "address", "value": "14 Rosewood Lane, Kettering" },
+      { "category": "other", "value": "type 2 diabetes" },
+      { "category": "person", "value": "Mira Kowalczyk" },
+      { "category": "date_of_birth", "value": "12/03/1984" },
+      { "category": "person", "value": "@mira_k84" },
+      { "category": "person", "value": "mkowalczyk" }
     ],
-    "entities": ["Kettering"],
+    "neutral": ["Kettering"],
     "keep": ["Apple Watch", "The Support Desk", "Tuesday morning", "quarterly report", "before Friday", "glucose readings"]
   }
 }

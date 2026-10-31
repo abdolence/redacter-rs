@@ -22,8 +22,8 @@ pub struct Measurement {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
     Measured(Measurement),
-    /// `scan` produced no report. The reason is the last line of its error output, which names
-    /// a setting the redacter lacks when it is not configured.
+    /// `scan` produced no report. The reason is the `Error:` line of its output, which names a
+    /// setting the redacter lacks when it is not configured, or an addon that is not installed.
     Failed {
         reason: String,
     },
@@ -58,20 +58,19 @@ fn row(cells: &[String]) -> String {
 }
 
 impl Measurement {
-    fn recall_in(&self, category: Category, min_support: usize) -> String {
-        match self.tally.recall.get(&category) {
-            Some(recall) if recall.total >= min_support => {
+    fn recall_in(&self, category: Category) -> String {
+        self.tally
+            .recall
+            .get(&category)
+            .map_or("-".to_string(), |recall| {
                 format!("{}/{}", recall.found, recall.total)
-            }
-            _ => "-".to_string(),
-        }
+            })
     }
 }
 
 impl DatasetResult {
     fn table(&self) -> String {
         let complete = self.dataset.has_complete_truth();
-        let min_support = self.dataset.min_category_support();
         let mut header: Vec<String> = ["Provider", "Whole run", "Per file", "Recall"]
             .map(String::from)
             .into();
@@ -97,7 +96,7 @@ impl DatasetResult {
             if complete {
                 cells.push(percent(measured.tally.precision()));
             }
-            cells.extend(Category::ALL.map(|category| measured.recall_in(category, min_support)));
+            cells.extend(Category::ALL.map(|category| measured.recall_in(category)));
             if complete {
                 cells.push(format!(
                     "{}/{}",
@@ -279,7 +278,7 @@ Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 
 | Provider | Whole run | Per file | Recall | person | contact | address | id_number | financial | date_of_birth | credential | network | other | Failed/blocked/unsupported |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| local-rules | 120 ms | 15 ms | 71% | - | 9/12 | - | - | - | - | - | - | - | 0/1/2 |
+| local-rules | 120 ms | 15 ms | 71% | - | 9/12 | - | - | - | - | - | - | 1/2 | 0/1/2 |
 
 Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 ";

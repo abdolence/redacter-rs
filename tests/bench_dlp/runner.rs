@@ -1,7 +1,6 @@
 //! Running the `redacter` binary: the provider specs and one timed `scan` that returns its
 //! report.
 
-use crate::datasets::DatasetKind;
 use crate::scoring::ScanReport;
 use std::fs;
 use std::path::Path;
@@ -34,62 +33,21 @@ impl std::fmt::Display for Spec {
     }
 }
 
-impl Spec {
-    fn has(&self, redacter: &str) -> bool {
-        self.0.iter().any(|part| part == redacter)
-    }
-}
-
-/// The addons `datasets` and `specs` read: the OCR models and Pdfium for images and PDFs, and
-/// the model of each local redacter in a spec.
-pub fn required_addons(specs: &[Spec], datasets: &[DatasetKind]) -> Vec<&'static str> {
-    let mut addons = Vec::new();
-    if datasets.contains(&DatasetKind::Images) {
-        addons.extend(["ocr", "pdf"]);
-    }
-    for (redacter, addon) in [("local-ner", "local-ner"), ("local-gliner", "local-gliner")] {
-        if specs.iter().any(|spec| spec.has(redacter)) {
-            addons.push(addon);
-        }
-    }
-    addons
-}
-
 /// One finished `scan`: how long it took and what it reported.
 pub struct ScanRun {
     pub wall: Duration,
     pub report: ScanReport,
 }
 
-/// The binary under test, where it keeps its addons and the `scan` options every run gets
-/// (`BENCH_DLP_SCAN_ARGS`), which is how a cloud redacter is configured.
+/// The binary under test and the `scan` options every run gets (`BENCH_DLP_SCAN_ARGS`), which
+/// is how a cloud redacter is configured. The binary finds its addons the way it does for a
+/// user, in `REDACTER_ADDONS_DIR` or the cache directory.
 pub struct Scanner<'a> {
     pub binary: &'a Path,
-    pub addons_dir: &'a Path,
     pub scan_args: Vec<String>,
 }
 
 impl Scanner<'_> {
-    pub fn install_addons(&self, addons: &[&str]) -> Result<(), String> {
-        if addons.is_empty() {
-            return Ok(());
-        }
-        let output = Command::new(self.binary)
-            .arg("--addons-dir")
-            .arg(self.addons_dir)
-            .args(["addons", "install", &addons.join(",")])
-            .output()
-            .map_err(|e| format!("spawn redacter addons install: {e}"))?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(failure_reason(
-                output.status.code(),
-                &String::from_utf8_lossy(&output.stderr),
-            ))
-        }
-    }
-
     /// Scans `source` with `spec`. The report is read even when the exit code is 1, since
     /// failed and blocked files are counted in it; without a report the run failed outright.
     pub fn scan(
@@ -102,8 +60,6 @@ impl Scanner<'_> {
         let report_path = scratch.path().join("report.json");
         let started = Instant::now();
         let output = Command::new(self.binary)
-            .arg("--addons-dir")
-            .arg(self.addons_dir)
             .arg("scan")
             .arg(source)
             .args(spec.0.iter().flat_map(|redacter| ["-d", redacter]))
@@ -129,8 +85,6 @@ impl Scanner<'_> {
     }
 }
 
-/// The `Error:` line of a failed run's output, which is where the binary says what went wrong
-/// (the last line when there is none), with the exit code.
 fn failure_reason(exit_code: Option<i32>, stderr: &str) -> String {
     let mut lines = stderr
         .lines()
@@ -149,22 +103,6 @@ fn failure_reason(exit_code: Option<i32>, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn addons_follow_the_datasets_and_the_local_redacters() {
-        let specs: Vec<Spec> = ["local-rules", "local-rules+local-gliner"]
-            .map(|spec| spec.parse().unwrap())
-            .into();
-
-        assert_eq!(
-            required_addons(&specs, &[DatasetKind::Fixtures]),
-            ["local-gliner"]
-        );
-        assert_eq!(
-            required_addons(&specs, &[DatasetKind::Images]),
-            ["ocr", "pdf", "local-gliner"]
-        );
-    }
 
     #[test]
     fn failed_run_is_reported_by_the_error_line_of_its_output() {
