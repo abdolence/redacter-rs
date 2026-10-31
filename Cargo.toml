@@ -18,7 +18,7 @@ description = "Detect & Redact cli tool to find sensitive data in files, such as
 default = ["pdf-render", "clipboard", "ocr", "local-ner", "local-gliner"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
-ci-ms-presidio = [] # For testing on CI/MS Presidiom
+ci-presidio = [] # For testing on CI/Presidio
 ci-gcp-llm = [] # For testing on CI/GCP with LLM models
 ci-open-ai = [] # For testing on CI/OpenAIP
 ci-clipboard = [] # For testing on CI/Clipboard
@@ -29,7 +29,7 @@ ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
 ci = [
     "ci-gcp",
     "ci-aws",
-    "ci-ms-presidio",
+    "ci-presidio",
     "ci-gcp-llm",
     "ci-open-ai",
     "ci-clipboard",

@@ -64,6 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
+    let stderr = Term::stderr();
+    for warning in deprecated_presidio_warnings(std::env::args_os().skip(1)) {
+        stderr.write_line(&format!(
+            "{}: {warning}",
+            Style::new().bold().yellow().apply_to("Warning")
+        ))?;
+    }
+
     let cli = match CliArgs::try_parse() {
         Ok(cli) => cli,
         Err(err) => {

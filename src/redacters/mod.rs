@@ -25,8 +25,8 @@ pub use aws_bedrock::*;
 mod aws_bedrock_guardrails;
 pub use aws_bedrock_guardrails::*;
 
-mod ms_presidio;
-pub use ms_presidio::*;
+mod presidio;
+pub use presidio::*;
 
 mod gemini_llm;
 pub use gemini_llm::*;
@@ -455,7 +455,7 @@ pub enum RedacterDataItemContent {
 pub enum Redacters<'a> {
     GcpDlp(GcpDlpRedacter<'a>),
     AwsComprehend(AwsComprehendRedacter<'a>),
-    MsPresidio(MsPresidioRedacter<'a>),
+    Presidio(PresidioRedacter<'a>),
     GeminiLlm(GeminiLlmRedacter<'a>),
     OpenAiLlm(OpenAiLlmRedacter<'a>),
     GcpVertexAi(GcpVertexAiRedacter<'a>),
@@ -489,7 +489,7 @@ pub struct RedacterBaseOptions {
 pub enum RedacterProviderOptions {
     GcpDlp(GcpDlpRedacterOptions),
     AwsComprehend(AwsComprehendRedacterOptions),
-    MsPresidio(MsPresidioRedacterOptions),
+    Presidio(PresidioRedacterOptions),
     GeminiLlm(GeminiLlmRedacterOptions),
     OpenAiLlm(OpenAiLlmRedacterOptions),
     GcpVertexAi(GcpVertexAiRedacterOptions),
@@ -508,7 +508,7 @@ impl RedacterProviderOptions {
         match self {
             RedacterProviderOptions::GcpDlp(_) => RedacterType::GcpDlp,
             RedacterProviderOptions::AwsComprehend(_) => RedacterType::AwsComprehend,
-            RedacterProviderOptions::MsPresidio(_) => RedacterType::MsPresidio,
+            RedacterProviderOptions::Presidio(_) => RedacterType::Presidio,
             RedacterProviderOptions::GeminiLlm(_) => RedacterType::GeminiLlm,
             RedacterProviderOptions::OpenAiLlm(_) => RedacterType::OpenAiLlm,
             RedacterProviderOptions::GcpVertexAi(_) => RedacterType::GcpVertexAi,
@@ -552,8 +552,8 @@ impl<'a> Redacters<'a> {
             RedacterProviderOptions::AwsComprehend(options) => Ok(Redacters::AwsComprehend(
                 AwsComprehendRedacter::new(options, reporter).await?,
             )),
-            RedacterProviderOptions::MsPresidio(options) => Ok(Redacters::MsPresidio(
-                MsPresidioRedacter::new(options, reporter).await?,
+            RedacterProviderOptions::Presidio(options) => Ok(Redacters::Presidio(
+                PresidioRedacter::new(options, reporter).await?,
             )),
             RedacterProviderOptions::GeminiLlm(options) => Ok(Redacters::GeminiLlm(
                 GeminiLlmRedacter::new(options, reporter).await?,
@@ -665,7 +665,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
             Redacters::AwsComprehend(redacter) => redacter.redact(input).await,
-            Redacters::MsPresidio(redacter) => redacter.redact(input).await,
+            Redacters::Presidio(redacter) => redacter.redact(input).await,
             Redacters::GeminiLlm(redacter) => redacter.redact(input).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact(input).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact(input).await,
@@ -683,7 +683,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact_support(file_ref).await,
             Redacters::AwsComprehend(redacter) => redacter.redact_support(file_ref).await,
-            Redacters::MsPresidio(redacter) => redacter.redact_support(file_ref).await,
+            Redacters::Presidio(redacter) => redacter.redact_support(file_ref).await,
             Redacters::GeminiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::OpenAiLlm(redacter) => redacter.redact_support(file_ref).await,
             Redacters::GcpVertexAi(redacter) => redacter.redact_support(file_ref).await,
@@ -704,7 +704,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.detect(input).await,
             Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
-            Redacters::MsPresidio(redacter) => redacter.detect(input).await,
+            Redacters::Presidio(redacter) => redacter.detect(input).await,
             Redacters::GeminiLlm(redacter) => redacter.detect(input).await,
             Redacters::OpenAiLlm(redacter) => redacter.detect(input).await,
             Redacters::GcpVertexAi(redacter) => redacter.detect(input).await,
@@ -722,7 +722,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.detect_support(file_ref).await,
             Redacters::AwsComprehend(redacter) => redacter.detect_support(file_ref).await,
-            Redacters::MsPresidio(redacter) => redacter.detect_support(file_ref).await,
+            Redacters::Presidio(redacter) => redacter.detect_support(file_ref).await,
             Redacters::GeminiLlm(redacter) => redacter.detect_support(file_ref).await,
             Redacters::OpenAiLlm(redacter) => redacter.detect_support(file_ref).await,
             Redacters::GcpVertexAi(redacter) => redacter.detect_support(file_ref).await,
@@ -740,7 +740,7 @@ impl<'a> Redacter for Redacters<'a> {
         match self {
             Redacters::GcpDlp(_) => RedacterType::GcpDlp,
             Redacters::AwsComprehend(_) => RedacterType::AwsComprehend,
-            Redacters::MsPresidio(_) => RedacterType::MsPresidio,
+            Redacters::Presidio(_) => RedacterType::Presidio,
             Redacters::GeminiLlm(_) => RedacterType::GeminiLlm,
             Redacters::OpenAiLlm(_) => RedacterType::OpenAiLlm,
             Redacters::GcpVertexAi(_) => RedacterType::GcpVertexAi,
@@ -1028,9 +1028,9 @@ mod tests {
     /// The redacter's service is unreachable, so only a guard in front of it can succeed.
     async fn redacter_with_unreachable_service<'a>(reporter: &'a AppReporter<'a>) -> Redacters<'a> {
         let unreachable = url::Url::parse("http://127.0.0.1:1/analyze").unwrap();
-        Redacters::MsPresidio(
-            ms_presidio::MsPresidioRedacter::new(
-                ms_presidio::MsPresidioRedacterOptions {
+        Redacters::Presidio(
+            presidio::PresidioRedacter::new(
+                presidio::PresidioRedacterOptions {
                     text_analyze_url: Some(unreachable),
                     image_redact_url: None,
                 },

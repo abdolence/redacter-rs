@@ -233,12 +233,69 @@ impl CliCommand {
     }
 }
 
+/// Deprecated names of the Presidio redacter and its flags, with their replacements.
+const DEPRECATED_PRESIDIO_FLAGS: [(&str, &str); 2] = [
+    (
+        "--ms-presidio-text-analyze-url",
+        "--presidio-text-analyze-url",
+    ),
+    (
+        "--ms-presidio-image-redact-url",
+        "--presidio-image-redact-url",
+    ),
+];
+const DEPRECATED_PRESIDIO_REDACTER: &str = "ms-presidio";
+
+/// Warnings for the deprecated Presidio spellings among the raw command line arguments.
+///
+/// clap resolves an alias to the canonical name before the parsed value is available, so the
+/// spelling is only visible in the raw arguments.
+pub fn deprecated_presidio_warnings<I, S>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut warnings = Vec::new();
+    let mut redacter_value_follows = false;
+    let mut redacter_name_used = false;
+    for arg in args {
+        let arg = arg.as_ref().to_string_lossy();
+        let redacter_value = if redacter_value_follows {
+            Some(arg.as_ref())
+        } else {
+            arg.strip_prefix("--redact=")
+                .or_else(|| arg.strip_prefix("-d="))
+                .or_else(|| arg.strip_prefix("-d"))
+        };
+        redacter_name_used |= redacter_value == Some(DEPRECATED_PRESIDIO_REDACTER);
+        redacter_value_follows = matches!(arg.as_ref(), "-d" | "--redact");
+
+        for (deprecated, replacement) in DEPRECATED_PRESIDIO_FLAGS {
+            let flag = arg.split_once('=').map_or(arg.as_ref(), |(flag, _)| flag);
+            if flag == deprecated {
+                let warning = format!("`{deprecated}` is deprecated, use `{replacement}`");
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+            }
+        }
+    }
+    if redacter_name_used {
+        warnings.insert(
+            0,
+            format!("`{DEPRECATED_PRESIDIO_REDACTER}` is deprecated, use `presidio`"),
+        );
+    }
+    warnings
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RedacterType {
     GcpDlp,
     AwsComprehend,
-    MsPresidio,
+    #[value(alias = "ms-presidio")]
+    Presidio,
     GeminiLlm,
     OpenAiLlm,
     GcpVertexAi,
@@ -256,7 +313,7 @@ impl std::str::FromStr for RedacterType {
         match s {
             "gcp-dlp" => Ok(RedacterType::GcpDlp),
             "aws-comprehend" => Ok(RedacterType::AwsComprehend),
-            "ms-presidio" => Ok(RedacterType::MsPresidio),
+            "presidio" => Ok(RedacterType::Presidio),
             "gemini-llm" => Ok(RedacterType::GeminiLlm),
             "open-ai-llm" => Ok(RedacterType::OpenAiLlm),
             "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
@@ -275,7 +332,7 @@ impl Display for RedacterType {
         match self {
             RedacterType::GcpDlp => write!(f, "gcp-dlp"),
             RedacterType::AwsComprehend => write!(f, "aws-comprehend"),
-            RedacterType::MsPresidio => write!(f, "ms-presidio"),
+            RedacterType::Presidio => write!(f, "presidio"),
             RedacterType::GeminiLlm => write!(f, "gemini-llm"),
             RedacterType::OpenAiLlm => write!(f, "open-ai-llm"),
             RedacterType::GcpVertexAi => write!(f, "gcp-vertex-ai"),
@@ -386,11 +443,19 @@ pub struct RedacterArgs {
     )]
     pub aws_bedrock_guardrail_version: Option<AwsBedrockGuardrailVersion>,
 
-    #[arg(long, help = "URL for text analyze endpoint for MsPresidio redacter")]
-    pub ms_presidio_text_analyze_url: Option<Url>,
+    #[arg(
+        long,
+        alias = "ms-presidio-text-analyze-url",
+        help = "URL for text analyze endpoint for Presidio redacter"
+    )]
+    pub presidio_text_analyze_url: Option<Url>,
 
-    #[arg(long, help = "URL for image redact endpoint for MsPresidio redacter")]
-    pub ms_presidio_image_redact_url: Option<Url>,
+    #[arg(
+        long,
+        alias = "ms-presidio-image-redact-url",
+        help = "URL for image redact endpoint for Presidio redacter"
+    )]
+    pub presidio_image_redact_url: Option<Url>,
 
     #[arg(
         long,
@@ -524,20 +589,20 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         region: self.aws_region.clone().map(aws_config::Region::new),
                     },
                 )),
-                RedacterType::MsPresidio => {
-                    if self.ms_presidio_text_analyze_url.is_none()
-                        && self.ms_presidio_image_redact_url.is_none()
+                RedacterType::Presidio => {
+                    if self.presidio_text_analyze_url.is_none()
+                        && self.presidio_image_redact_url.is_none()
                     {
                         return Err(AppError::RedacterConfigError {
                             message:
-                            "MsPresidio requires text analyze/image URL specified (at least one)"
+                            "Presidio requires text analyze/image URL specified (at least one)"
                                 .to_string(),
                         });
                     }
-                    Ok(RedacterProviderOptions::MsPresidio(
-                        crate::redacters::MsPresidioRedacterOptions {
-                            text_analyze_url: self.ms_presidio_text_analyze_url.clone(),
-                            image_redact_url: self.ms_presidio_image_redact_url.clone(),
+                    Ok(RedacterProviderOptions::Presidio(
+                        crate::redacters::PresidioRedacterOptions {
+                            text_analyze_url: self.presidio_text_analyze_url.clone(),
+                            image_redact_url: self.presidio_image_redact_url.clone(),
                         },
                     ))
                 }
@@ -786,7 +851,7 @@ mod tests {
         for redacter_type in [
             RedacterType::GcpDlp,
             RedacterType::AwsComprehend,
-            RedacterType::MsPresidio,
+            RedacterType::Presidio,
             RedacterType::GeminiLlm,
             RedacterType::OpenAiLlm,
             RedacterType::GcpVertexAi,
@@ -820,6 +885,78 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         redacter: RedacterArgs,
+    }
+
+    fn presidio_urls(args: &[&str]) -> (Option<Url>, Option<Url>) {
+        let cli = TestCli::try_parse_from([&["redacter"], args].concat())
+            .unwrap_or_else(|err| panic!("{err}"));
+        let options: RedacterOptions = cli.redacter.try_into().expect("valid Presidio options");
+        match options.provider_options.into_iter().next() {
+            Some(RedacterProviderOptions::Presidio(options)) => {
+                (options.text_analyze_url, options.image_redact_url)
+            }
+            other => panic!("expected Presidio options, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deprecated_presidio_spellings_select_the_same_options() {
+        let canonical = presidio_urls(&[
+            "-d",
+            "presidio",
+            "--presidio-text-analyze-url",
+            "http://localhost:5002/analyze",
+            "--presidio-image-redact-url",
+            "http://localhost:5003/redact",
+        ]);
+        let deprecated = presidio_urls(&[
+            "-d",
+            "ms-presidio",
+            "--ms-presidio-text-analyze-url",
+            "http://localhost:5002/analyze",
+            "--ms-presidio-image-redact-url",
+            "http://localhost:5003/redact",
+        ]);
+        assert!(canonical.0.is_some() && canonical.1.is_some());
+        assert_eq!(canonical, deprecated);
+    }
+
+    #[test]
+    fn deprecated_presidio_spellings_are_reported_once_each() {
+        let warnings = deprecated_presidio_warnings([
+            "scan",
+            "-d",
+            "ms-presidio",
+            "--redact=ms-presidio",
+            "--ms-presidio-text-analyze-url=http://localhost:5002/analyze",
+            "--ms-presidio-image-redact-url",
+            "http://localhost:5003/redact",
+            "--ms-presidio-text-analyze-url",
+            "http://localhost:5002/analyze",
+        ]);
+        assert_eq!(
+            warnings,
+            [
+                "`ms-presidio` is deprecated, use `presidio`",
+                "`--ms-presidio-text-analyze-url` is deprecated, use `--presidio-text-analyze-url`",
+                "`--ms-presidio-image-redact-url` is deprecated, use `--presidio-image-redact-url`",
+            ]
+        );
+    }
+
+    #[test]
+    fn presidio_spellings_without_the_old_name_report_nothing() {
+        let warnings = deprecated_presidio_warnings([
+            "scan",
+            "-d",
+            "local-rules",
+            "-d",
+            "presidio",
+            "--presidio-text-analyze-url",
+            "http://localhost:5002/analyze",
+            "ms-presidio-notes.txt",
+        ]);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     fn local_rules_options(
