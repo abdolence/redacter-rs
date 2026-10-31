@@ -114,13 +114,16 @@ where
 }
 
 /// Instruction given to an image editing model on the native redaction path.
-pub const NATIVE_IMAGE_REDACTION_PROMPT: &str =
-    "Find everything in the attached image that looks like personal information and generate a \
-     new image with that information erased and replaced by a plain black rectangle. The \
-     personal information must be gone from the new image: do not write it inside the black \
-     rectangles, do not write it on top of them, and do not highlight it. Keep everything else \
-     in the image identical, with the same size, layout and formatting. Do not add any other \
-     words.";
+pub const NATIVE_IMAGE_REDACTION_PROMPT: &str = concat!(
+    "Find everything in the attached image that looks like personal or sensitive information, \
+     such as ",
+    sensitive_data_examples!(),
+    ", and generate a new image with that information erased and replaced by a plain black \
+     rectangle. That information must be gone from the new image: do not write it inside the \
+     black rectangles, do not write it on top of them, and do not highlight it. Keep everything \
+     else in the image identical, with the same size, layout and formatting. Do not add any \
+     other words."
+);
 
 /// How the LLM redacters redact images.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -131,7 +134,7 @@ pub enum LlmImageMode {
     Auto,
     /// Always edit the image with the model, failing when it cannot.
     Native,
-    /// Always ask the model for PII coordinates and black them out locally.
+    /// Always ask the model where the sensitive data is and black it out locally.
     Coords,
 }
 
@@ -314,9 +317,12 @@ pub fn prepare_image_for_llm(mime_type: &Mime, data: &bytes::Bytes) -> AppResult
 /// converts the normalized boxes to pixel coordinates locally with
 /// [`normalized_box_to_image_coords`], using the dimensions of the image the model actually
 /// saw (from [`prepare_image_for_llm`]).
-pub const GEMINI_COORDS_REDACTION_PROMPT: &str =
-    "Detect all personal information in the image. Return a JSON array of objects \
-     {box_2d, text} where box_2d is [ymin, xmin, ymax, xmax] normalized to 0-1000.";
+pub const GEMINI_COORDS_REDACTION_PROMPT: &str = concat!(
+    "Detect all personal or sensitive information in the image, such as ",
+    sensitive_data_examples!(),
+    ". Return a JSON array of objects {box_2d, text} where box_2d is [ymin, xmin, ymax, xmax] \
+     normalized to 0-1000."
+);
 
 /// One detection from the Gemini coordinate redaction path: a bounding box normalized to
 /// 0-1000 as `[ymin, xmin, ymax, xmax]`, per Gemini's bounding-box convention, together with
