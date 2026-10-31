@@ -46,7 +46,9 @@ impl RuleGroup {
             RuleGroup::Iban => "International bank account numbers",
             RuleGroup::Network => "IPv4, IPv6 and MAC addresses",
             RuleGroup::Url => "Credentials embedded in URLs",
-            RuleGroup::Secrets => "API keys, tokens, authorization headers and private keys",
+            RuleGroup::Secrets => {
+                "Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys"
+            },
             RuleGroup::UsIdentifiers => {
                 "US identifiers: SSN and ITIN, passports, driver's licenses"
             }
@@ -523,6 +525,129 @@ mod tests {
             "\"api_key\": \"AIzaSyA1234567890abcdefghijklmnopqrstu-\"",
             "\"api_key\": \"[REDACTED]\"",
         );
+    }
+
+    #[test]
+    fn secret_assignment_redacts_only_the_value() {
+        assert_redacts("DB_PASSWORD=Sup3rS3cret!", "DB_PASSWORD=[REDACTED]");
+        assert_redacts("password: hunter2Secret", "password: [REDACTED]");
+        assert_redacts("password = \"tomlPass99\"", "password = \"[REDACTED]\"");
+        assert_redacts(
+            "spring.datasource.password=ChangeMe123",
+            "spring.datasource.password=[REDACTED]",
+        );
+        assert_redacts(
+            "x-api-key: 3c6e0b8a9c15224a8228b9a98ca1531d",
+            "x-api-key: [REDACTED]",
+        );
+        assert_redacts(
+            "{\"client_secret\": \"s3cr3t-value-9\", \"user\": \"alice\"}",
+            "{\"client_secret\": \"[REDACTED]\", \"user\": \"alice\"}",
+        );
+        assert_redacts(
+            "//registry/:_authToken=a1b2c3d4e5f6",
+            "//registry/:_authToken=[REDACTED]",
+        );
+        assert_redacts(
+            "Server=db;Password=P@ssw0rd1;Timeout=30",
+            "Server=db;Password=[REDACTED];Timeout=30",
+        );
+    }
+
+    #[test]
+    fn secret_assignment_needs_the_keyword_at_the_end_of_the_key() {
+        assert_untouched("password_min_length: 12345678");
+        assert_untouched("token_expiry: 3600s-or-so");
+        assert_untouched("passwordPolicy: strong1234");
+        assert_untouched("tokenizer: tokenizer-v2.json");
+        assert_untouched("api_key_header: \"X-Api-Key-1\"");
+    }
+
+    #[test]
+    fn secret_assignment_skips_references_and_placeholders() {
+        assert_untouched("secret: ${DB_SECRET_NAME_1}");
+        assert_untouched("password: <your password here 1>");
+        assert_untouched("password: \"[REDACTED]\"");
+        assert_untouched("secret: &SlackApiToken1");
+        assert_untouched("password = request.form[\"password\"]");
+        assert_untouched("token = get_token(user1)");
+    }
+
+    #[test]
+    fn secret_assignment_skips_values_without_a_digit_or_symbol() {
+        assert_untouched("password: changeme");
+        assert_untouched("token: required");
+        assert_untouched("self.password = password");
+        assert_untouched("secret = settings.SECRET_VALUE");
+        assert_untouched("const apiKey = process.env.API_KEY;");
+        assert_untouched("def run(password: str, token: Optional[str]) -> Token:");
+        assert_redacts("token: required1", "token: [REDACTED]");
+        assert_untouched("password: change.me");
+        assert_redacts("password: change-me!", "password: [REDACTED]");
+    }
+
+    #[test]
+    fn secret_rules_ignore_the_projects_own_source() {
+        for source in [
+            include_str!("../../../args.rs"),
+            include_str!("../../../commands/copy_command.rs"),
+            include_str!("../../../redacters/stream_redacter.rs"),
+            include_str!("../../../redacters/gcp_dlp.rs"),
+        ] {
+            for spec in builtin_rules()
+                .iter()
+                .filter(|spec| spec.group == RuleGroup::Secrets)
+            {
+                assert!(!rule_matches(spec, source), "{}", spec.name);
+            }
+        }
+    }
+
+    #[test]
+    fn vendor_tokens() {
+        let openai_project = format!("sk-proj-{}", "abcdefghij0123456789ABCDEFGHIJ");
+        let openai_legacy = format!(
+            "sk-{}T3BlbkFJ{}",
+            "abcdefghij0123456789", "ABCDEFGHIJ0123456789"
+        );
+        let anthropic = format!("sk-ant-api03-{}", "abcdefghij0123456789ABCDEFGHIJ-_");
+        let gitlab = format!("glpat-{}", "abcdefghij0123456789");
+        let npm = format!("npm_{}", "abcdefghijklmnopqrstuvwxyz0123456789");
+        let slack_webhook = format!(
+            "hooks.slack.com/services/{}",
+            "T0000AAAA/B0000BBBB/abcdEFGHijklMNOPqrstUVWX"
+        );
+        let sendgrid = format!(
+            "SG.{}.{}",
+            "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+        );
+        let huggingface = format!("hf_{}", "abcdefghijklmnopqrstuvwxyzABCDEFGH");
+        for token in [
+            &openai_project,
+            &openai_legacy,
+            &anthropic,
+            &gitlab,
+            &npm,
+            &slack_webhook,
+            &sendgrid,
+            &huggingface,
+        ] {
+            assert_redacts(&format!("key {token} end"), "key [REDACTED] end");
+        }
+    }
+
+    #[test]
+    fn vendor_tokens_need_their_full_shape() {
+        assert_untouched("pip install sk-learn");
+        assert_untouched("sk-proj-short");
+        assert_untouched("sk-ant-api03-short");
+        assert_untouched("glpat-short");
+        assert_untouched(&format!("npm_{}", "abcdefghijklmnopqrstuvwxyz012345678"));
+        assert_untouched("npm_install_dependencies");
+        assert_untouched("hooks.slack.com/services/T0000AAAA/B0000BBBB");
+        assert_untouched("SG.short.short");
+        assert_untouched("hf_hub_download(repo_id)");
+        assert_untouched(&format!("hf_{}", "abcdefghijklmnopqrstuvwxyzABC"));
     }
 
     #[test]

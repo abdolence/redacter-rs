@@ -10,7 +10,7 @@ Every built-in rule of the `local-rules` redacter, grouped as the `--local-rules
 | `iban` | 1 | International bank account numbers |
 | `network` | 3 | IPv4, IPv6 and MAC addresses |
 | `url` | 1 | Credentials embedded in URLs |
-| `secrets` | 9 | API keys, tokens, authorization headers and private keys |
+| `secrets` | 17 | Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys |
 | `us-identifiers` | 3 | US identifiers: SSN and ITIN, passports, driver's licenses |
 | `eu-identifiers` | 34 | European identifiers: national personal numbers, VAT numbers, UK driving licences |
 | `world-identifiers` | 7 | Identifiers of Canada, Australia, Brazil, India, South Africa and China |
@@ -71,7 +71,7 @@ Credentials embedded in URLs.
 
 ## `secrets`
 
-API keys, tokens, authorization headers and private keys.
+Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys.
 
 | Rule | Description | Validator | Keyword | Example |
 |---|---|---|---|---|
@@ -84,6 +84,14 @@ API keys, tokens, authorization headers and private keys.
 | `jwt` | JSON Web Token: three base64url parts, the first starting with `eyJ` | no | no | `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123def456` (synthetic) |
 | `authorization-header` | Value of an `Authorization: Bearer` or `Basic` header | no | yes | `Authorization: Bearer abc.def.ghi` (synthetic) |
 | `private-key-block` | PEM or PGP private key block from `BEGIN` to `END` | no | no | `-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----` (synthetic) |
+| `secret-assignment` | Value of a `password`, `secret`, `token` or `api_key` style key written as `key=value`, `key: value` or a JSON field, 8 characters or more | yes (digit or symbol in the value) | yes | `DB_PASSWORD=Sup3rS3cret!` (synthetic) |
+| `openai-key` | OpenAI API key (`sk-proj-`, `sk-svcacct-`, `sk-admin-`, or the legacy form containing `T3BlbkFJ`) | no | no | `sk-proj-abcdefghij0123456789ABCDEFGHIJ` (synthetic) |
+| `anthropic-key` | Anthropic API or admin key (`sk-ant-api` or `sk-ant-admin`, two digits and 20 characters or more) | no | no | `sk-ant-api03-abcdefghij0123456789ABCDEFGHIJ` (synthetic) |
+| `gitlab-token` | GitLab personal access token (`glpat-` and 20 characters or more) | no | no | `glpat-abcdefghij0123456789` (synthetic) |
+| `npm-token` | npm access token (`npm_` and 36 characters) | no | no | `npm_abcdefghijklmnopqrstuvwxyz0123456789` (synthetic) |
+| `slack-webhook` | Slack webhook URL (`hooks.slack.com/services/`, `workflows/` or `triggers/` and the secret path) | no | no | `hooks.slack.com/services/T0000AAAA/B0000BBBB/abcdEFGHijklMNOPqrstUVWX` (synthetic) |
+| `sendgrid-key` | SendGrid API key (`SG.`, 20 characters or more, `.`, 40 characters or more) | no | no | `SG.abcdefghijklmnopqrst.abcdefghijklmnopqrstuvwxyz0123456789ABCD` (synthetic) |
+| `huggingface-token` | Hugging Face access token (`hf_` and 30 letters or more) | no | no | `hf_abcdefghijklmnopqrstuvwxyzABCD` (synthetic) |
 
 ## `us-identifiers`
 

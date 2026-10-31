@@ -103,6 +103,15 @@ pub fn phone_national_digits(value: &str) -> bool {
     phone_digit_count(value, 9)
 }
 
+/// A credential value has a digit or a symbol. Words alone (`required`, `changeme`,
+/// `SlackApiToken`) are what code puts after `password =` and `token:`, so a letters-only
+/// passphrase is the price of not reporting them.
+pub fn credential_value(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| c.is_ascii_digit() || "!@#%^&*+=?~".contains(c))
+}
+
 pub fn ipv4(value: &str) -> bool {
     value.parse::<Ipv4Addr>().is_ok()
 }
