@@ -8,7 +8,6 @@ use crate::addon_store::AddonStoreOptions;
 use crate::commands::*;
 use crate::errors::AppError;
 use args::*;
-use clap::Parser;
 use console::{Style, Term};
 
 mod args;
@@ -64,14 +63,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let cli = match CliArgs::try_parse() {
-        Ok(cli) => cli,
+    let (cli, deprecated) = match CliArgs::try_parse_from_with_deprecations(std::env::args_os()) {
+        Ok(parsed) => parsed,
         Err(err) => {
             err.print()?;
             // clap exits with 2 on a usage error, which `scan` reserves for findings.
             std::process::exit(if err.use_stderr() { 1 } else { 0 });
         }
     };
+    let stderr = Term::stderr();
+    for DeprecatedSpelling { used, replacement } in deprecated {
+        stderr.write_line(&format!(
+            "{}: `{used}` is deprecated, use `{replacement}`",
+            Style::new().bold().yellow().apply_to("Warning")
+        ))?;
+    }
     match handle_args(cli, &term).await {
         Err(err) => {
             term.write_line(

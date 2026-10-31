@@ -13,43 +13,43 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 
 #[derive(Debug, Clone)]
-pub struct MsPresidioRedacterOptions {
+pub struct PresidioRedacterOptions {
     pub text_analyze_url: Option<Url>,
     pub image_redact_url: Option<Url>,
 }
 
 #[derive(Clone)]
-pub struct MsPresidioRedacter<'a> {
+pub struct PresidioRedacter<'a> {
     client: reqwest::Client,
-    ms_presidio_options: MsPresidioRedacterOptions,
+    presidio_options: PresidioRedacterOptions,
     reporter: &'a AppReporter<'a>,
 }
 
 #[derive(Serialize, Clone, Debug)]
-struct MsPresidioAnalyzeRequest {
+struct PresidioAnalyzeRequest {
     text: String,
     language: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-struct MsPresidioAnalyzedItem {
+struct PresidioAnalyzedItem {
     entity_type: String,
     start: Option<usize>,
     end: Option<usize>,
     score: Option<f32>,
 }
 
-impl MsPresidioAnalyzedItem {
+impl PresidioAnalyzedItem {
     fn is_disallowed(&self) -> bool {
-        MsPresidioRedacter::DISALLOW_ENTITY_TYPES.contains(&self.entity_type.as_str())
+        PresidioRedacter::DISALLOW_ENTITY_TYPES.contains(&self.entity_type.as_str())
     }
 }
 
-impl<'a> MsPresidioRedacter<'a> {
+impl<'a> PresidioRedacter<'a> {
     /// The error of a rejected request: the status only. The response body can quote the
     /// scanned text, and both the error and the log reach the terminal and the scan report.
     fn request_failure(operation: &str, status: reqwest::StatusCode) -> AppError {
-        tracing::debug!(%status, operation, "MS Presidio rejected the request");
+        tracing::debug!(%status, operation, "Presidio rejected the request");
         AppError::SystemError {
             message: format!("Failed to {operation}. HTTP status: {status}."),
         }
@@ -60,24 +60,24 @@ impl<'a> MsPresidioRedacter<'a> {
     const DISALLOW_ENTITY_TYPES: [&'static str; 1] = ["US_DRIVER_LICENSE"];
 
     pub async fn new(
-        ms_presidio_options: MsPresidioRedacterOptions,
+        presidio_options: PresidioRedacterOptions,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<Self> {
         let client = reqwest::Client::new();
         Ok(Self {
             client,
-            ms_presidio_options,
+            presidio_options,
             reporter,
         })
     }
 
-    async fn analyze(&self, text: &str) -> AppResult<Vec<MsPresidioAnalyzedItem>> {
-        let analyze_url = self.ms_presidio_options.text_analyze_url.as_ref().ok_or(
+    async fn analyze(&self, text: &str) -> AppResult<Vec<PresidioAnalyzedItem>> {
+        let analyze_url = self.presidio_options.text_analyze_url.as_ref().ok_or(
             AppError::RedacterConfigError {
                 message: "Text analyze URL is not configured".to_string(),
             },
         )?;
-        let analyze_request = MsPresidioAnalyzeRequest {
+        let analyze_request = PresidioAnalyzeRequest {
             text: text.to_string(),
             language: "en".to_string(),
         };
@@ -105,7 +105,7 @@ impl<'a> MsPresidioRedacter<'a> {
 
     /// Turns the analyzer's items for `text` into detections, converting its character
     /// offsets to byte offsets and leaving out the disallowed entity types.
-    fn detections_in(text: &str, items: &[MsPresidioAnalyzedItem]) -> AppResult<Vec<Detection>> {
+    fn detections_in(text: &str, items: &[PresidioAnalyzedItem]) -> AppResult<Vec<Detection>> {
         let offsets = CharOffsets::new(text);
         let lines = TextLines::new(text);
         items
@@ -114,7 +114,7 @@ impl<'a> MsPresidioRedacter<'a> {
             .map(|item| {
                 let (Some(start), Some(end)) = (item.start, item.end) else {
                     return Err(AppError::SystemError {
-                        message: format!("MS Presidio returned an item without offsets: {item:?}"),
+                        message: format!("Presidio returned an item without offsets: {item:?}"),
                     });
                 };
                 let range = offsets
@@ -146,7 +146,7 @@ impl<'a> MsPresidioRedacter<'a> {
     }
 
     pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let redact_url = self.ms_presidio_options.image_redact_url.as_ref().ok_or(
+        let redact_url = self.presidio_options.image_redact_url.as_ref().ok_or(
             AppError::RedacterConfigError {
                 message: "Image redact URL is not configured".to_string(),
             },
@@ -189,7 +189,7 @@ impl<'a> MsPresidioRedacter<'a> {
     }
 }
 
-impl<'a> Redacter for MsPresidioRedacter<'a> {
+impl<'a> Redacter for PresidioRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
@@ -204,13 +204,13 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
         Ok(match file_ref.media_type.as_ref() {
             Some(media_type)
                 if Redacters::is_mime_text(media_type)
-                    && self.ms_presidio_options.text_analyze_url.is_some() =>
+                    && self.presidio_options.text_analyze_url.is_some() =>
             {
                 RedactSupport::Supported
             }
             Some(media_type)
                 if Redacters::is_mime_image(media_type)
-                    && self.ms_presidio_options.image_redact_url.is_some() =>
+                    && self.presidio_options.image_redact_url.is_some() =>
             {
                 RedactSupport::Supported
             }
@@ -224,7 +224,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
         Ok(match file_ref.media_type.as_ref() {
             Some(media_type)
                 if Redacters::is_mime_text(media_type)
-                    && self.ms_presidio_options.text_analyze_url.is_some() =>
+                    && self.presidio_options.text_analyze_url.is_some() =>
             {
                 RedactSupport::Supported
             }
@@ -244,7 +244,7 @@ impl<'a> Redacter for MsPresidioRedacter<'a> {
     }
 
     fn redacter_type(&self) -> RedacterType {
-        RedacterType::MsPresidio
+        RedacterType::Presidio
     }
 }
 
@@ -273,10 +273,10 @@ mod tests {
     #[test]
     fn analyzer_items_become_detections_with_byte_ranges_and_scores() {
         let text = "Grüße, Zoë Keller: zoe@example.com";
-        let items: Vec<MsPresidioAnalyzedItem> = serde_json::from_str(ANALYZER_RESPONSE).unwrap();
+        let items: Vec<PresidioAnalyzedItem> = serde_json::from_str(ANALYZER_RESPONSE).unwrap();
         assert_eq!(text.chars().count(), 34);
 
-        let detections = MsPresidioRedacter::detections_in(text, &items).unwrap();
+        let detections = PresidioRedacter::detections_in(text, &items).unwrap();
 
         let name = text.find("Zoë Keller").unwrap();
         let email = text.find("zoe@example.com").unwrap();
@@ -312,9 +312,9 @@ mod tests {
 
     #[test]
     fn an_item_without_a_score_is_unscored() {
-        let items: Vec<MsPresidioAnalyzedItem> =
+        let items: Vec<PresidioAnalyzedItem> =
             serde_json::from_str(r#"[{"entity_type": "PERSON", "start": 0, "end": 3}]"#).unwrap();
-        let detections = MsPresidioRedacter::detections_in("Zoë", &items).unwrap();
+        let detections = PresidioRedacter::detections_in("Zoë", &items).unwrap();
         assert_eq!(detections.len(), 1);
         assert_eq!(detections[0].score, None);
     }
@@ -323,8 +323,8 @@ mod tests {
     async fn images_are_read_with_ocr_rather_than_by_the_image_endpoint() {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let redacter = MsPresidioRedacter::new(
-            MsPresidioRedacterOptions {
+        let redacter = PresidioRedacter::new(
+            PresidioRedacterOptions {
                 text_analyze_url: Some(Url::parse("http://localhost:5002/analyze").unwrap()),
                 image_redact_url: Some(Url::parse("http://localhost:5003/redact").unwrap()),
             },
@@ -362,13 +362,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci-ms-presidio"), ignore)]
+    #[cfg_attr(not(feature = "ci-presidio"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let test_analyze_url: Url = Url::parse(
-            std::env::var("TEST_MS_PRESIDIO_ANALYZE_URL")
-                .expect("TEST_MS_PRESIDIO_ANALYZE_URL required")
+            std::env::var("TEST_PRESIDIO_ANALYZE_URL")
+                .expect("TEST_PRESIDIO_ANALYZE_URL required")
                 .as_str(),
         )?;
         let test_content = "Hello, John";
@@ -382,8 +382,8 @@ mod tests {
         let content = RedacterDataItemContent::Value(test_content.to_string());
         let input = RedacterDataItem { file_ref, content };
 
-        let redacter = MsPresidioRedacter::new(
-            MsPresidioRedacterOptions {
+        let redacter = PresidioRedacter::new(
+            PresidioRedacterOptions {
                 text_analyze_url: Some(test_analyze_url),
                 image_redact_url: None,
             },
@@ -403,13 +403,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "ci-ms-presidio"), ignore)]
+    #[cfg_attr(not(feature = "ci-presidio"), ignore)]
     async fn detect_text_finds_values_at_their_byte_offsets() {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let test_analyze_url: Url = Url::parse(
-            std::env::var("TEST_MS_PRESIDIO_ANALYZE_URL")
-                .expect("TEST_MS_PRESIDIO_ANALYZE_URL required")
+            std::env::var("TEST_PRESIDIO_ANALYZE_URL")
+                .expect("TEST_PRESIDIO_ANALYZE_URL required")
                 .as_str(),
         )
         .unwrap();
@@ -422,8 +422,8 @@ mod tests {
             },
             content: RedacterDataItemContent::Value(text.to_string()),
         };
-        let redacter = MsPresidioRedacter::new(
-            MsPresidioRedacterOptions {
+        let redacter = PresidioRedacter::new(
+            PresidioRedacterOptions {
                 text_analyze_url: Some(test_analyze_url),
                 image_redact_url: None,
             },
