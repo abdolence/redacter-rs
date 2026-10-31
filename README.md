@@ -585,28 +585,33 @@ matched, and PDF files by rendering them as images first. Both need the optional
 (the OCR models, and Pdfium for PDFs); without them images and PDFs are skipped unless
 `--allow-unsupported-copies` is set.
 
-A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such
-as `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or one
-of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at the next quote of the kind that opened it, single, double or backtick, and
-may hold spaces, commas, semicolons, the other two quote kinds and escaped quotes such as `\"`. An unquoted value ends at a space, comma, semicolon, quote or an `&` that starts
-a `name=` pair, so in `?token=abc123def456&user=alice` only the token is redacted.
+A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such as
+`password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or one
+of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at the next quote of the kind that opened it,
+single, double or backtick, and may hold spaces, commas, semicolons, the other two quote kinds, escaped quotes such as
+`\"` and, in a single-quoted value, the SQL and YAML doubled quote `''`. JSON written inside a JSON string, where the
+quotes are `\"`, is redacted as well. A value in braces directly after the `=`, such as the ODBC `Pwd={Sup3r;S3cret1}`,
+is redacted and the braces stay. An unquoted value ends at a space, comma, semicolon, quote, `<`, a closing bracket
+(`)`, `]`, `}` or `>`) or an `&` that starts a `name=` pair, so in `?token=abc123def456&user=alice` only the token is
+redacted.
 
 Some values are taken for references or placeholders and left alone:
 
 - a quoted value starting with whitespace, `<`, `$`, `%`, `*`, `[` or `{`;
-- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `/`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`, which leaves
-  `PWD=/home/runner/work` and `secret: /run/secrets/db_password` alone;
+- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`;
 - an unquoted value that is a dotted or `::` path of identifiers, such as `process.env.API_KEY_V2` or
   `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
   and digits, as in `abcdefgh1234.ijklmnop5678`.
 
 Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
-such as `password=$ecretPa55word` or `/Sup3rS3cret`; an unquoted password written as a dotted path, such as
-`password: john.smith2024`; and a password written in a sentence.
+such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`;
+a password written in a sentence; and a quoted value that does not close on its line, such as `password = "Sup3rS3cret1`
+at a cut-off line end, a YAML `>-` block or a `"""` triple-quoted string.
 
 Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
 `secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
-after such a key, such as `token: v2-beta-channel`.
+after such a key, such as `token: v2-beta-channel`; and a file path after such a key, such as
+`PWD=/home/runner/work/app2` or `secret: /run/secrets/db_password1`, because one base64 secret in 64 starts with `/`.
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
 with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of
