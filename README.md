@@ -36,8 +36,8 @@ cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
         * PDF files (rendering as images)
-    * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction, with no built-in secret
-      detection (open source project that you can install on-prem).
+    * [Presidio](https://github.com/data-privacy-stack/presidio) for PII redaction, with no built-in secret detection
+      (open source project, maintained by Data Privacy Stack, that you can install on-prem).
         * text, html, csv, json files
         * images
         * PDF files (rendering as images)
@@ -95,7 +95,7 @@ strings that carry a password. The redacters differ most on secrets.
 | `gcp-dlp` | 13 info types, such as names, emails, phone numbers, cards, IBANs, passports and dates of birth | 15 info types: passwords, auth tokens, AWS credentials, basic auth headers, OAuth client secrets, GCP API keys, encryption keys, JWTs, HTTP cookie headers and the credential types of GCP, Azure, OpenAI and Anthropic, signed storage URLs and Tink keysets. In a test with synthetic values it found passwords, JWTs and cookie headers, and missed private key blocks and most vendor tokens |
 | `aws-comprehend` | Every Comprehend PII entity type, English text only | Passwords, AWS access keys and secret keys, PINs and usernames. It may redact only part of another token and leave the rest in place |
 | `aws-bedrock-guardrails` | The PII types the guardrail enables | Passwords, AWS keys, PINs and usernames when the guardrail enables them, plus any shape you add as a regex filter. It may redact only part of another token |
-| `ms-presidio` | Presidio's default recognizers | None built in. Custom recognizers are added on the Presidio side |
+| `presidio` | Presidio's default recognizers | None built in. Custom recognizers are added on the Presidio side |
 | `gcp-vertex-ai`, `gemini-llm`, `open-ai-llm`, `aws-bedrock` | Whatever the model recognises as personal information | Passwords, API keys, access tokens and private keys in text, as the prompt asks. In an image test, Gemini located the secrets of a `.env` screenshot, and Amazon Nova's boxes missed them, which is a limit of the model |
 
 Models answer differently from run to run, so check the output of an LLM redacter before relying on it. To cover both
@@ -203,7 +203,7 @@ Options:
   -d, --redact <REDACT>
           List of redacters to use
           
-          [possible values: gcp-dlp, aws-comprehend, ms-presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner, local-gliner]
+          [possible values: gcp-dlp, aws-comprehend, presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner, local-gliner]
 
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
@@ -260,11 +260,11 @@ Options:
       --aws-bedrock-guardrail-version <AWS_BEDROCK_GUARDRAIL_VERSION>
           Guardrail version for the AWS Bedrock Guardrails redacter. Default is 'DRAFT'
 
-      --ms-presidio-text-analyze-url <MS_PRESIDIO_TEXT_ANALYZE_URL>
-          URL for text analyze endpoint for MsPresidio redacter
+      --presidio-text-analyze-url <PRESIDIO_TEXT_ANALYZE_URL>
+          URL for text analyze endpoint for Presidio redacter
 
-      --ms-presidio-image-redact-url <MS_PRESIDIO_IMAGE_REDACT_URL>
-          URL for image redact endpoint for MsPresidio redacter
+      --presidio-image-redact-url <PRESIDIO_IMAGE_REDACT_URL>
+          URL for image redact endpoint for Presidio redacter
 
       --gemini-model <GEMINI_MODEL>
           Gemini model name for text redaction, also used to locate sensitive data in images. Default is 'models/gemini-3.8-flash'
@@ -371,15 +371,24 @@ Additionally you can provide the list of user defined info types using `--gcp-dl
 The built-in info types sent by default cover personal information and credentials. `--gcp-dlp-built-in-info-type`
 adds more, see the [infoTypes reference](https://docs.cloud.google.com/sensitive-data-protection/docs/infotypes-reference).
 
-### Microsoft Presidio
+### Presidio
 
 Presidio's default recognizers find personal information only. To find secrets, add custom recognizers on the Presidio
 side.
 
-To be able to use Microsoft Presidio DLP you need to have a running instance of the Presidio API.
-You can use Docker to run it locally or deploy it to your infrastructure.
-You need to provide the URLs for text analysis and image redaction endpoints using `--ms-presidio-text-analyze-url` and
-`--ms-presidio-image-redact-url` options.
+To be able to use Presidio you need to have a running instance of the Presidio API.
+The project is maintained by [Data Privacy Stack](https://github.com/data-privacy-stack) and publishes the
+analyzer and the image redactor as container images. You can run them locally or deploy them to your infrastructure:
+
+```sh
+docker run -d -p 5002:3000 ghcr.io/data-privacy-stack/presidio-analyzer:latest
+docker run -d -p 5003:3000 ghcr.io/data-privacy-stack/presidio-image-redactor:latest
+```
+
+You need to provide the URLs for text analysis and image redaction endpoints using `--presidio-text-analyze-url` and
+`--presidio-image-redact-url` options.
+
+The `ms-presidio` redacter name and the `--ms-presidio-*` options still work, but are deprecated and print a warning.
 
 ### GCP Vertex AI
 
@@ -948,10 +957,10 @@ and/or by size:
 redacter cp -m 1024 ...
 ```
 
-MS Presidio redacter:
+Presidio redacter:
 
 ```sh
-redacter cp -d ms-presidio --ms-presidio-text-analyze-url http://localhost:5002/analyze --ms-presidio-image-redact-url http://localhost:5003/redact ...
+redacter cp -d presidio --presidio-text-analyze-url http://localhost:5002/analyze --presidio-image-redact-url http://localhost:5003/redact ...
 ```
 
 Vertex AI redacter:
@@ -1022,7 +1031,7 @@ For example:
 
 - `scan form.pdf -d gcp-dlp -d local-rules`: GCP DLP reads the rendered pages, local-rules is skipped on the file;
 - `scan photo.png -d gemini-llm -d local-rules`: only Gemini reads the image;
-- `scan data.csv -d local-rules -d ms-presidio`: local-rules reads the table, and Microsoft Presidio, which reads text
+- `scan data.csv -d local-rules -d presidio`: local-rules reads the table, and Presidio, which reads text
   but not tables, is skipped.
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
@@ -1067,7 +1076,7 @@ Be aware that a report written with `--show-values` contains the sensitive data 
 ### Scores
 
 A score is the confidence of the redacter that the value is what the label says, between 0 and 1. The local-ner,
-local-gliner, AWS Comprehend, Microsoft Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
+local-gliner, AWS Comprehend, Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
 redacters and AWS Bedrock Guardrails do not: their findings have an empty score in the terminal and `null` in the JSON
 report.
 
@@ -1169,7 +1178,7 @@ enough for the longest path, so no path is shortened.
 ### Detection per redacter
 
 Each redacter detects in its own way and names the data with its own labels. The labels are not translated between
-redacters: an email address is `email` for local-rules, `EMAIL_ADDRESS` for GCP DLP and Microsoft Presidio and `EMAIL`
+redacters: an email address is `email` for local-rules, `EMAIL_ADDRESS` for GCP DLP and Presidio and `EMAIL`
 for AWS Comprehend.
 
 | Redacter | Label | Score | Images and PDF pages |
@@ -1179,11 +1188,11 @@ for AWS Comprehend.
 | `local-gliner` | The label from `--local-gliner-labels`, such as `person` | Model confidence | OCR |
 | `gcp-dlp` | The info type, such as `EMAIL_ADDRESS` | From the likelihood, see [Scores](#scores) | Read by DLP, which reports the boxes |
 | `aws-comprehend` | The PII entity type, such as `EMAIL` | Model confidence | OCR |
-| `ms-presidio` | The entity type, such as `EMAIL_ADDRESS` | Presidio score | OCR |
+| `presidio` | The entity type, such as `EMAIL_ADDRESS` | Presidio score | OCR |
 | `aws-bedrock-guardrails` | The PII type of the guardrail, or the name of its regex | None | OCR |
 | `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
 
-- Microsoft Presidio needs `--ms-presidio-text-analyze-url` to detect. The image redaction endpoint reports no
+- Presidio needs `--presidio-text-analyze-url` to detect. The image redaction endpoint reports no
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
   as unsupported.
 - The LLM redacters ask the model for the sensitive values in the text with a type for each, and report every
@@ -1250,7 +1259,7 @@ Image redaction in LLM models right now results in not very accurate redaction, 
 For the most protection, you can use multiple DLP providers in the order of the most accurate to the least accurate.
 
 For secrets, `local-rules` and GCP DLP find the most. AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS
-keys, PINs and usernames only, and Microsoft Presidio, `local-ner` and `local-gliner` find none by default.
+keys, PINs and usernames only, and Presidio, `local-ner` and `local-gliner` find none by default.
 
 ## Licence
 
