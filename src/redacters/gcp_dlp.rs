@@ -35,7 +35,7 @@ pub struct GcpDlpRedacterOptions {
 }
 
 impl<'a> GcpDlpRedacter<'a> {
-    pub const INFO_TYPES: [&'static str; 20] = [
+    pub const INFO_TYPES: [&'static str; 28] = [
         "PHONE_NUMBER",
         "EMAIL_ADDRESS",
         "CREDIT_CARD_NUMBER",
@@ -56,6 +56,14 @@ impl<'a> GcpDlpRedacter<'a> {
         "IBAN_CODE",
         "GCP_API_KEY",
         "ENCRYPTION_KEY",
+        "JSON_WEB_TOKEN",
+        "HTTP_COOKIE",
+        "GCP_CREDENTIALS",
+        "AZURE_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "STORAGE_SIGNED_URL",
+        "TINK_KEYSET",
     ];
     pub async fn new(
         gcp_dlp_options: GcpDlpRedacterOptions,
@@ -1005,6 +1013,46 @@ mod tests {
             }),
             "{detections:?}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn detect_text_finds_json_web_tokens_and_cookie_headers() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let json_web_token = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkphbmUgRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
+            "eUK98iEG8IR3YvDzy012TccHIFEVmg-J8sbayuNEuzE"
+        );
+        let text = format!(
+            "id_token: {json_web_token}\nCookie: sessionid=abcdef1234567890abcdef1234567890; theme=dark"
+        );
+        let input = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text),
+        };
+
+        let detections = live_redacter(&reporter)
+            .await
+            .detect(&input)
+            .await
+            .unwrap()
+            .found;
+
+        for info_type in ["JSON_WEB_TOKEN", "HTTP_COOKIE"] {
+            assert!(
+                detections
+                    .iter()
+                    .any(|detection| detection.label == DetectionLabel::new(info_type)),
+                "{info_type} not found: {detections:?}"
+            );
+        }
     }
 
     #[tokio::test]
