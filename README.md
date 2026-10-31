@@ -89,7 +89,7 @@ strings that carry a password. The redacters differ most on secrets.
 
 | Redacter | Personal information | Secrets |
 |---|---|---|
-| `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid and Hugging Face credentials; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
+| `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
 | `local-ner` | People, organisations and locations | None |
 | `local-gliner` | The labels you choose, 14 PII labels by default | None with the default labels. Chain `local-rules` for secrets |
 | `gcp-dlp` | 13 info types, such as names, emails, phone numbers, cards, IBANs, passports and dates of birth | 15 info types: passwords, auth tokens, AWS credentials, basic auth headers, OAuth client secrets, GCP API keys, encryption keys, JWTs, HTTP cookie headers and the credential types of GCP, Azure, OpenAI and Anthropic, signed storage URLs and Tink keysets. In a test with synthetic values it found passwords, JWTs and cookie headers, and missed private key blocks and most vendor tokens |
@@ -526,7 +526,7 @@ Built-in rule groups, all enabled by default:
 | `iban` | IBANs (mod 97 and the national length) |
 | `network` | IPv4, IPv6 and MAC addresses |
 | `url` | Credentials embedded in URLs |
-| `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid and Hugging Face credentials; JWTs; authorization headers; PEM and PGP private keys |
+| `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; JWTs; authorization headers; PEM and PGP private keys |
 | `us-identifiers` | SSN and ITIN, passport numbers next to the word passport (in 9 languages), US driver's license numbers |
 | `eu-identifiers` | European identifiers: the national personal numbers of Albania, Austria, Belgium, Bosnia and Herzegovina, Bulgaria, Croatia, Czechia, Denmark, Estonia, Finland, France, Germany (Steuer-ID), Greece (AMKA and AFM), Hungary (személyi szám and TAJ), Iceland, Ireland, Italy, Latvia, Lithuania, Luxembourg, Malta, Montenegro, the Netherlands, North Macedonia, Norway, Poland, Portugal, Romania, Serbia, Slovakia, Slovenia, Spain, Sweden, Switzerland, Turkey and the United Kingdom (NINO and driving licence), plus EU VAT numbers |
 | `world-identifiers` | Canadian SIN, Australian TFN, Brazilian CPF, Indian Aadhaar, South African ID, Chinese resident ID |
@@ -587,20 +587,22 @@ matched, and PDF files by rendering them as images first. Both need the optional
 
 A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such
 as `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or one
-of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at its closing quote, single, double or backtick, and
-may hold spaces, commas and semicolons. An unquoted value ends at a space, comma, semicolon, quote or an `&` that starts
+of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at the next quote of the kind that opened it, single, double or backtick, and
+may hold spaces, commas, semicolons, the other two quote kinds and escaped quotes such as `\"`. An unquoted value ends at a space, comma, semicolon, quote or an `&` that starts
 a `name=` pair, so in `?token=abc123def456&user=alice` only the token is redacted.
 
 Some values are taken for references or placeholders and left alone:
 
 - a quoted value starting with whitespace, `<`, `$`, `%`, `*`, `[` or `{`;
-- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`;
+- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `/`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`, which leaves
+  `PWD=/home/runner/work` and `secret: /run/secrets/db_password` alone;
 - an unquoted value that is a dotted or `::` path of identifiers, such as `process.env.API_KEY_V2` or
-  `crate::signing::private_key::Key`, unless one segment has more than 32 characters.
+  `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
+  and digits, as in `abcdefgh1234.ijklmnop5678`.
 
 Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
-such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`; a
-quoted value that holds a quote of another kind; a `pwd` key; and a password written in a sentence.
+such as `password=$ecretPa55word` or `/Sup3rS3cret`; an unquoted password written as a dotted path, such as
+`password: john.smith2024`; and a password written in a sentence.
 
 Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
 `secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
