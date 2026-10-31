@@ -138,6 +138,8 @@ On Windows:
 
 Download the latest release from [the GitHub releases](https://github.com/abdolence/redacter-rs/releases).
 
+The Linux x86_64 and aarch64 archives need glibc 2.18 or newer.
+
 ### Cargo
 
 ```sh
