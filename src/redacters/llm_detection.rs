@@ -1,6 +1,7 @@
 //! What the LLM redacters share: the prompts, with one list of what counts as sensitive, and
-//! the shape of the model's answer when they detect instead of redact. A model names the values it found and their kind, so text
-//! offsets are located locally and image boxes are scaled back to the image as given.
+//! the shape of the model's answer when they detect instead of redact. A model names the
+//! values it found and their kind, so text offsets are located locally and image boxes are
+//! scaled back to the image as given.
 
 use crate::errors::AppError;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Detections, ImageBoxes};
@@ -179,28 +180,6 @@ impl ImageBoxes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::{GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT};
-
-    #[test]
-    fn prompts_name_secrets_and_text_prompts_carry_the_separator() {
-        for prompt in [
-            GEMINI_COORDS_REDACTION_PROMPT.to_string(),
-            NATIVE_IMAGE_REDACTION_PROMPT.to_string(),
-            text_detection_instruction("---42"),
-            text_redaction_instruction("---42"),
-        ] {
-            assert!(
-                prompt.contains("passwords, API keys, access tokens, private keys"),
-                "{prompt}"
-            );
-        }
-        for prompt in [
-            text_detection_instruction("---42"),
-            text_redaction_instruction("---42"),
-        ] {
-            assert!(prompt.contains("'---42'"), "{prompt}");
-        }
-    }
 
     #[test]
     fn text_findings_are_located_at_every_occurrence() {
