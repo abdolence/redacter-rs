@@ -16,6 +16,15 @@ macro_rules! driving_licence_keywords {
     };
 }
 
+/// The key and operator that start a secret assignment: a key ending in a secret word, an
+/// optional closing quote of a JSON key, then `=`, `:`, `:=` or `=>` and any blanks. `pwd` is
+/// a connection string key (`Pwd=`, `PWD=`).
+macro_rules! secret_keys {
+    () => {
+        r#"[A-Za-z0-9_.-]*(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*"#
+    };
+}
+
 /// Whole-word keywords that anchor the birth-date rule: en, de, fr, es, it, nl, pt, pl, sv.
 /// `né le` needs its accent, because `ne le` is ordinary French. Each of these ends on a
 /// word character, so the caller puts a plain `\b` right after the group.
@@ -245,18 +254,22 @@ const RULES: &[RuleSpec] = &[
             validators::unquoted_credential_value,
         )),
         keyword: true,
-        description: "Unquoted value of a `password`, `secret`, `token` or `api_key` style key written as `key=value` or `key: value`, up to the next space, comma, semicolon or quote",
+        description: "Unquoted value of a `password`, `secret`, `token` or `api_key` style key written as `key=value` or `key: value`, up to the next space, comma, semicolon, quote or `&` followed by a `name=`",
         example: Example::Synthetic("DB_PASSWORD=Sup3rS3cret!"),
-        // The key must end in the keyword, so `password_min_length` and `tokenizer` stay out.
-        // The value cannot start with `:` (a `::` path), a reference or a placeholder character
-        // (`${..}`, `<..>`, `&anchor`, `[REDACTED]`) and must end at a quote, comma, semicolon,
-        // space or line end, which leaves `request.form["password"]` and `get_token(user)` alone.
-        // An `&` stays in the value unless a `name=` follows it, so the next parameter of a URL
-        // query is not swallowed while `P@ss&word1` is redacted whole.
-        pattern: r#"(?i)[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*([^\s"'`,;<>()\[\]{}$%*&:][^\s"'`,;<>()\[\]{}&]*(?:&(?:[^\s"'`,;<>()\[\]{}&A-Za-z0-9_.=-][^\s"'`,;<>()\[\]{}&]*|[A-Za-z0-9_.-]+(?:[^\s"'`,;<>()\[\]{}&A-Za-z0-9_.=-][^\s"'`,;<>()\[\]{}&]*)?)?)*)(?:["'`,;&\s]|$)"#,
+        // The value cannot start with `:` (a `::` path), `/` (a file path such as `PWD=/home/x`),
+        // a reference or a placeholder character (`${..}`, `<..>`, `&anchor`, `[REDACTED]`) and
+        // must end at a quote, comma, semicolon, space or line end, which leaves
+        // `request.form["password"]` and `get_token(user)` alone. An `&` stays in the value
+        // unless a `name=` follows it, so the next parameter of a URL query is not swallowed
+        // while `P@ss&word1` is redacted whole.
+        pattern: concat!(
+            r"(?i)",
+            secret_keys!(),
+            r#"([^\s"'`,;<>()\[\]{}$%*&:/][^\s"'`,;<>()\[\]{}&]*(?:&(?:[A-Za-z0-9_.-]*[^\s"'`,;<>()\[\]{}&A-Za-z0-9_.=-][^\s"'`,;<>()\[\]{}&]*|[A-Za-z0-9_.-]+)?)*)(?:["'`,;&\s]|$)"#
+        ),
     },
     RuleSpec {
-        name: "secret-assignment-quoted",
+        name: "secret-assignment-double-quoted",
         group: RuleGroup::Secrets,
         capture_group: 1,
         validator: Some((
@@ -264,11 +277,50 @@ const RULES: &[RuleSpec] = &[
             validators::quoted_credential_value,
         )),
         keyword: true,
-        description: "Quoted value of a `password`, `secret`, `token` or `api_key` style key, in single, double or backtick quotes, 8 characters or more up to the closing quote",
+        description: "Double-quoted value of a `password`, `secret`, `token` or `api_key` style key, 8 characters or more up to the closing quote; `\\\"` stays inside the value",
         example: Example::Synthetic("password = \"My pass; 1234\""),
-        // The quotes stay. The value cannot contain a quote of either kind, so a closing quote
-        // is found without a backreference, and cannot start with a placeholder character.
-        pattern: r#"(?i)[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*["'`]([^\s"'`<$%*\[{][^"'`\r\n]{7,})["'`]"#,
+        // The three quoted rows differ only in the quote: Rust regexes have no backreference, so
+        // each quote kind gets its own class and a value may hold the other two kinds. The
+        // value cannot start with a placeholder character.
+        pattern: concat!(
+            r"(?i)",
+            secret_keys!(),
+            r#""((?:[^\s"\\<$%*\[{]|\\.)(?:[^"\\\r\n]|\\.){7,})""#
+        ),
+    },
+    RuleSpec {
+        name: "secret-assignment-single-quoted",
+        group: RuleGroup::Secrets,
+        capture_group: 1,
+        validator: Some((
+            "digit or one of `!@#%^&*+=?~` in the value",
+            validators::quoted_credential_value,
+        )),
+        keyword: true,
+        description: "Single-quoted value of a `password`, `secret`, `token` or `api_key` style key, 8 characters or more up to the closing quote; `\\'` stays inside the value",
+        example: Example::Synthetic("password = 'My pass; 1234'"),
+        pattern: concat!(
+            r"(?i)",
+            secret_keys!(),
+            r#"'((?:[^\s'\\<$%*\[{]|\\.)(?:[^'\\\r\n]|\\.){7,})'"#
+        ),
+    },
+    RuleSpec {
+        name: "secret-assignment-backtick-quoted",
+        group: RuleGroup::Secrets,
+        capture_group: 1,
+        validator: Some((
+            "digit or one of `!@#%^&*+=?~` in the value",
+            validators::quoted_credential_value,
+        )),
+        keyword: true,
+        description: "Backtick-quoted value of a `password`, `secret`, `token` or `api_key` style key, 8 characters or more up to the closing backtick",
+        example: Example::Synthetic("password = `My pass; 1234`"),
+        pattern: concat!(
+            r"(?i)",
+            secret_keys!(),
+            r#"`((?:[^\s`\\<$%*\[{]|\\.)(?:[^`\\\r\n]|\\.){7,})`"#
+        ),
     },
     RuleSpec {
         name: "openai-key",
@@ -342,6 +394,17 @@ const RULES: &[RuleSpec] = &[
         description: "Hugging Face access token (`hf_` and 30 letters or digits or more)",
         example: Example::Synthetic("hf_abcdefghijklmnopqrstuvwxyzABCD"),
         pattern: r"\bhf_[A-Za-z0-9]{30,}\b",
+    },
+    RuleSpec {
+        name: "discord-bot-token",
+        group: RuleGroup::Secrets,
+        capture_group: 0,
+        validator: None,
+        keyword: false,
+        description: "Discord bot token: three base64url parts of 24 to 26, 6 and 27 or more characters, the first starting with `M`, `N` or `O`",
+        example: Example::Synthetic(concat!("MTAwMDAwMDAwMDAwMDAwMDAw", ".", "G1aB2c", ".", "abcdefghijklmnopqrstuvwxyz0")),
+        // No `\b` at the end: the class includes `-`, so a token ending in one would keep it.
+        pattern: r"\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}",
     },
     RuleSpec {
         name: "us-ssn",

@@ -606,6 +606,7 @@ mod tests {
             &format!("Google token: {google_oauth}"),
             "Google token: [REDACTED]",
         );
+        assert_redacts("token: abcdefgh1234.ijklmnop5678", "token: [REDACTED]");
     }
 
     #[test]
@@ -646,6 +647,55 @@ mod tests {
     }
 
     #[test]
+    fn quoted_secret_assignment_ends_at_a_quote_of_its_own_kind() {
+        assert_redacts(
+            "password = \"Sup3rS3cret'sTail\"",
+            "password = \"[REDACTED]\"",
+        );
+        assert_redacts("password = 'Sup3rS3cret\"sTail'", "password = '[REDACTED]'");
+        assert_redacts(
+            "password = `Sup3rS3cret'\"sTail`",
+            "password = `[REDACTED]`",
+        );
+        assert_redacts("password = \"'Sup3rS3cret'\"", "password = \"[REDACTED]\"");
+    }
+
+    #[test]
+    fn quoted_secret_assignment_keeps_escaped_quotes_in_the_value() {
+        assert_redacts(
+            r#"{"password": "Sup3rS3cret\"!xtail"}"#,
+            r#"{"password": "[REDACTED]"}"#,
+        );
+        assert_redacts(
+            r#"{"password": "p@ss\"word123"}"#,
+            r#"{"password": "[REDACTED]"}"#,
+        );
+        assert_redacts(r"password = 'it\'s-Sup3r1'", r"password = '[REDACTED]'");
+        assert_redacts(
+            r#"password = "Sup3rS3cret\\" # next"#,
+            r#"password = "[REDACTED]" # next"#,
+        );
+    }
+
+    #[test]
+    fn secret_assignment_covers_connection_string_passwords() {
+        assert_redacts(
+            "Driver={ODBC Driver 17};Uid=sa;Pwd=Sup3rS3cret1;",
+            "Driver={ODBC Driver 17};Uid=sa;Pwd=[REDACTED];",
+        );
+        assert_redacts("UID=sa;PWD=Sup3rS3cret1", "UID=sa;PWD=[REDACTED]");
+        assert_redacts("pwd = \"Sup3rS3cret1\"", "pwd = \"[REDACTED]\"");
+    }
+
+    #[test]
+    fn secret_assignment_skips_values_that_are_paths() {
+        assert_untouched("secret: /run/secrets/db_password1");
+        assert_untouched("PWD=/home/runner/work/app2");
+        assert_untouched("OLDPWD=/home/runner/work/app2");
+        assert_untouched("pwd: /var/log/app1");
+    }
+
+    #[test]
     fn vendor_tokens() {
         let openai_project = format!("sk-proj-{}", "abcdefghij0123456789ABCDEFGHIJ");
         let openai_legacy = format!(
@@ -664,6 +714,10 @@ mod tests {
             "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
         );
         let huggingface = format!("hf_{}", "abcdefghijklmnopqrstuvwxyzABCDEFGH");
+        let discord = format!(
+            "{}.{}.{}",
+            "MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"
+        );
         for token in [
             &openai_project,
             &openai_legacy,
@@ -673,6 +727,7 @@ mod tests {
             &slack_webhook,
             &sendgrid,
             &huggingface,
+            &discord,
         ] {
             assert_redacts(&format!("key {token} end"), "key [REDACTED] end");
         }
@@ -721,6 +776,7 @@ mod tests {
         assert_untouched("npm_install_dependencies");
         assert_untouched("hooks.slack.com/services/T0000AAAA/B0000BBBB");
         assert_untouched("SG.short.short");
+        assert_untouched("MTk4NjIyNDgzNDcxOTI1MjQ4.Cl2FMQ.short");
         assert_untouched("hf_hub_download(repo_id)");
         assert_untouched(&format!("hf_{}", "abcdefghijklmnopqrstuvwxyzABC"));
     }
@@ -975,12 +1031,21 @@ mod reference {
         text.replace('|', "\\|").replace('\n', "\\n")
     }
 
+    /// A text with a backtick needs a longer delimiter, padded so the span does not end early.
+    fn code_span(text: &str) -> String {
+        if text.contains('`') {
+            format!("`` {} ``", cell(text))
+        } else {
+            format!("`{}`", cell(text))
+        }
+    }
+
     fn example(example: &Example) -> String {
         match example {
             Example::Published(text, citation) => {
-                format!("`{}` (published, [source]({citation}))", cell(text))
+                format!("{} (published, [source]({citation}))", code_span(text))
             }
-            Example::Synthetic(text) => format!("`{}` (synthetic)", cell(text)),
+            Example::Synthetic(text) => format!("{} (synthetic)", code_span(text)),
         }
     }
 

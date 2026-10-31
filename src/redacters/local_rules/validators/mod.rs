@@ -122,8 +122,9 @@ pub fn unquoted_credential_value(value: &str) -> bool {
 const MAX_IDENTIFIER_LEN: usize = 32;
 
 /// Two or more identifiers joined by `.` or `::`. A segment longer than a name would be is a
-/// random token (a Google OAuth access token is `ya29.` and a long random tail), so the value
-/// is not a path.
+/// random token (a Google OAuth access token is `ya29.` and a long random tail), and so is a
+/// path whose every segment mixes letters and digits (`abcdefgh1234.ijklmnop5678`): a code
+/// reference has a segment without digits (`config.apiKeyV2`, `process.env.API_KEY_V2`).
 fn is_identifier_path(value: &str) -> bool {
     fn is_identifier(segment: &str) -> bool {
         let starts_well = segment
@@ -137,9 +138,15 @@ fn is_identifier_path(value: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    let normalised = value.replace("::", ".");
-    let segments: Vec<&str> = normalised.split('.').collect();
-    segments.len() >= 2 && segments.into_iter().all(is_identifier)
+    fn mixes_letters_and_digits(segment: &str) -> bool {
+        segment.chars().any(|c| c.is_ascii_alphabetic())
+            && segment.chars().any(|c| c.is_ascii_digit())
+    }
+
+    let mut segments = value.split("::").flat_map(|part| part.split('.'));
+    segments.clone().count() >= 2
+        && segments.clone().all(is_identifier)
+        && !segments.all(mixes_letters_and_digits)
 }
 
 pub fn ipv4(value: &str) -> bool {
