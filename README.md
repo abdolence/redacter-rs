@@ -36,8 +36,8 @@ cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
         * structured data table files (csv)
         * images (jpeg, png, bpm, gif)
         * PDF files (rendering as images)
-    * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction (open source project that you can
-      install on-prem).
+    * [Microsoft Presidio](https://microsoft.github.io/presidio/) for PII redaction, with no built-in secret
+      detection (open source project that you can install on-prem).
         * text, html, csv, json files
         * images
         * PDF files (rendering as images)
@@ -80,6 +80,27 @@ cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
     * ... more DLP providers can be added in the future.
 * **CLI:**  Easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
+
+## What each redacter finds
+
+Sensitive data here means two things: personal information (PII), such as names, addresses, phone numbers and national
+identifiers, and secrets, meaning credentials such as passwords, API keys, access tokens, private keys and connection
+strings that carry a password. The redacters differ most on secrets.
+
+| Redacter | Personal information | Secrets |
+|---|---|---|
+| `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid and Hugging Face credentials; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
+| `local-ner` | People, organisations and locations | None |
+| `local-gliner` | The labels you choose, 14 PII labels by default | None with the default labels. Chain `local-rules` for secrets |
+| `gcp-dlp` | 13 info types, such as names, emails, phone numbers, cards, IBANs, passports and dates of birth | 15 info types: passwords, auth tokens, AWS credentials, basic auth headers, OAuth client secrets, GCP API keys, encryption keys, JWTs, HTTP cookie headers and the credential types of GCP, Azure, OpenAI and Anthropic, signed storage URLs and Tink keysets. In a test with synthetic values it found passwords, JWTs and cookie headers, and missed private key blocks and most vendor tokens |
+| `aws-comprehend` | Every Comprehend PII entity type, English text only | Passwords, AWS access keys and secret keys, PINs and usernames. It may redact only part of another token and leave the rest in place |
+| `aws-bedrock-guardrails` | The PII types the guardrail enables | Passwords, AWS keys, PINs and usernames when the guardrail enables them, plus any shape you add as a regex filter. It may redact only part of another token |
+| `ms-presidio` | Presidio's default recognizers | None built in. Custom recognizers are added on the Presidio side |
+| `gcp-vertex-ai`, `gemini-llm`, `open-ai-llm`, `aws-bedrock` | Whatever the model recognises as personal information | Passwords, API keys, access tokens and private keys in text, as the prompt asks. In an image test, Gemini located the secrets of a `.env` screenshot, and Amazon Nova's boxes missed them, which is a limit of the model |
+
+Models answer differently from run to run, so check the output of an LLM redacter before relying on it. To cover both
+kinds of data, chain redacters: `-d local-rules -d gcp-dlp` finds the secrets and the pattern-shaped PII locally before
+the rest is sent to GCP DLP.
 
 ## Installation
 
@@ -205,7 +226,7 @@ Options:
           Possible values:
           - auto:   Edit the image with the model, verify the edit with the coordinate pass, and fall back to coordinates entirely when the model cannot edit images
           - native: Always edit the image with the model, failing when it cannot
-          - coords: Always ask the model for PII coordinates and black them out locally
+          - coords: Always ask the model where the sensitive data is and black it out locally
           
           [default: auto]
 
@@ -213,7 +234,7 @@ Options:
           GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
 
       --gcp-vertex-ai-text-model <GCP_VERTEX_AI_TEXT_MODEL>
-          Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'
+          Model name for text redaction in Vertex AI, also used to locate sensitive data in images. Default is 'publishers/google/models/gemini-3.8-flash'
 
       --gcp-vertex-ai-image-model <GCP_VERTEX_AI_IMAGE_MODEL>
           Model name for native image editing in Vertex AI. Default is 'publishers/google/models/gemini-3.1-flash-image'
@@ -231,7 +252,7 @@ Options:
           AWS region for the AWS Comprehend and AWS Bedrock redacters
 
       --aws-bedrock-text-model <AWS_BEDROCK_TEXT_MODEL>
-          Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere
+          Bedrock model id for text redaction, also used to locate sensitive data in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere
 
       --aws-bedrock-guardrail-id <AWS_BEDROCK_GUARDRAIL_ID>
           Guardrail id for the AWS Bedrock Guardrails redacter
@@ -246,7 +267,7 @@ Options:
           URL for image redact endpoint for MsPresidio redacter
 
       --gemini-model <GEMINI_MODEL>
-          Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'
+          Gemini model name for text redaction, also used to locate sensitive data in images. Default is 'models/gemini-3.8-flash'
 
       --gemini-image-model <GEMINI_IMAGE_MODEL>
           Gemini model name for native image editing. Default is 'models/gemini-3.1-flash-image'
@@ -258,7 +279,7 @@ Options:
           API key for OpenAI LLM redacter
 
       --open-ai-model <OPEN_AI_MODEL>
-          Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'
+          Open AI chat model name for text redaction, also used to locate sensitive data in images. Default is 'gpt-5.6-luna'
 
       --open-ai-image-model <OPEN_AI_IMAGE_MODEL>
           Open AI model name for native image editing. Default is 'gpt-image-2'
@@ -347,7 +368,13 @@ To be able to use GCP DLP you need to:
 
 Additionally you can provide the list of user defined info types using `--gcp-dlp-stored-info-type` option.
 
+The built-in info types sent by default cover personal information and credentials. `--gcp-dlp-built-in-info-type`
+adds more, see the [infoTypes reference](https://docs.cloud.google.com/sensitive-data-protection/docs/infotypes-reference).
+
 ### Microsoft Presidio
+
+Presidio's default recognizers find personal information only. To find secrets, add custom recognizers on the Presidio
+side.
 
 To be able to use Microsoft Presidio DLP you need to have a running instance of the Presidio API.
 You can use Docker to run it locally or deploy it to your infrastructure.
@@ -399,8 +426,8 @@ GCP Vertex AI, Gemini API and Open AI redact images in one of two ways, selected
 `--llm-image-mode`; AWS Bedrock has no active image editing model and always redacts images by
 coordinates, so `--llm-image-mode native` is rejected for it:
 
-- `native` (the image model edits the image and returns it with the personal information covered by black boxes);
-- `coords` (the text model reports the coordinates of the personal information and the tool blacks them out locally);
+- `native` (the image model edits the image and returns it with the sensitive data covered by black boxes);
+- `coords` (the text model reports the coordinates of the sensitive data and the tool blacks them out locally);
 - `auto` (the default): the native path is tried first and its result is then verified by running the coordinate
   path over the edited image, blacking out anything the model left legible; the tool falls back to coordinates
   entirely when the model cannot edit images. Authentication, permission and quota errors are never retried.
@@ -417,7 +444,7 @@ To be able to use AWS Bedrock you need to authenticate using `aws login`, `aws c
 and have model access enabled for the models you use in the Bedrock console.
 To provide an AWS region use `--aws-region` option.
 
-The text model is used for text redaction and to locate PII coordinates in images; AWS Bedrock has no active
+The text model is used for text redaction and to locate sensitive data in images; AWS Bedrock has no active
 image editing model, so images are always redacted by that coordinate path (`--llm-image-mode native` is
 rejected for this redacter). Select the model with `--aws-bedrock-text-model`; by default it is
 `amazon.nova-2-lite-v1:0`. Amazon Nova 2 Lite has no in-region endpoint and is served only through Geo
@@ -446,8 +473,8 @@ The guardrail's sensitive information filters must be configured with the action
 instead configured to **Block**, the service returns the guardrail's blocked message instead of redacted text, and
 the tool rejects the response rather than returning that message as if it were redacted content.
 
-You can create a guardrail with its PII filters set to anonymize using the AWS CLI. For example, with a
-`guardrail-pii.json` file such as:
+You can create a guardrail with its sensitive information filters set to anonymize using the AWS CLI. For example, with
+a `guardrail-pii.json` file such as:
 
 ```json
 {
@@ -456,13 +483,20 @@ You can create a guardrail with its PII filters set to anonymize using the AWS C
     {"type": "EMAIL", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
     {"type": "PHONE", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
     {"type": "ADDRESS", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
-    {"type": "CREDIT_DEBIT_CARD_NUMBER", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true}
+    {"type": "CREDIT_DEBIT_CARD_NUMBER", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "PASSWORD", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "AWS_ACCESS_KEY", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true},
+    {"type": "AWS_SECRET_KEY", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true}
+  ],
+  "regexesConfig": [
+    {"name": "github-token", "pattern": "gh[pousr]_[A-Za-z0-9]{36}", "action": "ANONYMIZE", "inputAction": "ANONYMIZE", "outputAction": "ANONYMIZE", "inputEnabled": true, "outputEnabled": true}
   ]
 }
 ```
 
-(see the [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-sensitive-filters.html)
-for the full list of supported PII entity types), create the guardrail with:
+The built-in types cover passwords and AWS keys only. A regex filter covers the shape of any other secret, such as the
+GitHub token above. See the [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-sensitive-filters.html)
+for the full list of supported PII entity types. Create the guardrail with:
 
 ```sh
 aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
@@ -473,7 +507,7 @@ aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
 ### Local rules redacter
 
 The `local-rules` redacter runs entirely on your machine. It finds pattern-shaped personal information
-with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
+and secrets with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
 national checks for identifiers) and replaces each match with `[REDACTED]`. With `redacter scan` it reports
 the matches instead, labelled with the name of the rule, see [Scan command](#scan-command).
 
@@ -492,7 +526,7 @@ Built-in rule groups, all enabled by default:
 | `iban` | IBANs (mod 97 and the national length) |
 | `network` | IPv4, IPv6 and MAC addresses |
 | `url` | Credentials embedded in URLs |
-| `secrets` | AWS, GCP, GitHub, Slack and Stripe keys, JWTs, authorization headers, PEM and PGP private keys |
+| `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid and Hugging Face credentials; JWTs; authorization headers; PEM and PGP private keys |
 | `us-identifiers` | SSN and ITIN, passport numbers next to the word passport (in 9 languages), US driver's license numbers |
 | `eu-identifiers` | European identifiers: the national personal numbers of Albania, Austria, Belgium, Bosnia and Herzegovina, Bulgaria, Croatia, Czechia, Denmark, Estonia, Finland, France, Germany (Steuer-ID), Greece (AMKA and AFM), Hungary (személyi szám and TAJ), Iceland, Ireland, Italy, Latvia, Lithuania, Luxembourg, Malta, Montenegro, the Netherlands, North Macedonia, Norway, Poland, Portugal, Romania, Serbia, Slovakia, Slovenia, Spain, Sweden, Switzerland, Turkey and the United Kingdom (NINO and driving licence), plus EU VAT numbers |
 | `world-identifiers` | Canadian SIN, Australian TFN, Brazilian CPF, Indian Aadhaar, South African ID, Chinese resident ID |
@@ -550,6 +584,11 @@ AWS Comprehend redacter does: images through text extraction using OCR, blacking
 matched, and PDF files by rendering them as images first. Both need the optional capabilities installed
 (the OCR models, and Pdfium for PDFs); without them images and PDFs are skipped unless
 `--allow-unsupported-copies` is set.
+
+A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such
+as `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or a
+symbol among them. The key name stays. A value made of letters only, such as the passphrase `correcthorsebattery`, is
+not found, and neither is a password written in a sentence.
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
 with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of
@@ -690,7 +729,7 @@ Pros of local redaction:
   GLiNER is slower, under a second per file, but still local and free.
 - Determinism: the same input always gives the same output, which makes results easy to test and audit.
 - A useful pre-pass: `-d local-rules -d local-ner -d gcp-dlp` (or `-d local-gliner` in place of `local-ner`)
-  removes the obvious PII before anything is sent.
+  removes the obvious PII and secrets before anything is sent.
 
 Cons of local redaction:
 
@@ -735,6 +774,7 @@ chain tag "Apple" and "The Support Desk" as organisations; `local-gliner` and it
 in a sentence about contact preferences as an email address, and mistake the invoice date
 `14 March 1985` in `dates-en.txt` for a date of birth by shape alone, the same false positive noted in the
 [Local GLiNER redacter](#local-gliner-redacter) section.
+The corpus holds no secrets, so the table measures personal information only.
 Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
 `test-fixtures/bench-dlp/README.md`) to reproduce the table on your own machine and documents.
 
@@ -1168,6 +1208,10 @@ redacter ls gs://my-little-bucket/my-big-files/
 - The local redacters (`local-rules`, `local-ner`, `local-gliner`) send nothing anywhere. Their model
   files are fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
+- Cloud ML detectors can match part of a token and leave the rest in place. See
+  [What each redacter finds](#what-each-redacter-finds).
+- `--allow-unsupported-copies` copies the files no redacter can read without redacting them. Key files, `.env` files and
+  other files without a text extension are among them unless `--unsupported-as-text` reads them as text.
 - The tool was mostly designed to redact files internally. Not recommended to use it in public environments without
   apropriate security measures and manual review.
 - Integrity of the files is not guaranteed due to DLP implementation specifics. Some formats such as
@@ -1181,6 +1225,9 @@ DLP on the market.
 Image redaction in LLM models right now results in not very accurate redaction, however text redaction is quite good.
 
 For the most protection, you can use multiple DLP providers in the order of the most accurate to the least accurate.
+
+For secrets, `local-rules` and GCP DLP find the most. AWS Comprehend and AWS Bedrock Guardrails find passwords and AWS
+keys only, and Microsoft Presidio, `local-ner` and `local-gliner` find none by default.
 
 ## Licence
 
