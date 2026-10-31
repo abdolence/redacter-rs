@@ -103,13 +103,43 @@ pub fn phone_national_digits(value: &str) -> bool {
     phone_digit_count(value, 9)
 }
 
-/// A credential value has a digit or a symbol. Words alone (`required`, `changeme`,
-/// `SlackApiToken`) are what code puts after `password =` and `token:`, so a letters-only
-/// passphrase is the price of not reporting them.
-pub fn credential_value(value: &str) -> bool {
+/// A quoted credential value has a digit or one of `!@#%^&*+=?~`. Words alone (`required`,
+/// `changeme`, `SlackApiToken`) are what code puts after `password =` and `token:`, so a
+/// letters-only passphrase is the price of not reporting them.
+pub fn quoted_credential_value(value: &str) -> bool {
     value
         .chars()
         .any(|c| c.is_ascii_digit() || "!@#%^&*+=?~".contains(c))
+}
+
+/// An unquoted credential value is at least 8 characters long, passes the quoted check and is
+/// not a reference to another value. An unquoted `process.env.TOKEN_V2` or
+/// `crate::key::Key1` is code reading a secret from elsewhere; a quoted one is a literal.
+pub fn unquoted_credential_value(value: &str) -> bool {
+    value.chars().count() >= 8 && quoted_credential_value(value) && !is_identifier_path(value)
+}
+
+const MAX_IDENTIFIER_LEN: usize = 32;
+
+/// Two or more identifiers joined by `.` or `::`. A segment longer than a name would be is a
+/// random token (a Google OAuth access token is `ya29.` and a long random tail), so the value
+/// is not a path.
+fn is_identifier_path(value: &str) -> bool {
+    fn is_identifier(segment: &str) -> bool {
+        let starts_well = segment
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+        starts_well
+            && segment.len() <= MAX_IDENTIFIER_LEN
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    let normalised = value.replace("::", ".");
+    let segments: Vec<&str> = normalised.split('.').collect();
+    segments.len() >= 2 && segments.into_iter().all(is_identifier)
 }
 
 pub fn ipv4(value: &str) -> bool {

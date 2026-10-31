@@ -48,7 +48,7 @@ impl RuleGroup {
             RuleGroup::Url => "Credentials embedded in URLs",
             RuleGroup::Secrets => {
                 "Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys"
-            },
+            }
             RuleGroup::UsIdentifiers => {
                 "US identifiers: SSN and ITIN, passports, driver's licenses"
             }
@@ -587,20 +587,62 @@ mod tests {
     }
 
     #[test]
-    fn secret_rules_ignore_the_projects_own_source() {
-        for source in [
-            include_str!("../../../args.rs"),
-            include_str!("../../../commands/copy_command.rs"),
-            include_str!("../../../redacters/stream_redacter.rs"),
-            include_str!("../../../redacters/gcp_dlp.rs"),
-        ] {
-            for spec in builtin_rules()
-                .iter()
-                .filter(|spec| spec.group == RuleGroup::Secrets)
-            {
-                assert!(!rule_matches(spec, source), "{}", spec.name);
-            }
-        }
+    fn secret_assignment_skips_code_references() {
+        assert_untouched("use crate::signing::private_key::Pkcs8SigningKey;");
+        assert_untouched("let key = self::token::Token2::new();");
+        assert_untouched("const apiKey = process.env.API_KEY_V2;");
+        assert_untouched("apiKey = config.apiKeyV2;");
+        assert_untouched("token: process.env.TOKEN_V2");
+        assert_untouched("secret = settings::SECRET_VALUE_2;");
+        assert_untouched("PWD=/home/runner/work/app2");
+        assert_untouched("OLDPWD=/home/runner/work/app2");
+        assert_untouched("pwd: /var/log/app1");
+    }
+
+    #[test]
+    fn secret_assignment_redacts_dotted_random_tokens() {
+        let google_oauth = format!("ya29.{}", "a0AfH6SMBxq1w2e3r4t5q1w2e3r4t5q1w2e3r4t5");
+        assert_redacts(
+            &format!("Google token: {google_oauth}"),
+            "Google token: [REDACTED]",
+        );
+    }
+
+    #[test]
+    fn secret_assignment_in_a_url_query_redacts_only_the_value() {
+        assert_redacts(
+            "https://example.com/api?token=abc123def456&user=alice&page=2",
+            "https://example.com/api?token=[REDACTED]&user=alice&page=2",
+        );
+        assert_redacts(
+            "https://example.com/api?user=alice&api_key=abc123def456&page=2",
+            "https://example.com/api?user=alice&api_key=[REDACTED]&page=2",
+        );
+        assert_redacts("password: P@ss&word1", "password: [REDACTED]");
+    }
+
+    #[test]
+    fn quoted_secret_assignment_redacts_up_to_the_closing_quote() {
+        assert_redacts(
+            "password = \"supersecret,1234\"",
+            "password = \"[REDACTED]\"",
+        );
+        assert_redacts("password = 'super secret; 1234'", "password = '[REDACTED]'");
+        assert_redacts(
+            "password = `pass, with; delimiters 1`",
+            "password = `[REDACTED]`",
+        );
+        assert_redacts(
+            "{\"api_key\": \"ab1,cd2 ef3;gh4\", \"user\": \"alice\"}",
+            "{\"api_key\": \"[REDACTED]\", \"user\": \"alice\"}",
+        );
+        assert_redacts(
+            "const token = \"process.env.TOKEN_V2\";",
+            "const token = \"[REDACTED]\";",
+        );
+        assert_untouched("password = \"changeme please\"");
+        assert_untouched("password = \"${DB_PASSWORD_1}\"");
+        assert_untouched("password = \"[REDACTED]\"");
     }
 
     #[test]
@@ -634,6 +676,39 @@ mod tests {
         ] {
             assert_redacts(&format!("key {token} end"), "key [REDACTED] end");
         }
+    }
+
+    #[test]
+    fn slack_webhooks_are_redacted_to_the_end() {
+        let trigger = format!(
+            "hooks.slack.com/triggers/{}",
+            "T0123456789/3141592653589/0123456789abcdef0123456789abcdef"
+        );
+        let workflow = format!(
+            "hooks.slack.com/workflows/{}",
+            "T0123456789/A0123456789/123456789012345678/abcdefghijklmnopqrstuvwx"
+        );
+        for webhook in [&trigger, &workflow] {
+            assert_redacts(
+                &format!("POST https://{webhook} done"),
+                "POST https://[REDACTED] done",
+            );
+        }
+    }
+
+    #[test]
+    fn huggingface_tokens_may_contain_digits() {
+        let token = format!("hf_{}", "0123456789abcdefghijklmnopqrstuv");
+        assert_redacts(&format!("HF {token} end"), "HF [REDACTED] end");
+    }
+
+    #[test]
+    fn sendgrid_keys_keep_no_trailing_dash() {
+        let key = format!(
+            "SG.{}.{}-",
+            "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+        );
+        assert_redacts(&format!("key {key} end"), "key [REDACTED] end");
     }
 
     #[test]

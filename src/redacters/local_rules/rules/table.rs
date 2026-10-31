@@ -240,15 +240,35 @@ const RULES: &[RuleSpec] = &[
         name: "secret-assignment",
         group: RuleGroup::Secrets,
         capture_group: 1,
-        validator: Some(("digit or symbol in the value", validators::credential_value)),
+        validator: Some((
+            "8 characters or more with a digit or one of `!@#%^&*+=?~`, not a dotted or `::` identifier path",
+            validators::unquoted_credential_value,
+        )),
         keyword: true,
-        description: "Value of a `password`, `secret`, `token` or `api_key` style key written as `key=value`, `key: value` or a JSON field, 8 characters or more",
+        description: "Unquoted value of a `password`, `secret`, `token` or `api_key` style key written as `key=value` or `key: value`, up to the next space, comma, semicolon or quote",
         example: Example::Synthetic("DB_PASSWORD=Sup3rS3cret!"),
         // The key must end in the keyword, so `password_min_length` and `tokenizer` stay out.
-        // The value cannot start with a reference or placeholder character (`${..}`, `<..>`,
-        // `&anchor`, `[REDACTED]`) and must end at a quote, comma, semicolon, space or line
-        // end, which leaves `request.form["password"]` and `get_token(user)` alone.
-        pattern: r#"(?i)[A-Za-z0-9_.-]*(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*["']?([^\s"'`,;<>()\[\]{}$%*&][^\s"'`,;<>()\[\]{}]{7,})(?:["'`,;\s]|$)"#,
+        // The value cannot start with `:` (a `::` path), a reference or a placeholder character
+        // (`${..}`, `<..>`, `&anchor`, `[REDACTED]`) and must end at a quote, comma, semicolon,
+        // space or line end, which leaves `request.form["password"]` and `get_token(user)` alone.
+        // An `&` stays in the value unless a `name=` follows it, so the next parameter of a URL
+        // query is not swallowed while `P@ss&word1` is redacted whole.
+        pattern: r#"(?i)[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*([^\s"'`,;<>()\[\]{}$%*&:][^\s"'`,;<>()\[\]{}&]*(?:&(?:[^\s"'`,;<>()\[\]{}&A-Za-z0-9_.=-][^\s"'`,;<>()\[\]{}&]*|[A-Za-z0-9_.-]+(?:[^\s"'`,;<>()\[\]{}&A-Za-z0-9_.=-][^\s"'`,;<>()\[\]{}&]*)?)?)*)(?:["'`,;&\s]|$)"#,
+    },
+    RuleSpec {
+        name: "secret-assignment-quoted",
+        group: RuleGroup::Secrets,
+        capture_group: 1,
+        validator: Some((
+            "digit or one of `!@#%^&*+=?~` in the value",
+            validators::quoted_credential_value,
+        )),
+        keyword: true,
+        description: "Quoted value of a `password`, `secret`, `token` or `api_key` style key, in single, double or backtick quotes, 8 characters or more up to the closing quote",
+        example: Example::Synthetic("password = \"My pass; 1234\""),
+        // The quotes stay. The value cannot contain a quote of either kind, so a closing quote
+        // is found without a backreference, and cannot start with a placeholder character.
+        pattern: r#"(?i)[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|access[_-]?key|account[_-]?key|private[_-]?key)["']?[ \t]*(?::=|=>|=|:)[ \t]*["'`]([^\s"'`<$%*\[{][^"'`\r\n]{7,})["'`]"#,
     },
     RuleSpec {
         name: "openai-key",
@@ -299,7 +319,7 @@ const RULES: &[RuleSpec] = &[
         keyword: false,
         description: "Slack webhook URL (`hooks.slack.com/services/`, `workflows/` or `triggers/` and the secret path)",
         example: Example::Synthetic("hooks.slack.com/services/T0000AAAA/B0000BBBB/abcdEFGHijklMNOPqrstUVWX"),
-        pattern: r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+        pattern: r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,}",
     },
     RuleSpec {
         name: "sendgrid-key",
@@ -309,8 +329,9 @@ const RULES: &[RuleSpec] = &[
         keyword: false,
         description: "SendGrid API key (`SG.`, 20 characters or more, `.`, 40 characters or more)",
         example: Example::Synthetic("SG.abcdefghijklmnopqrst.abcdefghijklmnopqrstuvwxyz0123456789ABCD"),
-        // The lengths are lower bounds, so a key format that grows is still found.
-        pattern: r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}\b",
+        // The lengths are lower bounds, so a key format that grows is still found. No `\b` at
+        // the end: the class includes `-`, so a key ending in one would keep that character.
+        pattern: r"\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{40,}",
     },
     RuleSpec {
         name: "huggingface-token",
@@ -318,9 +339,9 @@ const RULES: &[RuleSpec] = &[
         capture_group: 0,
         validator: None,
         keyword: false,
-        description: "Hugging Face access token (`hf_` and 30 letters or more)",
+        description: "Hugging Face access token (`hf_` and 30 letters or digits or more)",
         example: Example::Synthetic("hf_abcdefghijklmnopqrstuvwxyzABCD"),
-        pattern: r"\bhf_[A-Za-z]{30,}\b",
+        pattern: r"\bhf_[A-Za-z0-9]{30,}\b",
     },
     RuleSpec {
         name: "us-ssn",
