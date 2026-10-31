@@ -350,12 +350,12 @@ Additionally you can provide the list of user defined info types using `--gcp-dl
 ### Presidio
 
 To be able to use Presidio you need to have a running instance of the Presidio API.
-The project is maintained by [Data Privacy Stack](https://github.com/data-privacy-stack/presidio), and publishes the
+The project is maintained by [Data Privacy Stack](https://github.com/data-privacy-stack) and publishes the
 analyzer and the image redactor as container images. You can run them locally or deploy them to your infrastructure:
 
 ```sh
-docker run -p 5002:3000 ghcr.io/data-privacy-stack/presidio-analyzer:latest
-docker run -p 5003:3000 ghcr.io/data-privacy-stack/presidio-image-redactor:latest
+docker run -d -p 5002:3000 ghcr.io/data-privacy-stack/presidio-analyzer:latest
+docker run -d -p 5003:3000 ghcr.io/data-privacy-stack/presidio-image-redactor:latest
 ```
 
 You need to provide the URLs for text analysis and image redaction endpoints using `--presidio-text-analyze-url` and
