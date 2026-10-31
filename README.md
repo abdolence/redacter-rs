@@ -494,7 +494,7 @@ a `guardrail-pii.json` file such as:
 }
 ```
 
-The built-in types cover passwords and AWS keys only. A regex filter covers the shape of any other secret, such as the
+The built-in types cover passwords, AWS keys, PINs and usernames only. A regex filter covers the shape of any other secret, such as the
 GitHub token above. See the [AWS documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-sensitive-filters.html)
 for the full list of supported PII entity types. Create the guardrail with:
 
@@ -586,9 +586,25 @@ matched, and PDF files by rendering them as images first. Both need the optional
 `--allow-unsupported-copies` is set.
 
 A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such
-as `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or a
-symbol among them. The key name stays. A value made of letters only, such as the passphrase `correcthorsebattery`, is
-not found, and neither is a password written in a sentence.
+as `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or one
+of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at its closing quote, single, double or backtick, and
+may hold spaces, commas and semicolons. An unquoted value ends at a space, comma, semicolon, quote or an `&` that starts
+a `name=` pair, so in `?token=abc123def456&user=alice` only the token is redacted.
+
+Some values are taken for references or placeholders and left alone:
+
+- a quoted value starting with whitespace, `<`, `$`, `%`, `*`, `[` or `{`;
+- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`;
+- an unquoted value that is a dotted or `::` path of identifiers, such as `process.env.API_KEY_V2` or
+  `crate::signing::private_key::Key`, unless one segment has more than 32 characters.
+
+Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
+such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`; a
+quoted value that holds a quote of another kind; a `pwd` key; and a password written in a sentence.
+
+Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
+`secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
+after such a key, such as `token: v2-beta-channel`.
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
 with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of
@@ -1226,8 +1242,8 @@ Image redaction in LLM models right now results in not very accurate redaction, 
 
 For the most protection, you can use multiple DLP providers in the order of the most accurate to the least accurate.
 
-For secrets, `local-rules` and GCP DLP find the most. AWS Comprehend and AWS Bedrock Guardrails find passwords and AWS
-keys only, and Microsoft Presidio, `local-ner` and `local-gliner` find none by default.
+For secrets, `local-rules` and GCP DLP find the most. AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS
+keys, PINs and usernames only, and Microsoft Presidio, `local-ner` and `local-gliner` find none by default.
 
 ## Licence
 
