@@ -233,60 +233,68 @@ impl CliCommand {
     }
 }
 
-/// Deprecated names of the Presidio redacter and its flags, with their replacements.
-const DEPRECATED_PRESIDIO_FLAGS: [(&str, &str); 2] = [
-    (
-        "--ms-presidio-text-analyze-url",
-        "--presidio-text-analyze-url",
-    ),
-    (
-        "--ms-presidio-image-redact-url",
-        "--presidio-image-redact-url",
-    ),
+/// A deprecated command line spelling that still works, and the one that replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeprecatedSpelling {
+    pub used: &'static str,
+    pub replacement: &'static str,
+}
+
+const DEPRECATED_PRESIDIO_REDACTER: DeprecatedSpelling = DeprecatedSpelling {
+    used: "ms-presidio",
+    replacement: "presidio",
+};
+
+const DEPRECATED_PRESIDIO_FLAGS: [DeprecatedSpelling; 2] = [
+    DeprecatedSpelling {
+        used: "--ms-presidio-text-analyze-url",
+        replacement: "--presidio-text-analyze-url",
+    },
+    DeprecatedSpelling {
+        used: "--ms-presidio-image-redact-url",
+        replacement: "--presidio-image-redact-url",
+    },
 ];
-const DEPRECATED_PRESIDIO_REDACTER: &str = "ms-presidio";
 
-/// Warnings for the deprecated Presidio spellings among the raw command line arguments.
-///
-/// clap resolves an alias to the canonical name before the parsed value is available, so the
-/// spelling is only visible in the raw arguments.
-pub fn deprecated_presidio_warnings<I, S>(args: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let mut warnings = Vec::new();
-    let mut redacter_value_follows = false;
-    let mut redacter_name_used = false;
-    for arg in args {
-        let arg = arg.as_ref().to_string_lossy();
-        let redacter_value = if redacter_value_follows {
-            Some(arg.as_ref())
-        } else {
-            arg.strip_prefix("--redact=")
-                .or_else(|| arg.strip_prefix("-d="))
-                .or_else(|| arg.strip_prefix("-d"))
-        };
-        redacter_name_used |= redacter_value == Some(DEPRECATED_PRESIDIO_REDACTER);
-        redacter_value_follows = matches!(arg.as_ref(), "-d" | "--redact");
+impl CliArgs {
+    /// Parses like [`Parser::try_parse_from`] and also returns the deprecated Presidio
+    /// spellings the arguments used, each once.
+    ///
+    /// clap resolves an alias to the canonical name, so the redacter name is read from the
+    /// values as typed. For the flags clap keeps no spelling, so the arguments before `--` are
+    /// scanned for the whole token.
+    pub fn try_parse_from_with_deprecations<I, T>(
+        args: I,
+    ) -> Result<(Self, Vec<DeprecatedSpelling>), clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+        let matches = Self::command().try_get_matches_from(&args)?;
+        let cli = Self::from_arg_matches(&matches)?;
 
-        for (deprecated, replacement) in DEPRECATED_PRESIDIO_FLAGS {
-            let flag = arg.split_once('=').map_or(arg.as_ref(), |(flag, _)| flag);
-            if flag == deprecated {
-                let warning = format!("`{deprecated}` is deprecated, use `{replacement}`");
-                if !warnings.contains(&warning) {
-                    warnings.push(warning);
-                }
-            }
+        let mut deprecated = Vec::new();
+        let deprecated_redacter_typed = matches
+            .subcommand()
+            .and_then(|(_, subcommand)| subcommand.try_get_raw("redact").ok().flatten())
+            .is_some_and(|mut names| names.any(|name| name == DEPRECATED_PRESIDIO_REDACTER.used));
+        if deprecated_redacter_typed {
+            deprecated.push(DEPRECATED_PRESIDIO_REDACTER);
         }
-    }
-    if redacter_name_used {
-        warnings.insert(
-            0,
-            format!("`{DEPRECATED_PRESIDIO_REDACTER}` is deprecated, use `presidio`"),
+        let flags: Vec<&str> = args
+            .iter()
+            .take_while(|arg| *arg != "--")
+            .filter_map(|arg| arg.to_str())
+            .map(|arg| arg.split_once('=').map_or(arg, |(flag, _)| flag))
+            .collect();
+        deprecated.extend(
+            DEPRECATED_PRESIDIO_FLAGS
+                .into_iter()
+                .filter(|flag| flags.contains(&flag.used)),
         );
+        Ok((cli, deprecated))
     }
-    warnings
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -304,27 +312,6 @@ pub enum RedacterType {
     LocalRules,
     LocalNer,
     LocalGliner,
-}
-
-impl std::str::FromStr for RedacterType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "gcp-dlp" => Ok(RedacterType::GcpDlp),
-            "aws-comprehend" => Ok(RedacterType::AwsComprehend),
-            "presidio" => Ok(RedacterType::Presidio),
-            "gemini-llm" => Ok(RedacterType::GeminiLlm),
-            "open-ai-llm" => Ok(RedacterType::OpenAiLlm),
-            "gcp-vertex-ai" => Ok(RedacterType::GcpVertexAi),
-            "aws-bedrock" => Ok(RedacterType::AwsBedrock),
-            "aws-bedrock-guardrails" => Ok(RedacterType::AwsBedrockGuardrails),
-            "local-rules" => Ok(RedacterType::LocalRules),
-            "local-ner" => Ok(RedacterType::LocalNer),
-            "local-gliner" => Ok(RedacterType::LocalGliner),
-            _ => Err(format!("Unknown redacter type: {s}")),
-        }
-    }
 }
 
 impl Display for RedacterType {
@@ -752,7 +739,6 @@ impl TryInto<RedacterOptions> for RedacterArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn addons_install_takes_a_comma_separated_list() {
@@ -847,28 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn redacter_type_round_trips_through_its_name() {
-        for redacter_type in [
-            RedacterType::GcpDlp,
-            RedacterType::AwsComprehend,
-            RedacterType::Presidio,
-            RedacterType::GeminiLlm,
-            RedacterType::OpenAiLlm,
-            RedacterType::GcpVertexAi,
-            RedacterType::AwsBedrock,
-            RedacterType::AwsBedrockGuardrails,
-            RedacterType::LocalRules,
-            RedacterType::LocalNer,
-            RedacterType::LocalGliner,
-        ] {
-            let name = redacter_type.to_string();
-            let parsed = <RedacterType as FromStr>::from_str(&name)
-                .unwrap_or_else(|err| panic!("{name} should parse back: {err}"));
-            assert_eq!(parsed.to_string(), name);
-        }
-    }
-
-    #[test]
     fn redacter_type_names_match_the_cli_values() {
         for redacter_type in RedacterType::value_variants() {
             let cli_value = redacter_type
@@ -921,42 +885,67 @@ mod tests {
         assert_eq!(canonical, deprecated);
     }
 
-    #[test]
-    fn deprecated_presidio_spellings_are_reported_once_each() {
-        let warnings = deprecated_presidio_warnings([
-            "scan",
-            "-d",
-            "ms-presidio",
-            "--redact=ms-presidio",
-            "--ms-presidio-text-analyze-url=http://localhost:5002/analyze",
-            "--ms-presidio-image-redact-url",
-            "http://localhost:5003/redact",
-            "--ms-presidio-text-analyze-url",
-            "http://localhost:5002/analyze",
-        ]);
-        assert_eq!(
-            warnings,
-            [
-                "`ms-presidio` is deprecated, use `presidio`",
-                "`--ms-presidio-text-analyze-url` is deprecated, use `--presidio-text-analyze-url`",
-                "`--ms-presidio-image-redact-url` is deprecated, use `--presidio-image-redact-url`",
-            ]
-        );
+    fn deprecated_spellings(args: &[&str]) -> Vec<DeprecatedSpelling> {
+        CliArgs::try_parse_from_with_deprecations([&["redacter"], args].concat())
+            .unwrap_or_else(|err| panic!("{err}"))
+            .1
     }
 
     #[test]
-    fn presidio_spellings_without_the_old_name_report_nothing() {
-        let warnings = deprecated_presidio_warnings([
+    fn deprecated_redacter_name_is_reported_however_it_is_typed() {
+        for redact in [
+            &["-d", "ms-presidio"][..],
+            &["-dms-presidio"],
+            &["-d=ms-presidio"],
+            &["--redact", "ms-presidio"],
+            &["--redact=ms-presidio"],
+            &["-d", "ms-presidio", "-d", "ms-presidio"],
+        ] {
+            let args = [&["scan", "/tmp"], redact].concat();
+            assert_eq!(
+                deprecated_spellings(&args),
+                [DEPRECATED_PRESIDIO_REDACTER],
+                "{redact:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_presidio_flags_are_reported_with_and_without_equals() {
+        let spellings = deprecated_spellings(&[
             "scan",
+            "/tmp",
             "-d",
-            "local-rules",
+            "presidio",
+            "--ms-presidio-text-analyze-url=http://localhost:5002/analyze",
+            "--ms-presidio-image-redact-url",
+            "http://localhost:5003/redact",
+        ]);
+        assert_eq!(spellings, DEPRECATED_PRESIDIO_FLAGS);
+    }
+
+    #[test]
+    fn current_presidio_spellings_and_values_after_the_separator_are_not_deprecated() {
+        assert!(deprecated_spellings(&[
+            "scan",
+            "/tmp",
             "-d",
             "presidio",
             "--presidio-text-analyze-url",
             "http://localhost:5002/analyze",
-            "ms-presidio-notes.txt",
-        ]);
-        assert!(warnings.is_empty(), "{warnings:?}");
+            "--presidio-image-redact-url=http://localhost:5003/redact",
+        ])
+        .is_empty());
+        assert!(deprecated_spellings(&[
+            "cp",
+            "-d",
+            "presidio",
+            "--",
+            "-dms-presidio",
+            "--ms-presidio-text-analyze-url",
+        ])
+        .is_empty());
+        assert!(deprecated_spellings(&["ls", "/tmp"]).is_empty());
     }
 
     fn local_rules_options(
