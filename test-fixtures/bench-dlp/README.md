@@ -1,224 +1,149 @@
 # bench-dlp
 
-A small, fixed-corpus benchmark comparing the redacter CLI's providers on:
+A benchmark of the redacters of the `redacter` CLI. One run measures detection quality and time
+per file for every redacter that can be reached, over four datasets, and writes a markdown
+summary and a JSON file with the numbers.
 
-- **latency**: wall-clock time for `redacter cp` over the corpus, and per-file.
-- **detection quality**: does each provider actually remove the PII in the
-  corpus, and does it leave non-PII "control" text alone?
+The harness is the ignored integration test `tests/bench_dlp/main.rs`. It is a measurement
+tool kept next to the fixtures, not part of the `redacter` build.
 
-Providers compared: the offline ones (`local-rules`, `local-ner`, `local-gliner`,
-and the chains `local-rules+local-ner` and `local-rules+local-gliner`) against
-the cloud ones (`gcp-dlp`, `gcp-vertex-ai`).
+## How a run is scored
 
-Not part of the `redacter` crate build; this is a measurement harness kept
-under `test-fixtures/` for re-runs after future changes to the redacters, run
-via the ignored integration test `tests/bench_dlp.rs`.
+The harness runs `redacter scan <dataset> -d <redacter> --show-values --report-file ...` and
+scores the findings in the JSON report against a truth. Nothing is read back from a redacted
+copy, so the numbers say what a redacter finds, not what a copy happens to remove.
 
-## What's measured
+A truth has three kinds of entry:
 
-`truth.json` holds, per corpus file, three hand-written lists of exact
-substrings:
+- sensitive: a value, or for images a box, that must be found. Each has a category;
+- neutral: a city or an organisation. Whether a redacter finds one is a configuration choice,
+  so it counts neither for nor against;
+- keep: a string that looks sensitive and is not, such as an order number, a commit hash or
+  `password_min_length`.
 
-- `pii`: strings that must be gone from the output -- person names, emails,
-  phones, postal addresses, national ids, card/iban numbers, and dates of
-  birth (as they actually appear in that file).
-- `entities`: city, country and organisation names. These are reported as
-  their own column (`loc/org redacted/total`) and are never judged pass/fail
-  against `keep` -- whether a provider redacts a company or city name is a
-  configuration choice, not a correctness bug.
-- `keep`: non-PII control strings that must survive untouched -- non-DOB
-  dates, order/ticket/invoice numbers, amounts, version-ish strings, and
-  generic words. These exist to catch over-redaction.
+A finding is on a text value when it contains the value, or lies inside it and spans at least
+60% of it, and is at most 3 times as long as the value, ignoring case. A finding is on an
+image box when it overlaps the box and is at most 3 times its area, and the boxes on a target
+find it when together they cover at least 60% of it, since a value is often reported as one box
+per word. Sensitive values, neutral values and keep strings are all judged by this rule.
 
-A truth string counts as "gone" (a pii hit, a redacted entity, or a lost keep
-string) when it is no longer present anywhere in the output file as an exact
-substring. This is coarse by design: it does not check that the *right* span
-was redacted, only whether the original text survived. See `score_text` in
-`tests/bench_dlp.rs`.
+The size cap keeps a finding that covers a whole sentence or page from being on every value in
+it. A finding more than 3 times longer than a value, such as a whole `KEY=value` line around a
+short password, does not find it. Without the cap a finding on an email would also find a
+name inside the email, and 22% of the person values of the public dataset sit inside a longer
+email or URL in the same record.
 
-`local-rules` is a regex/dictionary matcher: it is not expected to hit person
-names, postal addresses or `entities` (it has no notion of named entities) --
-only structured PII like emails, phones, card numbers and IDs.  `local-ner` is
-a named-entity model: it is not expected to hit emails, phones, card numbers
-or IDs (it has no notion of those formats) -- only names and, depending on
-`--local-ner-entities`, organisations and locations. `local-gliner` is a
-zero-shot span model driven by free-text labels (`--local-gliner-labels`):
-it is expected to cover both classes on its own, since its default label list
-includes both structured PII and person/address labels, but it has no notion
-of an entity type it was not given a label for. `local-rules+local-ner` and
-`local-rules+local-gliner` (each a chain, run left to right) are production
-configurations: they are expected to cover both classes.
+Findings are counted once per place: the same span or box reported twice, by two redacters of
+a chain for instance, is one finding, and the same text at two places is two. A value that
+occurs more than once in a file is found when any finding is on it. A box target counts as one
+true finding however many word boxes find it.
 
-The same literal text can be PII in one file and a control in another on
-purpose -- e.g. `"14 March 1985"` is a customer's date of birth in
-`customer-note.txt` (`pii`) but an unrelated invoice date in `dates-en.txt`
-(`keep`). That is the point: a context-free regex can't tell these apart,
-which is exactly the kind of gap this benchmark is meant to surface.
+A finding that is not a false alarm is left out of the precision: one on a neutral entry, and
+one inside a sensitive entry that no finding finds, such as `Baker Street` from an address or
+one word box of a name. A text finding is inside an entry when it is a part of it, a box when
+at least 60% of its area lies in the entry.
 
-## Corpus
+| Column | Meaning |
+|---|---|
+| Recall | sensitive entries found, over all categories |
+| Precision | findings on a found sensitive entry, over those and the false alarms. Shown where the truth lists everything sensitive: every dataset but `public` |
+| Per category | found/total for person, contact, address, id_number, financial, date_of_birth, credential, network and other. `-` for a category the dataset has no entries in |
+| Keep hit | keep strings that a finding is on, out of all keep strings. Shown where precision is |
+| Whole run | wall time of one `scan` over the dataset |
+| Per file | whole run over the number of files |
+| Failed/blocked/unsupported | files `scan` could not read, files it lacked a converter for, and files no selected redacter reads. Their entries count as not found |
 
-Eight text-only fixtures (no images/PDF, to keep cloud cost and OCR variance
-out of the comparison), copied from `test-fixtures/documents/` into a fresh
-temp directory by name -- `tests/bench_dlp.rs` lists them explicitly rather
-than scanning the directory, so `test-fixtures/documents/customer-form.pdf`
-(and anything else added there later) is never pulled into the corpus:
+Recall is per truth category, whatever the redacter calls a finding: a redacter that finds an
+email under any label has found the email.
 
-- `customer-note.txt`, `customer.json`, `customer-profile.html`,
-  `customers.csv`, `multilingual.txt`, `false-positives-en.txt`,
-  `dates-en.txt`, `contextual-en.txt`
+Times include the start of the process and the load of the models of a local redacter, once
+per run. The per-file time of a small dataset is therefore mostly that fixed cost, and the
+figures are comparable between redacters on one dataset, not between datasets.
 
-`contextual-en.txt` is a call summary written so that every PII item needs
-context rather than shape or capitalisation to find: a lower-case name
-(`jonas petersen`), a free-form address with no postcode keyword, a medical
-condition, a keyword-less date of birth (`12/03/1984`, indistinguishable by
-shape from a plain date), a forum handle and a username. It also carries two
-non-PII controls that read like an organisation out of context (`Apple
-Watch`, `The Support Desk`) to check for over-redaction by entity-based
-providers. `local-rules` and plain `local-ner` are not expected to find most
-of this file's PII; it exists to show what a context-aware provider adds over
-the regex/NER baseline.
+## Datasets
 
-Total corpus size is under 4 KB.
+Select them with `BENCH_DLP_DATASETS`, a comma-separated list. The default is
+`fixtures,secrets,public`.
 
-The corpus is text only, on purpose, so this benchmark says nothing about the
-OCR path (images and PDFs read through the OCR engine before redaction): that
-path has its own coverage, the `ci-ocr`-gated
-`command_copy_local_rules_redacts_ocr_documents_test` in
-`src/commands/copy_command.rs`, which redacts `customer-form.pdf` and
-`form-example.png` and OCRs the output back to confirm no PII survives.
+- `fixtures`: eight text files from `test-fixtures/documents/` (text, JSON, HTML, CSV, German,
+  French and Spanish, contextual PII, dates and words that look like PII), listed in
+  `truth.json` with a category for each value. The same literal can be sensitive in one file
+  and a keep string in another: `14 March 1985` is a date of birth in `customer-note.txt` and
+  an invoice date in `dates-en.txt`.
+- `secrets`: a synthetic corpus of 41 planted secrets in 25 files (passwords in config files,
+  vendor API keys, tokens, JWTs, private keys, connection strings), and four control files
+  with strings that look like secrets and are not. Files are read with
+  `--unsupported-as-text`, since `.env` files and keys have no text media type. The values
+  are made up, apart from the AWS documentation example key. `secrets/secrets.json` stores
+  each value in two parts and each file as a template over `{{value id}}`, and the harness
+  assembles the files at run time, so that no committed line is a complete token that GitHub
+  push protection would block. Every value a template names is a credential to find.
+- `public`: a fixed sample of 200 records of the public dataset described below, in
+  `public.json`. Each record is one file. Each annotated span is cut out of the text by its
+  character offsets and is a sensitive value, or a neutral one for the labels the fixtures
+  treat as neutral (places, organisations, dates and times, occupation, language, employment
+  and education). The labels map to the categories in `tests/bench_dlp/categories.rs`. The
+  annotation is not exhaustive, so only recall is reported.
+- `images`: `test-fixtures/media/form-example.png` and `test-fixtures/documents/customer-form.pdf`,
+  the same customer form. `images.json` holds a pixel box for each value, measured on the
+  PNG and, for the PDF, at the 1 pixel per point scale the PDF renderer uses. The local
+  redacters need the OCR and PDF addons. `images.json` is in the format of `truth.json`, with a
+  box in place of a text value.
+
+## Public data
+
+`public.json` is a sample of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII)
+by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+- source: the `test` split of 100,000 records, revision `b70ffaf5ff39e079776134c5bf4381f00a9fd1ed`
+  (last modified 2025-12-17), taken in October 2026;
+- sample: 10 windows of 20 consecutive records, the window `i` starting at record
+  `i * (100000 - 20) / 10`;
+- changes: the `text` and the `label` of every span are unchanged. A span is kept as `start` and
+  `end` character offsets, and 15 of the 1,568 spans of the sample were left out because their
+  offsets do not select their text.
 
 ## Running it
-
-Build a release binary, then run the ignored benchmark test with
-`--nocapture` so its progress and summary table print to the terminal:
 
 ```sh
 cargo build --release
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-Configuration is via environment variables:
-
-- `BENCH_DLP_PROVIDERS`: comma-separated provider specs. Defaults to
-  `local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner`
-  (local providers only, no network calls).
-- `BENCH_DLP_GCP_PROJECT`: GCP project id, required only when a `gcp-dlp` or
-  `gcp-vertex-ai` spec is listed; the test fails fast with a clear message if
-  it's missing.
-- `BENCH_DLP_OUT`: output directory for run artifacts and `summary.md`.
-  Defaults to `target/bench-dlp`.
-
-Local providers only (the default):
+The harness reads the addons from the place the binary does, `REDACTER_ADDONS_DIR` or the user
+cache directory, and downloads nothing. Install the ones the run needs once:
 
 ```sh
+redacter addons install local-ner,local-gliner,ocr,pdf
+```
+
+The default runs the local redacters over `fixtures,secrets,public`. A redacter whose addon is
+missing is listed as failed, and a dataset whose addon is missing shows its files as blocked.
+All datasets and every redacter that is configured:
+
+```sh
+BENCH_DLP_DATASETS=fixtures,secrets,public,images \
+BENCH_DLP_PROVIDERS=local-rules,local-ner,local-gliner,local-rules+local-gliner,gcp-dlp,aws-comprehend \
+BENCH_DLP_SCAN_ARGS="--gcp-project-id my-project --aws-region eu-north-1" \
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-All seven providers, including the cloud ones (requires GCP credentials):
+Settings are environment variables:
 
-```sh
-BENCH_DLP_PROVIDERS=local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,gcp-dlp,gcp-vertex-ai \
-BENCH_DLP_GCP_PROJECT=latestbit \
-cargo test --release --test bench_dlp -- --ignored --nocapture
-```
-
-### What each run does
-
-For every provider spec:
-
-1. One warm-up pass over the whole corpus directory (untimed, discarded).
-2. Three timed passes over the whole corpus directory (`std::time::Instant`
-   around the `redacter cp` invocation) -- the median is reported.
-3. One timed pass per corpus file, for per-file latency.
-
-Results land in `<BENCH_DLP_OUT>/<provider>/` (scratch, not committed):
-`run1/`..`run3/` and `perfile/<name>/` hold the redacted output, and
-`<BENCH_DLP_OUT>/summary.md` holds the final table.
-
-A provider spec joined with `+` (e.g. `local-rules+local-ner`) runs the chain
-in a single `redacter cp -d local-rules -d local-ner ...` invocation, not as
-separate passes.
-
-### Cloud cost note
-
-Each cloud provider spec is invoked exactly `1 + 3 + <file count>` times per
-run (currently 8 corpus files, so 12 invocations). The test prints this count
-before starting and aborts if it would ever be exceeded -- there is no retry
-loop. Across those 12 invocations, the whole ~4 KB corpus is sent roughly 5
-times over (4 whole-corpus passes' worth of bytes, plus the per-file passes
-covering the corpus once more), so each cloud provider sees under 45 KB total
-per run.
-
-## Scoring
-
-Scoring happens automatically at the end of the same test run: it reads
-`truth.json`, scores each provider's `run1/` output, prints a markdown table,
-and writes it to `<BENCH_DLP_OUT>/summary.md`:
-
-| column | meaning |
+| Variable | Meaning |
 |---|---|
-| wall time (median of 3) | median of the 3 timed whole-corpus passes |
-| per-file median | median of the per-file timed passes |
-| pii hits/total | how many `pii` strings were actually removed |
-| loc/org redacted/total | how many `entities` strings were removed (informational, not scored pass/fail) |
-| keep survived/total | how many `keep` strings were left untouched |
-| `[REDACTED]` count | total replacement tokens written across the corpus |
+| `BENCH_DLP_PROVIDERS` | Comma-separated specs. A spec joined with `+` is a chain, run as one `redacter scan -d a -d b`. Default is the local redacters and their chains |
+| `BENCH_DLP_DATASETS` | `fixtures`, `secrets`, `public`, `images`. Default is `fixtures,secrets,public` |
+| `BENCH_DLP_SCAN_ARGS` | Options added to every `redacter scan`, split on whitespace, so a value cannot hold a space. They configure the cloud redacters: see `redacter scan --help` |
+| `BENCH_DLP_OUT` | Output directory. Default is `target/bench-dlp` |
 
-## Results
+A spec for which `scan` writes no report is listed as failed with the `Error:` line of its
+output, which names the setting or the addon a redacter lacks. It does not stop the run. Cloud
+redacters bill for what they read, and each dataset is sent once.
 
-Local rows measured at commit `e9b325d` (2026-09-08,
-`cargo test --release --test bench_dlp -- --ignored --nocapture`) on the
-8-file corpus (48 pii / 8 entities / 31 keep); Intel(R) Core(TM) i7-10700K
-CPU @ 3.80GHz (16 logical cores). All five local providers completed cleanly
-(12/12 calls made each, no errors, no retries needed).
+## Output
 
-Cloud rows are kept from the 7-file corpus run at commit `3c3491e`
-(2026-09-07, 41 pii / 7 entities / 25 keep, before `contextual-en.txt` joined
-the corpus) and were not re-run this round; their pii/entities/keep totals
-are out of 41/7/25, not the 48/8/31 the local rows use below.
-
-| provider | wall time (median of 3) | per-file median | pii hits/total | loc/org redacted/total | keep survived/total | [REDACTED] count |
-|---|---|---|---|---|---|---|
-| gcp-dlp (7-file corpus) | 710 ms | 266 ms | 40/41 | 4/7 | 25/25 | 73 |
-| gcp-vertex-ai (7-file corpus) | 68901 ms | 5999 ms | 41/41 | 1/7 | 24/25 | 48 |
-| local-rules | 52 ms | 49 ms | 28/48 | 0/8 | 31/31 | 31 |
-| local-ner | 441 ms | 152 ms | 17/48 | 8/8 | 27/31 | 37 |
-| local-rules+local-ner | 466 ms | 205 ms | 43/48 | 8/8 | 27/31 | 68 |
-| local-gliner | 2827 ms | 834 ms | 48/48 | 1/8 | 28/31 | 54 |
-| local-rules+local-gliner | 2727 ms | 878 ms | 48/48 | 1/8 | 27/31 | 59 |
-
-### Reading the numbers
-
-`local-rules` is by far the fastest (about 50 ms) and catches the structured
-PII including the dates of birth, the postcode and the passport number
-(28/48), missing the names and free-form addresses that have no shape to
-match, while leaving every control string alone (31/31 keep). `local-ner`
-alone inverts that gap: it catches names, capitalised addresses and all
-eight `entities` but has no notion of email/phone/card/id formats, so it
-lands at 17/48 pii hits, missing five of the contextual fixture's seven PII
-items: the lower-case name (NER needs capitalisation), the medical
-condition, the keyword-less date of birth and the two handles -- none of
-which are person, organisation or location entities to begin with.
-`local-rules+local-ner` is additive on the structured/named split (43/48
-pii, all entities) at essentially `local-ner`'s latency (468 ms), but stays
-short of the full 48 for the same reason: neither half of the chain has a
-notion of a medical condition, a handle, or a date of birth with no keyword
-and no NER-recognisable shape.
-
-`local-gliner` on its own reaches 48/48 pii at default settings (a 14-label
-PII-only list, no `organization`) -- every PII string in the corpus,
-including the lower-case name, medical condition, keyword-less date of birth
-and the two handles in `contextual-en.txt` that neither `local-rules` nor
-`local-ner` find; chaining it after `local-rules` adds nothing on this corpus
-but keeps the rules' checksummed identifiers for documents the model has not
-seen. It costs about 6x `local-rules+local-ner`'s latency (2727 ms vs 466 ms
-wall, mostly the model load repeated per invocation in this per-process
-harness) and, since `organization` is off by default, redacts only 1 of 8
-`entities` (the address's town name, tagged under the `address` label) rather
-than `local-ner`'s 8/8 -- entity coverage costs an extra label and the false
-positives that come with it (see the `local-gliner` section of the top-level
-README). Compared to the cloud rows on the smaller 7-file corpus,
-`local-rules+local-gliner`'s 48/48 pii on the harder 8-file corpus is not
-directly comparable, but the contextual fixture is exactly the kind of gap
-`gcp-vertex-ai`'s LLM-based redaction is included here to cover; a like-for-like
-comparison needs the cloud providers re-run on the current corpus.
+`<BENCH_DLP_OUT>/summary.md` has an overview table, one cell per redacter and dataset with
+recall, precision and time per file, and a table per dataset with the columns above.
+`results.json` has the same numbers, with every category and the counts behind each
+percentage. Both are scratch output and are not committed.
