@@ -338,7 +338,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Model name for text redaction in Vertex AI, also used to locate PII coordinates in images. Default is 'publishers/google/models/gemini-3.8-flash'"
+        help = "Model name for text redaction in Vertex AI, also used to locate sensitive data in images. Default is 'publishers/google/models/gemini-3.8-flash'"
     )]
     pub gcp_vertex_ai_text_model: Option<GcpVertexAiModelName>,
 
@@ -373,7 +373,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Bedrock model id for text redaction, also used to locate PII coordinates in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere"
+        help = "Bedrock model id for text redaction, also used to locate sensitive data in images and, since Bedrock has no active image editing model, to redact images. Default is 'amazon.nova-2-lite-v1:0' with the inference profile prefix of the selected region ('us.', 'eu.' or 'jp.'), falling back to the 'global.' profile elsewhere"
     )]
     pub aws_bedrock_text_model: Option<AwsBedrockModelName>,
 
@@ -394,7 +394,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Gemini model name for text redaction, also used to locate PII coordinates in images. Default is 'models/gemini-3.8-flash'"
+        help = "Gemini model name for text redaction, also used to locate sensitive data in images. Default is 'models/gemini-3.8-flash'"
     )]
     pub gemini_model: Option<GeminiLlmModelName>,
 
@@ -415,7 +415,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Open AI chat model name for text redaction, also used to locate PII coordinates in images. Default is 'gpt-5.6-luna'"
+        help = "Open AI chat model name for text redaction, also used to locate sensitive data in images. Default is 'gpt-5.6-luna'"
     )]
     pub open_ai_model: Option<OpenAiModelName>,
 
