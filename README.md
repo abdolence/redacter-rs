@@ -592,9 +592,9 @@ finds part of the mask of an earlier one masks the original value in its place, 
 
 A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
 redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole.
-`cp -d local-rules` on a 319 MB log with 26 findings peaks near 77 MiB of memory, against 682 MiB in 0.21, in about 5%
+`cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
-its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 89 MiB. With a report,
+its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
 the redactions are kept in memory until it is written.
 
 A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. Nothing of it
