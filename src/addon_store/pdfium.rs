@@ -10,7 +10,7 @@ pub(super) static PDFIUM: Option<AddonManifest> = if LIBRARY.is_empty() {
     None
 } else {
     Some(AddonManifest {
-        dir_name: "pdfium-7881",
+        dir_name: "pdfium-8125",
         files: LIBRARY,
         legacy_dirs: no_legacy_dirs,
         native_code: true,
@@ -20,57 +20,57 @@ pub(super) static PDFIUM: Option<AddonManifest> = if LIBRARY.is_empty() {
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.so",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-x64.so",
-    size: 7_645_184,
-    sha256: "f728930966f503652b92acc89b9374a2eeca00ce42e26dccd3e4b5c5161b2d64",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/libpdfium-linux-x64.so",
+    size: 8_049_768,
+    sha256: "1c251efce460d67437a4c76d4be9033ae2f17bf5603f5bff1af10209b94ca723",
 }];
 
 #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.so",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-linux-arm64.so",
-    size: 7_834_256,
-    sha256: "6252fce3da45e7f0dc5b27f4d4e1a1456ca3f7734cdb04f927967df772127478",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/libpdfium-linux-arm64.so",
+    size: 8_127_624,
+    sha256: "8cdc437dce84a6493b9ec6c4f5ad9ff2c299e505acfd7b0ad38cb440805b2c70",
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.dylib",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-x64.dylib",
-    size: 7_471_800,
-    sha256: "4eaad6c3e8d786cf6f66a45d7d014edf5c65f372f98c3070e66595ebb50e43d9",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/libpdfium-macos-x64.dylib",
+    size: 7_809_288,
+    sha256: "a9f428a16f46bab89646c8724b348e01c3fe707e3126d9356026cd876a74aecb",
 }];
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "libpdfium.dylib",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/libpdfium-macos-arm64.dylib",
-    size: 7_732_336,
-    sha256: "1bc45b15466b34cef96641ce25c77a876e70010c6b114f909dda2f5325fc5bd7",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/libpdfium-macos-arm64.dylib",
+    size: 7_388_864,
+    sha256: "a45c44645523968525c710462691dd974f4efb1013ce1c249919a0939cfb373a",
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x64.dll",
-    size: 7_211_520,
-    sha256: "79d4676b656cfb1abcea88f9ade3b4b0826c5200382db5f4ec72a636c598c118",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/pdfium-windows-x64.dll",
+    size: 7_586_816,
+    sha256: "4b0dec92555d69437bef0df37be630181ab3e83a6823ca264ede355a4f2ef994",
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-arm64.dll",
-    size: 6_658_048,
-    sha256: "267a6f08a9c854d9949754a53b7630f23c0b67de5c7ca273b6abf178b49158c2",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/pdfium-windows-arm64.dll",
+    size: 6_898_176,
+    sha256: "61b3500520d2f7ec2f8074851ba941b1470e85b8849e6efe5966ef2ce676c1f3",
 }];
 
 #[cfg(all(target_os = "windows", target_arch = "x86"))]
 const LIBRARY: &[AddonFile] = &[AddonFile {
     name: "pdfium.dll",
-    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-7881/pdfium-windows-x86.dll",
-    size: 6_710_272,
-    sha256: "6c6a1efa0079a01395ae88c01b1f976223ee4d4018c4e5c077903d5f768e95e4",
+    url: "https://github.com/abdolence/redacter-rs/releases/download/models-pdfium-8125/pdfium-windows-x86.dll",
+    size: 7_011_328,
+    sha256: "e90b1e3b598ff9a2aa5395dab4e4fea4fa97f0f36de0bc99dda8be3b5a0e6ca8",
 }];
 
 #[cfg(not(any(
