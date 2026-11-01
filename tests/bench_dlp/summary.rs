@@ -6,6 +6,27 @@ use crate::scoring::Tally;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// Shows milliseconds the way a reader takes them in: `999 ms`, `8.2 s`, `30 min 12 s`.
+///
+/// Under one second the milliseconds are kept, and `0` is written `under 1 ms` because the harness
+/// truncates to whole milliseconds. From one second to one minute the value is in seconds rounded
+/// to one decimal; from one minute it is in minutes and whole seconds. A value that would round
+/// up to `60.0 s` is written as `1 min 0 s`.
+fn format_duration(ms: u128) -> String {
+    if ms == 0 {
+        return "under 1 ms".to_string();
+    }
+    if ms < 1_000 {
+        return format!("{ms} ms");
+    }
+    let tenths = (ms + 50) / 100;
+    if tenths < 600 {
+        return format!("{}.{} s", tenths / 10, tenths % 10);
+    }
+    let seconds = (ms + 500) / 1_000;
+    format!("{} min {} s", seconds / 60, seconds % 60)
+}
+
 #[derive(Debug, Serialize)]
 pub struct Measurement {
     pub whole_run_ms: u128,
@@ -89,8 +110,8 @@ impl DatasetResult {
             };
             let mut cells = vec![
                 provider.provider.clone(),
-                format!("{} ms", measured.whole_run_ms),
-                format!("{} ms", measured.ms_per_file),
+                format_duration(measured.whole_run_ms),
+                format_duration(measured.ms_per_file),
                 percent(measured.tally.overall_recall()),
             ];
             if complete {
@@ -149,14 +170,14 @@ impl Results {
             for dataset in &self.datasets {
                 cells.push(match &dataset.providers[index].outcome {
                     Outcome::Measured(measured) => format!(
-                        "{} / {} / {} ms",
+                        "{} / {} / {}",
                         percent(measured.tally.overall_recall()),
                         if dataset.dataset.has_complete_truth() {
                             percent(measured.tally.precision())
                         } else {
                             "-".to_string()
                         },
-                        measured.ms_per_file
+                        format_duration(measured.ms_per_file)
                     ),
                     Outcome::Failed { .. } => "failed".to_string(),
                 });
@@ -210,8 +231,8 @@ mod tests {
         tally.false_findings = 1;
         tally.keep_total = 3;
         Outcome::Measured(Measurement {
-            whole_run_ms: 120,
-            ms_per_file: 15,
+            whole_run_ms: 61_500,
+            ms_per_file: 1_250,
             files_failed: 0,
             files_blocked: 1,
             files_unsupported: 2,
@@ -222,6 +243,27 @@ mod tests {
     fn failed() -> Outcome {
         Outcome::Failed {
             reason: "exit 1: --gcp-project-id is required".to_string(),
+        }
+    }
+
+    #[test]
+    fn durations_read_in_the_unit_that_fits() {
+        let cases = [
+            (0, "under 1 ms"),
+            (1, "1 ms"),
+            (999, "999 ms"),
+            (1_000, "1.0 s"),
+            (8_173, "8.2 s"),
+            (59_949, "59.9 s"),
+            (59_950, "1 min 0 s"),
+            (60_000, "1 min 0 s"),
+            (88_352, "1 min 28 s"),
+            (116_794, "1 min 57 s"),
+            (1_812_407, "30 min 12 s"),
+            (4_500_000, "75 min 0 s"),
+        ];
+        for (ms, expected) in cases {
+            assert_eq!(format_duration(ms), expected, "{ms} ms");
         }
     }
 
@@ -259,7 +301,7 @@ Each cell is recall / precision / time per file. Precision is only reported wher
 
 | Provider | fixtures | public |
 |---|---|---|
-| local-rules | 67% / 75% / 15 ms | 71% / - / 15 ms |
+| local-rules | 67% / 75% / 1.3 s | 71% / - / 1.3 s |
 | gcp-dlp | failed | failed |
 
 ## fixtures
@@ -268,7 +310,7 @@ Each cell is recall / precision / time per file. Precision is only reported wher
 
 | Provider | Whole run | Per file | Recall | Precision | person | contact | address | id_number | financial | date_of_birth | credential | network | other | Keep hit | Failed/blocked/unsupported |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| local-rules | 120 ms | 15 ms | 67% | 75% | - | 3/4 | - | - | - | - | - | - | 1/2 | 0/3 | 0/1/2 |
+| local-rules | 1 min 2 s | 1.3 s | 67% | 75% | - | 3/4 | - | - | - | - | - | - | 1/2 | 0/3 | 0/1/2 |
 
 Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 
@@ -278,7 +320,7 @@ Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 
 | Provider | Whole run | Per file | Recall | person | contact | address | id_number | financial | date_of_birth | credential | network | other | Failed/blocked/unsupported |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| local-rules | 120 ms | 15 ms | 71% | - | 9/12 | - | - | - | - | - | - | 1/2 | 0/1/2 |
+| local-rules | 1 min 2 s | 1.3 s | 71% | - | 9/12 | - | - | - | - | - | - | 1/2 | 0/1/2 |
 
 Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 ";
