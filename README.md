@@ -1187,8 +1187,6 @@ docs/**/example-keys.md
   marker below still applies;
 - a file named as the source itself is always scanned;
 - ignored files do not count towards `--max-files-limit`;
-- a local scan does not enter a directory that a pattern ignores, so the files in it are not counted in `files_ignored`.
-  When the file has a `!` pattern, every directory is entered;
 - a UTF-8 byte order mark at the start of the file is dropped, as git does;
 - a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
 
@@ -1213,8 +1211,9 @@ MIIEowIBAAKCAQEA...
 -----END RSA PRIVATE KEY----- # redacter:allow
 ```
 
-A marker inside the value of the finding does not count: `API_KEY=xyz_redacter:allow_123` is still reported. A marker on
-a line the finding does not cover, such as the line above it, does not count either.
+A marker inside the value of any finding does not count, and ignores nothing: `API_KEY=xyz_redacter:allow_123` is still
+reported, and so is an email on the same line. A marker on a line the finding does not cover, such as the line above it,
+does not count either.
 
 - The ignored findings are not in `findings`, in the rows or in the exit code. They are counted in `findings_ignored`,
   so the suppression stays visible in the summary and in the JSON report;
