@@ -388,6 +388,9 @@ pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Find
 mod tests {
     use super::*;
 
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
     #[test]
     fn a_person_is_a_person_and_places_and_organisations_are_other() {
         assert_eq!(Entity::label_category("per"), Category::Person);
@@ -395,8 +398,6 @@ mod tests {
         assert_eq!(Entity::label_category("loc"), Category::Other);
         assert_eq!(Entity::label_category("misc"), Category::Other);
     }
-    use std::cell::RefCell;
-    use std::collections::HashMap;
 
     const CLS: u32 = 1000;
     const SEP: u32 = 1001;

@@ -422,7 +422,7 @@ the option.
 | `aws-bedrock-guardrails` | Filtered | The same, with the type of the guardrail or the name of its regex in braces, such as `{EMAIL}`, in place of the value | OCR, then as for text |
 | `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | Narrowed and filtered: the prompt asks only for the types of the chosen categories, and for each chosen category by its own name, such as `network`, for the kinds that have no type of their own | Detected with that prompt, filtered and masked as for `aws-comprehend`; the model does not rewrite the text | OCR, then as for text; the model does not read the image |
 
-The category of a model's finding is the model's judgment, as the finding is, and a value can land in the wrong one.
+The category of a model's finding is the model's judgement, as the finding is, and a value can land in the wrong one.
 GLiNER given fewer labels can also settle on slightly different spans for the labels that remain.
 
 Presidio and the LLM redacters read an image with OCR under `--categories`, where without it they read the image

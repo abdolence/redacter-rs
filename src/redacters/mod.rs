@@ -816,7 +816,7 @@ pub enum TextMask {
     Token,
     /// One `X` per character of the value.
     EveryCharacter,
-    /// The detection's label in braces, `{NAME}`, as Guardrails' anonymized text writes it.
+    /// The detection's label in braces, `{NAME}`, as Guardrails' anonymised text writes it.
     Label,
 }
 

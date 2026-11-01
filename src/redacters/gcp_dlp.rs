@@ -66,8 +66,6 @@ impl<'a> GcpDlpRedacter<'a> {
         ("TINK_KEYSET", Category::Credential),
     ];
 
-    /// The category of a finding of the info type `name`: that of the default info type of
-    /// the name, `other` for any other, which the user added.
     /// The names of the info types looked for when the user chooses none.
     pub fn default_info_types() -> Vec<String> {
         Self::INFO_TYPES
@@ -76,6 +74,8 @@ impl<'a> GcpDlpRedacter<'a> {
             .collect()
     }
 
+    /// The category of a finding of the info type `name`: that of the default info type of
+    /// the name, `other` for any other, which the user added.
     pub fn info_type_category(name: &str) -> Category {
         Self::INFO_TYPES
             .iter()
