@@ -21,6 +21,11 @@ impl DetectionLabel {
     pub fn new(label: impl Into<String>) -> Self {
         Self(label.into())
     }
+
+    /// The label of data a redacter replaced or boxed without saying what kind it is.
+    pub fn unclassified() -> Self {
+        Self::new("sensitive_data")
+    }
 }
 
 impl From<RuleName> for DetectionLabel {
@@ -115,8 +120,8 @@ impl From<Vec<Detection>> for Detections {
 /// table rows and columns, and PDF pages count from 1, as editors and spreadsheets do.
 ///
 /// Locations are ordered the way a reader meets them: texts by offset, then cells by row and
-/// column, then image boxes by page, top to bottom and left to right. The fields are declared
-/// in that order for the derived `PartialOrd`.
+/// column, then image boxes by page, top to bottom and left to right, then whole pages, then
+/// the whole file. The fields are declared in that order for the derived `PartialOrd`.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetectionLocation {
@@ -144,10 +149,29 @@ pub enum DetectionLocation {
         y2: f32,
         x2: f32,
     },
+    /// PDF page `page`, when where on it is not known.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
+    Page { page: usize },
+    /// The file as a whole, when where in it is not known.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
+    File,
 }
 
-/// How a report shows a location: `line:column` in a text, `row:column` of a table cell, and
-/// `[x1,y1,x2,y2]` in whole pixels of an image, after `page:` on a PDF page.
+impl DetectionLocation {
+    /// The byte range inside the text or the table cell the location is in; `None` for the
+    /// kinds that do not point into a text.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
+    pub(crate) fn byte_range(&self) -> Option<Range<usize>> {
+        match *self {
+            Self::Text { start, end, .. } | Self::TableCell { start, end, .. } => Some(start..end),
+            Self::Image { .. } | Self::Page { .. } | Self::File => None,
+        }
+    }
+}
+
+/// How a report shows a location: `line:column` in a text, `row:column` of a table cell,
+/// `[x1,y1,x2,y2]` in whole pixels of an image, after `page:` on a PDF page, `page N` for a
+/// whole page and `file` for the whole file.
 impl Display for DetectionLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -172,6 +196,8 @@ impl Display for DetectionLocation {
                     y2.round()
                 )
             }
+            Self::Page { page } => write!(f, "page {page}"),
+            Self::File => f.write_str("file"),
         }
     }
 }
@@ -800,5 +826,20 @@ mod tests {
         );
 
         assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
+    }
+
+    #[test]
+    fn a_page_and_the_whole_file_serialise_by_kind() {
+        let page = serde_json::to_value(DetectionLocation::Page { page: 2 }).unwrap();
+        let file = serde_json::to_value(DetectionLocation::File).unwrap();
+
+        assert_eq!(page, serde_json::json!({"kind": "page", "page": 2}));
+        assert_eq!(file, serde_json::json!({"kind": "file"}));
+    }
+
+    #[test]
+    fn a_page_and_the_whole_file_are_shown_in_words() {
+        assert_eq!(DetectionLocation::Page { page: 2 }.to_string(), "page 2");
+        assert_eq!(DetectionLocation::File.to_string(), "file");
     }
 }

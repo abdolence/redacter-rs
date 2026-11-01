@@ -56,6 +56,9 @@ pub(crate) mod text_spans;
 mod detection;
 pub use detection::*;
 
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
+mod text_changes;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
@@ -249,10 +252,6 @@ pub struct PreparedImage {
     pub original_height: u32,
 }
 
-/// The kind of a box in an image whose text no text detection classified: the coordinate pass
-/// locates text a model takes for sensitive data, and does not classify it.
-const IMAGE_DETECTION_LABEL: &str = "sensitive_data";
-
 /// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
 #[derive(Debug, Clone)]
 pub struct ImageBoxes {
@@ -275,7 +274,7 @@ impl ImageBoxes {
                 let (x1, x2) = (to_x(coords.x1), to_x(coords.x2));
                 let (y1, y2) = (to_y(coords.y1), to_y(coords.y2));
                 Detection {
-                    label: DetectionLabel::new(IMAGE_DETECTION_LABEL),
+                    label: DetectionLabel::unclassified(),
                     location: DetectionLocation::Image {
                         page: None,
                         x1: x1.min(x2),

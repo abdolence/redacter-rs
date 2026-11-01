@@ -82,9 +82,9 @@ pub struct FindingReport {
     location: DetectionLocation,
     value: String,
     /// Where the finding is for a SARIF report, which also needs where a range ends. Not part of
-    /// the JSON report.
+    /// the JSON report. `None` when the location is the file as a whole.
     #[serde(skip)]
-    place: Place,
+    place: Option<Place>,
 }
 
 impl FindingReport {
@@ -197,7 +197,7 @@ impl ScanFileReport {
                             finding.redacter,
                             finding.label.clone(),
                             finding.score,
-                            Some(finding.place),
+                            finding.place,
                             &finding.value,
                         )
                     })

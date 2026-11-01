@@ -102,6 +102,7 @@ reqwest = { version = "0.13", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.10"
+similar = "3.2"
 pdfium-render = { version = "0.9", default-features = false, features = [
     "pdfium_7881",
     "thread_safe",

@@ -153,9 +153,10 @@ pub struct PixelBox {
 
 impl Place {
     /// The place of a detection; `value` is the text it matched, which gives the end of a
-    /// range that spans lines.
-    pub fn new(location: DetectionLocation, value: &str) -> Self {
-        match location {
+    /// range that spans lines. `None` for a location that names the file as a whole, which
+    /// SARIF carries as the artifact alone.
+    pub fn new(location: DetectionLocation, value: &str) -> Option<Self> {
+        Some(match location {
             DetectionLocation::Text { line, column, .. } => {
                 let (end_line, end_column) = match value.rsplit_once('\n') {
                     Some((before, last_line)) => (
@@ -182,7 +183,12 @@ impl Place {
                 page,
                 area: Some(PixelBox { x1, y1, x2, y2 }),
             },
-        }
+            DetectionLocation::Page { page } => Self::Image {
+                page: Some(page),
+                area: None,
+            },
+            DetectionLocation::File => return None,
+        })
     }
 
     fn region(&self) -> Option<Region> {
@@ -849,7 +855,7 @@ mod tests {
             .detection(start..text.len(), DetectionLabel::new("email"), None)
             .unwrap();
         let finding = email(
-            Some(Place::new(detection.location, &detection.value)),
+            Place::new(detection.location, &detection.value),
             &detection.value,
         );
 
@@ -872,7 +878,7 @@ mod tests {
             .detection(start..end, DetectionLabel::new("private-key"), None)
             .unwrap();
         let finding = email(
-            Some(Place::new(detection.location, &detection.value)),
+            Place::new(detection.location, &detection.value),
             &detection.value,
         );
 
@@ -1258,5 +1264,17 @@ mod tests {
             uri("zip://archive.zip", "inner/a.txt"),
             ("zip://archive.zip/inner/a.txt".to_string(), None)
         );
+    }
+
+    #[test]
+    fn a_page_is_placed_without_a_box_and_the_whole_file_has_no_place() {
+        assert_eq!(
+            Place::new(DetectionLocation::Page { page: 3 }, ""),
+            Some(Place::Image {
+                page: Some(3),
+                area: None
+            })
+        );
+        assert_eq!(Place::new(DetectionLocation::File, ""), None);
     }
 }
