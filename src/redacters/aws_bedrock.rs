@@ -13,10 +13,11 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_with_mode,
-    sensitive_data_examples, text_redaction_instruction, Categories, Detections, ImageBoxes,
-    LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport,
-    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
+    llm_support, normalized_box_to_image_coords, parse_answer, prepare_image_for_llm,
+    redact_image_with_mode, sensitive_data_examples, text_redaction_instruction, Categories,
+    Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop,
+    NativeImageEditError, RedactSupport, Redacted, Redacter, RedacterDataItem,
+    RedacterDataItemContent, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -123,10 +124,6 @@ pub struct AwsBedrockRedacterOptions {
     pub text_model: Option<AwsBedrockModelName>,
     pub image_mode: LlmImageMode,
     /// The categories to look for; every category when `None`.
-    #[expect(
-        dead_code,
-        reason = "read once the redacter narrows its detection by category"
-    )]
     pub categories: Option<Categories>,
 }
 
@@ -525,7 +522,7 @@ impl<'a> AwsBedrockRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
-        let prompt = TextDetectionPrompt::new(text);
+        let prompt = TextDetectionPrompt::new(text, self.options.categories.as_ref());
         let message = Message::builder()
             .role(ConversationRole::User)
             .content(ContentBlock::Text(TEXT_DETECTION_ANSWER_FORMAT.to_string()))
@@ -592,11 +589,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
-        Ok(match file_ref.media_type.as_ref() {
-            Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
-            Some(media_type) if Redacters::is_mime_image(media_type) => RedactSupport::Supported,
-            _ => RedactSupport::Unsupported,
-        })
+        Ok(llm_support(file_ref, self.options.categories.as_ref()))
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
