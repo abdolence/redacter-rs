@@ -882,7 +882,7 @@ PDF redaction is supported by rendering PDF files as images and redacting them.
 To render and convert PDF files the tool uses the external library `Pdfium` (the C++ PDF library used by the Google
 Chromium project). `redacter addons install pdf` installs the build the tool is compiled against:
 
-- The library is stored with the other addons, in `<addons dir>/pdfium-7881/`, and is checked against its pinned
+- The library is stored with the other addons, in `<addons dir>/pdfium-8125/`, and is checked against its pinned
   SHA-256 every time it is loaded. A copy that does not match turns PDF rendering off, reported as
   `PDF rendering: no (redacter addons install pdf)`; no other Pdfium is tried in its place.
 - The addon is available for Linux (glibc) on x86_64 and aarch64, macOS on x86_64 and aarch64, and Windows on x86,
@@ -901,7 +901,7 @@ The current directory is not searched otherwise.
 Manual installation:
 
 - Download the Pdfium build of
-  [release chromium/7881](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F7881) for your system
+  [release chromium/8125](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8125) for your system
   from the bblanchon/pdfium-binaries project. Other builds may not match the library the tool is compiled against.
 - Extract the archive and copy the library file (`libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`) to the directory
   of the tool.
@@ -941,7 +941,7 @@ below:
 | Addon | Files | Size | Source | Licence |
 |---|---|---|---|---|
 | `ocr`, in `ocrs/` | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
-| `pdf`, in `pdfium-7881/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.3 to 7.5 MiB | [release `models-pdfium-7881`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-7881), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/7881` (Pdfium 151.0.7881.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
+| `pdf`, in `pdfium-8125/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.6 to 7.8 MiB | [release `models-pdfium-8125`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-8125), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/8125` (Pdfium 158.0.8125.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
 | `local-ner`, in `distilbert-base-multilingual-cased-ner-hrl/` | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
 | `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
 | `local-credential-ml`, in `credential-line-32m-v2/` | `model.onnx`, `tokenizer.json` | 125.9 MiB | [release `models-credential-line-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-credential-line-1), from [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) (revision `65422b8`) | MIT; fine-tuned from `jhu-clsp/ettin-encoder-32m`, MIT |
