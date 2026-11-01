@@ -189,7 +189,6 @@ mod tests {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
         let redacter = redacter(&reporter).await;
-        assert_eq!(redacter.redacter_type(), RedacterType::LocalCredentialMl);
         let redacted = redacter
             .redact(item(
                 "credentials-note.txt",

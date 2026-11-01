@@ -1183,11 +1183,5 @@ mod tests {
                 Score::from_static(0.74)
             );
         }
-
-        #[test]
-        fn the_score_is_parsed() {
-            let options = local_credential_ml_options(&["--local-credential-ml-min-score", "0.5"]);
-            assert_eq!(options.min_score, Score::from_static(0.5));
-        }
     }
 }

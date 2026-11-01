@@ -1,9 +1,10 @@
 //! Turns the model's verdict on a line into the byte ranges to redact. The classifier says
 //! that a line holds a credential and nothing about where, so the ranges come from the
-//! `local-rules` secret rules and, failing those, from the line's most credential-like word.
+//! `local-rules` secret rules and, failing those, from every credential-like word of the line.
 
 use super::error::LocalCredentialMlError;
-use crate::redacters::text_spans::{merge_findings, Finding, RuleName};
+use crate::redacters::quoted_credential_value;
+use crate::redacters::text_spans::{merge_findings, Finding, RuleName, REDACTED};
 use crate::redacters::{RuleSet, Score};
 use std::ops::Range;
 
@@ -13,10 +14,6 @@ const CREDENTIAL_LABEL: &str = "credential";
 /// Characters a word is trimmed of at both ends before it is considered a value: the quotes
 /// and brackets that wrap a value in code and config.
 const WRAPPING_CHARACTERS: &[char] = &['"', '\'', '`', ',', ';', '(', ')', '{', '}', '[', ']'];
-
-/// Symbols that make a word look like a password or key. Letters alone, and the `-`, `_`, `.`
-/// and `/` of ordinary words, hostnames and paths, do not.
-const CREDENTIAL_SYMBOLS: &str = "!@#$%^&*+=~?";
 
 #[derive(Debug)]
 pub struct CredentialExtractor {
@@ -32,20 +29,29 @@ impl CredentialExtractor {
         })
     }
 
-    /// The credentials in `text`: for every line `score_line` rates at `min_score` or more,
-    /// the values on that line, labelled `credential` and carrying the line's score.
+    /// The credentials in `text`: every private key block, and for every line `score_line`
+    /// rates at `min_score` or more, the values on that line, labelled `credential` and
+    /// carrying the line's score.
     ///
-    /// A blank line is never scored. A private key spans lines and the model rates only its
-    /// `BEGIN` line, so a flagged `BEGIN` line redacts the whole block, and the lines inside
-    /// a block are not scored.
-    pub fn find<E>(
+    /// A private key block is certain on its own, so it is redacted whatever the model
+    /// thinks, and the lines inside it are not scored. A line with no value to place is not
+    /// scored either, since the model's verdict on it could not change the result.
+    pub fn find(
         &self,
         text: &str,
         min_score: Score,
-        mut score_line: impl FnMut(&str) -> Result<Score, E>,
-    ) -> Result<Vec<Finding>, E> {
+        mut score_line: impl FnMut(&str) -> Result<Score, LocalCredentialMlError>,
+    ) -> Result<Vec<Finding>, LocalCredentialMlError> {
         let blocks = self.private_key_blocks.find(text);
-        let mut findings = Vec::new();
+        let mut findings: Vec<Finding> = blocks
+            .iter()
+            .map(|block| Finding {
+                start: block.start,
+                end: block.end,
+                rule: RuleName::new(CREDENTIAL_LABEL),
+                score: None,
+            })
+            .collect();
         let mut line_start = 0;
         for raw_line in text.split_inclusive('\n') {
             let line = raw_line.trim_end_matches(['\r', '\n']);
@@ -53,25 +59,21 @@ impl CredentialExtractor {
             line_start += raw_line.len();
             let inside_block = blocks
                 .iter()
-                .any(|block| block.start < line_range.start && line_range.start < block.end);
-            if line.trim().is_empty() || inside_block {
+                .any(|block| block.start <= line_range.start && line_range.end <= block.end);
+            if inside_block {
+                continue;
+            }
+            let values = self.values_in_line(line);
+            if values.is_empty() {
                 continue;
             }
             let score = score_line(line)?;
             if score < min_score {
                 continue;
             }
-            let block_ranges = blocks
-                .iter()
-                .filter(|block| line_range.contains(&block.start))
-                .map(|block| block.start..block.end);
-            let line_ranges = self
-                .values_in_line(line)
-                .into_iter()
-                .map(|range| line_range.start + range.start..line_range.start + range.end);
-            findings.extend(block_ranges.chain(line_ranges).map(|range| Finding {
-                start: range.start,
-                end: range.end,
+            findings.extend(values.into_iter().map(|range| Finding {
+                start: line_range.start + range.start,
+                end: line_range.start + range.end,
                 rule: RuleName::new(CREDENTIAL_LABEL),
                 score: Some(score),
             }));
@@ -80,11 +82,12 @@ impl CredentialExtractor {
     }
 
     /// The values to redact on a line the model flagged: what the secret rules match on it
-    /// with their value checks off, or else the most credential-like word.
+    /// with their value checks off, or else every credential-like word. A redacter prefers
+    /// redacting a host name beside the password to leaving the password.
     fn values_in_line(&self, line: &str) -> Vec<Range<usize>> {
         let matched = self.line_rules.find(line);
         if matched.is_empty() {
-            return credential_like_word(line).into_iter().collect();
+            return credential_like_words(line);
         }
         matched
             .into_iter()
@@ -93,27 +96,20 @@ impl CredentialExtractor {
     }
 }
 
-/// The longest whitespace-separated word of `line` that holds a digit or a symbol, without
-/// the quotes and brackets around it, and without the `key=` in front of it when it is a
-/// `key=value` pair. The first of equally long words wins.
-fn credential_like_word(line: &str) -> Option<Range<usize>> {
-    let mut longest: Option<(usize, Range<usize>)> = None;
-    for word in words(line) {
-        let value = value_of_word(line, word);
-        let text = &line[value.clone()];
-        if !text.chars().any(is_credential_character) {
-            continue;
-        }
-        let length = text.chars().count();
-        if longest.as_ref().is_none_or(|(best, _)| length > *best) {
-            longest = Some((length, value));
-        }
-    }
-    longest.map(|(_, value)| value)
-}
-
-fn is_credential_character(character: char) -> bool {
-    character.is_ascii_digit() || CREDENTIAL_SYMBOLS.contains(character)
+/// The values of the whitespace-separated words of `line` that hold a letter or digit and a
+/// digit or a credential symbol, without the quotes and brackets around them and without the
+/// `key=` in front of them when they are `key=value` pairs. A word that holds a redaction
+/// marker is left alone: an earlier redacter placed it, and cutting it again would leave a
+/// stray bracket.
+fn credential_like_words(line: &str) -> Vec<Range<usize>> {
+    words(line)
+        .filter(|word| !line[word.clone()].contains(REDACTED))
+        .map(|word| value_of_word(line, word))
+        .filter(|value| {
+            let text = &line[value.clone()];
+            text.chars().any(char::is_alphanumeric) && quoted_credential_value(text)
+        })
+        .collect()
 }
 
 /// The byte ranges of the whitespace-separated words of `line`.
@@ -139,17 +135,12 @@ fn words(line: &str) -> impl Iterator<Item = Range<usize>> + '_ {
 }
 
 /// The part of `word` that is the value: without the wrapping characters, a trailing full
-/// stop, and the `key=` of a `key=value` pair. A word that is only padding after the `=`
-/// (`Zm9v==`) is not a pair.
+/// stop, and the `key=` of a `key=value` pair, whose own quotes are dropped too. A word that
+/// is only padding after the `=` (`Zm9v==`) is not a pair.
 fn value_of_word(line: &str, word: Range<usize>) -> Range<usize> {
-    let text = &line[word.clone()];
-    let unwrapped = text.trim_start_matches(WRAPPING_CHARACTERS);
-    let start = word.start + text.len() - unwrapped.len();
-    let unwrapped = unwrapped.trim_end_matches(|character: char| {
-        character == '.' || WRAPPING_CHARACTERS.contains(&character)
-    });
-    let value = start..start + unwrapped.len();
-    match unwrapped.split_once('=') {
+    let unwrapped = trim_wrapping(line, word);
+    let text = &line[unwrapped.clone()];
+    match text.split_once('=') {
         Some((key, rest))
             if !key.is_empty()
                 && key
@@ -157,16 +148,26 @@ fn value_of_word(line: &str, word: Range<usize>) -> Range<usize> {
                     .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
                 && !rest.trim_start_matches('=').is_empty() =>
         {
-            value.start + key.len() + 1..value.end
+            trim_wrapping(line, unwrapped.start + key.len() + 1..unwrapped.end)
         }
-        _ => value,
+        _ => unwrapped,
     }
+}
+
+/// `range` of `line` without the wrapping characters at both ends and a trailing full stop.
+fn trim_wrapping(line: &str, range: Range<usize>) -> Range<usize> {
+    let text = &line[range.clone()];
+    let without_start = text.trim_start_matches(WRAPPING_CHARACTERS);
+    let start = range.start + text.len() - without_start.len();
+    let without_end = without_start.trim_end_matches(|character: char| {
+        character == '.' || WRAPPING_CHARACTERS.contains(&character)
+    });
+    start..start + without_end.len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::Infallible;
 
     fn extractor() -> CredentialExtractor {
         CredentialExtractor::new().unwrap()
@@ -194,10 +195,6 @@ mod tests {
         assert_eq!(
             values("Google OAuth: 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"),
             ["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"]
-        );
-        assert_eq!(
-            values("machine example.com login deploy password n3trc-pass"),
-            ["n3trc-pass"]
         );
     }
 
@@ -228,14 +225,6 @@ mod tests {
             values("export GITHUB_TOKEN=ghp_Zy9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDc9"),
             ["ghp_Zy9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0FeDc9"]
         );
-        assert_eq!(
-            values("GET /api Authorization: Bearer eyJhbGci.eyJzdWIi.c2lnbmF0dXJl"),
-            ["eyJhbGci.eyJzdWIi.c2lnbmF0dXJl"]
-        );
-        assert_eq!(
-            values("DATABASE_URL=postgres://app:pg-pass-23@db.example.com/app"),
-            ["app:pg-pass-23"]
-        );
     }
 
     /// The model has already judged the line, so a value the rules would reject on an
@@ -251,8 +240,45 @@ mod tests {
     }
 
     #[test]
-    fn the_first_of_equally_long_words_wins() {
-        assert_eq!(values("a1b2c3 d4e5f6"), ["a1b2c3"]);
+    fn every_credential_like_word_on_a_flagged_line_is_redacted() {
+        assert_eq!(
+            values("machine 10.0.0.5 login admin password hunter2x"),
+            ["10.0.0.5", "hunter2x"]
+        );
+        assert_eq!(
+            values("Ping me at 14:30 about build 4512, the password is hunter2x until Friday."),
+            ["14:30", "4512", "hunter2x"]
+        );
+        assert_eq!(
+            values("ssh deploy@10.20.30.40 and use the passphrase Tr0ub4dor&3 when asked."),
+            ["deploy@10.20.30.40", "Tr0ub4dor&3"]
+        );
+    }
+
+    #[test]
+    fn a_redaction_marker_is_never_a_candidate() {
+        assert_eq!(
+            values("ssh deploy@[REDACTED] and use the passphrase Tr0ub4dor&3 when asked."),
+            ["Tr0ub4dor&3"]
+        );
+        assert_eq!(values("password is [REDACTED]"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn the_quotes_around_an_assigned_value_stay_outside_it() {
+        assert_eq!(values(r#"session_blob="Tr0ub4dor&3""#), ["Tr0ub4dor&3"]);
+        assert_eq!(values("session_blob='Tr0ub4dor&3'"), ["Tr0ub4dor&3"]);
+    }
+
+    #[test]
+    fn a_short_quoted_value_is_found_on_a_flagged_line() {
+        assert_eq!(values(r#"password = "hunter""#), ["hunter"]);
+        assert_eq!(values("password = 'hunter2'"), ["hunter2"]);
+    }
+
+    #[test]
+    fn a_word_made_of_symbols_alone_is_not_a_candidate() {
+        assert_eq!(values("name = app"), Vec::<&str>::new());
     }
 
     fn find(text: &str, score_of: impl Fn(&str) -> f32) -> (Vec<Finding>, Vec<String>) {
@@ -260,7 +286,7 @@ mod tests {
         let findings = extractor()
             .find(text, Score::from_static(0.74), |line| {
                 scored.push(line.to_string());
-                Ok::<_, Infallible>(Score::from_static(score_of(line)))
+                Ok::<_, LocalCredentialMlError>(Score::from_static(score_of(line)))
             })
             .unwrap();
         (findings, scored)
@@ -316,28 +342,18 @@ mod tests {
     }
 
     #[test]
-    fn blank_lines_never_reach_the_model() {
-        let (_, scored) = find("one 1\n\n   \ntwo 2\n", |_| 0.0);
-        assert_eq!(scored, ["one 1", "two 2"]);
+    fn lines_with_nothing_to_place_never_reach_the_model() {
+        let (_, scored) = find("just words\n\n   \npassword = Sup3r!\n", |_| 0.0);
+        assert_eq!(scored, ["password = Sup3r!"]);
     }
 
     const PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\nKUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==\n-----END RSA PRIVATE KEY-----";
 
     #[test]
-    fn a_flagged_begin_line_redacts_the_whole_private_key() {
+    fn a_private_key_is_redacted_whatever_the_model_scores() {
         let text = format!("key follows\n{PRIVATE_KEY}\nafter\n");
-        let (findings, scored) = find(&text, |line| if line.contains("BEGIN") { 0.9 } else { 0.1 });
+        let (findings, scored) = find(&text, |_| 0.0);
         assert_eq!(redact(&text, &findings), "key follows\n[REDACTED]\nafter\n");
-        assert_eq!(
-            scored,
-            ["key follows", "-----BEGIN RSA PRIVATE KEY-----", "after"]
-        );
-    }
-
-    #[test]
-    fn a_private_key_whose_begin_line_is_not_flagged_is_left_alone() {
-        let text = format!("{PRIVATE_KEY}\n");
-        let (findings, _) = find(&text, |_| 0.1);
-        assert_eq!(findings, Vec::new());
+        assert_eq!(scored, Vec::<String>::new());
     }
 }

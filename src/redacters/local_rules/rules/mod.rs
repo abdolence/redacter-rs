@@ -165,20 +165,40 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
     !before_is_word && !after_is_word
 }
 
+/// How closely a built-in rule insists on a value that looks like a credential.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Strictness {
+    /// The rule as declared, validators included.
+    Strict,
+    /// For a line something else has judged to hold a credential: no validators and no
+    /// minimum length of a quoted value.
+    #[cfg(feature = "local-credential-ml")]
+    Lenient,
+}
+
+/// `pattern` with the 8-character (6 in braces) minimum of the quoted `password = "..."`
+/// rules removed, which are the only built-in patterns that end a value with `{7,}` or
+/// `{6,}`. The first character of a value stays required.
+#[cfg(feature = "local-credential-ml")]
+fn without_minimum_quoted_length(pattern: &str) -> String {
+    pattern.replace("{7,}", "*").replace("{6,}", "*")
+}
+
 /// The built-in rule that matches a whole PEM or PGP private key block, which spans lines.
 pub const PRIVATE_KEY_BLOCK_RULE: &str = "private-key-block";
 
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
-        Self::from_builtin(|spec| groups.contains(&spec.group), true)
+        Self::from_builtin(|spec| groups.contains(&spec.group), Strictness::Strict)
     }
 
     /// The rules that find the value of a credential on one line, for a caller that already
     /// has evidence that the line holds one: every `Secrets` rule and `url-credentials`, apart
-    /// from the multi-line private key block. Value validators are off, so a short or plain
-    /// value written as `password: abc` is found on such a line; on an unjudged line the
-    /// validators are what keep these rules from redacting prose and code.
+    /// from the multi-line private key block. Value validators and the minimum length of a
+    /// quoted value are off, so a short or plain value written as `password: abc` or
+    /// `password = "abc"` is found on such a line; on an unjudged line they are what keep
+    /// these rules from redacting prose and code.
     #[cfg(feature = "local-credential-ml")]
     pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
@@ -186,29 +206,37 @@ impl RuleSet {
                 (spec.group == RuleGroup::Secrets || spec.name == "url-credentials")
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
             },
-            false,
+            Strictness::Lenient,
         )
     }
 
     /// Only the private key block rule.
     #[cfg(feature = "local-credential-ml")]
     pub fn private_key_block_rule() -> Result<Self, LocalRulesError> {
-        Self::from_builtin(|spec| spec.name == PRIVATE_KEY_BLOCK_RULE, true)
+        Self::from_builtin(
+            |spec| spec.name == PRIVATE_KEY_BLOCK_RULE,
+            Strictness::Strict,
+        )
     }
 
     fn from_builtin(
         keep: impl Fn(&RuleSpec) -> bool,
-        validated: bool,
+        strictness: Strictness,
     ) -> Result<Self, LocalRulesError> {
         let mut rules = Vec::new();
         for spec in builtin_rules().iter().filter(|spec| keep(spec)) {
+            let pattern = match strictness {
+                Strictness::Strict => spec.pattern.to_string(),
+                #[cfg(feature = "local-credential-ml")]
+                Strictness::Lenient => without_minimum_quoted_length(spec.pattern),
+            };
             rules.push(CompiledRule {
                 name: RuleName::new(spec.name),
-                regex: compile(spec.name, spec.pattern, false)?,
+                regex: compile(spec.name, &pattern, false)?,
                 capture_group: spec.capture_group,
                 validator: spec
                     .validator
-                    .filter(|_| validated)
+                    .filter(|_| strictness == Strictness::Strict)
                     .map(|(_, validate)| validate),
                 whole_word: false,
             });
@@ -345,6 +373,20 @@ pub(super) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[cfg(feature = "local-credential-ml")]
+    #[test]
+    fn a_short_quoted_value_is_found_only_where_the_line_is_known_to_hold_a_credential() {
+        let line = r#"password = "hunter2""#;
+        assert_eq!(
+            RuleSet::new(&RuleGroup::all()).unwrap().find(line),
+            Vec::new()
+        );
+        assert_eq!(
+            RuleSet::credential_line_rules().unwrap().find(line).len(),
+            1
+        );
+    }
 
     #[test]
     fn every_rule_example_is_matched_by_its_own_rule() {
