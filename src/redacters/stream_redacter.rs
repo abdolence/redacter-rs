@@ -3335,4 +3335,70 @@ mod tests {
 
         assert!(matches!(result, Err(AppError::TextNotUtf8 { offset: 4 })));
     }
+
+    #[tokio::test]
+    async fn a_zip_copy_keeps_the_files_around_one_that_fails_in_a_later_window() {
+        use crate::file_systems::{DetectFileSystem, FileSystemConnection};
+        use std::io::Read;
+
+        let redacters = vec![email_rules().await];
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let term = console::Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let scratch = tempfile::TempDir::with_prefix("stream_redacter_tests_zip_copy").unwrap();
+        let archive_path = scratch.path().join("copy.zip");
+        let mut archive =
+            DetectFileSystem::open(&format!("zip://{}", archive_path.display()), &reporter)
+                .await
+                .unwrap();
+        let good = "Mail ana@x.io today\n".repeat(60).into_bytes();
+        let mut bad = good.clone();
+        bad.extend_from_slice(b"bad \xff byte\n");
+        bad.extend_from_slice(&good);
+
+        let mut failures = Vec::new();
+        for (name, text) in [("a.log", &good), ("b.log", &bad), ("c.log", &good)] {
+            let file = file_ref(name, mime::TEXT_PLAIN);
+            let mut plan = stream_redacter
+                .create_redact_plan(&redacters, &file)
+                .await
+                .unwrap();
+            plan.piece_layout = Some(PieceLayout::new(300, 100));
+            let result = stream_redacter
+                .redact_stream(one_chunk(text), plan, &file)
+                .await
+                .unwrap();
+            let (uploaded, redactions) = result
+                .output
+                .drive(|stream| archive.upload(stream, Some(&file)))
+                .await;
+            if let Err(error) = redactions {
+                assert!(uploaded.is_err());
+                failures.push((name, error));
+            } else {
+                uploaded.unwrap();
+            }
+        }
+        archive.close().await.unwrap();
+
+        assert!(
+            matches!(
+                failures.as_slice(),
+                [("b.log", AppError::TextNotUtf8 { .. })]
+            ),
+            "{failures:?}"
+        );
+        let mut copied = zip::ZipArchive::new(std::fs::File::open(&archive_path).unwrap()).unwrap();
+        assert_eq!(copied.len(), 2);
+        assert!(copied.by_name("a.log").is_ok() && copied.by_name("b.log").is_err());
+        let mut text = String::new();
+        copied
+            .by_name("c.log")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "Mail [REDACTED] today\n".repeat(60));
+    }
 }

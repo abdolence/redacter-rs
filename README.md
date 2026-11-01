@@ -603,8 +603,9 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 - Clipboard: `clipboard://`
 
 A copy that fails leaves no partial output at a local or zip destination. A local file is written to a temporary file
-beside the destination and renamed into place once complete, so a file it would have replaced stays intact. A zip
-archive is deleted, because the format cannot drop a single entry.
+beside the destination and renamed into place once complete, so a file it would have replaced stays intact. In a zip
+archive, a file that fails is left out and the entries written before it stay; the archive is deleted when writing it
+fails or the copy stops with an error.
 
 S3 uploads over 8 MiB use multipart upload, so memory holds about one part rather than the whole file. An upload that is
 killed, or whose `AbortMultipartUpload` request fails, leaves its stored parts billed until they are aborted. Add an
