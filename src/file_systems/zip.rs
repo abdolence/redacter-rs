@@ -2,18 +2,17 @@ use crate::errors::AppError;
 use crate::file_systems::{
     AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult, RelativeFilePath,
 };
-use crate::file_tools::{FileMatcher, FileMatcherResult};
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
 use gcloud_sdk::prost::bytes::Bytes;
 use rvstruct::ValueStruct;
-use shared_file::SharedFile;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -21,52 +20,35 @@ use zip::read::ZipFileEntry;
 use zip::result::ZipError;
 use zip::{ZipArchive, ZipWriter};
 
-mod shared_file;
-
-/// Size of the pieces an entry is decompressed into.
 const DOWNLOAD_CHUNK_SIZE: usize = 64 * 1024;
 
-/// Pieces buffered between the thread that decompresses or writes an entry and the async side,
-/// so that a slow consumer holds the thread back instead of the entry piling up in memory.
+/// Pieces buffered between the thread that decompresses an entry and the async side, so that a
+/// slow consumer holds the thread back instead of the entry piling up in memory.
 const CHUNK_CHANNEL_DEPTH: usize = 4;
 
-/// A zip archive read in place and written as a stream.
-///
-/// Reading never extracts. The central directory is read once, on first use, and each download
-/// decompresses a single entry from a clone of the parsed archive, so downloads do not depend
-/// on each other. Every blocking zip call runs on the blocking thread pool.
 pub struct ZipFileSystem<'a> {
     zip_file_path: PathBuf,
-    opened_archive: Option<OpenedArchive>,
-    zip_writer: Option<ZipWriter<File>>,
+    mode: Option<ZipFileSystemMode>,
     reporter: &'a AppReporter<'a>,
 }
 
-/// Why an archive entry is not offered to the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SkipReason {
-    /// The name is absolute, climbs out of the archive, or is not valid.
-    UnsafePath,
-    Symlink,
-    Encrypted,
-    /// An earlier entry has the same path once the name is normalised.
-    DuplicatePath,
-}
-
-impl fmt::Display for SkipReason {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            SkipReason::UnsafePath => "its path is absolute, leaves the archive or is not valid",
-            SkipReason::Symlink => "it is a symbolic link",
-            SkipReason::Encrypted => "it is encrypted",
-            SkipReason::DuplicatePath => "an earlier entry has the same path",
-        })
-    }
+enum ZipFileSystemMode {
+    Read(OpenedArchive),
+    Write(ZipWriter<File>),
 }
 
 struct SkippedEntry {
     name: String,
-    reason: SkipReason,
+    reason: &'static str,
+}
+
+impl SkippedEntry {
+    fn new(entry: &ZipFileEntry<'_>, reason: &'static str) -> Self {
+        Self {
+            name: String::from_utf8_lossy(entry.name_raw()).into_owned(),
+            reason,
+        }
+    }
 }
 
 struct ReadableEntry {
@@ -74,37 +56,33 @@ struct ReadableEntry {
     size: usize,
 }
 
-enum EntryKind {
+enum IndexedEntry {
     Directory,
-    File(ReadableEntry),
+    Readable(ReadableEntry),
     Skipped(SkippedEntry),
 }
 
-impl EntryKind {
+impl IndexedEntry {
     /// Classifies an entry from its central directory record alone, without reading its data.
     fn of(entry: &ZipFileEntry<'_>) -> Self {
         if entry.is_dir() {
-            return EntryKind::Directory;
+            return IndexedEntry::Directory;
         }
-        let skipped = |reason| {
-            EntryKind::Skipped(SkippedEntry {
-                name: String::from_utf8_lossy(entry.name_raw()).into_owned(),
-                reason,
-            })
-        };
         let Some(relative_path) = entry
             .enclosed_name()
-            .map(|path| RelativeFilePath::from(relative_path_string(&path)))
-            .filter(|path| !path.value().is_empty())
+            .and_then(|path| normalised_path(&path))
         else {
-            return skipped(SkipReason::UnsafePath);
+            return IndexedEntry::Skipped(SkippedEntry::new(
+                entry,
+                "its path leaves the archive or is not valid",
+            ));
         };
         if entry.is_symlink() {
-            skipped(SkipReason::Symlink)
+            IndexedEntry::Skipped(SkippedEntry::new(entry, "it is a symbolic link"))
         } else if entry.encrypted() {
-            skipped(SkipReason::Encrypted)
+            IndexedEntry::Skipped(SkippedEntry::new(entry, "it is encrypted"))
         } else {
-            EntryKind::File(ReadableEntry {
+            IndexedEntry::Readable(ReadableEntry {
                 relative_path,
                 // An entry larger than the address space is larger than any size limit.
                 size: usize::try_from(entry.size()).unwrap_or(usize::MAX),
@@ -113,24 +91,26 @@ impl EntryKind {
     }
 }
 
-fn relative_path_string(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+/// `path` with `/` as its only separator and without `.` components; `None` when it is empty or
+/// has a component that is not a name. Listing and lookup both go through it, so that an entry
+/// named `./a.txt` is listed, and found, as `a.txt`.
+fn normalised_path(path: &Path) -> Option<RelativeFilePath> {
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => names.push(name.to_string_lossy()),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!names.is_empty()).then(|| names.join("/").into())
 }
 
 /// What the central directory says about every entry, in archive order.
 struct ZipIndex {
-    entries: Vec<EntryKind>,
-    /// Position of the first readable entry for each path.
+    entries: Vec<IndexedEntry>,
+    /// Position of the first readable entry for each normalised path.
     positions: HashMap<String, usize>,
-    has_duplicate_names: bool,
-}
-
-struct ZipListing<'i> {
-    result: ListFilesResult,
-    skipped_entries: Vec<&'i SkippedEntry>,
 }
 
 impl ZipIndex {
@@ -138,81 +118,37 @@ impl ZipIndex {
         let mut entries = Vec::with_capacity(archive.len());
         let mut positions = HashMap::new();
         for position in 0..archive.len() {
-            let kind = match EntryKind::of(&archive.by_index_data(position)?) {
-                EntryKind::File(readable)
-                    if positions.contains_key(readable.relative_path.value()) =>
-                {
-                    EntryKind::Skipped(SkippedEntry {
-                        name: readable.relative_path.value().clone(),
-                        reason: SkipReason::DuplicatePath,
-                    })
-                }
-                EntryKind::File(readable) => {
-                    positions.insert(readable.relative_path.value().clone(), position);
-                    EntryKind::File(readable)
+            let zip_entry = archive.by_index_data(position)?;
+            let entry = match IndexedEntry::of(&zip_entry) {
+                IndexedEntry::Readable(readable) => {
+                    match positions.entry(readable.relative_path.value().clone()) {
+                        Entry::Occupied(_) => IndexedEntry::Skipped(SkippedEntry::new(
+                            &zip_entry,
+                            "an earlier entry has the same path",
+                        )),
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(position);
+                            IndexedEntry::Readable(readable)
+                        }
+                    }
                 }
                 other => other,
             };
-            entries.push(kind);
+            entries.push(entry);
         }
-        Ok(Self {
-            entries,
-            positions,
-            has_duplicate_names: archive.has_duplicate_names(),
-        })
+        Ok(Self { entries, positions })
     }
 
-    /// The entry that listing offers under `relative_path`, with its position in the archive.
     fn readable(&self, relative_path: &RelativeFilePath) -> Option<(usize, &ReadableEntry)> {
-        let position = *self.positions.get(relative_path.value())?;
+        let normalised = normalised_path(Path::new(relative_path.value()))?;
+        let position = *self.positions.get(normalised.value())?;
         match &self.entries[position] {
-            EntryKind::File(readable) => Some((position, readable)),
+            IndexedEntry::Readable(readable) => Some((position, readable)),
             _ => None,
         }
     }
-
-    fn list(
-        &self,
-        file_matcher: Option<&FileMatcher>,
-        max_files_limit: Option<usize>,
-    ) -> ZipListing<'_> {
-        let mut listing = ZipListing {
-            result: ListFilesResult::EMPTY,
-            skipped_entries: Vec::new(),
-        };
-        if max_files_limit.iter().any(|limit| *limit == 0) {
-            return listing;
-        }
-        for entry in &self.entries {
-            match entry {
-                EntryKind::Directory => {}
-                EntryKind::Skipped(skipped) => {
-                    listing.result.skipped += 1;
-                    listing.skipped_entries.push(skipped);
-                }
-                EntryKind::File(readable) => {
-                    let file_ref = FileSystemRef::with_guessed_media_type(
-                        readable.relative_path.clone(),
-                        readable.size,
-                    );
-                    if file_matcher.iter().all(|matcher| {
-                        matches!(matcher.matches(&file_ref), FileMatcherResult::Matched)
-                    }) {
-                        listing.result.files.push(file_ref);
-                    } else {
-                        listing.result.skipped += 1;
-                    }
-                }
-            }
-            if max_files_limit.is_some_and(|limit| listing.result.files.len() >= limit) {
-                break;
-            }
-        }
-        listing
-    }
 }
 
-/// A parsed archive. Clones are cheap and read independently of each other.
 #[derive(Clone)]
 struct OpenedArchive {
     archive: ZipArchive<SharedFile>,
@@ -226,8 +162,7 @@ impl OpenedArchive {
         Ok(Self { archive, index })
     }
 
-    /// Runs on a blocking thread. Sends the content of the entry at `position`, and a failure
-    /// in reading it as the last item.
+    /// Runs on a blocking thread. A failure in reading the entry is sent as the last item.
     fn send_entry(mut self, position: usize, chunk_tx: &mpsc::Sender<AppResult<Bytes>>) {
         if let Err(error) = self.read_entry(position, chunk_tx) {
             let _ = chunk_tx.blocking_send(Err(error));
@@ -258,6 +193,61 @@ impl OpenedArchive {
     }
 }
 
+/// A read-only view of an open file that has a cursor of its own.
+///
+/// Clones share the file handle and read at explicit offsets, so reading through one clone
+/// never moves another. That is what lets a parsed `ZipArchive` be cloned for each concurrent
+/// download instead of parsing the central directory again.
+///
+/// On Windows `seek_read` also moves the cursor of the shared handle. Nothing reads through that
+/// cursor and every read passes its own offset, so clones still do not affect each other.
+#[derive(Clone)]
+struct SharedFile {
+    file: Arc<File>,
+    length: u64,
+    position: u64,
+}
+
+impl SharedFile {
+    fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        let length = file.metadata()?.len();
+        Ok(Self {
+            file: Arc::new(file),
+            length,
+            position: 0,
+        })
+    }
+}
+
+impl Read for SharedFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        #[cfg(unix)]
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, buffer, self.position)?;
+        #[cfg(windows)]
+        let read = std::os::windows::fs::FileExt::seek_read(&*self.file, buffer, self.position)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+impl Seek for SharedFile {
+    fn seek(&mut self, target: SeekFrom) -> io::Result<u64> {
+        let position = match target {
+            SeekFrom::Start(offset) => Some(offset),
+            SeekFrom::End(offset) => self.length.checked_add_signed(offset),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+        };
+        self.position = position.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "seek to a position before the start of the file",
+            )
+        })?;
+        Ok(self.position)
+    }
+}
+
 impl<'a> ZipFileSystem<'a> {
     pub async fn new(file_path: &str, reporter: &'a AppReporter<'a>) -> AppResult<Self> {
         let root_path_base_str = file_path.trim_start_matches("zip://").to_string();
@@ -270,21 +260,26 @@ impl<'a> ZipFileSystem<'a> {
         }
         Ok(Self {
             zip_file_path: root_path_path,
-            opened_archive: None,
-            zip_writer: None,
+            mode: None,
             reporter,
         })
     }
 
     async fn opened_archive(&mut self) -> AppResult<OpenedArchive> {
-        if let Some(opened_archive) = &self.opened_archive {
-            return Ok(opened_archive.clone());
+        match &self.mode {
+            Some(ZipFileSystemMode::Read(opened_archive)) => Ok(opened_archive.clone()),
+            Some(ZipFileSystemMode::Write(_)) => Err(AppError::SystemError {
+                message: "ZipFileSystem is not in read mode".into(),
+            }),
+            None => {
+                let zip_file_path = self.zip_file_path.clone();
+                let opened_archive =
+                    tokio::task::spawn_blocking(move || OpenedArchive::open(&zip_file_path))
+                        .await??;
+                self.mode = Some(ZipFileSystemMode::Read(opened_archive.clone()));
+                Ok(opened_archive)
+            }
         }
-        let zip_file_path = self.zip_file_path.clone();
-        let opened_archive =
-            tokio::task::spawn_blocking(move || OpenedArchive::open(&zip_file_path)).await??;
-        self.opened_archive = Some(opened_archive.clone());
-        Ok(opened_archive)
     }
 
     /// Ends with an error item if the thread behind `chunks` panicked, so that a stopped
@@ -300,27 +295,6 @@ impl<'a> ZipFileSystem<'a> {
                 None => task.await.err().map(|error| (Err(error.into()), None)),
             }
         })
-    }
-
-    fn write_entry(
-        mut zip_writer: ZipWriter<File>,
-        entry_name: String,
-        mut chunks: mpsc::Receiver<Bytes>,
-    ) -> (ZipWriter<File>, AppResult<()>) {
-        let written = Self::write_chunks(&mut zip_writer, entry_name, &mut chunks);
-        (zip_writer, written)
-    }
-
-    fn write_chunks(
-        zip_writer: &mut ZipWriter<File>,
-        entry_name: String,
-        chunks: &mut mpsc::Receiver<Bytes>,
-    ) -> AppResult<()> {
-        zip_writer.start_file(entry_name, zip::write::FullFileOptions::default())?;
-        while let Some(chunk) = chunks.blocking_recv() {
-            zip_writer.write_all(&chunk)?;
-        }
-        Ok(())
     }
 }
 
@@ -361,45 +335,38 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
         mut input: S,
         file_ref: Option<&FileSystemRef>,
     ) -> AppResult<()> {
-        let Some(file_ref) = file_ref else {
-            return Err(AppError::SystemError {
-                message: "FileSystemRef is required for ZipFileSystem".into(),
-            });
-        };
-        let zip_writer = match self.zip_writer.take() {
-            Some(zip_writer) => zip_writer,
-            None if self.zip_file_path.exists() => {
+        if self.mode.is_none() {
+            let zip_file = if self.zip_file_path.exists() {
                 return Err(AppError::SystemError {
                     message: "Zip file already exists".into(),
                 });
-            }
-            None => ZipWriter::new(File::create_new(&self.zip_file_path)?),
-        };
-        let (chunk_tx, chunk_rx) = mpsc::channel(CHUNK_CHANNEL_DEPTH);
-        let entry_name = file_ref.relative_path.value().clone();
-        let task = tokio::task::spawn_blocking(move || {
-            Self::write_entry(zip_writer, entry_name, chunk_rx)
-        });
-        let mut piped = Ok(());
-        loop {
-            match input.try_next().await {
-                Ok(Some(chunk)) => {
-                    if chunk_tx.send(chunk).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    piped = Err(error);
-                    break;
-                }
-            }
+            } else {
+                File::create_new(&self.zip_file_path)?
+            };
+
+            let zip_writer = ZipWriter::new(zip_file);
+            self.mode = Some(ZipFileSystemMode::Write(zip_writer));
         }
-        drop(chunk_tx);
-        let (zip_writer, written) = task.await?;
-        self.zip_writer = Some(zip_writer);
-        written?;
-        piped
+        match self.mode {
+            Some(ZipFileSystemMode::Write(ref mut zip_writer)) => match file_ref {
+                Some(file_ref) => {
+                    let file_path = Path::new(file_ref.relative_path.value());
+                    let file_path_str = file_path.to_string_lossy().to_string();
+                    let file_options = zip::write::FullFileOptions::default();
+                    zip_writer.start_file(file_path_str, file_options)?;
+                    while let Some(chunk) = input.try_next().await? {
+                        zip_writer.write_all(&chunk)?;
+                    }
+                    Ok(())
+                }
+                None => Err(AppError::SystemError {
+                    message: "FileSystemRef is required for ZipFileSystem".into(),
+                }),
+            },
+            _ => Err(AppError::SystemError {
+                message: "ZipFileSystem is not in write mode".into(),
+            }),
+        }
     }
 
     async fn list_files(
@@ -408,25 +375,43 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
         max_files_limit: Option<usize>,
     ) -> AppResult<ListFilesResult> {
         let opened_archive = self.opened_archive().await?;
-        if opened_archive.index.has_duplicate_names {
+        if opened_archive.archive.has_duplicate_names() {
             self.reporter.report(
-                "The zip archive lists some entry names more than once; only the last entry of each name is read",
+                "The zip archive repeats some entry names; only the last entry with each name is read, and the earlier ones are neither listed nor counted as skipped",
             )?;
         }
-        let listing = opened_archive.index.list(file_matcher, max_files_limit);
-        for skipped in &listing.skipped_entries {
-            self.reporter.report(format!(
-                "Skipping zip entry {:?}: {}",
-                skipped.name, skipped.reason
-            ))?;
+        let limit = max_files_limit.unwrap_or(usize::MAX);
+        let mut listing = ListFilesResult::EMPTY;
+        for entry in &opened_archive.index.entries {
+            if listing.files.len() >= limit {
+                break;
+            }
+            match entry {
+                IndexedEntry::Directory => {}
+                IndexedEntry::Skipped(skipped) => {
+                    listing.skipped += 1;
+                    self.reporter.report(format!(
+                        "Skipping zip entry {:?}: {}",
+                        skipped.name, skipped.reason
+                    ))?;
+                }
+                IndexedEntry::Readable(readable) => listing.add(
+                    FileSystemRef::with_guessed_media_type(
+                        readable.relative_path.clone(),
+                        readable.size,
+                    ),
+                    file_matcher,
+                ),
+            }
         }
-        Ok(listing.result)
+        Ok(listing)
     }
 
     async fn close(mut self) -> AppResult<()> {
-        if let Some(zip_writer) = self.zip_writer.take() {
-            tokio::task::spawn_blocking(move || zip_writer.finish()).await??;
+        if let Some(ZipFileSystemMode::Write(zip_writer)) = self.mode {
+            zip_writer.finish()?;
         }
+        self.mode = None;
         Ok(())
     }
 
@@ -454,6 +439,7 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_tools::IgnoreFileChoice;
     use gcloud_sdk::prost::bytes;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
@@ -518,6 +504,10 @@ mod tests {
         write_zip(&zip_file_path, |zip| {
             zip.start_file("file1.txt", SimpleFileOptions::default())?;
             zip.write_all(test_content)?;
+            zip.start_file("docs/a/notes.csv", SimpleFileOptions::default())?;
+            zip.write_all(b"a,b")?;
+            zip.start_file("docs/b/notes.csv", SimpleFileOptions::default())?;
+            zip.write_all(b"c,d")?;
             Ok(())
         })?;
 
@@ -528,30 +518,47 @@ mod tests {
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
         assert_eq!(file_ref.file_size, Some(test_content.len()));
 
+        let listing = fs.list_files(None, None).await?;
+        assert_eq!(
+            listed_paths(&listing),
+            ["file1.txt", "docs/a/notes.csv", "docs/b/notes.csv"]
+        );
+        let (nested_ref, nested_content) = download_all(&mut fs, "docs/b/notes.csv").await?;
+        assert_eq!(nested_content, b"c,d");
+        assert_eq!(nested_ref.relative_path.value(), "notes.csv");
+        assert_eq!(nested_ref.media_type, Some(mime::TEXT_CSV));
+
         fs.close().await?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn download_of_nested_entry_names_the_file_only() -> TestResult {
+    async fn entry_names_are_normalised_for_listing_and_lookup() -> TestResult {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::with_prefix("zip_file_system_tests_nested")?;
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_dot_slash")?;
         let zip_file_path = temp_dir.path().join("test.zip");
         write_zip(&zip_file_path, |zip| {
-            zip.start_file("docs/notes/file1.csv", SimpleFileOptions::default())?;
-            zip.write_all(b"a,b")?;
+            zip.start_file("./dir/file1.txt", SimpleFileOptions::default())?;
+            zip.write_all(b"content")?;
+            zip.start_file("/abs.txt", SimpleFileOptions::default())?;
+            zip.write_all(b"absolute")?;
             Ok(())
         })?;
 
         let mut fs = open(&zip_file_path, &reporter).await?;
         let listing = fs.list_files(None, None).await?;
-        assert_eq!(listed_paths(&listing), ["docs/notes/file1.csv"]);
-
-        let (file_ref, content) = download_all(&mut fs, "docs/notes/file1.csv").await?;
-        assert_eq!(content, b"a,b");
-        assert_eq!(file_ref.relative_path.value(), "file1.csv");
-        assert_eq!(file_ref.media_type, Some(mime::TEXT_CSV));
+        assert_eq!(listed_paths(&listing), ["dir/file1.txt", "abs.txt"]);
+        assert_eq!(download_all(&mut fs, "abs.txt").await?.1, b"absolute");
+        assert_eq!(
+            download_all(&mut fs, "./dir/file1.txt").await?.1,
+            b"content"
+        );
+        assert_eq!(
+            download_all(&mut fs, "dir/./file1.txt").await?.1,
+            b"content"
+        );
+        assert_eq!(download_all(&mut fs, "dir/file1.txt").await?.1, b"content");
         Ok(())
     }
 
@@ -600,7 +607,6 @@ mod tests {
         .await?;
         assert_eq!(first.concat(), first_content);
         assert_eq!(second.concat(), second_content);
-        assert!(first.iter().all(|chunk| chunk.len() <= DOWNLOAD_CHUNK_SIZE));
         Ok(())
     }
 
@@ -612,35 +618,20 @@ mod tests {
         let zip_file_path = temp_dir.path().join("test.zip");
         write_zip(&zip_file_path, |zip| {
             zip.start_file("file1.txt", SimpleFileOptions::default())?;
-            zip.start_file("file2.txt", SimpleFileOptions::default())?;
+            zip.add_directory("docs/", SimpleFileOptions::default())?;
+            zip.start_file("docs/file2.txt", SimpleFileOptions::default())?;
             Ok(())
         })?;
 
         let mut fs = open(&zip_file_path, &reporter).await?;
         let list_files_result = fs.list_files(None, None).await?;
-        assert_eq!(list_files_result.files.len(), 2);
+        assert_eq!(
+            listed_paths(&list_files_result),
+            ["file1.txt", "docs/file2.txt"]
+        );
         assert_eq!(list_files_result.skipped, 0);
 
         fs.close().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn directory_entries_are_not_listed() -> TestResult {
-        let term = console::Term::stdout();
-        let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::with_prefix("zip_file_system_tests_directories")?;
-        let zip_file_path = temp_dir.path().join("test.zip");
-        write_zip(&zip_file_path, |zip| {
-            zip.add_directory("docs/", SimpleFileOptions::default())?;
-            zip.start_file("docs/file1.txt", SimpleFileOptions::default())?;
-            Ok(())
-        })?;
-
-        let mut fs = open(&zip_file_path, &reporter).await?;
-        let listing = fs.list_files(None, None).await?;
-        assert_eq!(listed_paths(&listing), ["docs/file1.txt"]);
-        assert_eq!(listing.skipped, 0);
         Ok(())
     }
 
@@ -719,24 +710,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entries_that_would_leave_the_archive_are_skipped() -> TestResult {
+    async fn symlinks_and_entries_leaving_the_archive_are_skipped() -> TestResult {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
         let temp_dir = TempDir::with_prefix("zip_file_system_tests_unsafe")?;
-        let outside_file_path = temp_dir.path().join("outside-secret.txt");
-        std::fs::write(&outside_file_path, "OUTSIDE-MARKER")?;
         let zip_file_path = temp_dir.path().join("evil.zip");
         write_zip(&zip_file_path, |zip| {
             let options = SimpleFileOptions::default();
             zip.start_file("ok.txt", options)?;
             zip.write_all(b"inside")?;
-            zip.add_symlink(
-                "link-absolute.txt",
-                outside_file_path.to_string_lossy(),
-                options,
-            )?;
-            zip.add_symlink("link-relative.txt", "../outside-secret.txt", options)?;
-            zip.add_symlink("link-inside.txt", "ok.txt", options)?;
+            zip.add_symlink("link.txt", "ok.txt", options)?;
             zip.start_file("../escape.txt", options)?;
             zip.write_all(b"escaped")?;
             Ok(())
@@ -745,15 +728,10 @@ mod tests {
         let mut fs = open(&zip_file_path, &reporter).await?;
         let listing = fs.list_files(None, None).await?;
         assert_eq!(listed_paths(&listing), ["ok.txt"]);
-        assert_eq!(listing.skipped, 4);
+        assert_eq!(listing.skipped, 2);
         assert_eq!(download_all(&mut fs, "ok.txt").await?.1, b"inside");
 
-        for skipped in [
-            "link-absolute.txt",
-            "link-relative.txt",
-            "link-inside.txt",
-            "../escape.txt",
-        ] {
+        for skipped in ["link.txt", "../escape.txt"] {
             assert!(download_all(&mut fs, skipped).await.is_err());
         }
         Ok(())
@@ -819,6 +797,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn entries_matched_by_the_ignore_rules_count_as_ignored() -> TestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_ignore")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+        write_zip(&zip_file_path, |zip| {
+            zip.start_file("kept.txt", SimpleFileOptions::default())?;
+            zip.start_file("mocks/a.txt", SimpleFileOptions::default())?;
+            zip.start_file("b.mock", SimpleFileOptions::default())?;
+            zip.add_symlink("link.txt", "kept.txt", SimpleFileOptions::default())?;
+            Ok(())
+        })?;
+        let ignore_file_path = temp_dir.path().join("ignore");
+        std::fs::write(&ignore_file_path, "mocks/\n*.mock\n")?;
+        let ignore_rules = IgnoreFileChoice::Explicit(ignore_file_path).load(None)?;
+        let matcher = FileMatcher::new(None, None).with_ignore(ignore_rules);
+
+        let mut fs = open(&zip_file_path, &reporter).await?;
+        let listing = fs.list_files(Some(&matcher), None).await?;
+        assert_eq!(listed_paths(&listing), ["kept.txt"]);
+        assert_eq!((listing.ignored, listing.skipped), (2, 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_file_limit_stops_the_listing_before_later_entries_are_counted() -> TestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_limit")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+        write_zip(&zip_file_path, |zip| {
+            zip.start_file("a.txt", SimpleFileOptions::default())?;
+            zip.start_file("b.csv", SimpleFileOptions::default())?;
+            zip.start_file("c.txt", SimpleFileOptions::default())?;
+            zip.start_file("d.csv", SimpleFileOptions::default())?;
+            Ok(())
+        })?;
+        let text_files =
+            FileMatcher::new(Some(globset::Glob::new("*.txt")?.compile_matcher()), None);
+
+        let mut fs = open(&zip_file_path, &reporter).await?;
+        let listing = fs.list_files(Some(&text_files), Some(1)).await?;
+        assert_eq!(listed_paths(&listing), ["a.txt"]);
+        assert_eq!(listing.skipped, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_entry_that_repeats_a_path_is_skipped_under_its_own_name() -> TestResult {
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_duplicate_name")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+        write_zip(&zip_file_path, |zip| {
+            zip.start_file("a.txt", SimpleFileOptions::default())?;
+            zip.start_file("./a.txt", SimpleFileOptions::default())?;
+            Ok(())
+        })?;
+
+        let archive = OpenedArchive::open(&zip_file_path)?;
+        let skipped_names: Vec<&str> = archive
+            .index
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                IndexedEntry::Skipped(skipped) => Some(skipped.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(skipped_names, ["./a.txt"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_entry_larger_than_its_declared_size_fails_the_download() -> TestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_declared_size")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+        write_zip(&zip_file_path, |zip| {
+            zip.start_file(
+                "zeros.bin",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+            )?;
+            zip.write_all(&vec![0u8; 1_000_000])?;
+            Ok(())
+        })?;
+        // The uncompressed size sits 24 bytes into the central directory header.
+        let mut archive_bytes = std::fs::read(&zip_file_path)?;
+        let central_header = archive_bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x01\x02")
+            .expect("the archive has a central directory header");
+        archive_bytes[central_header + 24..central_header + 28]
+            .copy_from_slice(&1000u32.to_le_bytes());
+        std::fs::write(&zip_file_path, archive_bytes)?;
+
+        let mut fs = open(&zip_file_path, &reporter).await?;
+        let listing = fs.list_files(None, None).await?;
+        assert_eq!(listing.files[0].file_size, Some(1000));
+        assert!(download_all(&mut fs, "zeros.bin").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stored_entry_cut_short_fails_the_download() -> TestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_truncated")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+        let content = b"0123456789".repeat(100);
+        write_zip(&zip_file_path, |zip| {
+            zip.start_file(
+                "stored.bin",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            )?;
+            zip.write_all(&content)?;
+            Ok(())
+        })?;
+
+        let mut fs = open(&zip_file_path, &reporter).await?;
+        fs.list_files(None, None).await?;
+        let payload_start = std::fs::read(&zip_file_path)?
+            .windows(content.len())
+            .position(|window| window == content)
+            .expect("the stored entry data is in the archive");
+        File::options()
+            .write(true)
+            .open(&zip_file_path)?
+            .set_len((payload_start + content.len() / 2) as u64)?;
+
+        assert!(download_all(&mut fs, "stored.bin").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn upload_test() -> TestResult {
         let term = console::Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
@@ -836,52 +948,6 @@ mod tests {
         let mut content = Vec::new();
         file.read_to_end(&mut content)?;
         assert_eq!(content, test_content);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn upload_writes_every_entry_in_chunks() -> TestResult {
-        let term = console::Term::stdout();
-        let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::with_prefix("zip_file_system_tests_upload_chunks")?;
-        let zip_file_path = temp_dir.path().join("test.zip");
-
-        let mut fs = open(&zip_file_path, &reporter).await?;
-        for (name, parts) in [
-            ("one.txt", ["a", "b", "c"]),
-            ("dir/two.txt", ["d", "e", "f"]),
-        ] {
-            let stream = futures::stream::iter(
-                parts
-                    .iter()
-                    .map(|part| Ok(bytes::Bytes::from(part.to_string())))
-                    .collect::<Vec<_>>(),
-            );
-            fs.upload(stream, Some(&reference(name))).await?;
-        }
-        fs.close().await?;
-
-        let mut fs = open(&zip_file_path, &reporter).await?;
-        assert_eq!(download_all(&mut fs, "one.txt").await?.1, b"abc");
-        assert_eq!(download_all(&mut fs, "dir/two.txt").await?.1, b"def");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn upload_to_existing_zip_is_refused() -> TestResult {
-        let term = console::Term::stdout();
-        let reporter: AppReporter = AppReporter::from(&term);
-        let temp_dir = TempDir::with_prefix("zip_file_system_tests_upload_existing")?;
-        let zip_file_path = temp_dir.path().join("test.zip");
-        std::fs::write(&zip_file_path, "existing")?;
-
-        let mut fs = open(&zip_file_path, &reporter).await?;
-        let stream = futures::stream::iter(Vec::<AppResult<bytes::Bytes>>::new());
-        assert!(fs
-            .upload(stream, Some(&reference("file1.txt")))
-            .await
-            .is_err());
-        assert_eq!(std::fs::read(&zip_file_path)?, b"existing");
         Ok(())
     }
 

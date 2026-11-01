@@ -63,7 +63,8 @@ impl FileSystemRef {
 #[derive(Debug, Clone)]
 pub struct ListFilesResult {
     pub files: Vec<FileSystemRef>,
-    /// Files skipped by the size limit or the name filter.
+    /// Files skipped by the size limit or the name filter, and entries of an archive that cannot
+    /// be read.
     pub skipped: usize,
     /// Files ignored by the ignore rules of the matcher.
     pub ignored: usize,
