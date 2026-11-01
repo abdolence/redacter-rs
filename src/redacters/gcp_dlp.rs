@@ -39,7 +39,7 @@ impl<'a> GcpDlpRedacter<'a> {
         ("PHONE_NUMBER", Category::Contact),
         ("EMAIL_ADDRESS", Category::Contact),
         ("CREDIT_CARD_NUMBER", Category::Financial),
-        ("LOCATION", Category::Location),
+        ("LOCATION", Category::Address),
         ("PERSON_NAME", Category::Person),
         ("AGE", Category::Other),
         ("DATE_OF_BIRTH", Category::DateOfBirth),

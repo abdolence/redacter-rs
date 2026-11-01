@@ -1629,8 +1629,8 @@ mod tests {
             let narrowed = dlp_of(&["--categories", "network"]).unwrap();
             assert_eq!(narrowed.built_in_info_types, ["IP_ADDRESS"]);
 
-            let places = dlp_of(&["--categories", "location"]).unwrap();
-            assert_eq!(places.built_in_info_types, ["LOCATION"]);
+            let addresses = dlp_of(&["--categories", "address"]).unwrap();
+            assert_eq!(addresses.built_in_info_types, ["LOCATION"]);
 
             let every = dlp_of(&[]).unwrap();
             assert_eq!(

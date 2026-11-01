@@ -483,8 +483,8 @@ Error: local-ner finds nothing in the chosen categories: secrets
 
 A redacter finds nothing when no rule group, entity, label or info type of it is in the chosen categories. This is
 checked for `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `gcp-dlp` and `aws-comprehend`, which has
-no entity type for `date-of-birth`. The `LOCATION` info type of `gcp-dlp` is `location`, so `gcp-dlp` has no info type
-for `address`. Presidio and Guardrails are configured on their server or in AWS, so they run and may find nothing:
+no entity type for `date-of-birth`. The `LOCATION` info type of `gcp-dlp` is `address`, so `gcp-dlp` has no info type
+for `location`. Presidio and Guardrails are configured on their server or in AWS, so they run and may find nothing:
 Presidio has no recogniser for `secrets`. The LLM redacters can find any category.
 
 `cp` fails a file when an LLM redacter or Guardrails names a value in the chosen categories that the tool cannot place
