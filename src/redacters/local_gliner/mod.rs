@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::{find_in_cell, redact_rows};
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Score,
+    RedacterDataItem, RedacterDataItemContent, Score, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -178,6 +178,10 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalGliner
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Token
     }
 }
 

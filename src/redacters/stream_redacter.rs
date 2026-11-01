@@ -454,7 +454,14 @@ impl<'a> StreamRedacter<'a> {
                         file = %file_ref.relative_path.value(),
                         "redacting"
                     );
-                    redacted = recorder.redact(redacter, None, redacted).await?;
+                    redacted = recorder
+                        .redact(
+                            redacter,
+                            None,
+                            redacted,
+                            self.redacter_base_options.categories.as_ref(),
+                        )
+                        .await?;
                     number_of_redactions += 1;
                     summary.applied.push(redacter.redacter_type());
                 }
@@ -906,7 +913,14 @@ impl<'a> StreamRedacter<'a> {
                     } else {
                         let mut item = image_to_redact;
                         for redacter in redacters {
-                            item = recorder.redact(redacter, Some(page_number), item).await?;
+                            item = recorder
+                                .redact(
+                                    redacter,
+                                    Some(page_number),
+                                    item,
+                                    self.redacter_base_options.categories.as_ref(),
+                                )
+                                .await?;
                         }
                         item
                     };
@@ -985,7 +999,14 @@ impl<'a> StreamRedacter<'a> {
                         let mut steps =
                             StreamRedactions::new(self.redacter_base_options.list_redactions);
                         for redacter in redacters {
-                            redacted_item = steps.redact(redacter, page, redacted_item).await?;
+                            redacted_item = steps
+                                .redact(
+                                    redacter,
+                                    page,
+                                    redacted_item,
+                                    self.redacter_base_options.categories.as_ref(),
+                                )
+                                .await?;
                         }
 
                         match redacted_item.content {

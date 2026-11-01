@@ -654,25 +654,6 @@ impl RedacterType {
     }
 }
 
-impl RedacterOptions {
-    /// Fails when `cp` is limited to categories and a redacter would redact data outside
-    /// them.
-    pub fn check_copy_within_categories(&self) -> Result<(), CategoriesError> {
-        if self.base_options.categories.is_none() {
-            return Ok(());
-        }
-        match self
-            .provider_options
-            .iter()
-            .map(RedacterProviderOptions::redacter_type)
-            .find(|redacter| !redacter.narrows_itself())
-        {
-            Some(redacter) => Err(CategoriesError::CopyUnsupported { redacter }),
-            None => Ok(()),
-        }
-    }
-}
-
 impl Display for RedacterOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let to_display = self
@@ -746,6 +727,39 @@ impl<'a> Redacters<'a> {
         }
     }
 
+    /// `redact`, limited to `categories`. A redacter that does not narrow its own request has
+    /// its text redacted by masking the values `detect` finds in those categories, so the rest
+    /// of the text is copied byte for byte. That is one provider call per item, as `redact`
+    /// makes. A value in the categories that `detect` named but could not place in the text
+    /// fails with [`CategoriesError::Unlocated`]: copying it would leave it in place unsaid.
+    pub async fn redact_in(
+        &self,
+        input: RedacterDataItem,
+        categories: Option<&Categories>,
+    ) -> AppResult<Redacted> {
+        let redacter = self.redacter_type();
+        let (Some(categories), RedacterDataItemContent::Value(text)) = (categories, &input.content)
+        else {
+            return self.redact(input).await;
+        };
+        if redacter.narrows_itself() {
+            return self.redact(input).await;
+        }
+        let (masked, replaced) = self.detect(&input).await?.masked_within(
+            text,
+            redacter,
+            self.text_mask(),
+            categories,
+        )?;
+        Ok(Redacted::located(
+            RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(masked),
+            },
+            replaced,
+        ))
+    }
+
     pub fn is_mime_text(mime: &Mime) -> bool {
         let mime_subtype_as_str = mime.subtype().as_str().to_lowercase();
         (mime.type_() == mime::TEXT
@@ -796,6 +810,18 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
     }
 }
 
+/// What replaces a value a redacter detected when `cp` masks it locally instead of asking the
+/// provider to redact: the look the provider's own redaction gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMask {
+    /// One `[REDACTED]` per value.
+    Token,
+    /// One `X` per character of the value.
+    EveryCharacter,
+    /// The detection's label in braces, `{NAME}`, as Guardrails' anonymized text writes it.
+    Label,
+}
+
 pub trait Redacter {
     /// Redacts `input` and returns the result with what was replaced, as [`Redacted`] says.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted>;
@@ -813,6 +839,11 @@ pub trait Redacter {
     }
 
     fn redacter_type(&self) -> RedacterType;
+
+    /// What replaces a value this redacter detected, when `cp` masks it locally.
+    fn text_mask(&self) -> TextMask {
+        TextMask::EveryCharacter
+    }
 }
 
 impl<'a> Redacter for Redacters<'a> {
@@ -924,7 +955,28 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
         }
     }
+
+    fn text_mask(&self) -> TextMask {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.text_mask(),
+            Redacters::AwsComprehend(redacter) => redacter.text_mask(),
+            Redacters::Presidio(redacter) => redacter.text_mask(),
+            Redacters::GeminiLlm(redacter) => redacter.text_mask(),
+            Redacters::OpenAiLlm(redacter) => redacter.text_mask(),
+            Redacters::GcpVertexAi(redacter) => redacter.text_mask(),
+            Redacters::AwsBedrock(redacter) => redacter.text_mask(),
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.text_mask(),
+            Redacters::LocalRules(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.text_mask(),
+        }
+    }
 }
+
 #[cfg(test)]
 pub mod test_support {
     use super::*;
@@ -1253,6 +1305,163 @@ mod tests {
             RedacterDataItemContent::Value(text) if text == " \n\t"
         ));
         assert_eq!(redacted.replaced.as_deref(), Some(&[][..]));
+    }
+
+    /// A Presidio analyzer on a local port that answers every request with `answer` and counts
+    /// the requests, so a test sees both the masking and how many provider calls it took.
+    fn presidio_analyzer_answering(
+        answer: &'static str,
+    ) -> (url::Url, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = url::Url::parse(&format!(
+            "http://{}/analyze",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    if let Some(at) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                    let read = stream.read(&mut chunk).unwrap();
+                    assert_ne!(read, 0, "the request ended inside its headers");
+                    request.extend_from_slice(&chunk[..read]);
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                let body_len: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |len| len.trim().parse().unwrap());
+                while request.len() < header_end + body_len {
+                    let read = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (url, requests)
+    }
+
+    fn text_item(text: &str) -> RedacterDataItem {
+        RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "note.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        }
+    }
+
+    fn item_text(redacted: &Redacted) -> &str {
+        match &redacted.item.content {
+            RedacterDataItemContent::Value(text) => text,
+            other => panic!("expected a text item, got {other:?}"),
+        }
+    }
+
+    const NOTE: &str = "Ana Lima mailed ana@example.com";
+    /// Presidio's answer for [`NOTE`]: the name at 0..8 and the email address at 16..31.
+    const NOTE_ANALYSIS: &str = r#"[
+        {"entity_type":"PERSON","start":0,"end":8,"score":0.9},
+        {"entity_type":"EMAIL_ADDRESS","start":16,"end":31,"score":1.0}
+    ]"#;
+
+    async fn presidio_reading<'a>(
+        analyzer: url::Url,
+        reporter: &'a AppReporter<'a>,
+    ) -> Redacters<'a> {
+        Redacters::Presidio(
+            presidio::PresidioRedacter::new(
+                presidio::PresidioRedacterOptions {
+                    text_analyze_url: Some(analyzer),
+                    image_redact_url: None,
+                    categories: None,
+                },
+                reporter,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn text_is_masked_within_the_categories_with_one_provider_call() {
+        let (analyzer, requests) = presidio_analyzer_answering(NOTE_ANALYSIS);
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = presidio_reading(analyzer, &reporter).await;
+        let contact = Categories::limiting([Category::Contact]).unwrap();
+
+        let redacted = redacter
+            .redact_in(text_item(NOTE), Some(&contact))
+            .await
+            .unwrap();
+
+        assert_eq!(item_text(&redacted), "Ana Lima mailed XXXXXXXXXXXXXXX");
+        assert_eq!(
+            redacted.replaced.as_ref().map(|found| found
+                .iter()
+                .map(|detection| detection.label.to_string())
+                .collect::<Vec<_>>()),
+            Some(vec!["EMAIL_ADDRESS".to_string()])
+        );
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn without_categories_everything_detected_is_masked_as_redact_does() {
+        let (analyzer, _) = presidio_analyzer_answering(NOTE_ANALYSIS);
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = presidio_reading(analyzer, &reporter).await;
+
+        let in_scope = redacter.redact_in(text_item(NOTE), None).await.unwrap();
+        let today = redacter.redact(text_item(NOTE)).await.unwrap();
+
+        assert_eq!(item_text(&in_scope), item_text(&today));
+        assert_eq!(item_text(&in_scope), "XXXXXXXX mailed XXXXXXXXXXXXXXX");
+    }
+
+    #[tokio::test]
+    async fn a_redacter_that_narrows_itself_is_not_masked_from_its_detections() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = Redacters::LocalRules(
+            LocalRulesRedacter::new(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: Vec::new(),
+                },
+                &reporter,
+            )
+            .await
+            .unwrap(),
+        );
+        let credential = Categories::limiting([Category::Credential]).unwrap();
+
+        let in_scope = redacter
+            .redact_in(text_item(NOTE), Some(&credential))
+            .await
+            .unwrap();
+        let today = redacter.redact(text_item(NOTE)).await.unwrap();
+
+        assert_eq!(item_text(&in_scope), item_text(&today));
+        assert_eq!(item_text(&in_scope), "Ana Lima mailed [REDACTED]");
     }
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {

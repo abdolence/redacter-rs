@@ -94,7 +94,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         }?;
 
         let detections = self.detect_text(&text_content).await?;
-        let redacted_content = mask_detections(&text_content, &detections);
+        let redacted_content = mask_detections(&text_content, &detections, self.text_mask());
         Ok(Redacted::located(
             RedacterDataItem {
                 file_ref: input.file_ref,

@@ -20,7 +20,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::redact_rows;
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent,
+    RedacterDataItem, RedacterDataItemContent, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -108,6 +108,10 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalRules
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Token
     }
 }
 
