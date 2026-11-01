@@ -599,14 +599,9 @@ mod tests {
         );
     }
 
-    /// The user part is an address, so the credentials rule does not apply and the email rule
-    /// redacts the address on its own; the password after it stays.
     #[test]
-    fn url_with_an_email_as_user_is_left_to_the_email_rule() {
-        assert_redacts(
-            "https://bob@corp.com:pw@host/",
-            "https://[REDACTED]:pw@host/",
-        );
+    fn url_credentials_with_an_email_as_user_are_redacted_whole() {
+        assert_redacts("https://bob@corp.com:pw@host/", "https://[REDACTED]@host/");
     }
 
     #[test]
