@@ -28,9 +28,8 @@ pub(crate) struct TextPosition {
 }
 
 impl TextPosition {
-    /// The position `text` ends at, when it starts at this one.
-    pub fn after(self, text: &str) -> Self {
-        let bytes = text.as_bytes();
+    /// The position `bytes` end at, when they start at this one.
+    pub fn after(self, bytes: &[u8]) -> Self {
         match bytes.iter().rposition(|&byte| byte == b'\n') {
             Some(last_newline) => Self {
                 offset: self.offset + bytes.len(),
@@ -313,19 +312,8 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
     }
 
     fn position_of(&self, offset: usize) -> TextPosition {
-        let before = &self.buffer[..offset - self.buffer_start.offset];
-        match before.iter().rposition(|&byte| byte == b'\n') {
-            Some(last_newline) => TextPosition {
-                offset,
-                lines_before: self.buffer_start.lines_before + newlines(before),
-                columns_before: characters(&before[last_newline + 1..]),
-            },
-            None => TextPosition {
-                offset,
-                lines_before: self.buffer_start.lines_before,
-                columns_before: self.buffer_start.columns_before + characters(before),
-            },
-        }
+        self.buffer_start
+            .after(&self.buffer[..offset - self.buffer_start.offset])
     }
 
     fn drop_before(&mut self, offset: usize) {

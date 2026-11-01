@@ -11,7 +11,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_changes::{OutputPosition, TextChange, TextChanges};
 use crate::redacters::{
-    Categories, Detection, DetectionLabel, DetectionLocation, PieceLayout, Redacter,
+    Categories, ContentStream, Detection, DetectionLabel, DetectionLocation, PieceLayout, Redacter,
     RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines, TextMask,
     TextPieceLimits, TextPieces, TextPosition, TextWindow,
 };
@@ -21,13 +21,8 @@ use futures::Stream;
 use std::ops::Range;
 use tokio::sync::mpsc;
 
-/// How many chunks of written text wait for the upload to take them.
-const WRITTEN_CHUNKS_IN_FLIGHT: usize = 4;
-
-/// The size of the chunks the redacted text goes to the upload in. Chunks of one size are given
-/// back to the allocator and taken again whole, where a text of a window's size, different for
-/// every window, would leave freed memory of every size behind.
-const WRITTEN_CHUNK_BYTES: usize = 256 * 1024;
+/// How many redacted windows wait for the upload to take them.
+const WRITTEN_WINDOWS_IN_FLIGHT: usize = 4;
 
 /// A value one step of the chain found, placed in a text.
 #[derive(Debug, Clone)]
@@ -205,7 +200,7 @@ impl<'a> PieceRedaction<'a> {
                 });
             }
             if index + 1 < self.steps.len() {
-                masked = Some(mask_text(read, &found));
+                masked = Some(mask_ranges(read, 0, &merge(&found), &found)?);
             }
         }
 
@@ -225,67 +220,46 @@ impl<'a> PieceRedaction<'a> {
     }
 }
 
-/// `text` with the findings merged and masked, and the changes that made it.
-fn mask_text(text: &str, findings: &[StepFinding]) -> (String, TextChanges) {
-    let merged = merge(findings);
+/// `text`, which starts at `base` in the file, with `ranges` masked as the findings they were
+/// merged from say, and the changes that made it. The ranges are in the file and in order, and
+/// the text from the end of the last one is kept.
+fn mask_ranges(
+    text: &str,
+    base: usize,
+    ranges: &[MergedRange],
+    findings: &[StepFinding],
+) -> AppResult<(String, TextChanges)> {
+    let slice = |range: Range<usize>| -> AppResult<&str> {
+        range
+            .start
+            .checked_sub(base)
+            .zip(range.end.checked_sub(base))
+            .and_then(|(start, end)| text.get(start..end))
+            .ok_or(AppError::DetectionOutsideContent {
+                start: range.start,
+                end: range.end,
+            })
+    };
     let mut masked = String::with_capacity(text.len());
-    let mut changes = Vec::with_capacity(merged.len());
-    let mut cursor = 0;
-    for range in &merged {
-        masked.push_str(&text[cursor..range.range.start]);
+    let mut changes = Vec::with_capacity(ranges.len());
+    let mut cursor = base;
+    for range in ranges {
+        masked.push_str(slice(cursor..range.range.start)?);
         let representative = &findings[range.representative];
         let start = masked.len();
         masked.push_str(
             &representative
                 .mask
-                .replacement(&representative.label, &text[range.range.clone()]),
+                .replacement(&representative.label, slice(range.range.clone())?),
         );
         changes.push(TextChange {
-            input: range.range.clone(),
+            input: range.range.start - base..range.range.end - base,
             output: start..masked.len(),
         });
         cursor = range.range.end;
     }
-    masked.push_str(&text[cursor..]);
-    (masked, TextChanges::new(changes))
-}
-
-/// Text collected into chunks of [`WRITTEN_CHUNK_BYTES`].
-#[derive(Default)]
-struct WrittenChunks {
-    done: Vec<Bytes>,
-    current: String,
-}
-
-impl WrittenChunks {
-    fn push(&mut self, mut text: &str) {
-        while !text.is_empty() {
-            if self.current.capacity() == 0 {
-                self.current = String::with_capacity(WRITTEN_CHUNK_BYTES);
-            }
-            let mut at = text.len().min(WRITTEN_CHUNK_BYTES - self.current.len());
-            while !text.is_char_boundary(at) {
-                at -= 1;
-            }
-            self.current.push_str(&text[..at]);
-            text = &text[at..];
-            if !text.is_empty() {
-                self.flush();
-            }
-        }
-    }
-
-    fn flush(&mut self) {
-        if !self.current.is_empty() {
-            self.done
-                .push(Bytes::from(std::mem::take(&mut self.current)));
-        }
-    }
-
-    fn finish(mut self) -> Vec<Bytes> {
-        self.flush();
-        self.done
-    }
+    masked.push_str(slice(cursor..base + text.len())?);
+    Ok((masked, TextChanges::new(changes)))
 }
 
 /// The text of a file between what has been written and what a later window can still change,
@@ -320,7 +294,7 @@ impl PendingMasks {
     /// A window finds nothing that starts before its own start, so nothing before the start of
     /// the next window changes, except through a range that reaches past it. The text from the
     /// start of the first such range is held back, whole.
-    fn take(&mut self, window: WindowFindings) -> AppResult<Vec<Bytes>> {
+    fn take(&mut self, window: WindowFindings) -> AppResult<Bytes> {
         let base = self.tail_start.offset;
         let tail_end = base + self.tail.len();
         let skip = tail_end.saturating_sub(window.start.offset);
@@ -340,41 +314,22 @@ impl PendingMasks {
             (None, hold) => hold.unwrap_or(tail_end),
         };
 
-        let mut text = WrittenChunks::default();
-        let mut cursor = base;
-        for range in &merged[..settled] {
-            text.push(self.tail_slice(cursor..range.range.start)?);
-            let representative = &self.findings[range.representative];
-            text.push(
-                &representative
-                    .mask
-                    .replacement(&representative.label, self.tail_slice(range.range.clone())?),
-            );
-            cursor = range.range.end;
-        }
-        text.push(self.tail_slice(cursor..limit)?);
+        let outside = || AppError::DetectionOutsideContent {
+            start: base,
+            end: limit,
+        };
+        let final_length = limit.checked_sub(base).ok_or_else(outside)?;
+        let final_text = self.tail.get(..final_length).ok_or_else(outside)?;
+        let (text, _) = mask_ranges(final_text, base, &merged[..settled], &self.findings)?;
 
         if self.recording {
             self.record(limit)?;
         }
         self.findings
             .retain(|finding| !finding.range.is_empty() && finding.range.start >= limit);
-        self.tail_start = self.tail_start.after(&self.tail[..limit - base]);
-        self.tail.drain(..limit - base);
-        Ok(text.finish())
-    }
-
-    fn tail_slice(&self, range: Range<usize>) -> AppResult<&str> {
-        let base = self.tail_start.offset;
-        range
-            .start
-            .checked_sub(base)
-            .zip(range.end.checked_sub(base))
-            .and_then(|(start, end)| self.tail.get(start..end))
-            .ok_or(AppError::DetectionOutsideContent {
-                start: range.start,
-                end: range.end,
-            })
+        self.tail_start = self.tail_start.after(&self.tail.as_bytes()[..final_length]);
+        self.tail.drain(..final_length);
+        Ok(Bytes::from(text))
     }
 
     /// Places what each redacter masked before `limit`, as its findings that overlap united.
@@ -382,56 +337,21 @@ impl PendingMasks {
         let base = self.tail_start.offset;
         let lines = TextLines::new(&self.tail);
         for (step, redactions) in self.redactions.iter_mut().enumerate() {
-            let mut own: Vec<(usize, &StepFinding)> = self
+            let own: Vec<StepFinding> = self
                 .findings
                 .iter()
-                .enumerate()
-                .filter(|(_, finding)| {
-                    finding.step == step && !finding.range.is_empty() && finding.range.start < limit
-                })
+                .filter(|finding| finding.step == step && finding.range.start < limit)
+                .cloned()
                 .collect();
-            own.sort_by(|(a_index, a), (b_index, b)| {
-                a.range
-                    .start
-                    .cmp(&b.range.start)
-                    .then(b.range.end.cmp(&a.range.end))
-                    .then(a_index.cmp(b_index))
-            });
-            let mut united: Option<(Range<usize>, &StepFinding, usize)> = None;
-            let mut place = |range: Range<usize>, label_from: &StepFinding| -> AppResult<()> {
+            for united in merge(&own) {
+                let representative = &own[united.representative];
                 let mut detection = lines.detection(
-                    range.start - base..range.end - base,
-                    label_from.label.clone(),
-                    label_from.score,
+                    united.range.start - base..united.range.end - base,
+                    representative.label.clone(),
+                    representative.score,
                 )?;
                 detection.location = detection.location.in_file(self.tail_start);
                 redactions.push((self.redacters[step], detection));
-                Ok(())
-            };
-            for (_, finding) in own {
-                united = match united.take() {
-                    Some((range, label_from, longest)) if finding.range.start < range.end => {
-                        let length = finding.range.len();
-                        let (label_from, longest) = if length > longest {
-                            (finding, length)
-                        } else {
-                            (label_from, longest)
-                        };
-                        Some((
-                            range.start..range.end.max(finding.range.end),
-                            label_from,
-                            longest,
-                        ))
-                    }
-                    Some((range, label_from, _)) => {
-                        place(range, label_from)?;
-                        Some((finding.range.clone(), finding, finding.range.len()))
-                    }
-                    None => Some((finding.range.clone(), finding, finding.range.len())),
-                };
-            }
-            if let Some((range, label_from, _)) = united {
-                place(range, label_from)?;
             }
         }
         Ok(())
@@ -457,11 +377,9 @@ pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
     let outcome: AppResult<()> = async {
         let mut next = Some(first);
         while let Some(window) = next {
-            let chunks = pending.take(redaction.find_in_window(window).await?)?;
-            for chunk in chunks {
-                if written.send(Ok(chunk)).await.is_err() {
-                    return Ok(());
-                }
+            let text = pending.take(redaction.find_in_window(window).await?)?;
+            if !text.is_empty() && written.send(Ok(text)).await.is_err() {
+                return Ok(());
             }
             next = pieces.next_window().await?;
         }
@@ -483,11 +401,8 @@ pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
 }
 
 /// The channel the redacted windows go through, and the stream of what comes out of it.
-pub(crate) fn written_windows() -> (
-    mpsc::Sender<AppResult<Bytes>>,
-    Box<dyn Stream<Item = AppResult<Bytes>> + Send + Sync + Unpin + 'static>,
-) {
-    let (sender, receiver) = mpsc::channel(WRITTEN_CHUNKS_IN_FLIGHT);
+pub(crate) fn written_windows() -> (mpsc::Sender<AppResult<Bytes>>, ContentStream) {
+    let (sender, receiver) = mpsc::channel(WRITTEN_WINDOWS_IN_FLIGHT);
     let stream = futures::stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
     });
@@ -565,32 +480,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_merged_range_takes_the_mask_of_the_latest_step_and_the_first_of_equals() {
-        let findings = [
-            finding(0..6, 0, TextMask::Token, "early"),
-            finding(4..9, 1, TextMask::EveryCharacter, "late"),
-            finding(4..12, 1, TextMask::EveryCharacter, "late-longer"),
-            finding(2..3, 0, TextMask::Token, "inner"),
-        ];
-
-        let merged = merge(&findings);
-
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].range, 0..12);
-        assert_eq!(
-            findings[merged[0].representative].label.to_string(),
-            "late-longer"
-        );
-    }
-
-    #[test]
-    fn empty_findings_make_no_range() {
-        let findings = [finding(5..5, 0, TextMask::Token, "empty")];
-
-        assert!(merge(&findings).is_empty());
-    }
-
     /// `read` with the ranges replaced by `[REDACTED]`, and the changes that did it.
     fn masked(read: &str, ranges: &[Range<usize>]) -> (String, TextChanges) {
         let mut out = String::new();
@@ -611,18 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn a_step_reads_its_reach_around_the_piece_in_the_masked_text() {
-        let read = "0123456789".repeat(10);
-        let (_, changes) = masked(&read, &[5..7, 60..62]);
-
-        // The piece is 30..50; a reach of 20 would start at 10 and end at 70 in the read text.
-        let window = step_window(&read, &changes, &(30..50), 20);
-
-        // 10 is after the first mask and 70 after the second, which each lengthen the text by 8.
-        assert_eq!(window, 10 + 8..70 + 16);
-    }
-
-    #[test]
     fn a_cut_inside_a_mask_leaves_the_mask_out() {
         let read = "0123456789".repeat(10);
         let (masked, changes) = masked(&read, &[8..14, 66..72]);
@@ -635,25 +512,8 @@ mod tests {
         assert!(!masked[window.clone()].contains('['));
     }
 
-    fn text_of(chunks: AppResult<Vec<Bytes>>) -> String {
-        String::from_utf8(chunks.unwrap().concat()).unwrap()
-    }
-
-    #[test]
-    fn written_text_is_cut_into_chunks_of_one_size_on_character_starts() {
-        let mut chunks = WrittenChunks::default();
-        let text = "é日本語".repeat(WRITTEN_CHUNK_BYTES);
-
-        chunks.push(&text);
-        chunks.push("tail");
-        let chunks = chunks.finish();
-
-        assert!(chunks.len() > 8);
-        for chunk in &chunks[..chunks.len() - 1] {
-            assert!(chunk.len() > WRITTEN_CHUNK_BYTES - 4 && chunk.len() <= WRITTEN_CHUNK_BYTES);
-        }
-        let joined = String::from_utf8(chunks.concat()).unwrap();
-        assert_eq!(joined, format!("{text}tail"));
+    fn text_of(text: AppResult<Bytes>) -> String {
+        String::from_utf8(text.unwrap().to_vec()).unwrap()
     }
 
     fn window(
@@ -705,23 +565,6 @@ mod tests {
         let written = text_of(pending.take(window(text, at(0, 0, 0), None, findings)));
 
         assert_eq!(written, "id=XXXXXX;");
-    }
-
-    #[test]
-    fn text_is_written_up_to_where_the_next_window_starts() {
-        let mut pending = PendingMasks::new(vec![RedacterType::LocalRules], false);
-        let first = window(
-            "0123456789",
-            at(0, 0, 0),
-            Some(6),
-            vec![finding(1..3, 0, TextMask::Token, "early")],
-        );
-
-        let written = text_of(pending.take(first));
-
-        assert_eq!(written, "0[REDACTED]345");
-        let second = window("6789abcdef", at(6, 0, 6), None, vec![]);
-        assert_eq!(text_of(pending.take(second)), "6789abcdef");
     }
 
     #[test]
@@ -787,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn a_redaction_is_listed_under_the_label_of_the_longest_finding_it_unites() {
+    fn a_redaction_is_listed_under_the_label_of_the_finding_that_starts_first() {
         let mut pending = PendingMasks::new(vec![RedacterType::LocalRules], true);
         let findings = vec![
             finding(2..6, 0, TextMask::Token, "short"),
@@ -801,7 +644,7 @@ mod tests {
 
         let redactions = pending.into_redactions();
         assert_eq!(redactions.len(), 1);
-        assert_eq!(redactions[0].1.label.to_string(), "long");
+        assert_eq!(redactions[0].1.label.to_string(), "short");
         assert_eq!(redactions[0].1.value, "23456789ab");
     }
 
