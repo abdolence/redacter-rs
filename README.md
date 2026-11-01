@@ -1343,13 +1343,17 @@ For example:
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
-A text file of more than about 1 MiB is read in pieces of whole lines when every selected redacter is `local-rules` or
-`local-credential-ml`, so the text no longer sets the memory `scan` needs. Each piece is read with 16 KiB of lines on
-each side, which is enough for a value across lines such as a private key block, and a finding is reported once, at the
-location it has when the file is read whole. Other redacters, `--sampling-size` and `--unsupported-as-text` read the
-file whole. `scan -d local-rules` on a 319 MB log with 26 findings peaks near 54 MB of memory, against 731 MB before.
-The findings are still kept in memory until the reports are written, so a file with millions of findings needs memory
-for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.9 GB, against 4.8 GB.
+A text file of more than about 1 MiB is read in pieces when every selected redacter is `local-rules` or
+`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a
+table and whole. A piece is read with 64 KiB of text on each side, in windows of at most 1 MiB. A value of up to 128 KiB
+across lines, such as a private key block, is found wherever a piece ends, and a longer one that crosses the end of a
+piece can be missed. A finding is reported once, at the location it has when the file is read whole. A line longer than a
+window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are. Other
+redacters and `--unsupported-as-text` read the file whole. With `--sampling-size`, `scan` reads only as much of a text
+file as the sample needs. `scan -d local-rules` on a 319 MB log with 26 findings peaks near 52 MB of memory, against
+697 MB in 0.21. The findings are still kept in memory until the reports are written, so a file with millions of findings
+needs memory for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.7 GB, against 4.4 GB in
+0.21.
 
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
