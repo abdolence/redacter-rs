@@ -4,7 +4,7 @@
       { "category": "person", "value": "John Michael Smith" },
       { "category": "contact", "value": "john.smith@example.com" },
       { "category": "contact", "value": "+1 (555) 123-4567" },
-      { "category": "date_of_birth", "value": "14 March 1985" },
+      { "category": "date-of-birth", "value": "14 March 1985" },
       { "category": "address", "value": "221B Baker Street, London NW1 6XE" },
       { "category": "financial", "value": "4111 1111 1111 1111" }
     ],
@@ -16,7 +16,7 @@
       { "category": "person", "value": "John Michael Smith" },
       { "category": "contact", "value": "john.smith@example.com" },
       { "category": "contact", "value": "+1 (555) 123-4567" },
-      { "category": "date_of_birth", "value": "1985-03-14" },
+      { "category": "date-of-birth", "value": "1985-03-14" },
       { "category": "address", "value": "221B Baker Street" },
       { "category": "address", "value": "NW1 6XE" },
       { "category": "financial", "value": "4111 1111 1111 1111" }
@@ -29,9 +29,9 @@
       { "category": "person", "value": "John Michael Smith" },
       { "category": "contact", "value": "john.smith@example.com" },
       { "category": "contact", "value": "+1 (555) 123-4567" },
-      { "category": "date_of_birth", "value": "14 March 1985" },
+      { "category": "date-of-birth", "value": "14 March 1985" },
       { "category": "address", "value": "221B Baker Street, London NW1 6XE" },
-      { "category": "id_number", "value": "X1234567" }
+      { "category": "id-number", "value": "X1234567" }
     ],
     "neutral": [],
     "keep": ["Customer profile", "Passport no.", "Prefers contact by email in the evening."]
@@ -47,7 +47,7 @@
       { "category": "person", "value": "Akira Tanaka" },
       { "category": "contact", "value": "akira.tanaka@example.net" },
       { "category": "contact", "value": "+81 90-1234-5678" },
-      { "category": "id_number", "value": "X1234567" }
+      { "category": "id-number", "value": "X1234567" }
     ],
     "neutral": ["London", "Madrid", "Osaka"],
     "keep": ["Called on 2026-08-30", "Prefers email"]
@@ -90,7 +90,7 @@
       { "category": "address", "value": "14 Rosewood Lane, Kettering" },
       { "category": "other", "value": "type 2 diabetes" },
       { "category": "person", "value": "Mira Kowalczyk" },
-      { "category": "date_of_birth", "value": "12/03/1984" },
+      { "category": "date-of-birth", "value": "12/03/1984" },
       { "category": "person", "value": "@mira_k84" },
       { "category": "person", "value": "mkowalczyk" }
     ],

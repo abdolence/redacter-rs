@@ -4,9 +4,9 @@
       { "category": "person", "value": [309, 125, 537, 148] },
       { "category": "contact", "value": [309, 195, 620, 218] },
       { "category": "contact", "value": [312, 265, 538, 286] },
-      { "category": "date_of_birth", "value": [312, 335, 488, 353] },
+      { "category": "date-of-birth", "value": [312, 335, 488, 353] },
       { "category": "address", "value": [312, 405, 750, 426] },
-      { "category": "id_number", "value": [311, 475, 431, 493] },
+      { "category": "id-number", "value": [311, 475, 431, 493] },
       { "category": "financial", "value": [311, 545, 575, 563] },
       { "category": "person", "value": [181, 655, 308, 678] }
     ],
@@ -17,9 +17,9 @@
       { "category": "person", "value": [119, 122, 224, 133] },
       { "category": "contact", "value": [97, 147, 235, 161] },
       { "category": "contact", "value": [101, 172, 200, 183] },
-      { "category": "date_of_birth", "value": [132, 197, 212, 208] },
+      { "category": "date-of-birth", "value": [132, 197, 212, 208] },
       { "category": "address", "value": [111, 222, 311, 235] },
-      { "category": "id_number", "value": [134, 247, 189, 258] },
+      { "category": "id-number", "value": [134, 247, 189, 258] },
       { "category": "financial", "value": [125, 272, 242, 283] },
       { "category": "person", "value": [118, 342, 178, 353] }
     ],
