@@ -41,8 +41,8 @@ Each cell is recall / precision / time per file. Time per file is described unde
 | `local-gliner` | 100% / 94% / 443 ms | 2% / 33% / 146 ms | 55% / - / 441 ms | 88% / 100% / 658 ms |
 | `local-rules+local-ner` | 77% / 89% / 43 ms | 88% / 97% / 19 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
 | `local-rules+local-gliner` | 100% / 95% / 435 ms | 88% / 95% / 141 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
-| `local-credential-ml` | 0% / - / 103 ms | 61% / 100% / 11 ms | 1% / - / 38 ms | 0% / - / 334 ms |
-| `local-rules+local-credential-ml` | 54% / 100% / 44 ms | 93% / 100% / 12 ms | 24% / - / 38 ms | 62% / 100% / 348 ms |
+| `local-credential-ml` | 0% / - / 77 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 389 ms |
+| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 93% / 100% / 11 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
 | `presidio` | 69% / 56% / 18 ms | 7% / 21% / 6 ms | 66% / - / 12 ms | 69% / 92% / 312 ms |
 | `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
 | `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
@@ -106,8 +106,8 @@ Recall only, since the annotation does not list everything sensitive.
 | `local-gliner` | 55% | 234/244 | 158/161 | 46/57 | 17/187 | 37/126 | 31/31 | 0/33 | 10/82 | 2/60 |
 | `local-rules+local-ner` | 46% | 201/244 | 157/161 | 22/57 | 16/187 | 7/126 | 31/31 | 0/33 | 16/82 | 4/60 |
 | `local-rules+local-gliner` | 57% | 234/244 | 161/161 | 46/57 | 32/187 | 40/126 | 31/31 | 0/33 | 17/82 | 2/60 |
-| `local-credential-ml` | 1% | 2/244 | 5/161 | 0/57 | 0/187 | 1/126 | 0/31 | 1/33 | 4/82 | 0/60 |
-| `local-rules+local-credential-ml` | 24% | 9/244 | 157/161 | 1/57 | 16/187 | 8/126 | 31/31 | 1/33 | 17/82 | 0/60 |
+| `local-credential-ml` | 2% | 2/244 | 5/161 | 0/57 | 0/187 | 1/126 | 0/31 | 6/33 | 5/82 | 0/60 |
+| `local-rules+local-credential-ml` | 25% | 9/244 | 157/161 | 1/57 | 16/187 | 8/126 | 31/31 | 6/33 | 17/82 | 0/60 |
 | `presidio` | 66% | 201/244 | 156/161 | 14/57 | 90/187 | 64/126 | 31/31 | 6/33 | 72/82 | 15/60 |
 | `gcp-dlp` | 49% | 219/244 | 160/161 | 27/57 | 2/187 | 12/126 | 31/31 | 4/33 | 8/82 | 15/60 |
 | `aws-comprehend` | 80% | 240/244 | 161/161 | 39/57 | 85/187 | 116/126 | 31/31 | 23/33 | 82/82 | 9/60 |
@@ -115,7 +115,7 @@ Recall only, since the annotation does not list everything sensitive.
 | `gcp-vertex-ai` | 86% | 239/244 | 161/161 | 46/57 | 186/187 | 126/126 | 31/31 | 27/33 | 15/82 | 11/60 |
 | `aws-bedrock` | 87% | 232/244 | 161/161 | 45/57 | 187/187 | 125/126 | 31/31 | 31/33 | 36/82 | 6/60 |
 
-- on `credential`, `local-credential-ml` found 1 of the 33 and no other local row found any, where `local-rules` found 36 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
+- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 36 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
 - every redacter found all 31 dates of birth except `local-ner` and `aws-bedrock-guardrails`, which found none.
 
 ## Images
@@ -153,8 +153,8 @@ The whole run over the 200 files of `public`, in milliseconds:
 | `local-gliner` | 88352 ms |
 | `local-rules+local-ner` | 7797 ms |
 | `local-rules+local-gliner` | 93374 ms |
-| `local-credential-ml` | 7716 ms |
-| `local-rules+local-credential-ml` | 7685 ms |
+| `local-credential-ml` | 5738 ms |
+| `local-rules+local-credential-ml` | 5771 ms |
 | `presidio` | 2568 ms |
 | `gcp-dlp` | 14526 ms |
 | `aws-comprehend` | 16962 ms |
@@ -186,10 +186,11 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 - `gemini-llm` (the Gemini API) and `open-ai-llm` were not measured;
 - the `secrets` corpus is synthetic: the values are made up;
-- the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. The word it redacts when no rule matches is picked by its shape, and no dataset here is built to test that choice;
+- the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. When no rule matches, every word of a flagged line with a digit or a symbol is redacted, and no dataset here is built to test what that takes along;
 - `fixtures` has 8 files and `images` has 2 files and 16 boxes, so a difference of a few points is a few values;
 - each cell is one run, and an LLM redacter can answer differently for the same files: the re-run of the `gcp-vertex-ai` cell for `fixtures` differed in precision and in keep hits, see [How the numbers were measured](#how-the-numbers-were-measured);
 - the `local-rules` time on `fixtures` (412 ms for the run, 51 ms per file) is from the first scan of the first run. It is higher than the times of `local-ner` (40 ms) and `local-rules+local-ner` (43 ms) on the same files;
+- the `local-credential-ml` time on `fixtures` (616 ms for the run, 77 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (30 ms) on the same files;
 - every redacter ran with its default configuration: the default label lists and rules of the local redacters, Presidio's default recognizers, and the default model of the LLM redacters (`publishers/google/models/gemini-3.8-flash` on Vertex AI, Amazon Nova 2 Lite on Bedrock). A tuned configuration, such as more labels for `local-gliner`, a custom info type list for `gcp-dlp` or your own `local-rules` rules, changes the numbers;
 - `aws-bedrock-guardrails` ran with a [guardrail](../README.md#aws-bedrock-guardrails) that has all 31 built-in PII types set to anonymise;
 - times are from one machine and one network;
@@ -198,7 +199,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 ## How the numbers were measured
 
 - commit `2390a25` of this repository, release build;
-- the `local-credential-ml` rows come from a later run, in the same way: commit `cbe346f`, release build, the same machine, on 2026-11-01;
+- the `local-credential-ml` rows come from a later run, in the same way: commit `c71f738`, release build, the same machine, on 2026-11-01;
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
 - the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6785 ms per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8073 ms, and its numbers are used;
@@ -248,7 +249,7 @@ cargo test --release --test bench_dlp -- --ignored --nocapture
 
 The re-run is run 1 with `BENCH_DLP_PROVIDERS=gcp-vertex-ai` and `BENCH_DLP_DATASETS=fixtures`.
 
-The `local-credential-ml` rows are run 4, on commit `cbe346f`:
+The `local-credential-ml` rows are run 4, on commit `c71f738`:
 
 ```sh
 BENCH_DLP_DATASETS=fixtures,secrets,public,images \

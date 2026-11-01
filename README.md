@@ -775,15 +775,19 @@ redacter cp -d local-rules -d local-credential-ml tmp/source/ tmp/redacted/
 redacter cp -d local-rules -d local-credential-ml --local-credential-ml-min-score 0.5 tmp/source/ tmp/redacted/
 ```
 
-The model says that a line holds a credential and not where, so the value is placed in three steps:
+The model says that a line holds a credential and not where, so the values on a line are placed first, and the
+line is rated only when there is something to redact:
 
-- the secret rules of `local-rules` run on the line: `key=value` and `key: value` assignments, vendor tokens,
-  `Authorization` header values and passwords in URLs. Their value checks are off, since the model has already
-  rated the line;
-- when no rule matches, the longest word of the line that holds a digit or a symbol is redacted, without the quotes
-  around it and without the `key=` in front of it;
-- a flagged `-----BEGIN ... PRIVATE KEY-----` line redacts the whole key block, found by the `private-key-block`
-  rule of `local-rules`. The lines inside a block are not rated.
+- the secret rules of `local-rules` run on the line: `key=value` and `key: value` assignments, quoted values of any
+  length, vendor tokens, `Authorization` header values and passwords in URLs. Their value checks are off, since the
+  model rates the line;
+- when no rule matches, every word of the line that holds a digit or a symbol is a value, without the quotes
+  around it and without the `key=` in front of it. A redaction marker that an earlier redacter left is never a
+  value;
+- a line with no value is not rated.
+
+A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
+whatever the model rates; the lines inside a block are not rated.
 
 The key of an assignment stays in the file. In a table, a cell is rated behind its column header, as
 `password: value`, and only the cell is redacted.
@@ -804,13 +808,14 @@ Limits:
 - the model rates a line on its own, without the lines around it, and reads the first 128 tokens of a line;
 - it rates the AWS documentation example keys and `password: value` lines with a plain value low. `local-rules`
   finds both, which is why it is chained;
-- when no rule matches, the word is chosen by its shape. On the line
-  `machine api2.example.com login deploy password n3trc-pass` that is the host name and not the password;
-- it found 1 of the 33 credentials of the `public` dataset, and it does not look for personal information;
-- it reported 46 findings in the 113 files of `src` and 2 in `README.md`, which hold passwords and tokens as test
-  data; `docs` and `Cargo.toml` gave none;
-- the rating costs about 4 ms per line, so a file of many lines takes seconds. Loading takes about 60 ms and the
-  process holds about 190 MiB. These numbers are from an Apple M6 Mac mini.
+- when no rule matches, every word with a digit or a symbol on a flagged line is redacted, so a host name, an IP
+  address or a date next to the password is redacted too;
+- it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
+- on 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly
+  all of them test data that holds passwords and tokens;
+- the model takes about 4 ms for a line, and a line with no digit and no symbol is not rated. A scan of Rust source
+  of 30,036 non-blank lines took 32 s, and a log of 10,000 lines that each hold a digit took 49 s. The process holds
+  about 190 MiB and loading takes about 60 ms. These numbers are from an Apple M6 Mac mini.
 
 The model is [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) by
 Zain Dana Harper, released under the MIT licence and fine-tuned from
@@ -844,7 +849,7 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
 secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
 and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
-models. The `local-credential-ml` rows come from a later run, on commit `cbe346f`, with the same datasets. `gemini-llm` and `open-ai-llm` were not measured.
+models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. `gemini-llm` and `open-ai-llm` were not measured.
 
 For secrets, `local-rules` found 88% at 1 ms per file, `local-rules+local-credential-ml` 93%, and `gcp-vertex-ai` found all of them. For personal information
 in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
