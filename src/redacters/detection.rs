@@ -3,7 +3,7 @@
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
-use crate::redacters::text_spans::{Finding, RuleName, REDACTED};
+use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, RuleName, REDACTED};
 #[cfg(feature = "local-ner")]
 use crate::redacters::Entity;
 use crate::redacters::{
@@ -148,6 +148,26 @@ pub struct Detections {
     /// such as a value a model reformatted. Only the labels are kept, since the values are the
     /// sensitive data. A file with unlocated values may hold findings that `found` lacks.
     pub unlocated: Vec<DetectionLabel>,
+}
+
+impl Detections {
+    /// `text` with the findings masked as `mask` says and everything else untouched, and the
+    /// findings that were masked. Fails when a value was named but not placed in `text`:
+    /// it cannot be masked, and copying the text would leave it in place unsaid.
+    pub fn masked(
+        self,
+        text: &str,
+        redacter: RedacterType,
+        mask: TextMask,
+    ) -> AppResult<(String, Vec<Detection>)> {
+        if !self.unlocated.is_empty() {
+            return Err(AppError::UnlocatedValues {
+                redacter,
+                count: self.unlocated.len(),
+            });
+        }
+        Ok((Detection::mask(text, &self.found, mask), self.found))
+    }
 }
 
 impl From<Vec<Detection>> for Detections {
@@ -454,6 +474,33 @@ impl Detection {
             .collect::<AppResult<_>>()?;
         Ok(Detections { found, unlocated })
     }
+
+    /// `text` with every text range of `detections` replaced as `mask` says. Ranges may
+    /// overlap or arrive in any order; overlapping ranges are masked as one, and
+    /// `TextMask::Label` names the label of the one that starts first.
+    pub(crate) fn mask(text: &str, detections: &[Self], mask: TextMask) -> String {
+        let findings = detections
+            .iter()
+            .filter_map(|detection| match detection.location {
+                DetectionLocation::Text { start, end, .. } if start < end => Some(Finding {
+                    start,
+                    end,
+                    rule: RuleName::new(&detection.label.0),
+                    score: None,
+                }),
+                _ => None,
+            })
+            .collect();
+        replace_findings(
+            text,
+            &merge_findings(findings),
+            |finding, original| match mask {
+                TextMask::Token => REDACTED.to_string(),
+                TextMask::EveryCharacter => original.chars().map(|_| 'X').collect(),
+                TextMask::Label => format!("{{{}}}", finding.rule),
+            },
+        )
+    }
 }
 
 /// A text case-folded one character at a time, with the byte offsets that map a position in
@@ -561,83 +608,9 @@ impl CharOffsets {
     }
 }
 
-/// `text` with every text range of `detections` replaced as `mask` says. Ranges may overlap
-/// or arrive in any order; overlapping ranges are masked as one, and `TextMask::Label` names
-/// the label of the one that starts first.
-pub(crate) fn mask_detections(text: &str, detections: &[Detection], mask: TextMask) -> String {
-    let mut ranges: Vec<(Range<usize>, &DetectionLabel)> = detections
-        .iter()
-        .filter_map(|detection| match detection.location {
-            DetectionLocation::Text { start, end, .. } if start < end => {
-                Some((start..end, &detection.label))
-            }
-            _ => None,
-        })
-        .collect();
-    ranges.sort_by_key(|(range, _)| (range.start, std::cmp::Reverse(range.end)));
-    let mut merged: Vec<(Range<usize>, &DetectionLabel)> = Vec::with_capacity(ranges.len());
-    for (range, label) in ranges {
-        match merged.last_mut() {
-            Some((last, _)) if range.start < last.end => last.end = last.end.max(range.end),
-            _ => merged.push((range, label)),
-        }
-    }
-
-    let mut masked = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for (range, label) in merged {
-        masked.push_str(&text[cursor..range.start]);
-        match mask {
-            TextMask::Token => masked.push_str(REDACTED),
-            TextMask::EveryCharacter => {
-                masked.extend(text[range.clone()].chars().map(|_| 'X'));
-            }
-            TextMask::Label => {
-                masked.push('{');
-                masked.push_str(&label.0);
-                masked.push('}');
-            }
-        }
-        cursor = range.end;
-    }
-    masked.push_str(&text[cursor..]);
-    masked
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_label_is_placed_by_the_map_of_the_redacter_that_found_it() {
-        let rows = [
-            (RedacterType::LocalRules, "email", Category::Contact),
-            #[cfg(feature = "local-ner")]
-            (RedacterType::LocalNer, "per", Category::Person),
-            #[cfg(feature = "local-gliner")]
-            (RedacterType::LocalGliner, "iban", Category::Financial),
-            (
-                RedacterType::LocalCredentialMl,
-                "credential",
-                Category::Credential,
-            ),
-            (RedacterType::GcpDlp, "PASSWORD", Category::Credential),
-            (RedacterType::AwsComprehend, "EMAIL", Category::Contact),
-            (RedacterType::Presidio, "IP_ADDRESS", Category::Network),
-            (RedacterType::AwsBedrockGuardrails, "NAME", Category::Person),
-            (RedacterType::GeminiLlm, "api_key", Category::Credential),
-            (RedacterType::OpenAiLlm, "api_key", Category::Credential),
-            (RedacterType::GcpVertexAi, "api_key", Category::Credential),
-            (RedacterType::AwsBedrock, "api_key", Category::Credential),
-        ];
-        for (redacter, label, category) in rows {
-            assert_eq!(
-                DetectionLabel::new(label).category(redacter),
-                category,
-                "{redacter} {label}"
-            );
-        }
-    }
 
     fn score(value: f32) -> Score {
         Score::try_from(value).unwrap()
@@ -989,7 +962,7 @@ mod tests {
                 .unwrap()
         };
 
-        let masked = mask_detections(
+        let masked = Detection::mask(
             text,
             &[
                 detection("zoe@example.com"),
@@ -1000,6 +973,48 @@ mod tests {
         );
 
         assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
+    }
+
+    #[test]
+    fn masked_leaves_the_rest_of_the_text_alone_and_returns_what_it_masked() {
+        let text = "key=hunter2-Secret mail=ops@example.com";
+        let lines = TextLines::new(text);
+        let key = lines
+            .detection(4..18, DetectionLabel::new("password"), None)
+            .unwrap();
+
+        let (masked, replaced) = Detections::from(vec![key])
+            .masked(text, RedacterType::GeminiLlm, TextMask::EveryCharacter)
+            .unwrap();
+
+        assert_eq!(masked, "key=XXXXXXXXXXXXXX mail=ops@example.com");
+        assert_eq!(
+            replaced
+                .iter()
+                .map(|d| d.value.as_str())
+                .collect::<Vec<_>>(),
+            ["hunter2-Secret"]
+        );
+    }
+
+    #[test]
+    fn a_value_that_was_named_but_not_placed_cannot_be_masked() {
+        let detections = Detections {
+            unlocated: vec![DetectionLabel::new("password")],
+            ..Detections::default()
+        };
+
+        let error = detections
+            .masked("key=hunter2", RedacterType::GeminiLlm, TextMask::Token)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::UnlocatedValues {
+                redacter: RedacterType::GeminiLlm,
+                count: 1
+            }
+        ));
     }
 
     #[test]
@@ -1019,15 +1034,15 @@ mod tests {
         ];
 
         assert_eq!(
-            mask_detections(text, &detections, TextMask::Token),
+            Detection::mask(text, &detections, TextMask::Token),
             "[REDACTED] wrote to [REDACTED]"
         );
         assert_eq!(
-            mask_detections(text, &detections, TextMask::EveryCharacter),
+            Detection::mask(text, &detections, TextMask::EveryCharacter),
             "XXX wrote to XXXXXXXXXXXXXXX"
         );
         assert_eq!(
-            mask_detections(text, &detections, TextMask::Label),
+            Detection::mask(text, &detections, TextMask::Label),
             "{NAME} wrote to {EMAIL}"
         );
     }

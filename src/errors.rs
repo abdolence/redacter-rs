@@ -57,6 +57,11 @@ pub enum AppError {
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]
     RedacterConfigError { message: String },
+    #[error("{redacter} named {count} value(s) it could not place in the text, so they cannot be redacted")]
+    UnlocatedValues {
+        redacter: RedacterType,
+        count: usize,
+    },
     #[error(transparent)]
     Categories(#[from] crate::redacters::CategoriesError),
     #[error("Template error: {0}")]

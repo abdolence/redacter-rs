@@ -55,11 +55,21 @@ pub fn merge_findings(mut findings: Vec<Finding>) -> Vec<Finding> {
 /// Rebuilds `text` with every finding replaced by `replacement`. Findings must be merged
 /// (sorted, non-overlapping); the function walks them front to back.
 pub fn apply_redaction(text: &str, findings: &[Finding], replacement: &str) -> String {
+    replace_findings(text, findings, |_, _| replacement.to_string())
+}
+
+/// Rebuilds `text` with every finding replaced by what `replacement` makes of it and the
+/// text it covers. Findings must be merged, as for [`apply_redaction`].
+pub fn replace_findings(
+    text: &str,
+    findings: &[Finding],
+    replacement: impl Fn(&Finding, &str) -> String,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
     for finding in findings {
         out.push_str(&text[cursor..finding.start]);
-        out.push_str(replacement);
+        out.push_str(&replacement(finding, &text[finding.start..finding.end]));
         cursor = finding.end;
     }
     out.push_str(&text[cursor..]);

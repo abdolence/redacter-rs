@@ -2,9 +2,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, Categories, Category, CharOffsets, Detection, DetectionLabel, Detections,
-    RedactSupport, Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
-    TextLines,
+    Categories, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
+    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -94,7 +93,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         }?;
 
         let detections = self.detect_text(&text_content).await?;
-        let redacted_content = mask_detections(&text_content, &detections, self.text_mask());
+        let redacted_content = Detection::mask(&text_content, &detections, self.text_mask());
         Ok(Redacted::located(
             RedacterDataItem {
                 file_ref: input.file_ref,
