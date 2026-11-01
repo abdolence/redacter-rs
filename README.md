@@ -846,7 +846,7 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 | `gcp-dlp` | 85% | 41% | 49% | 94% | 72 ms |
 | `aws-comprehend` | 98% | 56% | 80% | 94% | 84 ms |
 | `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 161 ms |
-| `gcp-vertex-ai` | 98% | 100% | 86% | 100% | 9062 ms |
+| `gcp-vertex-ai` | 98% | 100% | 86% | 100% | 9.1 s |
 | `aws-bedrock` | 98% | 93% | 87% | 94% | 583 ms |
 
 PII documents is `fixtures`: 8 text files with personal data in several formats and languages. Secrets in config and code is `secrets`: 29 files with 41 planted passwords, keys and tokens. Public PII sample is `public`: 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0), synthetic personal data. Scanned form is `images`: a PNG and a PDF of one customer form.
