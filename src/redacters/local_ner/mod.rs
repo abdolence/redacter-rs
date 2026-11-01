@@ -12,7 +12,7 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
+use crate::redacters::text_spans::{self, apply_redaction, Finding, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Score,
@@ -48,10 +48,8 @@ impl LocalNerRedacterOptions {
 /// hold a name and never reaches the model: the predicate is "holds no letter", not "is a
 /// number", and the model would cost a tokenizer pass and a forward pass to find nothing.
 ///
-/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
-/// `"Madrid"`: a one-word cell gives the model no sentence, and it tags a bare city as `O` at
-/// every score floor. The prefix is scoring context only: `shift_into_cell` maps the findings
-/// back onto the cell, so no header text can reach a redacted cell or a detection.
+/// A one-word cell gives the model no sentence, and it tags a bare city as `O` at every score
+/// floor, so the cell is scored behind its column header as `"city: Madrid"`.
 fn find_in_cell<F>(
     headers: &[String],
     column: usize,
@@ -64,17 +62,7 @@ where
     if !cell.chars().any(char::is_alphabetic) {
         return Ok(Vec::new());
     }
-    // A row wider than the header list, or an empty header, leaves the cell alone.
-    let prefix = match headers.get(column) {
-        Some(header) if !header.is_empty() => format!("{header}: "),
-        _ => String::new(),
-    };
-    let scored = if prefix.is_empty() {
-        find_in(cell)?
-    } else {
-        find_in(&format!("{prefix}{cell}"))?
-    };
-    Ok(shift_into_cell(scored, prefix.len()))
+    text_spans::find_in_cell(headers, column, cell, find_in)
 }
 
 /// Redacts every table cell that could hold a name, leaving the rest byte for byte.
@@ -102,22 +90,6 @@ where
         redacted_rows.push(redacted_row);
     }
     Ok((redacted_rows, findings))
-}
-
-/// Maps findings on `"{prefix}{cell}"` back onto `cell`. A finding that ends inside the
-/// prefix is the model matching the header itself and is dropped; one that crosses the
-/// boundary keeps only the part that falls in the cell. `prefix_len` is a byte length and the
-/// cell starts exactly there, so every clamped offset stays on a character boundary.
-fn shift_into_cell(findings: Vec<Finding>, prefix_len: usize) -> Vec<Finding> {
-    findings
-        .into_iter()
-        .filter(|finding| finding.end > prefix_len)
-        .map(|mut finding| {
-            finding.start = finding.start.max(prefix_len) - prefix_len;
-            finding.end -= prefix_len;
-            finding
-        })
-        .collect()
 }
 
 /// Offline NER redacter. The engine is loaded once per run and shared through an `Arc`, so

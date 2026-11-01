@@ -9,7 +9,8 @@
         feature = "ocr",
         feature = "pdf-render",
         feature = "local-ner",
-        feature = "local-gliner"
+        feature = "local-gliner",
+        feature = "local-credential-ml"
     )),
     allow(dead_code)
 )]

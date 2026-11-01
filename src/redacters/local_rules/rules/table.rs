@@ -3,7 +3,7 @@
 //! the same span (the first declared wins).
 
 use super::super::validators;
-use super::{Example, RuleGroup, RuleSpec};
+use super::{Example, RuleGroup, RuleSpec, PRIVATE_KEY_BLOCK_RULE};
 
 pub(super) fn builtin_rules() -> &'static [RuleSpec] {
     RULES
@@ -242,7 +242,7 @@ const RULES: &[RuleSpec] = &[
         pattern: r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]+)",
     },
     RuleSpec {
-        name: "private-key-block",
+        name: PRIVATE_KEY_BLOCK_RULE,
         group: RuleGroup::Secrets,
         capture_group: 0,
         validator: None,

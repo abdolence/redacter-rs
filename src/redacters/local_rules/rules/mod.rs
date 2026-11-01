@@ -165,19 +165,51 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
     !before_is_word && !after_is_word
 }
 
+/// The built-in rule that matches a whole PEM or PGP private key block, which spans lines.
+pub const PRIVATE_KEY_BLOCK_RULE: &str = "private-key-block";
+
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
+        Self::from_builtin(|spec| groups.contains(&spec.group), true)
+    }
+
+    /// The rules that find the value of a credential on one line, for a caller that already
+    /// has evidence that the line holds one: every `Secrets` rule and `url-credentials`, apart
+    /// from the multi-line private key block. Value validators are off, so a short or plain
+    /// value written as `password: abc` is found on such a line; on an unjudged line the
+    /// validators are what keep these rules from redacting prose and code.
+    #[cfg(feature = "local-credential-ml")]
+    pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
+        Self::from_builtin(
+            |spec| {
+                (spec.group == RuleGroup::Secrets || spec.name == "url-credentials")
+                    && spec.name != PRIVATE_KEY_BLOCK_RULE
+            },
+            false,
+        )
+    }
+
+    /// Only the private key block rule.
+    #[cfg(feature = "local-credential-ml")]
+    pub fn private_key_block_rule() -> Result<Self, LocalRulesError> {
+        Self::from_builtin(|spec| spec.name == PRIVATE_KEY_BLOCK_RULE, true)
+    }
+
+    fn from_builtin(
+        keep: impl Fn(&RuleSpec) -> bool,
+        validated: bool,
+    ) -> Result<Self, LocalRulesError> {
         let mut rules = Vec::new();
-        for spec in builtin_rules()
-            .iter()
-            .filter(|spec| groups.contains(&spec.group))
-        {
+        for spec in builtin_rules().iter().filter(|spec| keep(spec)) {
             rules.push(CompiledRule {
                 name: RuleName::new(spec.name),
                 regex: compile(spec.name, spec.pattern, false)?,
                 capture_group: spec.capture_group,
-                validator: spec.validator.map(|(_, validate)| validate),
+                validator: spec
+                    .validator
+                    .filter(|_| validated)
+                    .map(|(_, validate)| validate),
                 whole_word: false,
             });
         }

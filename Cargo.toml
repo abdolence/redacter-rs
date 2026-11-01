@@ -15,7 +15,7 @@ categories = ["command-line-utilities"]
 description = "Detect & Redact cli tool to find sensitive data in files, such as personal information (PII), passwords and API keys, and to securely copy and redact files removing it, across various filesystems."
 
 [features]
-default = ["pdf-render", "clipboard", "ocr", "local-ner", "local-gliner"]
+default = ["pdf-render", "clipboard", "ocr", "local-ner", "local-gliner", "local-credential-ml"]
 ci-gcp = [] # For testing on CI/GCP
 ci-aws = [] # For testing on CI/AWS
 ci-presidio = [] # For testing on CI/Presidio
@@ -25,6 +25,7 @@ ci-clipboard = [] # For testing on CI/Clipboard
 ci-ocr = [] # For testing on CI/OCR
 ci-local-ner = [] # For testing on CI with the downloaded local NER model
 ci-local-gliner = [] # For testing on CI with the downloaded local GLiNER model
+ci-local-credential-ml = [] # For testing on CI with the downloaded local credential model
 ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
 ci = [
     "ci-gcp",
@@ -40,6 +41,7 @@ clipboard = ["arboard"]
 ocr = ["ocrs", "rten", "rten-imageproc"]
 local-ner = ["tokenizers", "rten", "rten-tensor"]
 local-gliner = ["tokenizers", "rten", "rten-tensor"]
+local-credential-ml = ["tokenizers", "rten", "rten-tensor"]
 
 [dependencies]
 rsb_derive = "0.5"

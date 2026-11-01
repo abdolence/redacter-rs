@@ -29,7 +29,7 @@ use std::str::FromStr;
 use summary::{DatasetResult, Measurement, Outcome, ProviderResult, Results};
 
 const DEFAULT_PROVIDERS: &str =
-    "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner";
+    "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,local-credential-ml,local-rules+local-credential-ml";
 const DEFAULT_DATASETS: &str = "fixtures,secrets,public";
 
 fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> Vec<T> {
