@@ -47,7 +47,7 @@ at least 60% of its area lies in the entry.
 |---|---|
 | Recall | sensitive entries found, over all categories |
 | Precision | findings on a found sensitive entry, over those and the false alarms. Shown where the truth lists everything sensitive: every dataset but `public` |
-| Per category | found/total for person, contact, address, id-number, financial, date-of-birth, credential, network and other. `-` for a category the dataset has no entries in |
+| Per category | found/total for person, contact, address, location, organization, id-number, financial, date-of-birth, secrets, network and other. `-` for a category the dataset has no entries in, which is always the case for location and organization, since the truth counts places and organisations as neutral |
 | Keep hit | keep strings that a finding is on, out of all keep strings. Shown where precision is |
 | Whole run | wall time of one `scan` over the dataset |
 | Per file | whole run over the number of files |
