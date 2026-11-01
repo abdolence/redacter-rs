@@ -22,16 +22,6 @@ pub enum AppError {
     #[error("Google Cloud invalid metadata value:\n{0}")]
     GoogleCloudInvalidMetadataValue(#[from] InvalidMetadataValue),
     #[error(
-        "Google Cloud Storage object '{object}' failed the CRC32C check of the message at byte \
-         {offset}: expected {expected:#010x}, computed {computed:#010x}"
-    )]
-    GoogleCloudMessageChecksumMismatch {
-        object: String,
-        offset: u64,
-        expected: u32,
-        computed: u32,
-    },
-    #[error(
         "Google Cloud Storage object '{object}' failed the whole-object CRC32C check: expected \
          {expected:#010x}, computed {computed:#010x}"
     )]
@@ -39,6 +29,17 @@ pub enum AppError {
         object: String,
         expected: u32,
         computed: u32,
+    },
+    #[error(
+        "Google Cloud Storage object '{object}' could not be verified: neither the read nor the \
+         object metadata carries a CRC32C"
+    )]
+    GoogleCloudObjectChecksumMissing { object: String },
+    #[error("Google Cloud Storage object '{object}' has {expected} bytes but {read} were read")]
+    GoogleCloudObjectSizeMismatch {
+        object: String,
+        expected: i64,
+        read: i64,
     },
     #[error("AWS SDK error occurred")]
     AwsSdkError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
