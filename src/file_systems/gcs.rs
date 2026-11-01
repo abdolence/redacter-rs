@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use gcloud_sdk::google::storage::v2::storage_client::StorageClient;
 use gcloud_sdk::google::storage::v2::{
     write_object_request, ChecksummedData, GetObjectRequest, ListObjectsRequest, Object,
-    ReadObjectRequest, WriteObjectRequest, WriteObjectSpec,
+    ObjectChecksums, ReadObjectRequest, ReadObjectResponse, WriteObjectRequest, WriteObjectSpec,
 };
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::prost::bytes::{Bytes, BytesMut};
@@ -18,7 +18,9 @@ use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use rvstruct::ValueStruct;
 use std::collections::VecDeque;
 use std::default::Default;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{ready, Context, Poll};
 
 const GCS_GRPC_ENDPOINT: &str = "https://storage.googleapis.com";
 
@@ -146,11 +148,14 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
 
 /// Splits an arbitrary sequence of byte chunks into `WriteObject` messages with
 /// 256 KiB-aligned payloads, cumulative write offsets, and a `WriteObjectSpec`
-/// carried by the first message of the stream.
+/// carried by the first message of the stream. Every message carries the CRC32C
+/// of its payload and the closing one the CRC32C of the whole object, so the
+/// server rejects data that was damaged on the way.
 struct WriteObjectChunker {
     first_message: Option<write_object_request::FirstMessage>,
     buffer: BytesMut,
     write_offset: i64,
+    object_crc32c: u32,
 }
 
 impl WriteObjectChunker {
@@ -159,12 +164,16 @@ impl WriteObjectChunker {
             first_message: Some(write_object_request::FirstMessage::WriteObjectSpec(spec)),
             buffer: BytesMut::new(),
             write_offset: 0,
+            object_crc32c: 0,
         }
     }
 
     fn message(&mut self, content: Vec<u8>, finish_write: bool) -> WriteObjectRequest {
         let write_offset = self.write_offset;
         self.write_offset = write_offset.saturating_add(content.len() as i64);
+        let message_crc32c = crc32c::crc32c(&content);
+        self.object_crc32c =
+            crc32c::crc32c_combine(self.object_crc32c, message_crc32c, content.len());
         WriteObjectRequest {
             write_offset,
             finish_write,
@@ -172,9 +181,13 @@ impl WriteObjectChunker {
             data: Some(write_object_request::Data::ChecksummedData(
                 ChecksummedData {
                     content,
-                    crc32c: None,
+                    crc32c: Some(message_crc32c),
                 },
             )),
+            object_checksums: finish_write.then(|| ObjectChecksums {
+                crc32c: Some(self.object_crc32c),
+                md5_hash: Vec::new(),
+            }),
             ..WriteObjectRequest::default()
         }
     }
@@ -234,6 +247,120 @@ where
     })
 }
 
+/// Checks that a `ReadObject` stream delivered the whole object Cloud Storage
+/// holds. The CRC32C comes from the stream, which is the one the server computed
+/// for this very read, or else from the object metadata fetched beforehand.
+///
+/// The check holds for a full read only: a read with an offset or a limit would
+/// always fail it.
+struct ReadObjectVerifier {
+    object: String,
+    metadata_size: i64,
+    metadata_crc32c: Option<u32>,
+    bytes_read: i64,
+    computed_crc32c: u32,
+    stream_crc32c: Option<u32>,
+}
+
+impl ReadObjectVerifier {
+    fn new(object: String, metadata: &Object) -> Self {
+        Self {
+            object,
+            metadata_size: metadata.size,
+            metadata_crc32c: metadata
+                .checksums
+                .as_ref()
+                .and_then(|checksums| checksums.crc32c),
+            bytes_read: 0,
+            computed_crc32c: 0,
+            stream_crc32c: None,
+        }
+    }
+
+    fn accept(&mut self, response: ReadObjectResponse) -> Bytes {
+        if let Some(crc32c) = response
+            .object_checksums
+            .and_then(|checksums| checksums.crc32c)
+        {
+            self.stream_crc32c = Some(crc32c);
+        }
+        let Some(data) = response.checksummed_data else {
+            return Bytes::new();
+        };
+        self.bytes_read = self.bytes_read.saturating_add(data.content.len() as i64);
+        self.computed_crc32c = crc32c::crc32c_append(self.computed_crc32c, &data.content);
+        Bytes::from(data.content)
+    }
+
+    /// A download that cannot be checked fails rather than pass as verified.
+    fn finish(self) -> AppResult<()> {
+        let Some(expected) = self.stream_crc32c.or(self.metadata_crc32c) else {
+            return Err(AppError::GoogleCloudObjectChecksumMissing {
+                object: self.object,
+            });
+        };
+        if expected != self.computed_crc32c {
+            return Err(AppError::GoogleCloudObjectChecksumMismatch {
+                object: self.object,
+                expected,
+                computed: self.computed_crc32c,
+            });
+        }
+        if self.metadata_size != self.bytes_read {
+            return Err(AppError::GoogleCloudObjectSizeMismatch {
+                object: self.object,
+                expected: self.metadata_size,
+                read: self.bytes_read,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Turns the `ReadObject` response stream into the payload stream, failing it
+/// with a checksum error instead of ending normally when the data does not
+/// match what the server digested. The stream ends after its first error.
+struct VerifiedReadStream<S> {
+    responses: S,
+    verifier: Option<ReadObjectVerifier>,
+}
+
+impl<S> VerifiedReadStream<S> {
+    fn new(responses: S, object_name: String, metadata: &Object) -> Self {
+        Self {
+            responses,
+            verifier: Some(ReadObjectVerifier::new(object_name, metadata)),
+        }
+    }
+}
+
+impl<S> Stream for VerifiedReadStream<S>
+where
+    S: Stream<Item = Result<ReadObjectResponse, tonic::Status>> + Unpin,
+{
+    type Item = AppResult<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let Some(verifier) = this.verifier.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match ready!(Pin::new(&mut this.responses).poll_next(cx)) {
+            Some(Ok(response)) => Poll::Ready(Some(Ok(verifier.accept(response)))),
+            Some(Err(status)) => {
+                this.verifier = None;
+                Poll::Ready(Some(Err(status.into())))
+            }
+            None => Poll::Ready(
+                this.verifier
+                    .take()
+                    .and_then(|verifier| verifier.finish().err())
+                    .map(Err),
+            ),
+        }
+    }
+}
+
 impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
     async fn download(
         &mut self,
@@ -281,7 +408,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             .get()
             .read_object(self.request(ReadObjectRequest {
                 bucket: self.bucket_resource_name.clone(),
-                object: object_name,
+                object: object_name.clone(),
                 ..ReadObjectRequest::default()
             }))
             .await?
@@ -289,16 +416,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
 
         Ok((
             found_file_ref,
-            Box::new(read_stream.map(|response| {
-                response
-                    .map(|response| {
-                        response
-                            .checksummed_data
-                            .map(|data| Bytes::from(data.content))
-                            .unwrap_or_default()
-                    })
-                    .map_err(AppError::from)
-            })),
+            Box::new(VerifiedReadStream::new(read_stream, object_name, &object)),
         ))
     }
 
@@ -548,6 +666,192 @@ mod tests {
         assert!(matches!(*parked, Some(AppError::SystemError { .. })));
     }
 
+    fn message_checksum(request: &WriteObjectRequest) -> Option<u32> {
+        match request.data {
+            Some(write_object_request::Data::ChecksummedData(ref data)) => data.crc32c,
+            None => None,
+        }
+    }
+
+    /// The standard CRC32C check value: the checksum of the ASCII digits "123456789".
+    const CRC32C_OF_DIGITS: u32 = 0xE306_9283;
+
+    #[tokio::test]
+    async fn write_object_chunker_matches_the_crc32c_check_value() {
+        let requests: Vec<WriteObjectRequest> = write_object_requests(
+            futures::stream::iter(vec![Ok(Bytes::from_static(b"123456789"))]),
+            test_write_object_spec(),
+            Arc::new(Mutex::new(None)),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(message_checksum(&requests[0]), Some(CRC32C_OF_DIGITS));
+        assert_eq!(
+            requests[0]
+                .object_checksums
+                .as_ref()
+                .and_then(|checksums| checksums.crc32c),
+            Some(CRC32C_OF_DIGITS)
+        );
+    }
+
+    #[tokio::test]
+    async fn write_object_chunker_sends_the_object_checksum_on_the_last_message_only() {
+        let (expected, requests) = chunk_input(&[
+            1,
+            WRITE_OBJECT_CHUNK_SIZE - 1,
+            WRITE_OBJECT_CHUNK_SIZE * 2 + 17,
+            5,
+        ])
+        .await;
+
+        let Some((last, earlier)) = requests.split_last() else {
+            panic!("the chunker must always emit a final message");
+        };
+        assert!(!earlier.is_empty());
+        assert!(
+            earlier
+                .iter()
+                .all(|request| request.object_checksums.is_none()),
+            "only the closing message may carry the object checksums"
+        );
+        assert_eq!(
+            last.object_checksums,
+            Some(ObjectChecksums {
+                crc32c: Some(crc32c::crc32c(&expected)),
+                md5_hash: Vec::new(),
+            })
+        );
+    }
+
+    fn read_response(content: &[u8], object_crc32c: Option<u32>) -> ReadObjectResponse {
+        ReadObjectResponse {
+            checksummed_data: Some(ChecksummedData {
+                content: content.to_vec(),
+                crc32c: None,
+            }),
+            object_checksums: object_crc32c.map(|crc32c| ObjectChecksums {
+                crc32c: Some(crc32c),
+                md5_hash: Vec::new(),
+            }),
+            ..ReadObjectResponse::default()
+        }
+    }
+
+    fn object_metadata(content: &[u8], crc32c: Option<u32>) -> Object {
+        Object {
+            size: content.len() as i64,
+            checksums: crc32c.map(|crc32c| ObjectChecksums {
+                crc32c: Some(crc32c),
+                md5_hash: Vec::new(),
+            }),
+            ..Object::default()
+        }
+    }
+
+    async fn read_verified(
+        metadata: &Object,
+        responses: Vec<ReadObjectResponse>,
+    ) -> Vec<AppResult<Bytes>> {
+        VerifiedReadStream::new(
+            futures::stream::iter(responses.into_iter().map(Ok)),
+            "redacter/test-object.bin".to_string(),
+            metadata,
+        )
+        .collect()
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_passes_matching_data_through() {
+        let metadata = object_metadata(b"hello, world", None);
+        let items = read_verified(
+            &metadata,
+            vec![
+                read_response(b"hello, ", Some(crc32c::crc32c(b"hello, world"))),
+                read_response(b"world", None),
+            ],
+        )
+        .await;
+
+        let payloads: Vec<Bytes> = items
+            .into_iter()
+            .collect::<AppResult<_>>()
+            .expect("matching checksums must not fail the stream");
+        assert_eq!(payloads.concat(), b"hello, world");
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_rejects_a_truncated_object() {
+        let metadata = object_metadata(b"hello, world", None);
+        let items = read_verified(
+            &metadata,
+            vec![read_response(
+                b"hello, ",
+                Some(crc32c::crc32c(b"hello, world")),
+            )],
+        )
+        .await;
+
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectChecksumMismatch { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_falls_back_to_the_metadata_checksum() {
+        let responses = vec![
+            read_response(b"hello, ", None),
+            read_response(b"world", None),
+        ];
+
+        let matching = object_metadata(b"hello, world", Some(crc32c::crc32c(b"hello, world")));
+        let items = read_verified(&matching, responses.clone()).await;
+        assert!(items.iter().all(|item| item.is_ok()));
+
+        let mismatching = object_metadata(b"hello, world", Some(crc32c::crc32c(b"hello, w0rld")));
+        let items = read_verified(&mismatching, responses).await;
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectChecksumMismatch { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_fails_without_any_checksum() {
+        let metadata = object_metadata(b"hello, world", None);
+        let items = read_verified(&metadata, vec![read_response(b"hello, world", None)]).await;
+
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectChecksumMissing { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_rejects_a_size_that_differs_from_the_metadata() {
+        let content = b"hello, world";
+        let mut metadata = object_metadata(content, Some(crc32c::crc32c(content)));
+        metadata.size += 1;
+        let items = read_verified(
+            &metadata,
+            vec![read_response(content, Some(crc32c::crc32c(content)))],
+        )
+        .await;
+
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectSizeMismatch {
+                expected: 13,
+                read: 12,
+                ..
+            }))
+        ));
+    }
+
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn upload_download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -563,10 +867,25 @@ mod tests {
         )
         .await?;
 
-        let test_data = "test content";
-        let test_data_stream = futures::stream::iter(vec![Ok(bytes::Bytes::from(test_data))]);
+        // Larger than one 2 MiB read message and cut at offsets that fall
+        // inside upload messages, so both directions cross message boundaries.
+        let piece_sizes = [1, 300_000, 1_000_003, 2 * 1024 * 1024 + 5, 123];
+        let mut next_byte: u8 = 0;
+        let pieces: Vec<bytes::Bytes> = piece_sizes
+            .iter()
+            .map(|size| {
+                (0..*size)
+                    .map(|_| {
+                        next_byte = next_byte.wrapping_add(31);
+                        next_byte
+                    })
+                    .collect::<Vec<u8>>()
+                    .into()
+            })
+            .collect();
+        let test_data = pieces.concat();
         fs.upload(
-            test_data_stream,
+            futures::stream::iter(pieces.into_iter().map(Ok)),
             Some(&FileSystemRef {
                 relative_path: "test-upload.txt".into(),
                 media_type: Some(mime::TEXT_PLAIN),
@@ -584,9 +903,7 @@ mod tests {
             .await?;
 
         let downloaded_bytes: Vec<bytes::Bytes> = down_stream.try_collect().await?;
-        let flattened_bytes = downloaded_bytes.concat();
-        let downloaded_content = std::str::from_utf8(&flattened_bytes)?;
-        assert_eq!(downloaded_content, test_data);
+        assert_eq!(downloaded_bytes.concat(), test_data);
 
         assert_eq!(file_ref.relative_path.value(), "test-upload.txt");
         assert_eq!(file_ref.media_type, Some(mime::TEXT_PLAIN));
