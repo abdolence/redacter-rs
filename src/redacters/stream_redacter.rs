@@ -15,6 +15,8 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use image::ImageFormat;
 use mime::Mime;
 use rvstruct::ValueStruct;
+use std::collections::HashMap;
+use std::ops::Range;
 
 /// The conversion the content went through before it was redacted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,36 +91,66 @@ impl DetectStreamResult {
     /// Only text and table cells can carry the marker: the words OCR reads from an image or a
     /// PDF page have no author-controlled place for it.
     fn set_aside_ignored(&mut self, content: &RedacterDataItemContent) {
-        let (ignored, unmarked) = match content {
+        let marked: Vec<bool> = match content {
             RedacterDataItemContent::Value(text) => {
                 let lines = TextLines::new(text);
-                std::mem::take(&mut self.detections)
-                    .into_iter()
-                    .partition(|(_, detection)| match detection.location {
+                let findings: Vec<Range<usize>> = self
+                    .detections
+                    .iter()
+                    .filter_map(|(_, detection)| match detection.location {
+                        DetectionLocation::Text { start, end, .. } => Some(start..end),
+                        _ => None,
+                    })
+                    .collect();
+                self.detections
+                    .iter()
+                    .map(|(_, detection)| match detection.location {
                         DetectionLocation::Text { start, end, .. } => {
-                            lines.has_marker_beside(start..end)
+                            lines.has_marker_beside(start..end, &findings)
                         }
                         _ => false,
                     })
+                    .collect()
             }
-            RedacterDataItemContent::Table { rows, .. } => std::mem::take(&mut self.detections)
-                .into_iter()
-                .partition(|(_, detection)| match detection.location {
-                    DetectionLocation::TableCell {
+            RedacterDataItemContent::Table { rows, .. } => {
+                let mut findings_by_cell: HashMap<(usize, usize), Vec<Range<usize>>> =
+                    HashMap::new();
+                for (_, detection) in &self.detections {
+                    if let DetectionLocation::TableCell {
                         row,
                         column,
                         start,
                         end,
-                    } => rows
-                        .get(row.saturating_sub(1))
-                        .and_then(|cells| cells.get(column.saturating_sub(1)))
-                        .is_some_and(|cell| has_marker_outside(cell, start..end)),
-                    _ => false,
-                }),
+                    } = detection.location
+                    {
+                        findings_by_cell
+                            .entry((row, column))
+                            .or_default()
+                            .push(start..end);
+                    }
+                }
+                self.detections
+                    .iter()
+                    .map(|(_, detection)| match detection.location {
+                        DetectionLocation::TableCell { row, column, .. } => rows
+                            .get(row.saturating_sub(1))
+                            .and_then(|cells| cells.get(column.saturating_sub(1)))
+                            .is_some_and(|cell| {
+                                has_marker_outside(cell, &findings_by_cell[&(row, column)])
+                            }),
+                        _ => false,
+                    })
+                    .collect()
+            }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => return,
         };
-        self.ignored.extend(ignored);
-        self.detections = unmarked;
+        for (detection, is_marked) in std::mem::take(&mut self.detections).into_iter().zip(marked) {
+            if is_marked {
+                self.ignored.push(detection);
+            } else {
+                self.detections.push(detection);
+            }
+        }
     }
 
     fn absorb(&mut self, other: Self) {
@@ -2048,20 +2080,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_marker_inside_the_finding_does_not_ignore_it() {
+    async fn a_marker_inside_any_finding_is_not_a_marker() {
         let converters = FileConverters::new();
-        let redacters = vec![secret_rules().await];
+        let redacters = vec![secret_rules().await, email_rules().await];
 
         let result = detect(
             &converters,
             &redacters,
             &file_ref("env.txt", mime::TEXT_PLAIN),
-            "API_KEY=xyz_redacter:allow_123456789\n".into(),
+            "API_KEY=xyz_redacter:allow_123456789 mail a@b.io\n".into(),
         )
         .await
         .unwrap();
 
-        assert_eq!(result.detections.len(), 1);
+        assert_eq!(result.detections.len(), 2);
         assert!(result.ignored.is_empty());
     }
 
