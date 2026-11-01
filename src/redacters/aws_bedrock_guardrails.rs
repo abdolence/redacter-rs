@@ -9,7 +9,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
+    bedrock_error, Detection, DetectionLabel, Detections, RedactSupport, Redacted, Redacter,
     RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
@@ -32,7 +32,6 @@ pub struct AwsBedrockGuardrailsRedacterOptions {
 pub struct AwsBedrockGuardrailsRedacter<'a> {
     client: aws_sdk_bedrockruntime::Client,
     options: AwsBedrockGuardrailsRedacterOptions,
-    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -149,7 +148,7 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
         Detection::locate_values(text, &values)
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -159,19 +158,25 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
 
         let result = self.apply_guardrail(&text_content).await?;
 
-        let redacted_content =
-            interpret_guardrail_output(&result, self.options.guardrail_id.value())?
-                .unwrap_or(text_content);
+        let anonymized = interpret_guardrail_output(&result, self.options.guardrail_id.value())?;
+        let replaced =
+            Self::detections_in(&text_content, &result).map(|detections| detections.found);
+        let redacted_content = anonymized.unwrap_or(text_content);
 
-        Ok(RedacterDataItem {
-            file_ref: input.file_ref,
-            content: RedacterDataItemContent::Value(redacted_content),
-        })
+        Ok(Redacted::located_or_unlocated(
+            RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(redacted_content),
+            },
+            replaced,
+            self.reporter,
+            RedacterType::AwsBedrockGuardrails,
+        ))
     }
 }
 
 impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
@@ -458,7 +463,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value, "Hello, {NAME}");
             }

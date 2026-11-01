@@ -3,11 +3,11 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_at_coords, redact_image_with_mode, retrying_once,
-    text_redaction_instruction, Detections, GeminiCandidate, ImageBoxes, LlmImageMode,
-    LlmTextFinding, ModelAnswer, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
-    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
+    prepare_image_for_llm, redact_image_with_mode, retrying_once, text_redaction_instruction,
+    Detections, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacted, Redacter, RedacterDataItem,
+    RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
+    NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -270,22 +270,11 @@ impl<'a> GeminiLlmRedacter<'a> {
     pub async fn redact_image_file_using_coords(
         &self,
         input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
+    ) -> AppResult<Redacted> {
         match input.content {
             RedacterDataItemContent::Image { mime_type, data } => {
                 let found = self.find_image_boxes(&mime_type, &data).await?;
-                Ok(RedacterDataItem {
-                    file_ref: input.file_ref,
-                    content: RedacterDataItemContent::Image {
-                        mime_type: mime_type.clone(),
-                        data: redact_image_at_coords(
-                            mime_type,
-                            found.image.data,
-                            found.coords,
-                            0.25,
-                        )?,
-                    },
-                })
+                found.redact(mime_type, input.file_ref, 0.25)
             }
             _ => Err(AppError::SystemError {
                 message: "Unsupported item for image redacting".to_string(),
@@ -480,9 +469,11 @@ impl<'a> GeminiLlmRedacter<'a> {
 }
 
 impl<'a> Redacter for GeminiLlmRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
-            RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
+            RedacterDataItemContent::Value(_) => {
+                self.redact_text_file(input).await.map(Redacted::unlocated)
+            }
             RedacterDataItemContent::Image { .. } => {
                 redact_image_with_mode(
                     self.gemini_llm_options.image_mode,
@@ -641,7 +632,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value.trim(), "Hello, [REDACTED]");
             }
@@ -674,7 +665,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input.clone()).await?;
-        let output_path = check_and_save_redacted_image(&input, &redacted_item, output_name);
+        let output_path = check_and_save_redacted_image(&input, &redacted_item.item, output_name);
         term.write_line(&format!(
             "Redacted image written to {}",
             output_path.display()

@@ -366,7 +366,7 @@ impl<'a> StreamRedacter<'a> {
                         file = %file_ref.relative_path.value(),
                         "redacting"
                     );
-                    redacted = redacter.redact(redacted).await?;
+                    redacted = redacter.redact(redacted).await?.item;
                     number_of_redactions += 1;
                     summary.applied.push(redacter.redacter_type());
                 }
@@ -792,7 +792,7 @@ impl<'a> StreamRedacter<'a> {
                     } else {
                         let mut item = image_to_redact;
                         for redacter in redacters {
-                            item = redacter.redact(item).await?;
+                            item = redacter.redact(item).await?.item;
                         }
                         item
                     };
@@ -868,7 +868,7 @@ impl<'a> StreamRedacter<'a> {
                             file_ref: file_ref.clone(),
                         };
                         for redacter in redacters {
-                            redacted_item = redacter.redact(redacted_item).await?;
+                            redacted_item = redacter.redact(redacted_item).await?.item;
                         }
 
                         match redacted_item.content {
