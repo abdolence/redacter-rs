@@ -78,7 +78,7 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 
 ## Secrets in config and code
 
-| Redacter | Recall | Precision | Credential | Keep hit |
+| Redacter | Recall | Precision | Secrets | Keep hit |
 |---|---|---|---|---|
 | `local-rules` | 93% | 100% | 38/41 | 0/19 |
 | `local-ner` | 0% | 0% | 0/41 | 0/19 |
@@ -101,7 +101,7 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 
 Recall only, since the annotation does not list everything sensitive.
 
-| Redacter | Recall | Person | Contact | Address | ID number | Financial | Date of birth | Credential | Network | Other |
+| Redacter | Recall | Person | Contact | Address | ID number | Financial | Date of birth | Secrets | Network | Other |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `local-rules` | 24% | 9/244 | 157/161 | 1/57 | 16/187 | 7/126 | 31/31 | 0/33 | 16/82 | 0/60 |
 | `local-ner` | 23% | 199/244 | 3/161 | 21/57 | 0/187 | 0/126 | 0/31 | 0/33 | 0/82 | 4/60 |
