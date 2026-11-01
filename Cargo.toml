@@ -3,12 +3,19 @@ name = "redacter"
 version = "0.21.1"
 edition = "2021"
 authors = ["Abdulla Abdurakhmanov <me@abdolence.dev>"]
-license = "Apache-2.0"
+license = "Apache-2.0 AND MIT"
 homepage = "https://github.com/abdolence/redacter-rs"
 repository = "https://github.com/abdolence/redacter-rs"
 documentation = "https://docs.rs/redacter"
 readme = "README.md"
-include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
+include = [
+    "Cargo.toml",
+    "src/**/*.rs",
+    "src/redacters/local_rules/validators/generic_api_key_stopwords.txt",
+    "src/redacters/local_rules/validators/gitleaks.LICENSE",
+    "README.md",
+    "LICENSE",
+]
 rust-version = "1.94.0"
 keywords = ["redact", "pii", "secrets", "dlp", "scan"]
 categories = ["command-line-utilities"]

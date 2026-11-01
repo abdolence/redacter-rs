@@ -36,13 +36,13 @@ Each cell is recall / precision / time per file. Time per file is described unde
 
 | Redacter | Fixtures | Secrets | Public | Images |
 |---|---|---|---|---|
-| `local-rules` | 54% / 100% / 51 ms | 88% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
+| `local-rules` | 54% / 100% / 51 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
 | `local-ner` | 23% / 69% / 40 ms | 0% / 0% / 18 ms | 23% / - / 39 ms | 19% / 100% / 334 ms |
 | `local-gliner` | 100% / 94% / 443 ms | 2% / 33% / 146 ms | 55% / - / 441 ms | 88% / 100% / 658 ms |
-| `local-rules+local-ner` | 77% / 89% / 43 ms | 88% / 97% / 19 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
-| `local-rules+local-gliner` | 100% / 95% / 435 ms | 88% / 95% / 141 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
+| `local-rules+local-ner` | 77% / 89% / 43 ms | 93% / 97% / 25 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
+| `local-rules+local-gliner` | 100% / 95% / 435 ms | 93% / 95% / 177 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
 | `local-credential-ml` | 0% / - / 77 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 389 ms |
-| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 93% / 100% / 11 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
+| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 95% / 100% / 15 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
 | `presidio` | 69% / 56% / 18 ms | 7% / 21% / 6 ms | 66% / - / 12 ms | 69% / 92% / 312 ms |
 | `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
 | `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
@@ -78,13 +78,13 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 
 | Redacter | Recall | Precision | Credential | Keep hit |
 |---|---|---|---|---|
-| `local-rules` | 88% | 100% | 36/41 | 0/19 |
+| `local-rules` | 93% | 100% | 38/41 | 0/19 |
 | `local-ner` | 0% | 0% | 0/41 | 0/19 |
 | `local-gliner` | 2% | 33% | 1/41 | 0/19 |
-| `local-rules+local-ner` | 88% | 97% | 36/41 | 0/19 |
-| `local-rules+local-gliner` | 88% | 95% | 36/41 | 0/19 |
+| `local-rules+local-ner` | 93% | 97% | 38/41 | 0/19 |
+| `local-rules+local-gliner` | 93% | 95% | 38/41 | 0/19 |
 | `local-credential-ml` | 61% | 100% | 25/41 | 0/19 |
-| `local-rules+local-credential-ml` | 93% | 100% | 38/41 | 0/19 |
+| `local-rules+local-credential-ml` | 95% | 100% | 39/41 | 0/19 |
 | `presidio` | 7% | 21% | 3/41 | 0/19 |
 | `gcp-dlp` | 41% | 100% | 17/41 | 0/19 |
 | `aws-comprehend` | 56% | 82% | 23/41 | 2/19 |
@@ -92,8 +92,8 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 | `gcp-vertex-ai` | 100% | 95% | 41/41 | 1/19 |
 | `aws-bedrock` | 93% | 59% | 38/41 | 11/19 |
 
-- `local-rules` found 88% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
-- `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 93% (38 of 41). The three it and `local-rules` both miss are the `SECRET_KEY_BASE` hex value, the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 98% (40 of 41), again with 100% precision and no keep string hit;
+- `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
+- `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
 
 ## Public
 
@@ -115,7 +115,7 @@ Recall only, since the annotation does not list everything sensitive.
 | `gcp-vertex-ai` | 86% | 239/244 | 161/161 | 46/57 | 186/187 | 126/126 | 31/31 | 27/33 | 15/82 | 11/60 |
 | `aws-bedrock` | 87% | 232/244 | 161/161 | 45/57 | 187/187 | 125/126 | 31/31 | 31/33 | 36/82 | 6/60 |
 
-- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 36 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
+- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 38 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
 - every redacter found all 31 dates of birth except `local-ner` and `aws-bedrock-guardrails`, which found none.
 
 ## Images
@@ -200,6 +200,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 - commit `2390a25` of this repository, release build;
 - the `local-credential-ml` rows come from a later run, in the same way: commit `c71f738`, release build, the same machine, on 2026-11-01;
+- the `secrets` cells of the local redacters and their chains come from a run on commit `19874f5` (the `generic-api-key` rule), in the same way;
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
 - the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6785 ms per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8073 ms, and its numbers are used;

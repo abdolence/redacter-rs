@@ -2,6 +2,8 @@
 
 Every built-in rule of the `local-rules` redacter, grouped as the `--local-rules` and `--local-rules-disable` options see them. A rule with a validator only redacts values that pass the named check; a rule with a keyword only redacts values within a few characters of a context word such as `passport` or `NIF`. A synthetic example is made up for the tests, with check digits computed from the published formula; a published example is a real worked value from the cited public specification or vendor documentation. `redacter scan -d local-rules` reports the same matches instead of redacting them, labelled with the rule name from the first column of the tables below. Generated from the rule table by `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.
 
+The pattern and the stopword list of `generic-api-key` are taken from the rule of the same name in [gitleaks](https://github.com/gitleaks/gitleaks), MIT licence, Copyright (c) 2019 Zachary Rice. The licence text is in `src/redacters/local_rules/validators/gitleaks.LICENSE`.
+
 | Group | Rules | Purpose |
 |---|---|---|
 | `email` | 1 | Email addresses |
@@ -10,7 +12,7 @@ Every built-in rule of the `local-rules` redacter, grouped as the `--local-rules
 | `iban` | 1 | International bank account numbers |
 | `network` | 3 | IPv4, IPv6 and MAC addresses |
 | `url` | 1 | Credentials embedded in URLs |
-| `secrets` | 23 | Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys |
+| `secrets` | 24 | Passwords and keys in `key=value` lines, vendor API keys and tokens, authorization headers and private keys |
 | `us-identifiers` | 3 | US identifiers: SSN and ITIN, passports, driver's licenses |
 | `eu-identifiers` | 34 | European identifiers: national personal numbers, VAT numbers, UK driving licences |
 | `world-identifiers` | 7 | Identifiers of Canada, Australia, Brazil, India, South Africa and China |
@@ -98,6 +100,7 @@ Passwords and keys in `key=value` lines, vendor API keys and tokens, authorizati
 | `sendgrid-key` | SendGrid API key (`SG.`, 20 characters or more, `.`, 40 characters or more) | no | no | `SG.abcdefghijklmnopqrst.abcdefghijklmnopqrstuvwxyz0123456789ABCD` (synthetic) |
 | `huggingface-token` | Hugging Face access token (`hf_` and 30 letters or digits or more) | no | no | `hf_abcdefghijklmnopqrstuvwxyzABCD` (synthetic) |
 | `discord-bot-token` | Discord bot token: three base64url parts of 24 to 26, 6 and 27 or more characters, the first starting with `M`, `N` or `O` | no | no | `MTAwMDAwMDAwMDAwMDAwMDAw.G1aB2c.abcdefghijklmnopqrstuvwxyz0` (synthetic) |
+| `generic-api-key` | Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`; ported from the `generic-api-key` rule of gitleaks | yes (entropy above 3.5 bits per character, not letters only, no stopword) | yes | `access_token = "k8Jd2Lw9QzX7vNb3RtY5"` (synthetic) |
 
 ## `us-identifiers`
 

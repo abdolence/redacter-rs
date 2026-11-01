@@ -95,7 +95,7 @@ strings that carry a password. The redacters differ most on secrets.
 
 | Redacter | Personal information | Secrets |
 |---|---|---|
-| `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
+| `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; values that look random after a key name such as `key`, `secret`, `token` or `auth`; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
 | `local-ner` | People, organisations and locations | None |
 | `local-gliner` | The labels you choose, 14 PII labels by default | None with the default labels. Chain `local-rules` for secrets |
 | `local-credential-ml` | None | Lines that a model rates as holding a credential, with the value on each line redacted: a password written in a sentence, a token with no known prefix, an OAuth client secret after a label, a `.netrc` password. It rates the AWS documentation example keys and `password: value` lines with a plain value low, and `local-rules` finds those. Chain it after `local-rules` |
@@ -548,7 +548,7 @@ Built-in rule groups, all enabled by default:
 | `iban` | IBANs (mod 97 and the national length) |
 | `network` | IPv4, IPv6 and MAC addresses |
 | `url` | Credentials embedded in URLs |
-| `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; JWTs; authorization headers; PEM and PGP private keys |
+| `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; values that look random after a key name (`generic-api-key`); JWTs; authorization headers; PEM and PGP private keys |
 | `us-identifiers` | SSN and ITIN, passport numbers next to the word passport (in 9 languages), US driver's license numbers |
 | `eu-identifiers` | European identifiers: the national personal numbers of Albania, Austria, Belgium, Bosnia and Herzegovina, Bulgaria, Croatia, Czechia, Denmark, Estonia, Finland, France, Germany (Steuer-ID), Greece (AMKA and AFM), Hungary (személyi szám and TAJ), Iceland, Ireland, Italy, Latvia, Lithuania, Luxembourg, Malta, Montenegro, the Netherlands, North Macedonia, Norway, Poland, Portugal, Romania, Serbia, Slovakia, Slovenia, Spain, Sweden, Switzerland, Turkey and the United Kingdom (NINO and driving licence), plus EU VAT numbers |
 | `world-identifiers` | Canadian SIN, Australian TFN, Brazilian CPF, Indian Aadhaar, South African ID, Chinese resident ID |
@@ -800,8 +800,8 @@ threshold of the model card). Lower values redact more and produce more false al
 already replaced.
 
 On the `secrets` dataset of the benchmark (41 planted secrets, 19 strings that look like secrets and are not) the
-model alone found 25 values at 0.74 and 31 at 0.50. Chained after `local-rules`, which found 36 alone, it found
-38 and 40, with no false alarm and no keep string hit at either threshold. Each of the 25 findings at 0.74
+model alone found 25 values at 0.74 and 31 at 0.50. Chained after `local-rules`, which found 38 alone, it found
+39 and 41, with no false alarm and no keep string hit at either threshold. Each of the 25 findings at 0.74
 covered exactly the planted value. At 0.50, 29 of 30 did, and the other left the `sessionid=` of a cookie in place.
 The benchmark is in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 
@@ -835,13 +835,13 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 
 | Redacter | Fixtures | Secrets | Public | Images | Per file on public |
 |---|---|---|---|---|---|
-| `local-rules` | 54% | 88% | 24% | 62% | under 1 ms |
+| `local-rules` | 54% | 93% | 24% | 62% | under 1 ms |
 | `local-ner` | 23% | 0% | 23% | 19% | 39 ms |
 | `local-gliner` | 100% | 2% | 55% | 88% | 441 ms |
-| `local-rules+local-ner` | 77% | 88% | 46% | 94% | 38 ms |
-| `local-rules+local-gliner` | 100% | 88% | 57% | 88% | 466 ms |
+| `local-rules+local-ner` | 77% | 93% | 46% | 94% | 38 ms |
+| `local-rules+local-gliner` | 100% | 93% | 57% | 88% | 466 ms |
 | `local-credential-ml` | 0% | 61% | 1% | 0% | 38 ms |
-| `local-rules+local-credential-ml` | 54% | 93% | 24% | 62% | 38 ms |
+| `local-rules+local-credential-ml` | 54% | 95% | 24% | 62% | 38 ms |
 | `presidio` | 69% | 7% | 66% | 69% | 12 ms |
 | `gcp-dlp` | 85% | 41% | 49% | 94% | 72 ms |
 | `aws-comprehend` | 98% | 56% | 80% | 94% | 84 ms |
@@ -852,9 +852,9 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
 secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
 and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
-models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. `gemini-llm` and `open-ai-llm` were not measured.
+models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. The `Secrets` column of the local rows and their chains comes from a run on commit `19874f5`. `gemini-llm` and `open-ai-llm` were not measured.
 
-For secrets, `local-rules` found 88% at 1 ms per file, `local-rules+local-credential-ml` 93%, and `gcp-vertex-ai` found all of them. For personal information
+For secrets, `local-rules` found 93% at 1 ms per file, `local-rules+local-credential-ml` 95%, and `gcp-vertex-ai` found all of them. For personal information
 in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
 and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
 find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
@@ -1405,13 +1405,15 @@ cloud](#local-or-cloud-quality-versus-performance). The image rows measure the c
 
 For the most protection, you can use multiple DLP providers, see [Multiple redacters](#multiple-redacters).
 
-For secrets, `gcp-vertex-ai` found all 41 planted secrets, `aws-bedrock` and `local-rules+local-credential-ml` 38 and `local-rules` 36. `aws-comprehend`,
+For secrets, `gcp-vertex-ai` found all 41 planted secrets, `local-rules+local-credential-ml` 39, and `aws-bedrock` and `local-rules` 38. `aws-comprehend`,
 `aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, `local-credential-ml` alone 25, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
 AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS keys, PINs and usernames only.
 
 ## Licence
 
 Apache Software License (ASL)
+
+The pattern and the stopword list of the `generic-api-key` rule of `local-rules` are taken from [gitleaks](https://github.com/gitleaks/gitleaks), MIT licence, Copyright (c) 2019 Zachary Rice. The licence text is in `src/redacters/local_rules/validators/gitleaks.LICENSE`.
 
 ## Author
 

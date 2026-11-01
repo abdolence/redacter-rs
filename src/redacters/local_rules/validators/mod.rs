@@ -8,12 +8,14 @@ mod asia;
 mod checksums;
 mod dates;
 mod europe;
+mod generic_api_key;
 mod oceania;
 
 pub use africa::*;
 pub use americas::*;
 pub use asia::*;
 pub use europe::*;
+pub use generic_api_key::generic_api_key_value;
 pub use oceania::*;
 
 pub use dates::birth_date;

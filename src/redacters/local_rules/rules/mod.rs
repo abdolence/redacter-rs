@@ -191,6 +191,11 @@ pub const PRIVATE_KEY_BLOCK_RULE: &str = "private-key-block";
 /// The built-in rule that matches the `user:password` of a URL.
 pub const URL_CREDENTIALS_RULE: &str = "url-credentials";
 
+/// The built-in rule ported from gitleaks that matches a high-entropy value after a key name. It
+/// is not run on a line judged to hold a credential: without its value checks it matches the key
+/// name itself (`key="ClearTextPassword"` in `<add key="ClearTextPassword" value="...">`).
+pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
+
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
@@ -199,7 +204,7 @@ impl RuleSet {
 
     /// The rules that find the value of a credential on one line, for a caller that already
     /// has evidence that the line holds one: every `Secrets` rule and `url-credentials`, apart
-    /// from the multi-line private key block. Value validators and the minimum length of a
+    /// from the multi-line private key block and `generic-api-key`. Value validators and the minimum length of a
     /// quoted value are off, so a short or plain value written as `password: abc` or
     /// `password = "abc"` is found on such a line; on an unjudged line they are what keep
     /// these rules from redacting prose and code.
@@ -209,6 +214,7 @@ impl RuleSet {
             |spec| {
                 (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
+                    && spec.name != GENERIC_API_KEY_RULE
             },
             Strictness::Lenient,
         )
@@ -409,6 +415,20 @@ mod tests {
         assert_eq!(
             RuleSet::credential_line_rules().unwrap().find(line).len(),
             1
+        );
+    }
+
+    #[cfg(feature = "local-credential-ml")]
+    #[test]
+    fn credential_line_rules_leave_out_the_generic_api_key_rule() {
+        let line = r#"<add key="ClearTextPassword" value="x">"#;
+        assert_eq!(
+            RuleSet::new(&RuleGroup::all()).unwrap().find(line),
+            Vec::new()
+        );
+        assert_eq!(
+            RuleSet::credential_line_rules().unwrap().find(line),
+            Vec::new()
         );
     }
 
@@ -757,6 +777,12 @@ mod tests {
             "SG.{}.{}-",
             "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
         );
+        let google_oauth_client = format!("GOCSPX-{}", "x7Kq2mP9vL4tR8wZ3nB6yH1cD5fG");
+        let secret_key_base = format!(
+            "{}{}",
+            "9f3a7c1e5b8d2046a1c9e7f30b5d8a24", "c6e1f9037ab4d85e2c07f1936ab5d48e"
+        );
+
         let discord = format!(
             "{}.{}.{}",
             "MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"
@@ -884,6 +910,15 @@ mod tests {
             (format!("HF {huggingface} end"), "HF [REDACTED] end"),
             (format!("key {sendgrid} end"), "key [REDACTED] end"),
             (format!("key {discord} end"), "key [REDACTED] end"),
+            // A high-entropy value after a key name no hand-written rule knows.
+            (
+                format!("google_auth = \"{google_oauth_client}\""),
+                r#"google_auth = "[REDACTED]""#,
+            ),
+            (
+                format!("SECRET_KEY_BASE={secret_key_base}"),
+                "SECRET_KEY_BASE=[REDACTED]",
+            ),
         ];
 
         let kept = [
@@ -900,6 +935,11 @@ mod tests {
             "password: {required: true, minLength: 8}",
             r#"println!("password={}", password)"#,
             r#"println!("token={token}")"#,
+            // `generic-api-key` keeps a value at the entropy floor, one with a stopword and one of
+            // letters only.
+            r#"creds = "q7m3v9t2hkpshkps""#,
+            r#"auth_value = "x9Kq2proc7Zw4mT""#,
+            r#"api_token = "ReallyLongLettersOnlyValue""#,
         ];
         let mut mismatches: Vec<String> = redacted
             .iter()
@@ -1249,7 +1289,11 @@ mod reference {
              vendor documentation. `redacter scan -d local-rules` reports the same matches \
              instead of redacting them, labelled with the rule name from the first column of \
              the tables below. Generated from the rule table by \
-             `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n",
+             `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n\
+             The pattern and the stopword list of `generic-api-key` are taken from the rule of the \
+             same name in [gitleaks](https://github.com/gitleaks/gitleaks), MIT licence, Copyright \
+             (c) 2019 Zachary Rice. The licence text is in \
+             `src/redacters/local_rules/validators/gitleaks.LICENSE`.\n\n",
         );
         out.push_str("| Group | Rules | Purpose |\n|---|---|---|\n");
         for group in RuleGroup::value_variants() {

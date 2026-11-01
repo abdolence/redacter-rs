@@ -3,7 +3,10 @@
 //! the same span (the first declared wins).
 
 use super::super::validators;
-use super::{Example, RuleGroup, RuleSpec, PRIVATE_KEY_BLOCK_RULE, URL_CREDENTIALS_RULE};
+use super::{
+    Example, RuleGroup, RuleSpec, GENERIC_API_KEY_RULE, PRIVATE_KEY_BLOCK_RULE,
+    URL_CREDENTIALS_RULE,
+};
 
 pub(super) fn builtin_rules() -> &'static [RuleSpec] {
     RULES
@@ -461,6 +464,21 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic(concat!("MTAwMDAwMDAwMDAwMDAwMDAw", ".", "G1aB2c", ".", "abcdefghijklmnopqrstuvwxyz0")),
         // No `\b` at the end: the class includes `-`, so a token ending in one would keep it.
         pattern: r"\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}",
+    },
+    RuleSpec {
+        name: GENERIC_API_KEY_RULE,
+        group: RuleGroup::Secrets,
+        capture_group: 1,
+        validator: Some((
+            "entropy above 3.5 bits per character, not letters only, no stopword",
+            validators::generic_api_key_value,
+        )),
+        keyword: true,
+        description: "Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`; ported from the `generic-api-key` rule of gitleaks",
+        example: Example::Synthetic("access_token = \"k8Jd2Lw9QzX7vNb3RtY5\""),
+        // The classes are written out in ASCII, as RE2 reads `\w` and `\s`: the Unicode `\w`
+        // repeated 150 times exceeds the regex size limit.
+        pattern: r#"(?i)[0-9A-Za-z_.-]{0,50}?(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t0-9A-Za-z_.-]{0,20})[\t\n\f\r '"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\t\n\f\r =]{0,5}([0-9A-Za-z_.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\t\n\f\r ;]|\\[nr]|$)"#,
     },
     RuleSpec {
         name: "us-ssn",
