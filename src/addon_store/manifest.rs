@@ -188,16 +188,16 @@ static CREDENTIAL_LINE_FILES: [AddonFile; 4] = [
 #[cfg(any(feature = "ocr", test))]
 static OCRS_FILES: [AddonFile; 2] = [
     AddonFile {
-        name: "text-detection.rten",
-        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-detection.rten",
-        size: 2_510_284,
-        sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+        name: "text-detection.onnx",
+        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-2/text-detection.onnx",
+        size: 2_499_479,
+        sha256: "a917b23dbd9524b465df7e922641b3ff2981623df4ded5a0234004ef2fee7cfe",
     },
     AddonFile {
-        name: "text-recognition.rten",
-        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-1/text-recognition.rten",
-        size: 9_716_568,
-        sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
+        name: "text-recognition.onnx",
+        url: "https://github.com/abdolence/redacter-rs/releases/download/models-ocrs-2/text-recognition.onnx",
+        size: 9_713_177,
+        sha256: "86c145c2edb96c8caed5b1ebb8f44d706408922211451c309c625157dd6061c5",
     },
 ];
 
@@ -220,7 +220,7 @@ fn ocrs_legacy_dirs() -> Vec<PathBuf> {
 
 #[cfg(any(feature = "ocr", test))]
 static OCRS: AddonManifest = AddonManifest {
-    dir_name: "ocrs",
+    dir_name: "ocrs-2",
     files: &OCRS_FILES,
     legacy_dirs: ocrs_legacy_dirs,
     native_code: false,

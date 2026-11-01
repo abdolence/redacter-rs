@@ -940,7 +940,7 @@ below:
 
 | Addon | Files | Size | Source | Licence |
 |---|---|---|---|---|
-| `ocr`, in `ocrs/` | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `ocr`, in `ocrs-2/` | `text-detection.onnx`, `text-recognition.onnx` | 11.6 MiB | [release `models-ocrs-2`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-2), from the [ocrs-models](https://github.com/robertknight/ocrs-models) project of [ocrs](https://github.com/robertknight/ocrs) | CC BY-SA 4.0, inherited from the HierText training dataset, attribution in the release notes; ocrs code MIT OR Apache-2.0 |
 | `pdf`, in `pdfium-8125/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.6 to 7.8 MiB | [release `models-pdfium-8125`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-8125), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/8125` (Pdfium 158.0.8125.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
 | `local-ner`, in `distilbert-base-multilingual-cased-ner-hrl/` | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
 | `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
@@ -962,11 +962,15 @@ and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
 An interrupted install can leave `*.part` files in the addon's directory; they are safe to delete while no install is running.
 
 For air-gapped machines, download the files listed above on another computer and copy them into the addon's
-directory under the names in the table, for example `~/.cache/redacter/addons/ocrs/text-detection.rten`. This works
+directory under the names in the table, for example `~/.cache/redacter/addons/ocrs-2/text-detection.onnx`. This works
 for Pdfium too, which is checked against its digest. For the models the tool also looks in
 `addons/<addon directory>/` next to its own executable. Breaking change: earlier versions used `models/<addon directory>/`;
-move it to `addons/` or run `redacter addons install` again. The OCR models are still found in `~/.cache/ocrs` and
-`../share/ocrs` as in earlier versions; these copies are used as they are, checked against nothing.
+move it to `addons/` or run `redacter addons install` again. Copies of the OCR models named `text-detection.onnx` and `text-recognition.onnx` are still found in
+`~/.cache/ocrs` and `../share/ocrs`; these are used as they are, checked against nothing.
+
+Breaking change: the OCR models are now ONNX files in the `ocrs-2/` directory, and the `.rten` files of earlier
+versions are not read any more. Run `redacter addons install ocr` again; the old `ocrs/` directory is not used and can
+be deleted.
 
 `--download-models` and its download prompt are removed: install the addons with `addons install` instead.
 `--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
@@ -977,8 +981,7 @@ directory is `addons` instead of `models`: move the old `models` directory to `a
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
-Install the OCR models with `redacter addons install ocr`, see [Addons](#addons); `~/.cache/ocrs` from earlier
-versions keeps working.
+Install the OCR models with `redacter addons install ocr`, see [Addons](#addons).
 
 ## Examples:
 
@@ -998,6 +1001,21 @@ Zip archives are supported too:
 ```sh
 redacter cp gs://my-bucket-name/sensitive-files/ zip://tmp/sensitive-files.zip
 ```
+
+A zip archive as a source is read in place, nothing is extracted. Files are listed from the archive index, so
+`-f`, `-m` and `-n` apply before anything is decompressed, and each file is decompressed when it is copied or scanned.
+An absolute entry name such as `/docs/a.txt` is read as `docs/a.txt`.
+
+These entries are skipped and reported with their reason, up to the last file the listing reaches (`-n` stops it
+early). An entry that the ignore file ignores is counted as ignored, not reported:
+
+- entries with a path that leaves the archive or is not valid;
+- symbolic links;
+- encrypted entries;
+- entries with the same path as an earlier entry, once `./` is removed.
+
+When the archive lists the same raw name more than once, only the last entry with that name is read. The earlier ones
+are neither listed nor counted as skipped, and a warning says so.
 
 Filter files by name:
 
@@ -1090,6 +1108,9 @@ For example:
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
+`scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and an inline
+marker, see [Ignoring files and findings](#ignoring-files-and-findings).
+
 ```sh
 redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
 ```
@@ -1154,6 +1175,74 @@ A finding with an unspecified likelihood has no score.
 `--local-ner-min-score`, `--local-gliner-min-score` and `--local-credential-ml-min-score` work as in `cp`: a finding of
 the redacter is only reported when its score reaches them (0.5 by default, 0.74 for local-credential-ml).
 
+### Ignoring files and findings
+
+Two mechanisms keep legitimate values, such as the mock keys of a test fixture, out of a scan. Both apply to `scan`
+only. `cp` does not read an ignore file and does not look for the marker: it always redacts everything it finds.
+
+Be aware that both hide real secrets as well as mock ones, so keep the ignore file and the marked lines in code review.
+
+#### Ignore file
+
+An ignore file lists the files `scan` does not read. It uses the gitignore syntax: `#` comments, `*` and `**`
+wildcards, a trailing `/` for a directory, a leading `/` to anchor a pattern at the source root and `!` to bring back a
+file an earlier pattern ignored. Unlike git, `!` also brings back a file inside an ignored directory: with `fixtures/`
+and `!fixtures/keep.txt`, `keep.txt` is scanned. Patterns match the path of a file relative to the source root, the path
+the reports show, with `/` or `\` as the separator, so the same file works for a local directory, GCS, S3 and a zip
+archive.
+
+```
+# Mock credentials used by the tests
+test-fixtures/
+*.mock.txt
+docs/**/example-keys.md
+!docs/real/example-keys.md
+```
+
+- A local directory source uses the `.redacterignore` at its root when it has one. The file leaves itself out, so it is
+  neither scanned nor reported as unsupported, and it is counted in `files_ignored`;
+- `--ignore-file <PATH>` reads the given local file instead, for any source, including GCS and S3;
+- `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
+  marker below still applies;
+- a file named as the source itself is always scanned;
+- ignored files do not count towards `--max-files-limit`;
+- a UTF-8 byte order mark at the start of the file is dropped, as git does;
+- a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
+
+An ignored file is not read. It is counted in `files_ignored`, which is part of the file total of the summary, and has no
+entry in the `files` of the report. The other counters keep their meaning.
+
+#### Inline marker
+
+The text `redacter:allow` on a line ignores every finding that covers that line, from the line where the finding
+starts to the line where it ends. The marker is matched as a substring, so it sits in whatever comment syntax the file
+uses:
+
+```
+API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
+```
+
+A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:
+
+```
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA...
+-----END RSA PRIVATE KEY----- # redacter:allow
+```
+
+A marker inside the value of any finding does not count, and ignores nothing: `API_KEY=xyz_redacter:allow_123` is still
+reported, and so is an email on the same line. A marker on a line the finding does not cover, such as the line above it,
+does not count either.
+
+- The ignored findings are not in `findings`, in the rows or in the exit code. They are counted in `findings_ignored`,
+  so the suppression stays visible in the summary and in the JSON report;
+- the marker works for every redacter, since it acts on the location of a finding. A value an LLM redacter named
+  without being able to locate it has no line and is not ignored; it stays in `unlocated_values`;
+- in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
+  lines;
+- an image or a PDF page has no place for the marker, so the findings in them are always reported;
+- `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
+
 ### Exit codes
 
 - `0`: nothing was found, or `--fail-on never` is set;
@@ -1194,7 +1283,10 @@ The report is one JSON object with the counters of the run and an entry for each
 - `files_scanned`, `files_with_findings`, `files_unconfirmed`, `files_skipped`, `files_unsupported`, `files_blocked`
   and `files_failed`: the number of files in each state. `files_unconfirmed` counts the scanned files without findings
   that have `unlocated_values`, and is part of `files_scanned`;
+- `files_ignored`: the number of files the [ignore file](#ignoring-files-and-findings) ignored. They have no entry in
+  `files`;
 - `findings`: the number of findings, and `findings_by_label`: the same count for each label;
+- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker, not counted in `findings`;
 - `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
 
 A finding has the fields `redacter`, `label`, `score`, `location` and `value`.

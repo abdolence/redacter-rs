@@ -1,13 +1,31 @@
 use crate::errors::AppError;
 use crate::file_systems::{AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult};
-use crate::file_tools::{FileMatcher, FileMatcherResult};
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, TryStreamExt};
 use gcloud_sdk::prost::bytes;
 use rvstruct::ValueStruct;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs::File;
+
+/// The path a local source names. On Windows a `file://` URL puts a slash of its own before the
+/// drive letter: `file:///C:/project` is `C:/project`. Elsewhere `/C:/project` is an absolute path.
+fn local_path(source: &str) -> String {
+    let path = source.trim_start_matches("file://");
+    if cfg!(windows) {
+        without_slash_before_drive_letter(path).to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn without_slash_before_drive_letter(path: &str) -> &str {
+    match path.as_bytes() {
+        [b'/', letter, b':', ..] if letter.is_ascii_alphabetic() => &path[1..],
+        _ => path,
+    }
+}
 
 pub struct LocalFileSystem<'a> {
     root_path: String,
@@ -17,7 +35,7 @@ pub struct LocalFileSystem<'a> {
 
 impl<'a> LocalFileSystem<'a> {
     pub async fn new(root_path: &str, reporter: &'a AppReporter<'a>) -> AppResult<Self> {
-        let root_path_base_str = root_path.trim_start_matches("file://").to_string();
+        let root_path_base_str = local_path(root_path);
         let root_path_path = PathBuf::from(&root_path_base_str);
         let is_dir = root_path.ends_with('/') || root_path_path.is_dir();
         let root_path_str = if is_dir && !root_path_base_str.ends_with('/') {
@@ -44,31 +62,23 @@ impl<'a> LocalFileSystem<'a> {
         }
 
         let mut entries = tokio::fs::read_dir(dir_path).await?;
-        let mut files = Vec::new();
-        let mut skipped: usize = 0;
+        let mut listing = ListFilesResult::EMPTY;
         while let Some(entry) = entries.next_entry().await? {
             let file_type = entry.file_type().await?;
             if file_type.is_file() {
-                let file_ref = FileSystemRef {
-                    relative_path: entry
+                let file_ref = FileSystemRef::with_guessed_media_type(
+                    entry
                         .path()
                         .to_string_lossy()
                         .to_string()
                         .replace(self.root_path.as_str(), "")
                         .into(),
-                    media_type: mime_guess::from_path(entry.path()).first(),
-                    file_size: Some(entry.metadata().await?.len() as usize),
-                };
-                if file_matcher
-                    .iter()
-                    .all(|matcher| matches!(matcher.matches(&file_ref), FileMatcherResult::Matched))
-                {
-                    files.push(file_ref);
-                } else {
-                    skipped += 1;
-                }
+                    entry.metadata().await?.len() as usize,
+                );
+                listing.add(file_ref, *file_matcher);
             } else if file_type.is_dir() {
-                let new_max_files_limit = max_files_limit.map(|v| v.saturating_sub(files.len()));
+                let new_max_files_limit =
+                    max_files_limit.map(|v| v.saturating_sub(listing.files.len()));
                 let dir_files = self
                     .list_files_recursive(
                         entry.path().to_string_lossy().to_string(),
@@ -76,17 +86,16 @@ impl<'a> LocalFileSystem<'a> {
                         new_max_files_limit,
                     )
                     .await?;
-                skipped += dir_files.skipped;
-                files.extend(dir_files.files);
+                listing.merge(dir_files);
             }
 
             if let Some(limit) = max_files_limit {
-                if files.len() >= limit {
+                if listing.files.len() >= limit {
                     break;
                 }
             }
         }
-        Ok(ListFilesResult { files, skipped })
+        Ok(listing)
     }
 }
 
@@ -103,19 +112,23 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
 
         let file = tokio::fs::File::open(&file_path).await?;
         let stream = tokio_util::io::ReaderStream::new(file).map_err(AppError::from);
-        let relative_file_path = file_path
-            .file_name()
-            .ok_or_else(|| AppError::SystemError {
-                message: "Filename is empty".to_string(),
-            })?
-            .to_string_lossy()
-            .to_string();
-        let file_metadata = tokio::fs::metadata(&file_path).await?;
-        let file_ref = FileSystemRef {
-            relative_path: relative_file_path.into(),
-            media_type: mime_guess::from_path(&file_path).first(),
-            file_size: Some(file_metadata.len() as usize),
+        // The name filter matches this path against the paths listings report, which are
+        // relative to the source root, so a directory source keeps the listed path.
+        let relative_file_path = match file_ref.filter(|_| self.is_dir) {
+            Some(listed) => listed.relative_path.value().clone(),
+            None => file_path
+                .file_name()
+                .ok_or_else(|| AppError::SystemError {
+                    message: "Filename is empty".to_string(),
+                })?
+                .to_string_lossy()
+                .to_string(),
         };
+        let file_metadata = tokio::fs::metadata(&file_path).await?;
+        let file_ref = FileSystemRef::with_guessed_media_type(
+            relative_file_path.into(),
+            file_metadata.len() as usize,
+        );
         Ok((file_ref, Box::new(stream)))
     }
 
@@ -163,6 +176,10 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         Ok(self.is_dir)
     }
 
+    fn local_directory(&self) -> Option<&Path> {
+        self.is_dir.then(|| Path::new(&self.root_path))
+    }
+
     fn resolve(&self, file_ref: Option<&FileSystemRef>) -> AbsoluteFilePath {
         AbsoluteFilePath {
             file_path: if self.is_dir {
@@ -185,6 +202,22 @@ mod tests {
     use super::*;
     use crate::file_systems::DetectFileSystem;
     use console::Term;
+
+    #[test]
+    fn a_file_url_with_a_drive_letter_names_the_drive_path() {
+        assert_eq!(
+            without_slash_before_drive_letter("/C:/project/"),
+            "C:/project/"
+        );
+        assert_eq!(
+            without_slash_before_drive_letter("/home/user/"),
+            "/home/user/"
+        );
+        assert_eq!(
+            without_slash_before_drive_letter("relative/dir"),
+            "relative/dir"
+        );
+    }
 
     #[tokio::test]
     async fn download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

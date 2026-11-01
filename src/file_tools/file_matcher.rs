@@ -1,10 +1,12 @@
 use crate::file_systems::FileSystemRef;
+use crate::file_tools::IgnoreRules;
 use rvstruct::ValueStruct;
 
 #[derive(Debug, Clone)]
 pub struct FileMatcher {
     pub filename_matcher: Option<globset::GlobMatcher>,
     pub max_size_limit: Option<usize>,
+    ignore: Option<IgnoreRules>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -12,6 +14,7 @@ pub enum FileMatcherResult {
     Matched,
     SkippedDueToSize,
     SkippedDueToName,
+    SkippedDueToIgnore,
 }
 
 impl FileMatcher {
@@ -22,7 +25,15 @@ impl FileMatcher {
         FileMatcher {
             filename_matcher,
             max_size_limit,
+            ignore: None,
         }
+    }
+
+    /// The same matcher that also skips the files `ignore` ignores. A matcher applies them
+    /// to the paths of a listing, which are relative to the source root; a file read on its own
+    /// is not matched against them.
+    pub fn with_ignore(self, ignore: Option<IgnoreRules>) -> Self {
+        Self { ignore, ..self }
     }
 
     pub fn matches(&self, file_ref: &FileSystemRef) -> FileMatcherResult {
@@ -37,6 +48,12 @@ impl FileMatcher {
         if let Some(filename_matcher) = &self.filename_matcher {
             if !filename_matcher.is_match(file_ref.relative_path.value().as_str()) {
                 return FileMatcherResult::SkippedDueToName;
+            }
+        }
+
+        if let Some(ignore) = &self.ignore {
+            if ignore.ignores_file(&file_ref.relative_path) {
+                return FileMatcherResult::SkippedDueToIgnore;
             }
         }
 

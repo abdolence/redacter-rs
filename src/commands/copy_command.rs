@@ -86,10 +86,11 @@ pub async fn command_copy(
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
 
-    // The bar exists from here on because the file systems report through it, but it is
-    // not drawn until the converters and redacters have been bound: they report straight to
-    // the terminal, those lines must not land under a live progress bar, and a failure to
-    // bind one must not leave a bar running.
+    // The bar is not drawn until the converters and redacters have been bound: they report
+    // straight to the terminal, those lines must not land under a live progress bar, and a
+    // failure to bind one must not leave a bar running. A hidden bar drops what is printed
+    // through it, so the source reports to the terminal: a zip source reports the entries it
+    // skips while it is listed, before the bar is drawn.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -100,7 +101,7 @@ pub async fn command_copy(
     bar.set_draw_target(ProgressDrawTarget::hidden());
     let app_reporter = AppReporter::from(&bar);
 
-    let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
+    let mut source_fs = DetectFileSystem::open(source, &term_reporter).await?;
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
     let source_listing = if source_fs.has_multiple_files().await? {
@@ -332,7 +333,8 @@ async fn transfer_and_redact_file<
     let skip_reason = match options.file_matcher.matches(&base_file_ref) {
         FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
         FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-        FileMatcherResult::Matched => None,
+        // Ignore rules apply to listings only; this matcher carries none.
+        FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
     };
     if let Some(reason) = skip_reason {
         let outcome = CopyFileOutcome::Skipped { reason };
@@ -604,6 +606,86 @@ mod tests {
             assert_eq!(original, copied, "{name} should be copied byte-identical");
         }
 
+        Ok(())
+    }
+
+    fn write_nested_text_files(root: &std::path::Path) {
+        for file in ["a/notes.txt", "b/notes.txt", "top.txt"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "plain text").unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_filter_naming_a_subdirectory_copies_its_nested_files(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let source = TempDir::with_prefix("copy_command_tests_nested_filter_source")?;
+        write_nested_text_files(source.path());
+        let destination = TempDir::with_prefix("copy_command_tests_nested_filter_dest")?;
+
+        let result = command_copy(
+            &Term::stdout(),
+            &format!("{}/", source.path().display()),
+            &destination.path().to_string_lossy(),
+            CopyCommandOptions::new(
+                Some(globset::Glob::new("a/*")?),
+                None,
+                None,
+                vec![],
+                AddonStoreOptions::default(),
+            ),
+            None,
+        )
+        .await?;
+
+        assert_eq!((result.files_copied, result.files_skipped), (1, 2));
+        assert!(destination.path().join("a/notes.txt").is_file());
+        assert!(!destination.path().join("b/notes.txt").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_filter_naming_a_directory_copies_its_files_from_a_zip(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::io::Write;
+
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let scratch = TempDir::with_prefix("copy_command_tests_nested_filter_zip")?;
+        let zip_path = scratch.path().join("archive.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path)?);
+        for file in ["a/notes.txt", "b/notes.txt", "top.txt"] {
+            writer.start_file(file, zip::write::SimpleFileOptions::default())?;
+            writer.write_all(b"plain text")?;
+        }
+        writer.finish()?;
+        let destination = scratch.path().join("out");
+        std::fs::create_dir(&destination)?;
+
+        let result = command_copy(
+            &Term::stdout(),
+            &format!("zip://{}", zip_path.display()),
+            &destination.to_string_lossy(),
+            CopyCommandOptions::new(
+                Some(globset::Glob::new("a/*")?),
+                None,
+                None,
+                vec![],
+                AddonStoreOptions::default(),
+            ),
+            None,
+        )
+        .await?;
+
+        assert_eq!((result.files_copied, result.files_skipped), (1, 2));
+        assert!(destination.join("a/notes.txt").is_file());
+        assert!(!destination.join("b").exists());
+        assert!(!destination.join("top.txt").exists());
         Ok(())
     }
 

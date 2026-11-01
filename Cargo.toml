@@ -73,6 +73,7 @@ mime = "0.3"
 mime_guess = "2"
 zip = "9"
 globset = "0.4"
+ignore = "0.4"
 tempfile = "3"
 csv-async = { version = "1", default-features = false, features = [
     "tokio",
@@ -112,8 +113,8 @@ image = "0.25"
 bytes = { version = "1" }
 serde_json = "1"
 arboard = { version = "3", features = ["image"], optional = true }
-ocrs = { version = "0.13", optional = true }
-rten = { version = "0.26", optional = true }
+ocrs = { version = "0.13", optional = true, default-features = false, features = ["onnx"] }
+rten = { version = "0.26", optional = true, default-features = false, features = ["contrib", "onnx_format"] }
 rten-imageproc = { version = "0.26", optional = true }
 rten-tensor = { version = "0.26", optional = true }
 tokenizers = { version = "0.23", default-features = false, features = [

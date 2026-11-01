@@ -14,9 +14,10 @@ use crate::commands::scan_output::{
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
-use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
+use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride, IgnoreFileChoice};
 use crate::redacters::{
-    DetectStreamResult, RedacterOptions, RedacterThrottler, Redacters, Score, StreamRedacter,
+    DetectStreamResult, Detection, RedacterOptions, RedacterThrottler, Redacters, Score,
+    StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -35,6 +36,7 @@ pub struct ScanCommandOptions {
     pub addon_store: AddonStoreOptions,
     pub min_score: Option<Score>,
     pub values: ValueDisplay,
+    pub ignore: IgnoreFileChoice,
 }
 
 impl ScanCommandOptions {
@@ -57,7 +59,12 @@ impl ScanCommandOptions {
             addon_store,
             min_score,
             values,
+            ignore: IgnoreFileChoice::SourceRoot,
         }
+    }
+
+    pub fn with_ignore(self, ignore: IgnoreFileChoice) -> Self {
+        Self { ignore, ..self }
     }
 }
 
@@ -81,10 +88,11 @@ pub async fn command_scan(
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
 
-    // The bar exists from here on because the file systems report through it, but it is not
-    // drawn until the converters and redacters have been bound: they report straight to the
-    // terminal, those lines must not land under a live progress bar, and a failure to bind one
-    // must not leave a bar running.
+    // The bar is not drawn until the converters and redacters have been bound: they report
+    // straight to the terminal, those lines must not land under a live progress bar, and a
+    // failure to bind one must not leave a bar running. A hidden bar drops what is printed
+    // through it, so the source reports to the terminal: a zip source reports the entries it
+    // skips while it is listed, before the bar is drawn.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -93,13 +101,14 @@ pub async fn command_scan(
         .progress_chars("━>─"),
     );
     bar.set_draw_target(ProgressDrawTarget::hidden());
-    let app_reporter = AppReporter::from(&bar);
 
-    let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
+    let mut source_fs = DetectFileSystem::open(source, &term_reporter).await?;
     let source_listing = if source_fs.has_multiple_files().await? {
+        let ignore_rules = options.ignore.load(source_fs.local_directory())?;
+        let listing_matcher = options.file_matcher.clone().with_ignore(ignore_rules);
         Some(
             source_fs
-                .list_files(Some(&options.file_matcher), options.max_files_limit)
+                .list_files(Some(&listing_matcher), options.max_files_limit)
                 .await?,
         )
     } else {
@@ -156,11 +165,18 @@ pub async fn command_scan(
                 styles.highlighted.apply_to(listing.files.len()),
                 styles.highlighted.apply_to(HumanBytes(total_size as u64))
             )];
+            if listing.ignored > 0 {
+                header.push(format!(
+                    "{} files ignored.",
+                    styles.highlighted.apply_to(listing.ignored)
+                ));
+            }
             if !listing.files.is_empty() {
                 header.push(format_legend(&SCAN_LEGEND, &styles));
             }
             write_lines(term, &bar, &header)?;
             result.files_skipped += listing.skipped;
+            result.files_ignored += listing.ignored;
             bar.set_length(listing.files.len() as u64);
             for file in &listing.files {
                 let report =
@@ -200,7 +216,8 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
             let skip_reason = match context.options.file_matcher.matches(&base_file_ref) {
                 FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
                 FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-                FileMatcherResult::Matched => None,
+                // Ignore rules apply to listings only; this matcher carries none.
+                FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
             };
             match skip_reason {
                 Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
@@ -295,35 +312,44 @@ async fn detect_in_file(
                 file_ref,
                 SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
             ),
-            Ok(scanned) => ScanFileReport::scanned(
-                file_ref,
-                scanned
-                    .detections
-                    .iter()
-                    .filter(|(_, detection)| {
-                        context.options.min_score.is_none_or(|min_score| {
-                            detection.score.is_none_or(|score| score >= min_score)
+            Ok(scanned) => {
+                let meets_min_score = |detection: &Detection| {
+                    context.options.min_score.is_none_or(|min_score| {
+                        detection.score.is_none_or(|score| score >= min_score)
+                    })
+                };
+                ScanFileReport::scanned(
+                    file_ref,
+                    scanned
+                        .detections
+                        .iter()
+                        .filter(|(_, detection)| meets_min_score(detection))
+                        .map(|(redacter, detection)| {
+                            FindingReport::new(*redacter, detection, context.options.values)
                         })
-                    })
-                    .map(|(redacter, detection)| {
-                        FindingReport::new(*redacter, detection, context.options.values)
-                    })
-                    .collect(),
-                scanned.unlocated,
-            ),
+                        .collect(),
+                    scanned.unlocated,
+                )
+                .with_findings_ignored(
+                    scanned
+                        .ignored
+                        .iter()
+                        .filter(|(_, detection)| meets_min_score(detection))
+                        .count(),
+                )
+            }
             Err(error) => failed_report(file_ref, &error),
         },
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::args::FailOn;
     use crate::redacters::{
         LocalRulesRedacterOptions, RedacterBaseOptions, RedacterProviderOptions, RuleGroup,
     };
-    use std::os::unix::fs::PermissionsExt;
 
     fn email_rules() -> RedacterOptions {
         RedacterOptions {
@@ -356,8 +382,10 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_file_that_cannot_be_read_is_reported_failed_and_the_scan_goes_on() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::TempDir::with_prefix("scan_unreadable_file").unwrap();
         std::fs::write(dir.path().join("a.txt"), "mail a@b.io").unwrap();
         let unreadable = dir.path().join("b.txt");
@@ -391,5 +419,180 @@ mod tests {
             (1, 1, 1)
         );
         assert_eq!(result.exit_code(FailOn::Findings), 1);
+    }
+
+    async fn scan_directory(
+        directory: &std::path::Path,
+        ignore: IgnoreFileChoice,
+        max_files_limit: Option<usize>,
+    ) -> ScanCommandResult {
+        command_scan(
+            &silent_term(),
+            &format!("{}/", directory.display()),
+            ScanCommandOptions::new(
+                None,
+                None,
+                max_files_limit,
+                Vec::new(),
+                AddonStoreOptions::default(),
+                None,
+                ValueDisplay::Masked,
+            )
+            .with_ignore(ignore),
+            email_rules(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A source with an email in every file, one in a directory and one under a name a pattern
+    /// can hit anywhere, beside the ignore file the patterns come from.
+    fn source_with_mock_files() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::with_prefix("scan_ignore").unwrap();
+        std::fs::create_dir(dir.path().join("mocks")).unwrap();
+        for file in ["real.txt", "mocks/key.txt", "token.mock.txt"] {
+            std::fs::write(dir.path().join(file), "mail a@b.io").unwrap();
+        }
+        std::fs::write(dir.path().join("clean.txt"), "nothing here").unwrap();
+        std::fs::write(dir.path().join(".redacterignore"), "mocks/\n*.mock.txt\n").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn the_ignore_file_at_the_source_root_keeps_its_files_out_of_the_scan() {
+        let dir = source_with_mock_files();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::SourceRoot, None).await;
+
+        assert_eq!(
+            (
+                result.files_ignored,
+                result.files_scanned,
+                result.files_unsupported,
+                result.findings
+            ),
+            (3, 2, 0, 1),
+            "the ignored files are not read, and the ignore file excludes itself"
+        );
+        assert_eq!(result.exit_code(FailOn::Findings), 2);
+    }
+
+    #[tokio::test]
+    async fn a_filter_naming_a_subdirectory_scans_its_nested_files() {
+        let dir = tempfile::TempDir::with_prefix("scan_nested_filter").unwrap();
+        for file in ["a/notes.txt", "b/notes.txt", "top.txt"] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "mail a@b.io").unwrap();
+        }
+
+        let result = command_scan(
+            &silent_term(),
+            &format!("{}/", dir.path().display()),
+            ScanCommandOptions::new(
+                Some(globset::Glob::new("a/*").unwrap()),
+                None,
+                None,
+                Vec::new(),
+                AddonStoreOptions::default(),
+                None,
+                ValueDisplay::Masked,
+            ),
+            email_rules(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((result.files_scanned, result.findings), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn no_ignore_scans_every_file_of_the_source() {
+        let dir = source_with_mock_files();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
+
+        assert_eq!((result.files_ignored, result.findings), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_ignore_file_replaces_the_one_at_the_source_root() {
+        let dir = source_with_mock_files();
+        let elsewhere = tempfile::TempDir::with_prefix("scan_ignore_explicit").unwrap();
+        let explicit = elsewhere.path().join("ci-ignore");
+        std::fs::write(&explicit, "real.txt\n").unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Explicit(explicit), None).await;
+
+        assert_eq!((result.files_ignored, result.findings), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn a_marked_line_is_left_out_of_the_findings_and_counted() {
+        let dir = tempfile::TempDir::with_prefix("scan_allow_marker").unwrap();
+        std::fs::write(
+            dir.path().join("config.txt"),
+            "mail a@b.io\nmock c@d.io # redacter:allow\nmail e@f.io\n",
+        )
+        .unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
+
+        assert_eq!(
+            (
+                result.findings,
+                result.findings_ignored,
+                result.files_with_findings
+            ),
+            (2, 1, 1)
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(written["findings_ignored"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_named_as_the_source_is_scanned_even_when_the_ignore_file_lists_it() {
+        let dir = source_with_mock_files();
+        let explicit = dir.path().join("token.mock.txt");
+
+        let result = command_scan(
+            &silent_term(),
+            &explicit.display().to_string(),
+            ScanCommandOptions::new(
+                None,
+                None,
+                None,
+                Vec::new(),
+                AddonStoreOptions::default(),
+                None,
+                ValueDisplay::Masked,
+            )
+            .with_ignore(IgnoreFileChoice::Explicit(
+                dir.path().join(".redacterignore"),
+            )),
+            email_rules(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((result.files_ignored, result.findings), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn ignored_files_do_not_use_up_the_file_limit() {
+        let dir = tempfile::TempDir::with_prefix("scan_ignore_limit").unwrap();
+        std::fs::create_dir(dir.path().join("mocks")).unwrap();
+        for index in 0..20 {
+            std::fs::write(dir.path().join(format!("mocks/{index}.txt")), "mail a@b.io").unwrap();
+        }
+        std::fs::write(dir.path().join("real.txt"), "mail c@d.io").unwrap();
+        std::fs::write(dir.path().join("config.mock"), "mail e@f.io").unwrap();
+        std::fs::write(dir.path().join(".redacterignore"), "mocks/\n*.mock\n").unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::SourceRoot, Some(1)).await;
+
+        assert_eq!((result.files_scanned, result.findings), (1, 1));
+        assert_eq!(result.exit_code(FailOn::Findings), 2);
     }
 }

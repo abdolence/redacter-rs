@@ -31,6 +31,8 @@ pub enum AppError {
     HttpClientError(#[from] reqwest::Error),
     #[error("Zip error:\n{0}")]
     ZipError(#[from] zip::result::ZipError),
+    #[error("A background task failed: {0}")]
+    BackgroundTaskFailed(#[from] tokio::task::JoinError),
     #[error("CSV parser error:\n{0}")]
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]
@@ -84,6 +86,11 @@ pub enum AppError {
     },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
+    #[error("Invalid ignore file: {source}")]
+    InvalidIgnoreFile {
+        #[source]
+        source: ignore::Error,
+    },
     #[error("Score must be a number between 0 and 1, got `{value}`")]
     InvalidScore { value: String },
     #[error("System error: {message}")]

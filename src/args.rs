@@ -1,6 +1,7 @@
 use crate::addon_store::Addon;
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
+use crate::file_tools::IgnoreFileChoice;
 #[cfg(feature = "local-credential-ml")]
 use crate::redacters::LocalCredentialMlRedacterOptions;
 #[cfg(feature = "local-gliner")]
@@ -147,6 +148,9 @@ pub enum CliCommand {
             help = "Which results make the command exit with 2: 'findings', 'unconfirmed' (findings, or a file without findings whose named values could not be located, marked ?) or 'never'. Errors, blocked and failed files exit with 1 whichever it is"
         )]
         fail_on: FailOn,
+
+        #[command(flatten)]
+        ignore: IgnoreArgs,
     },
     #[command(about = "List files in the source")]
     Ls {
@@ -202,6 +206,32 @@ pub struct ReportArgs {
         help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (scan only; values are always masked). Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct IgnoreArgs {
+    #[arg(
+        long,
+        conflicts_with = "no_ignore",
+        help = "Skip the files this ignore file lists, in gitignore syntax, matched against the path relative to the source. Works for any source. Without it, a local directory source uses its own .redacterignore"
+    )]
+    pub ignore_file: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Do not read the .redacterignore at the root of a local source. Lines marked with redacter:allow are still ignored"
+    )]
+    pub no_ignore: bool,
+}
+
+impl From<IgnoreArgs> for IgnoreFileChoice {
+    fn from(args: IgnoreArgs) -> Self {
+        match args.ignore_file {
+            Some(path) => Self::Explicit(path),
+            None if args.no_ignore => Self::Disabled,
+            None => Self::SourceRoot,
+        }
+    }
 }
 
 /// Which results make `scan` exit with 2. Errors exit with 1 whichever it is.
