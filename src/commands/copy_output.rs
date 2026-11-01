@@ -8,7 +8,7 @@
 use crate::addon_store::Addon;
 use crate::args::RedacterType;
 use crate::file_converters::FileConverters;
-use crate::redacters::{RedactionBlocked, RedactionConversion};
+use crate::redacters::{Categories, RedactionBlocked, RedactionConversion};
 use console::{pad_str, Alignment, Style};
 
 /// Why a file was copied without being redacted, or skipped instead of redacted.
@@ -165,6 +165,7 @@ pub struct Capabilities {
     pub pdf_rendering: Capability,
     pub ocr: Capability,
     pub sampling_size: Option<usize>,
+    pub categories: Option<Categories>,
 }
 
 impl Capabilities {
@@ -175,6 +176,7 @@ impl Capabilities {
         redacters: Vec<RedacterType>,
         file_converters: &FileConverters<'_>,
         sampling_size: Option<usize>,
+        categories: Option<Categories>,
     ) -> Self {
         Self {
             redacters,
@@ -193,6 +195,7 @@ impl Capabilities {
                 None => Capability::No(None),
             },
             sampling_size,
+            categories,
         }
     }
 }
@@ -541,17 +544,28 @@ pub fn format_capabilities_line(capabilities: &Capabilities, styles: &OutputStyl
         Some(size) => styles.highlighted.apply_to(format!("{size} bytes")),
         None => styles.dimmed.apply_to("off".to_string()),
     };
-    format!(
+    let mut line = format!(
         "Redacters: {} · PDF rendering: {} · OCR: {} · Sampling: {}",
         redacters,
         yes_no(capabilities.pdf_rendering),
         yes_no(capabilities.ocr),
         sampling
-    )
+    );
+    if let Some(categories) = &capabilities.categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
+    line
 }
 
 /// The closing summary, replacing the per-file step lines with one count line.
-pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> String {
+pub fn format_summary_line(
+    summary: &CopySummary,
+    categories: Option<&Categories>,
+    styles: &OutputStyles,
+) -> String {
     let total = summary.redacted + summary.copied_as_is + summary.skipped + summary.errors;
     let mut line = format!(
         "{} {}: {} redacted, {} copied as is, {} skipped",
@@ -584,6 +598,12 @@ pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> Stri
         )
         .as_str(),
     );
+    if let Some(categories) = categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
     line
 }
 
@@ -865,6 +885,7 @@ mod tests {
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::No(None),
                     sampling_size: None,
+                    categories: None,
                 },
                 &styles
             ),
@@ -877,6 +898,7 @@ mod tests {
                     pdf_rendering: Capability::No(None),
                     ocr: Capability::Yes,
                     sampling_size: Some(1024),
+                    categories: None,
                 },
                 &styles
             ),
@@ -889,6 +911,7 @@ mod tests {
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::Yes,
                     sampling_size: None,
+                    categories: None,
                 },
                 &styles
             ),
@@ -905,6 +928,7 @@ mod tests {
                     pdf_rendering: Capability::No(Some(Addon::Pdf)),
                     ocr: Capability::No(Some(Addon::Ocr)),
                     sampling_size: None,
+                    categories: None,
                 },
                 &OutputStyles::plain()
             ),
@@ -925,6 +949,7 @@ mod tests {
                     errors: 1,
                     total_size: 6 * 1024,
                 },
+                None,
                 &styles
             ),
             "6 files: 3 redacted, 1 copied as is, 1 skipped, 1 error. Total size: 6.00 KiB"
@@ -938,6 +963,7 @@ mod tests {
                     errors: 0,
                     total_size: 0,
                 },
+                None,
                 &styles
             ),
             "6 files: 5 redacted, 0 copied as is, 1 skipped. Total size: 0 B"
@@ -951,6 +977,7 @@ mod tests {
                     errors: 0,
                     total_size: 12,
                 },
+                None,
                 &styles
             ),
             "1 file: 0 redacted, 1 copied as is, 0 skipped. Total size: 12 B"
@@ -964,6 +991,7 @@ mod tests {
                     errors: 2,
                     total_size: 0,
                 },
+                None,
                 &styles
             ),
             "2 files: 0 redacted, 0 copied as is, 0 skipped, 2 errors. Total size: 0 B"

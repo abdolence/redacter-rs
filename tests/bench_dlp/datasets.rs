@@ -1,7 +1,7 @@
 //! The datasets a benchmark run scores against: each is a directory of files for `scan` to read
 //! and, per file, the truth to score its report with.
 
-use crate::categories::Category;
+use crate::category::Category;
 use crate::scoring::{FileTruth, Sensitive, Target};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -192,7 +192,7 @@ impl SecretsCorpus {
                     let value = parts.concat();
                     content = content.replace(&placeholder, &value);
                     truth.sensitive.push(Sensitive {
-                        category: Category::Credential,
+                        category: Category::Secrets,
                         value: Target::Text(value),
                     });
                 }
@@ -229,6 +229,40 @@ struct PublicSpan {
     label: String,
 }
 
+/// The category of a label of the public dataset (`nvidia/Nemotron-PII`), `None` for a
+/// label the fixtures treat as neutral: places, organisations, dates and times, and
+/// occupational or educational attributes. Whether a redacter finds one is a configuration
+/// choice, so it counts neither for nor against. Any other label is sensitive.
+fn nemotron_category(label: &str) -> Option<Category> {
+    match label {
+        "city" | "county" | "state" | "country" | "company_name" | "date" | "date_time"
+        | "time" | "occupation" | "language" | "employment_status" | "education_level" => None,
+        "first_name" | "last_name" | "user_name" => Some(Category::Person),
+        "email" | "phone_number" | "fax_number" => Some(Category::Contact),
+        "street_address" | "postcode" | "coordinate" => Some(Category::Address),
+        "ssn"
+        | "national_id"
+        | "tax_id"
+        | "customer_id"
+        | "employee_id"
+        | "certificate_license_number"
+        | "license_plate"
+        | "vehicle_identifier"
+        | "unique_id"
+        | "medical_record_number"
+        | "health_plan_beneficiary_number"
+        | "device_identifier"
+        | "biometric_identifier" => Some(Category::IdNumber),
+        "credit_debit_card" | "cvv" | "bank_routing_number" | "account_number" | "swift_bic" => {
+            Some(Category::Financial)
+        }
+        "date_of_birth" => Some(Category::DateOfBirth),
+        "password" | "api_key" | "http_cookie" | "pin" => Some(Category::Secrets),
+        "ipv4" | "ipv6" | "url" | "mac_address" => Some(Category::Network),
+        _ => Some(Category::Other),
+    }
+}
+
 impl TryFrom<&PublicRecord> for FileTruth {
     type Error = String;
 
@@ -241,7 +275,7 @@ impl TryFrom<&PublicRecord> for FileTruth {
                 .ok_or_else(|| format!("span {}..{} lies outside the text", span.start, span.end))?
                 .iter()
                 .collect();
-            match Category::of_nemotron_label(&span.label) {
+            match nemotron_category(&span.label) {
                 Some(category) => sensitive.push(Sensitive {
                     category,
                     value: Target::Text(value),
@@ -280,7 +314,7 @@ mod tests {
         assert_eq!(
             truth.sensitive,
             vec![Sensitive {
-                category: Category::Credential,
+                category: Category::Secrets,
                 value: Target::Text("abcd".to_string())
             }]
         );

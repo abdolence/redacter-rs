@@ -54,6 +54,12 @@ pub use local_credential_ml::{LocalCredentialMlRedacter, LocalCredentialMlRedact
 /// `local-credential-ml`).
 pub(crate) mod text_spans;
 
+mod category;
+pub use category::*;
+
+mod category_filter;
+pub use category_filter::*;
+
 mod detection;
 pub use detection::*;
 
@@ -582,6 +588,8 @@ pub struct RedacterBaseOptions {
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+    /// The categories `scan` reports and `cp` redacts; every category when `None`.
+    pub categories: Option<Categories>,
     /// Record where each redaction sits in the file, for a report that lists them. Recording
     /// keeps the content of every step and compares it with the next, so a copy that writes no
     /// such report leaves it off.
@@ -627,6 +635,22 @@ impl RedacterProviderOptions {
             #[cfg(feature = "local-credential-ml")]
             RedacterProviderOptions::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
         }
+    }
+}
+
+impl RedacterType {
+    /// Whether the chosen categories narrow the redacter's own request, so that its redaction
+    /// leaves the other categories alone: the local redacters and GCP DLP. The others redact
+    /// everything they detect.
+    pub fn narrows_itself(self) -> bool {
+        matches!(
+            self,
+            RedacterType::GcpDlp
+                | RedacterType::LocalRules
+                | RedacterType::LocalNer
+                | RedacterType::LocalGliner
+                | RedacterType::LocalCredentialMl
+        )
     }
 }
 
@@ -703,6 +727,37 @@ impl<'a> Redacters<'a> {
         }
     }
 
+    /// `redact`, limited to `categories`. A redacter that does not narrow its own request has
+    /// its text redacted by masking the values `detect` finds in those categories, so the rest
+    /// of the text is copied byte for byte. That is one provider call per item, as `redact`
+    /// makes. A value in the categories that `detect` named but could not place in the text
+    /// fails with [`AppError::UnlocatedValues`]: copying it would leave it in place unsaid.
+    /// Such a redacter is only offered text under categories; any other content fails with
+    /// [`CategoriesError::ContentNotText`] rather than being redacted in every category.
+    pub async fn redact_in(
+        &self,
+        input: RedacterDataItem,
+        categories: Option<&Categories>,
+    ) -> AppResult<Redacted> {
+        let redacter = self.redacter_type();
+        let Some(categories) = categories.filter(|_| !redacter.narrows_itself()) else {
+            return self.redact(input).await;
+        };
+        let RedacterDataItemContent::Value(text) = &input.content else {
+            return Err(CategoriesError::ContentNotText { redacter }.into());
+        };
+        let mut detections = self.detect(&input).await?;
+        detections.retain_categories(redacter, categories);
+        let (masked, replaced) = detections.masked(text, redacter, self.text_mask())?;
+        Ok(Redacted::located(
+            RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(masked),
+            },
+            replaced,
+        ))
+    }
+
     pub fn is_mime_text(mime: &Mime) -> bool {
         let mime_subtype_as_str = mime.subtype().as_str().to_lowercase();
         (mime.type_() == mime::TEXT
@@ -753,6 +808,18 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
     }
 }
 
+/// What replaces a value a redacter detected when `cp` masks it locally instead of asking the
+/// provider to redact: the look the provider's own redaction gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMask {
+    /// One `[REDACTED]` per value.
+    Token,
+    /// One `X` per character of the value.
+    EveryCharacter,
+    /// The detection's label in braces, `{NAME}`, as Guardrails' anonymised text writes it.
+    Label,
+}
+
 pub trait Redacter {
     /// Redacts `input` and returns the result with what was replaced, as [`Redacted`] says.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted>;
@@ -770,6 +837,11 @@ pub trait Redacter {
     }
 
     fn redacter_type(&self) -> RedacterType;
+
+    /// What replaces a value this redacter detected, when `cp` masks it locally.
+    fn text_mask(&self) -> TextMask {
+        TextMask::EveryCharacter
+    }
 }
 
 impl<'a> Redacter for Redacters<'a> {
@@ -881,7 +953,28 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
         }
     }
+
+    fn text_mask(&self) -> TextMask {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.text_mask(),
+            Redacters::AwsComprehend(redacter) => redacter.text_mask(),
+            Redacters::Presidio(redacter) => redacter.text_mask(),
+            Redacters::GeminiLlm(redacter) => redacter.text_mask(),
+            Redacters::OpenAiLlm(redacter) => redacter.text_mask(),
+            Redacters::GcpVertexAi(redacter) => redacter.text_mask(),
+            Redacters::AwsBedrock(redacter) => redacter.text_mask(),
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.text_mask(),
+            Redacters::LocalRules(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.text_mask(),
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.text_mask(),
+        }
+    }
 }
+
 #[cfg(test)]
 pub mod test_support {
     use super::*;
@@ -1177,6 +1270,7 @@ mod tests {
                 presidio::PresidioRedacterOptions {
                     text_analyze_url: Some(unreachable),
                     image_redact_url: None,
+                    categories: None,
                 },
                 reporter,
             )
@@ -1209,6 +1303,85 @@ mod tests {
             RedacterDataItemContent::Value(text) if text == " \n\t"
         ));
         assert_eq!(redacted.replaced.as_deref(), Some(&[][..]));
+    }
+
+    fn text_item(text: &str) -> RedacterDataItem {
+        RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "note.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        }
+    }
+
+    fn item_text(redacted: &Redacted) -> &str {
+        match &redacted.item.content {
+            RedacterDataItemContent::Value(text) => text,
+            other => panic!("expected a text item, got {other:?}"),
+        }
+    }
+
+    const NOTE: &str = "Ana Lima mailed ana@example.com";
+
+    /// The redacter here is built with every group, which `args` does not do under
+    /// `--categories`, so only a `redact_in` that leaves the narrowing to the redacter and
+    /// delegates to `redact` redacts the email address under `secrets` as `redact` does.
+    #[tokio::test]
+    async fn redact_in_delegates_to_redact_for_a_redacter_that_narrows_itself() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = Redacters::LocalRules(
+            LocalRulesRedacter::new(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: Vec::new(),
+                },
+                &reporter,
+            )
+            .await
+            .unwrap(),
+        );
+        let secrets = Categories::limiting([Category::Secrets]).unwrap();
+
+        let in_scope = redacter
+            .redact_in(text_item(NOTE), Some(&secrets))
+            .await
+            .unwrap();
+        let today = redacter.redact(text_item(NOTE)).await.unwrap();
+
+        assert_eq!(item_text(&in_scope), item_text(&today));
+        assert_eq!(item_text(&in_scope), "Ana Lima mailed [REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn redact_in_fails_on_content_that_is_not_text_for_a_redacter_that_does_not_narrow_itself(
+    ) {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+        let redacter = redacter_with_unreachable_service(&reporter).await;
+        let contact = Categories::limiting([Category::Contact]).unwrap();
+        let table = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "people.csv".into(),
+                media_type: Some(mime::TEXT_CSV),
+                file_size: None,
+            },
+            content: RedacterDataItemContent::Table {
+                headers: vec!["mail".to_string()],
+                rows: vec![vec!["ana@example.com".to_string()]],
+            },
+        };
+
+        let error = redacter.redact_in(table, Some(&contact)).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            AppError::Categories(CategoriesError::ContentNotText {
+                redacter: RedacterType::Presidio
+            })
+        ));
     }
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {

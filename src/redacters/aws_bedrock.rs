@@ -13,10 +13,11 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_with_mode,
-    sensitive_data_examples, text_redaction_instruction, Detections, ImageBoxes, LlmImageMode,
-    LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
+    llm_support, normalized_box_to_image_coords, parse_answer, prepare_image_for_llm,
+    redact_image_with_mode, sensitive_data_examples, text_redaction_instruction, Categories,
+    Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop,
+    NativeImageEditError, RedactSupport, Redacted, Redacter, RedacterDataItem,
+    RedacterDataItemContent, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -122,6 +123,8 @@ pub struct AwsBedrockRedacterOptions {
     pub region: Option<Region>,
     pub text_model: Option<AwsBedrockModelName>,
     pub image_mode: LlmImageMode,
+    /// The categories to look for; every category when `None`.
+    pub categories: Option<Categories>,
 }
 
 #[derive(Clone)]
@@ -519,7 +522,7 @@ impl<'a> AwsBedrockRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
-        let prompt = TextDetectionPrompt::new(text);
+        let prompt = TextDetectionPrompt::new(text, self.options.categories.as_ref());
         let message = Message::builder()
             .role(ConversationRole::User)
             .content(ContentBlock::Text(TEXT_DETECTION_ANSWER_FORMAT.to_string()))
@@ -539,7 +542,11 @@ impl<'a> AwsBedrockRedacter<'a> {
             )
             .await?
             .into_text()?;
-        LlmTextFinding::detections_from_answer(strip_json_fence(&answer), text)
+        LlmTextFinding::detections_from_answer(
+            strip_json_fence(&answer),
+            text,
+            prompt.kind_names.as_deref(),
+        )
     }
 
     /// AWS Bedrock has no active image editing model: Amazon Nova Canvas, the only inpainting
@@ -586,11 +593,7 @@ impl<'a> Redacter for AwsBedrockRedacter<'a> {
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
-        Ok(match file_ref.media_type.as_ref() {
-            Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
-            Some(media_type) if Redacters::is_mime_image(media_type) => RedactSupport::Supported,
-            _ => RedactSupport::Unsupported,
-        })
+        Ok(llm_support(file_ref, self.options.categories.as_ref()))
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
@@ -994,6 +997,7 @@ mod tests {
         let reporter: AppReporter = AppReporter::from(&term);
         let redacter = AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: None,
                 text_model: None,
                 image_mode: LlmImageMode::Native,
@@ -1017,6 +1021,7 @@ mod tests {
         let reporter: AppReporter = AppReporter::from(&term);
         let redacter = AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: Some(Region::new("eu-north-1")),
                 text_model: Some(AwsBedrockModelName::from(
                     "eu.mistral.pixtral-large-2502-v1:0".to_string(),
@@ -1061,6 +1066,7 @@ mod tests {
 
         let redacter = AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: Some(Region::new(test_aws_region)),
                 text_model: None,
                 image_mode: LlmImageMode::Auto,
@@ -1092,6 +1098,7 @@ mod tests {
         let input = test_image_item();
         let redacter = AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: Some(Region::new(test_aws_region)),
                 text_model: None,
                 image_mode,
@@ -1148,6 +1155,7 @@ mod tests {
         let input = test_image_item();
         let redacter = AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: Some(Region::new(test_aws_region)),
                 text_model: Some(AwsBedrockModelName::from(claude_model)),
                 image_mode: LlmImageMode::Coords,
@@ -1178,6 +1186,7 @@ mod tests {
         let detections = LlmTextFinding::detections_from_answer(
             strip_json_fence(answer),
             "Mail john.smith@example.com now",
+            None,
         )
         .unwrap()
         .found;
@@ -1202,6 +1211,7 @@ mod tests {
         let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
         Ok(AwsBedrockRedacter::new(
             AwsBedrockRedacterOptions {
+                categories: None,
                 region: Some(Region::new(test_aws_region)),
                 text_model: None,
                 image_mode: LlmImageMode::Auto,

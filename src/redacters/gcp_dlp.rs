@@ -3,8 +3,8 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    Category, Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -28,41 +28,61 @@ pub struct GcpDlpRedacter<'a> {
 #[derive(Debug, Clone)]
 pub struct GcpDlpRedacterOptions {
     pub project_id: GcpProjectId,
-    pub user_defined_built_in_info_types: Vec<String>,
+    /// The built-in info types to look for: the defaults the chosen categories leave, and those
+    /// the user added.
+    pub built_in_info_types: Vec<String>,
     pub user_defined_stored_info_types: Vec<String>,
 }
 
 impl<'a> GcpDlpRedacter<'a> {
-    pub const INFO_TYPES: [&'static str; 28] = [
-        "PHONE_NUMBER",
-        "EMAIL_ADDRESS",
-        "CREDIT_CARD_NUMBER",
-        "LOCATION",
-        "PERSON_NAME",
-        "AGE",
-        "DATE_OF_BIRTH",
-        "FINANCIAL_ACCOUNT_NUMBER",
-        "GENDER",
-        "IP_ADDRESS",
-        "PASSPORT",
-        "AUTH_TOKEN",
-        "AWS_CREDENTIALS",
-        "BASIC_AUTH_HEADER",
-        "VAT_NUMBER",
-        "PASSWORD",
-        "OAUTH_CLIENT_SECRET",
-        "IBAN_CODE",
-        "GCP_API_KEY",
-        "ENCRYPTION_KEY",
-        "JSON_WEB_TOKEN",
-        "HTTP_COOKIE",
-        "GCP_CREDENTIALS",
-        "AZURE_AUTH_TOKEN",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "STORAGE_SIGNED_URL",
-        "TINK_KEYSET",
+    pub const INFO_TYPES: [(&'static str, Category); 28] = [
+        ("PHONE_NUMBER", Category::Contact),
+        ("EMAIL_ADDRESS", Category::Contact),
+        ("CREDIT_CARD_NUMBER", Category::Financial),
+        ("LOCATION", Category::Address),
+        ("PERSON_NAME", Category::Person),
+        ("AGE", Category::Other),
+        ("DATE_OF_BIRTH", Category::DateOfBirth),
+        ("FINANCIAL_ACCOUNT_NUMBER", Category::Financial),
+        ("GENDER", Category::Other),
+        ("IP_ADDRESS", Category::Network),
+        ("PASSPORT", Category::IdNumber),
+        ("AUTH_TOKEN", Category::Secrets),
+        ("AWS_CREDENTIALS", Category::Secrets),
+        ("BASIC_AUTH_HEADER", Category::Secrets),
+        ("VAT_NUMBER", Category::IdNumber),
+        ("PASSWORD", Category::Secrets),
+        ("OAUTH_CLIENT_SECRET", Category::Secrets),
+        ("IBAN_CODE", Category::Financial),
+        ("GCP_API_KEY", Category::Secrets),
+        ("ENCRYPTION_KEY", Category::Secrets),
+        ("JSON_WEB_TOKEN", Category::Secrets),
+        ("HTTP_COOKIE", Category::Secrets),
+        ("GCP_CREDENTIALS", Category::Secrets),
+        ("AZURE_AUTH_TOKEN", Category::Secrets),
+        ("OPENAI_API_KEY", Category::Secrets),
+        ("ANTHROPIC_API_KEY", Category::Secrets),
+        ("STORAGE_SIGNED_URL", Category::Secrets),
+        ("TINK_KEYSET", Category::Secrets),
     ];
+
+    /// The names of the info types looked for when the user chooses none.
+    pub fn default_info_types() -> Vec<String> {
+        Self::INFO_TYPES
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect()
+    }
+
+    /// The category of a finding of the info type `name`: that of the default info type of
+    /// the name, `other` for any other, which the user added.
+    pub fn info_type_category(name: &str) -> Category {
+        Self::INFO_TYPES
+            .iter()
+            .find(|(info_type, _)| *info_type == name)
+            .map_or(Category::Other, |(_, category)| *category)
+    }
+
     pub async fn new(
         gcp_dlp_options: GcpDlpRedacterOptions,
         reporter: &'a AppReporter<'a>,
@@ -353,17 +373,11 @@ impl<'a> GcpDlpRedacter<'a> {
     }
 
     fn create_built_in_info_types(&self) -> HashSet<&str> {
-        [
-            Self::INFO_TYPES.to_vec(),
-            self.gcp_dlp_options
-                .user_defined_built_in_info_types
-                .iter()
-                .map(|v| v.as_str())
-                .collect(),
-        ]
-        .concat()
-        .into_iter()
-        .collect()
+        self.gcp_dlp_options
+            .built_in_info_types
+            .iter()
+            .map(|name| name.as_str())
+            .collect()
     }
 
     fn check_supported_image_type(mime_type: &Mime) -> bool {
@@ -431,6 +445,10 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::GcpDlp
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Token
     }
 }
 
@@ -1038,7 +1056,7 @@ mod tests {
         let redacter = GcpDlpRedacter::new(
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             },
             &reporter,
@@ -1063,7 +1081,7 @@ mod tests {
         GcpDlpRedacter::new(
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             },
             reporter,
@@ -1295,5 +1313,25 @@ mod tests {
                 [ink_x1, ink_y1, ink_x2, ink_y2]
             );
         }
+    }
+
+    #[test]
+    fn every_default_info_type_but_age_and_gender_is_in_a_named_category() {
+        for (name, category) in GcpDlpRedacter::INFO_TYPES {
+            assert_eq!(GcpDlpRedacter::info_type_category(name), category, "{name}");
+            assert_eq!(
+                category != Category::Other,
+                !["AGE", "GENDER"].contains(&name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_info_type_the_user_added_is_other() {
+        assert_eq!(
+            GcpDlpRedacter::info_type_category("EMPLOYEE_NUMBER"),
+            Category::Other
+        );
     }
 }

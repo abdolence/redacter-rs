@@ -56,7 +56,7 @@ enum Severity {
     Informational,
     /// Sensitive data was found.
     Medium,
-    /// A credential was found.
+    /// A secret was found.
     High,
 }
 
@@ -923,8 +923,29 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_is_high_and_other_findings_are_medium() {
-        let credential = finding(
+    fn a_secret_is_high_whichever_redacter_found_it() {
+        for (redacter, label) in [
+            (RedacterType::GcpDlp, "PASSWORD"),
+            (RedacterType::AwsComprehend, "PASSWORD"),
+            (RedacterType::LocalCredentialMl, "credential"),
+        ] {
+            let secret = finding(redacter, label, None, DetectionLocation::File, "hunter2");
+            let event = event_of(found("a.txt", vec![secret]));
+            assert_eq!(event["severity_id"], 4, "{redacter}");
+        }
+        let name = finding(
+            RedacterType::GcpDlp,
+            "PERSON_NAME",
+            None,
+            DetectionLocation::File,
+            "Akira",
+        );
+        assert_eq!(event_of(found("a.txt", vec![name]))["severity_id"], 3);
+    }
+
+    #[test]
+    fn a_secret_is_high_and_other_findings_are_medium() {
+        let secret = finding(
             RedacterType::LocalRules,
             "aws-access-key",
             None,
@@ -942,7 +963,7 @@ mod tests {
             (json!(3), json!("Medium"))
         );
         assert_eq!(
-            severity_of(vec![personal, credential]),
+            severity_of(vec![personal, secret]),
             (json!(4), json!("High"))
         );
     }

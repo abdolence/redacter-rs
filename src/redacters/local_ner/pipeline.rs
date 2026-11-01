@@ -3,7 +3,8 @@
 
 use super::error::LocalNerError;
 use crate::redacters::text_spans::{Finding, RuleName};
-use crate::redacters::Score;
+use crate::redacters::{Category, Score};
+use clap::ValueEnum;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Tokens shared by two neighbouring windows.
@@ -22,6 +23,24 @@ impl Entity {
         [Entity::Per, Entity::Org, Entity::Loc]
             .into_iter()
             .collect()
+    }
+
+    /// The category of what the entity marks.
+    pub fn category(self) -> Category {
+        match self {
+            Entity::Per => Category::Person,
+            Entity::Org => Category::Organization,
+            Entity::Loc => Category::Location,
+        }
+    }
+
+    /// The category of a finding named `label`, as [`Entity::as_str`] spells it; `other` for
+    /// any other name.
+    pub fn label_category(label: &str) -> Category {
+        Entity::value_variants()
+            .iter()
+            .find(|entity| entity.as_str() == label)
+            .map_or(Category::Other, |entity| entity.category())
     }
 
     /// The name used in findings and in `--local-ner-entities`.
@@ -369,8 +388,17 @@ pub fn merge_spans(text: &str, words: &[Word], options: &NerOptions) -> Vec<Find
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::cell::RefCell;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_person_is_a_person_and_places_and_organisations_are_other() {
+        assert_eq!(Entity::label_category("per"), Category::Person);
+        assert_eq!(Entity::label_category("org"), Category::Organization);
+        assert_eq!(Entity::label_category("loc"), Category::Location);
+        assert_eq!(Entity::label_category("misc"), Category::Other);
+    }
 
     const CLS: u32 = 1000;
     const SEP: u32 = 1001;

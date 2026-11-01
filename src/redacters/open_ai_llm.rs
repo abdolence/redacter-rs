@@ -8,11 +8,11 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_with_mode,
-    sensitive_data_examples, text_redaction_instruction, Detections, ImageBoxes, LlmImageMode,
-    LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
-    NATIVE_IMAGE_REDACTION_PROMPT,
+    classify_http_native_failure, llm_support, parse_answer, prepare_image_for_llm,
+    redact_image_with_mode, sensitive_data_examples, text_redaction_instruction, Categories,
+    Detections, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop,
+    NativeImageEditError, RedactSupport, Redacted, Redacter, RedacterDataItem,
+    RedacterDataItemContent, TextDetectionPrompt, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -29,6 +29,8 @@ pub struct OpenAiLlmRedacterOptions {
     pub model: Option<OpenAiModelName>,
     pub image_model: Option<OpenAiModelName>,
     pub image_mode: LlmImageMode,
+    /// The categories to look for; every category when `None`.
+    pub categories: Option<Categories>,
 }
 
 #[derive(Clone)]
@@ -143,6 +145,32 @@ struct OpenAiLlmJsonSchema {
 #[derive(Deserialize, Clone, Debug)]
 struct OpenAiLlmTextCoordsResponse {
     text_coords: Vec<TextImageCoords>,
+}
+
+/// The schema of the text detection answer. `kind_names`, when set, are the only values
+/// `type` may take.
+fn text_findings_schema(kind_names: Option<&[String]>) -> serde_json::Value {
+    let kind = match kind_names {
+        Some(names) => serde_json::json!({ "type": "string", "enum": names }),
+        None => serde_json::json!({ "type": "string" }),
+    };
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "type": kind
+                    },
+                    "required": ["text", "type"]
+                }
+            }
+        },
+        "required": ["findings"]
+    })
 }
 
 /// The answer to the text detection request: OpenAI's response schemas must be objects, so
@@ -390,7 +418,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             role: "system".to_string(),
             content: vec![OpenAiLlmAnalyzeMessageContent::Text { text }],
         };
-        let prompt = TextDetectionPrompt::new(text);
+        let prompt = TextDetectionPrompt::new(text, self.open_ai_llm_options.categories.as_ref());
         let request = OpenAiLlmAnalyzeRequest {
             model: self.model_name(),
             messages: vec![
@@ -405,23 +433,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             response_format: Some(OpenAiLlmResponseFormat::JsonSchema {
                 json_schema: OpenAiLlmJsonSchema {
                     name: "text_detect".to_string(),
-                    schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "findings": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "text": { "type": "string" },
-                                        "type": { "type": "string" }
-                                    },
-                                    "required": ["text", "type"]
-                                }
-                            }
-                        },
-                        "required": ["findings"]
-                    }),
+                    schema: text_findings_schema(prompt.kind_names.as_deref()),
                 },
             }),
         };
@@ -430,7 +442,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             .await?
             .into_text()?;
         let findings: OpenAiLlmTextFindings = parse_answer(&answer)?;
-        LlmTextFinding::locate(text, findings.findings)
+        LlmTextFinding::locate(text, findings.findings, prompt.kind_names.as_deref())
     }
 
     /// Output format accepted by the images/edits endpoint for the given input format.
@@ -552,11 +564,10 @@ impl<'a> Redacter for OpenAiLlmRedacter<'a> {
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
-        Ok(match file_ref.media_type.as_ref() {
-            Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
-            Some(media_type) if Redacters::is_mime_image(media_type) => RedactSupport::Supported,
-            _ => RedactSupport::Unsupported,
-        })
+        Ok(llm_support(
+            file_ref,
+            self.open_ai_llm_options.categories.as_ref(),
+        ))
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
@@ -595,6 +606,20 @@ mod tests {
     use super::*;
 
     const PLANTED_VALUE: &str = "jane.doe@example.com";
+
+    #[test]
+    fn the_kind_of_a_finding_is_limited_to_the_names_when_categories_limit_the_search() {
+        let names = vec!["password".to_string(), "api_key".to_string()];
+
+        let limited = text_findings_schema(Some(&names));
+        let unlimited = text_findings_schema(None);
+
+        let kind = |schema: &serde_json::Value| {
+            schema["properties"]["findings"]["items"]["properties"]["type"].clone()
+        };
+        assert_eq!(kind(&limited)["enum"], serde_json::json!(names));
+        assert_eq!(kind(&unlimited).get("enum"), None);
+    }
 
     #[test]
     fn a_failed_request_does_not_repeat_the_response_body() {
@@ -636,6 +661,7 @@ mod tests {
 
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -681,6 +707,7 @@ mod tests {
         let input = test_image_item();
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -771,6 +798,7 @@ mod tests {
         };
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -798,6 +826,7 @@ mod tests {
         };
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,

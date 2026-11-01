@@ -14,6 +14,7 @@ use crate::commands::artifact_locator::{
 };
 use crate::commands::copy_output::escaped;
 use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
+use crate::redacters::Categories;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -193,6 +194,15 @@ struct Run {
     column_kind: &'static str,
     invocations: Vec<Invocation>,
     results: Vec<SarifResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<RunProperties>,
+}
+
+/// The property bag of a run. It states the categories a limited run looked for, so two
+/// analyses of one commit with different categories can be told apart.
+#[derive(Debug, Serialize)]
+struct RunProperties {
+    categories: Categories,
 }
 
 #[derive(Debug, Serialize)]
@@ -395,7 +405,11 @@ impl Location {
 impl SarifLog {
     /// The log of one run over `artifacts`. Rules are sorted by id, so the log does not
     /// depend on the order the files were read in.
-    pub fn new(artifacts: &[ReportedFile], locator: &ArtifactLocator) -> Self {
+    pub fn new(
+        artifacts: &[ReportedFile],
+        locator: &ArtifactLocator,
+        categories: Option<&Categories>,
+    ) -> Self {
         let mut rules: BTreeMap<RuleId, Rule> = BTreeMap::new();
         for artifact in artifacts {
             match &artifact.outcome {
@@ -511,6 +525,9 @@ impl SarifLog {
                     tool_execution_notifications: notifications,
                 }],
                 results,
+                properties: categories.map(|categories| RunProperties {
+                    categories: categories.clone(),
+                }),
             }],
         }
     }
@@ -592,7 +609,7 @@ impl Notification {
 mod tests {
     use super::*;
     use crate::args::RedacterType;
-    use crate::redacters::{DetectionLabel, DetectionLocation, Score, TextLines};
+    use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score, TextLines};
     use serde_json::{json, Value};
 
     fn text_at(line: usize, column: usize, end_column: usize) -> Option<Place> {
@@ -624,7 +641,25 @@ mod tests {
 
     fn log_of(artifacts: &[ReportedFile]) -> Value {
         let locator = ArtifactLocator::new("./", Path::new("/work"));
-        serde_json::to_value(SarifLog::new(artifacts, &locator)).unwrap()
+        serde_json::to_value(SarifLog::new(artifacts, &locator, None)).unwrap()
+    }
+
+    #[test]
+    fn a_run_states_the_categories_only_when_they_limit_the_run() {
+        let artifacts = [artifact("a.txt", FileOutcome::Findings(Vec::new()))];
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+        let run_of = |categories: Option<&Categories>| {
+            serde_json::to_value(SarifLog::new(&artifacts, &locator, categories)).unwrap()["runs"]
+                [0]
+            .clone()
+        };
+
+        assert!(run_of(None).get("properties").is_none());
+        let chosen = Categories::limiting([Category::Secrets, Category::Contact]);
+        assert_eq!(
+            run_of(chosen.as_ref())["properties"],
+            json!({"categories": ["contact", "secrets"]})
+        );
     }
 
     fn results(artifacts: &[ReportedFile]) -> Vec<Value> {

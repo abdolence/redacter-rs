@@ -12,7 +12,8 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+    Categories, Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters,
+    StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -35,6 +36,10 @@ pub struct CopyCommandResult {
     /// Every file the copy met, in the order it met them. Files the listing left out by size or
     /// name are only counted in `files_skipped`.
     pub files: Vec<CopyFileReport>,
+    /// The categories `--categories` limited the copy to; absent when every category was
+    /// redacted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Categories>,
 }
 
 /// One file of the copy, as the JSON report lists it. The redactions come in the order a reader
@@ -158,8 +163,13 @@ impl CopyCommandResult {
 
     /// The report for people.
     pub fn to_text(&self) -> String {
+        let categories = self
+            .categories
+            .as_ref()
+            .map(|categories| format!("Categories: {categories}\n"))
+            .unwrap_or_default();
         format!(
-            "Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
+            "{categories}Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
             self.files_copied, self.files_redacted, self.files_skipped
         )
     }
@@ -212,6 +222,9 @@ pub async fn command_copy(
     let term_reporter = AppReporter::from(term);
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
+    let categories = redacter_options
+        .as_ref()
+        .and_then(|options| options.base_options.categories.clone());
 
     // The bar is not drawn until the converters and redacters have been bound: they report
     // straight to the terminal, those lines must not land under a live progress bar, and a
@@ -338,6 +351,7 @@ pub async fn command_copy(
             files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
             files,
+            categories: categories.clone(),
         })
     } else {
         bar.println(format_legend(&COPY_LEGEND, &styles));
@@ -366,6 +380,7 @@ pub async fn command_copy(
             files_redacted,
             files_skipped,
             files: vec![report.file],
+            categories: categories.clone(),
         })
     };
 
@@ -373,7 +388,7 @@ pub async fn command_copy(
     source_fs.close().await?;
     bar.finish_and_clear();
     term.write_line("")?;
-    term.write_line(format_summary_line(&summary, &styles).as_str())?;
+    term.write_line(format_summary_line(&summary, categories.as_ref(), &styles).as_str())?;
     copy_result
 }
 
@@ -414,6 +429,9 @@ fn report_copy_info(
         redacter_options
             .as_ref()
             .and_then(|o| o.base_options.sampling_size),
+        redacter_options
+            .as_ref()
+            .and_then(|o| o.base_options.categories.clone()),
     );
 
     term.write_line(
@@ -709,9 +727,9 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        DetectionLabel, DetectionLocation, GcpDlpRedacterOptions, GcpVertexAiRedacterOptions,
-        LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions, RedacterProviderOptions,
-        RuleGroup,
+        DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
+        GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions,
+        RedacterProviderOptions, RuleGroup,
     };
     use tempfile::TempDir;
 
@@ -730,6 +748,7 @@ mod tests {
                 csv_delimiter: None,
                 sampling_size: None,
                 limit_dlp_requests: None,
+                categories: None,
                 list_redactions: true,
             },
         }
@@ -830,6 +849,7 @@ mod tests {
             files_redacted: 0,
             files_skipped: 0,
             files,
+            categories: None,
         }
     }
 
@@ -929,7 +949,7 @@ mod tests {
     fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
         let result = result_of(files);
         let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
-        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator)).unwrap()
+        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None)).unwrap()
     }
 
     #[test]
@@ -1019,7 +1039,7 @@ mod tests {
             &format!("{}/", source.path().display()),
             std::path::Path::new("/work"),
         );
-        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator))?;
+        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None))?;
         let results = sarif["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["ruleId"], "local-rules/email");
@@ -1437,7 +1457,7 @@ mod tests {
         let redacter_options =
             base_redacter_options(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             }));
 
@@ -1508,6 +1528,7 @@ mod tests {
                     text_model: None,
                     image_model: None,
                     block_none_harmful: false,
+                    categories: None,
                 },
             ))
         };

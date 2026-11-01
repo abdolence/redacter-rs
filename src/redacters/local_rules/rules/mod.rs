@@ -2,6 +2,7 @@ use super::error::LocalRulesError;
 use super::user_rules::{UserMatcher, UserRule};
 use super::validators::Validator;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
+use crate::redacters::Category;
 use clap::ValueEnum;
 use regex::{Match, Regex, RegexBuilder};
 use std::collections::BTreeSet;
@@ -32,6 +33,22 @@ pub enum RuleGroup {
 impl RuleGroup {
     pub fn all() -> BTreeSet<RuleGroup> {
         RuleGroup::value_variants().iter().copied().collect()
+    }
+
+    /// The category of what the group finds.
+    pub fn category(self) -> Category {
+        match self {
+            RuleGroup::Email | RuleGroup::Phone => Category::Contact,
+            RuleGroup::PaymentCard | RuleGroup::Iban => Category::Financial,
+            RuleGroup::Network => Category::Network,
+            RuleGroup::Url | RuleGroup::Secrets => Category::Secrets,
+            RuleGroup::UsIdentifiers | RuleGroup::EuIdentifiers | RuleGroup::WorldIdentifiers => {
+                Category::IdNumber
+            }
+            RuleGroup::Postcodes => Category::Address,
+            RuleGroup::BirthDates => Category::DateOfBirth,
+            RuleGroup::Custom => Category::Other,
+        }
     }
 
     /// One line per group for `--help`-style listings and the rules reference. Read only
@@ -74,13 +91,6 @@ impl Display for RuleGroup {
     }
 }
 
-/// Whether `name` is a built-in rule that finds a credential: a password, a key or a token.
-pub fn is_credential_rule(name: &str) -> bool {
-    builtin_rules()
-        .iter()
-        .any(|spec| spec.name == name && spec.finds_credential())
-}
-
 /// One built-in rule as declared in the table. `capture_group` 0 redacts the whole match;
 /// a higher number redacts only that group (used where the pattern needs context such as
 /// the word "passport" that must survive). `validator` carries the name of the check for the
@@ -107,6 +117,7 @@ pub struct RuleSpec {
 
 impl RuleSpec {
     /// Whether the rule finds a password, a key or a token.
+    #[cfg(feature = "local-credential-ml")]
     fn finds_credential(&self) -> bool {
         self.group == RuleGroup::Secrets || self.name == URL_CREDENTIALS_RULE
     }
@@ -245,6 +256,20 @@ pub const URL_CREDENTIALS_RULE: &str = "url-credentials";
 pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
 
 impl RuleSet {
+    /// The category of a finding named `rule`: that of the group of the built-in rule of the
+    /// name, `other` for any other name, which is a user-defined rule.
+    pub fn category_of(rule: &str) -> Category {
+        builtin_rules()
+            .iter()
+            .find(|spec| spec.name == rule)
+            .map_or(Category::Other, |spec| spec.group.category())
+    }
+
+    /// Whether `name` is the name of a built-in rule, enabled or not.
+    fn is_builtin_name(name: &str) -> bool {
+        builtin_rules().iter().any(|spec| spec.name == name)
+    }
+
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
         Self::from_builtin(|spec| groups.contains(&spec.group), Strictness::Strict)
@@ -306,15 +331,22 @@ impl RuleSet {
         self.rules.is_empty()
     }
 
-    /// Built-in rules of the enabled groups followed by the user's rules. Names must be
-    /// unique across both sets so reports are unambiguous.
+    /// Built-in rules of the enabled groups followed by the user's rules. A user rule may not
+    /// take the name of any built-in rule, enabled or not, nor of another user rule: a finding
+    /// is placed in a category by its rule name, and a shared name would place a user's rule
+    /// in the category of the built-in one.
     pub fn with_user_rules(
         groups: &BTreeSet<RuleGroup>,
         user_rules: &[UserRule],
     ) -> Result<Self, LocalRulesError> {
         let mut set = Self::new(groups)?;
-        let mut names: BTreeSet<RuleName> = set.rules.iter().map(|r| r.name.clone()).collect();
+        let mut names: BTreeSet<RuleName> = BTreeSet::new();
         for rule in user_rules {
+            if Self::is_builtin_name(rule.name.as_str()) {
+                return Err(LocalRulesError::BuiltinRuleName {
+                    name: rule.name.to_string(),
+                });
+            }
             if !names.insert(rule.name.clone()) {
                 return Err(LocalRulesError::DuplicateRule {
                     name: rule.name.to_string(),
@@ -422,6 +454,28 @@ pub(super) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[test]
+    fn every_group_but_custom_finds_a_named_category() {
+        for group in RuleGroup::value_variants() {
+            let named = group.category() != Category::Other;
+            assert_eq!(named, *group != RuleGroup::Custom, "{group}");
+        }
+    }
+
+    #[test]
+    fn a_built_in_rule_has_the_category_of_its_group_and_a_user_rule_is_other() {
+        for spec in builtin_rules() {
+            assert_eq!(
+                RuleSet::category_of(spec.name),
+                spec.group.category(),
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(RuleSet::category_of("generic-api-key"), Category::Secrets);
+        assert_eq!(RuleSet::category_of("employee-number"), Category::Other);
+    }
 
     #[cfg(feature = "local-credential-ml")]
     #[test]
@@ -1283,17 +1337,19 @@ mod tests {
     }
 
     #[test]
-    fn user_rule_named_like_a_builtin_is_rejected() {
-        let rule = UserRule {
+    fn user_rule_named_like_a_builtin_is_rejected_whether_or_not_its_group_is_enabled() {
+        let rule = || UserRule {
             name: RuleName::new("email"),
             matcher: UserMatcher::Regex("x".to_string()),
             case_insensitive: false,
         };
-        let err = RuleSet::with_user_rules(&RuleGroup::all(), &[rule]).unwrap_err();
-        assert!(
-            matches!(err, LocalRulesError::DuplicateRule { .. }),
-            "{err}"
-        );
+        for groups in [RuleGroup::all(), BTreeSet::new()] {
+            let err = RuleSet::with_user_rules(&groups, &[rule()]).unwrap_err();
+            assert!(
+                matches!(err, LocalRulesError::BuiltinRuleName { ref name } if name == "email"),
+                "{err}"
+            );
+        }
     }
 }
 

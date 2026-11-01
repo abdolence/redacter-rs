@@ -5,6 +5,7 @@ use crate::commands::artifact_locator::ArtifactLocator;
 use crate::commands::findings::ReportedFile;
 use crate::commands::ocsf::{EpochMillis, OcsfEvents};
 use crate::commands::sarif::SarifLog;
+use crate::redacters::Categories;
 use crate::AppResult;
 use console::{Style, Term};
 use serde::Serialize;
@@ -14,7 +15,8 @@ impl ReportArgs {
     /// Writes the report of a command run over `source` to `--report-file` in
     /// `--report-format`, when a file was given, and says where on the terminal. `report` is
     /// the JSON report, `text` the report for people, and `reported_files` the files for the
-    /// SARIF and OCSF reports, built only when one of them is chosen.
+    /// SARIF and OCSF reports, built only when one of them is chosen. `categories` are the
+    /// ones `--categories` limited the run to, which the SARIF report states.
     pub async fn write(
         &self,
         term: &Term,
@@ -22,6 +24,7 @@ impl ReportArgs {
         text: &str,
         reported_files: impl FnOnce() -> Vec<ReportedFile>,
         source: &str,
+        categories: Option<&Categories>,
     ) -> AppResult<()> {
         let Some(path) = &self.report_file else {
             return Ok(());
@@ -31,7 +34,7 @@ impl ReportArgs {
             ReportFormat::Text => (text.to_string(), "text"),
             ReportFormat::Sarif => {
                 let locator = ArtifactLocator::new(source, &std::env::current_dir()?);
-                let log = SarifLog::new(&reported_files(), &locator);
+                let log = SarifLog::new(&reported_files(), &locator, categories);
                 (serde_json::to_string_pretty(&log)?, "SARIF")
             }
             ReportFormat::Ocsf => {

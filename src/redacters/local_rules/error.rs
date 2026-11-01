@@ -8,6 +8,8 @@ pub enum LocalRulesError {
     InvalidRegex { rule: String, reason: String },
     #[error("rule name `{name}` is used more than once")]
     DuplicateRule { name: String },
+    #[error("rule name `{name}` is the name of a built-in rule")]
+    BuiltinRuleName { name: String },
     #[error("rule `{name}` has an empty dictionary")]
     EmptyDictionary { name: String },
     #[error("rule `{name}` has a dictionary word that is empty or only whitespace")]

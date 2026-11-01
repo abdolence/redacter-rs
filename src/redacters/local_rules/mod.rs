@@ -4,7 +4,7 @@ mod user_rules;
 mod validators;
 
 pub use error::LocalRulesError;
-pub use rules::{is_credential_rule, RuleGroup, RuleSet};
+pub use rules::{RuleGroup, RuleSet};
 pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
 #[cfg(feature = "local-credential-ml")]
 pub(crate) use validators::quoted_credential_value;
@@ -20,7 +20,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::redact_rows;
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent,
+    RedacterDataItem, RedacterDataItemContent, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -108,6 +108,10 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::LocalRules
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Token
     }
 }
 

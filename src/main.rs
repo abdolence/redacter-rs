@@ -134,6 +134,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                     &copy_result.to_text(),
                     || copy_result.reported_files(),
                     &source,
+                    copy_result.categories.as_ref(),
                 )
                 .await?;
             Ok(0)
@@ -174,6 +175,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                     &scan_result.to_text(),
                     || scan_result.reported_files(),
                     &source,
+                    scan_result.categories.as_ref(),
                 )
                 .await?;
             Ok(scan_result.exit_code(fail_on))

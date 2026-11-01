@@ -6,7 +6,7 @@ use crate::errors::AppError;
 use crate::redacters::stream_redacter::OcrText;
 use crate::redacters::text_changes::{TextChain, MAX_DIFFED_BYTES, TEXT_DIFF_TIME_LIMIT};
 use crate::redacters::{
-    Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
+    Categories, Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
 };
 use crate::AppResult;
@@ -54,19 +54,20 @@ impl StreamRedactions {
         }
     }
 
-    /// Runs `redacter` on `item` and records what it changed, as part of `page` of a PDF when
-    /// the item is a rendered page.
+    /// Runs `redacter` on `item`, limited to `categories`, and records what it changed, as part
+    /// of `page` of a PDF when the item is a rendered page.
     pub(crate) async fn redact(
         &mut self,
         redacter: &Redacters<'_>,
         page: Option<usize>,
         item: RedacterDataItem,
+        categories: Option<&Categories>,
     ) -> AppResult<RedacterDataItem> {
         if !self.recording {
-            return Ok(redacter.redact(item).await?.item);
+            return Ok(redacter.redact_in(item, categories).await?.item);
         }
         let input = item.content.clone();
-        let Redacted { item, replaced } = redacter.redact(item).await?;
+        let Redacted { item, replaced } = redacter.redact_in(item, categories).await?;
         self.record(
             redacter.redacter_type(),
             page,

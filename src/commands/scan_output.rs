@@ -12,7 +12,7 @@ use crate::commands::copy_output::{
 };
 use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
 use console::{measure_text_width, pad_str, Alignment};
 use indicatif::HumanBytes;
 use rvstruct::ValueStruct;
@@ -325,6 +325,10 @@ pub struct ScanCommandResult {
     pub findings_ignored: usize,
     pub findings_by_label: FindingsByLabel,
     pub files: Vec<ScanFileReport>,
+    /// The categories `--categories` limited the scan to; absent when every category was
+    /// scanned for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Categories>,
 }
 
 impl ScanCommandResult {
@@ -551,6 +555,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         ". Total size: {}",
         styles.highlighted.apply_to(HumanBytes(total_size as u64))
     ));
+    if let Some(categories) = &result.categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
     line
 }
 
@@ -561,6 +571,7 @@ mod tests {
     use crate::commands::copy_output::NotRedactedReason;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::SarifLog;
+    use crate::redacters::Category;
     use clap::ValueEnum;
     use std::path::Path;
 
@@ -729,8 +740,8 @@ mod tests {
         ));
         let locator = ArtifactLocator::new("./", Path::new("/work"));
 
-        let sarif =
-            serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator)).unwrap();
+        let sarif = serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator, None))
+            .unwrap();
 
         assert!(sarif.contains("j********************m"), "{sarif}");
         assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
@@ -1259,6 +1270,38 @@ mod tests {
                 .collect();
             assert_eq!(exit_codes, expected, "{result:?}");
         }
+    }
+
+    #[test]
+    fn the_json_report_states_the_categories_only_when_they_limit_the_run() {
+        let mut result = sample_result();
+        assert!(serde_json::to_value(&result)
+            .unwrap()
+            .get("categories")
+            .is_none());
+
+        result.categories = Categories::limiting([Category::Secrets, Category::Contact]);
+
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["categories"],
+            serde_json::json!(["contact", "secrets"])
+        );
+    }
+
+    #[test]
+    fn the_summary_line_ends_with_the_categories_only_when_they_limit_the_run() {
+        let mut result = sample_result();
+        let styles = OutputStyles::plain();
+        let unlimited = format_scan_summary(&result, &styles);
+        assert!(!unlimited.contains("Categories"), "{unlimited}");
+
+        result.categories = Categories::limiting([Category::Secrets]);
+
+        assert_eq!(
+            format_scan_summary(&result, &styles),
+            format!("{unlimited} · Categories: secrets")
+        );
+        assert!(result.to_text().contains("Categories: secrets"));
     }
 
     #[test]
