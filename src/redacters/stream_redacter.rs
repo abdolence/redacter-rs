@@ -19,6 +19,7 @@ use image::ImageFormat;
 use mime::Mime;
 use rvstruct::ValueStruct;
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Range;
 
 /// The conversion the content went through before it was redacted.
@@ -61,23 +62,41 @@ pub struct RedactStreamResult<'f> {
     /// no-op (see `summary`), because it decides whether the file is uploaded.
     pub number_of_redactions: usize,
     pub summary: RedactionSummary,
-    /// What each redacter replaced, placed in the file as it was read, in plan order and in the
-    /// order a reader meets it within a redacter. Empty when no redacter changed the file.
-    ///
-    /// A text read in pieces is redacted as `stream` is read, so this future and the reader of
-    /// `stream` must be polled together, and it completes once `stream` has ended. An error
-    /// means the file could not be redacted: `stream` then ends with an error as well, so that
-    /// no destination keeps a partial copy.
-    pub redactions: RedactionRecords<'f>,
-    pub stream: ContentStream,
+    pub output: RedactedOutput<'f>,
 }
 
 /// The redactions of a file, placed in it, once they are known.
-pub type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Detection)>>>;
+type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Detection)>>>;
 
-impl RedactStreamResult<'_> {
-    fn known(records: Vec<(RedacterType, Detection)>) -> RedactionRecords<'static> {
-        futures::future::ready(Ok(records)).boxed_local()
+/// The redacted bytes of a file and the list of what was redacted in them.
+///
+/// A text read in pieces is redacted as its stream is read, so the stream stops when nobody
+/// polls the list and the list completes only once the stream has ended. That is why neither
+/// half can be taken alone: [`RedactedOutput::drive`] polls both.
+pub struct RedactedOutput<'f> {
+    stream: ContentStream,
+    /// What each redacter replaced, placed in the file as it was read, in plan order and in the
+    /// order a reader meets it within a redacter. Empty when no redacter changed the file. An
+    /// error means the file could not be redacted; the stream then ends with an error as well,
+    /// so that no destination keeps a partial copy.
+    redactions: RedactionRecords<'f>,
+}
+
+impl<'f> RedactedOutput<'f> {
+    fn known(stream: ContentStream, redactions: Vec<(RedacterType, Detection)>) -> Self {
+        Self {
+            stream,
+            redactions: futures::future::ready(Ok(redactions)).boxed_local(),
+        }
+    }
+
+    /// Hands the stream to `consume`, which reads it to the end, and returns what `consume`
+    /// returned beside the redactions.
+    pub async fn drive<T, Consumed: Future<Output = T>>(
+        self,
+        consume: impl FnOnce(ContentStream) -> Consumed,
+    ) -> (T, AppResult<Vec<(RedacterType, Detection)>>) {
+        futures::join!(consume(self.stream), self.redactions)
     }
 }
 
@@ -459,8 +478,7 @@ impl<'a> StreamRedacter<'a> {
                         blocked: Some(RedactionBlocked::NotText),
                         ..RedactionSummary::default()
                     },
-                    redactions: RedactStreamResult::known(Vec::new()),
-                    stream: data,
+                    output: RedactedOutput::known(data, Vec::new()),
                 });
             }
         };
@@ -603,13 +621,12 @@ impl<'a> StreamRedacter<'a> {
         Ok(RedactStreamResult {
             number_of_redactions,
             summary,
-            redactions: RedactStreamResult::known(recorder.into_records()),
-            stream: output_stream,
+            output: RedactedOutput::known(output_stream, recorder.into_records()),
         })
     }
 
     /// The result of redacting a text that does not fit in one window, whose first window is
-    /// `first`. The text is redacted as the stream is read, see [`RedactStreamResult::redactions`].
+    /// `first`. The text is redacted as the stream is read, see [`RedactedOutput`].
     fn redact_text_in_pieces<S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + 'static>(
         &'a self,
         pieces: TextPieces<S>,
@@ -637,8 +654,10 @@ impl<'a> StreamRedacter<'a> {
                 applied: redacters,
                 ..RedactionSummary::default()
             },
-            redactions: redact_windows(redaction, pieces, first, written).boxed_local(),
-            stream,
+            output: RedactedOutput {
+                stream,
+                redactions: redact_windows(redaction, pieces, first, written).boxed_local(),
+            },
         })
     }
 
@@ -2067,6 +2086,16 @@ mod tests {
         );
     }
 
+    /// What a result writes and lists, read together as `cp` does.
+    async fn written_and_listed(
+        output: RedactedOutput<'_>,
+    ) -> (
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    ) {
+        output.drive(|stream| stream.try_collect()).await
+    }
+
     async fn redact(
         converters: &FileConverters<'_>,
         redacters: &[Redacters<'static>],
@@ -2083,7 +2112,7 @@ mod tests {
             .redact_stream(one_chunk(data), plan, file_ref)
             .await
             .unwrap();
-        result.redactions.await.unwrap()
+        written_and_listed(result.output).await.1.unwrap()
     }
 
     fn redaction_places(
@@ -2141,8 +2170,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.number_of_redactions, 1);
-        assert!(result.redactions.await.unwrap().is_empty());
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let (output, redactions) = written_and_listed(result.output).await;
+        assert!(redactions.unwrap().is_empty());
+        let output = output.unwrap();
         assert_eq!(output.concat(), b"Mail [REDACTED] today");
     }
 
@@ -2459,7 +2489,7 @@ mod tests {
             .redact_stream(one_chunk(b"ADMIN_EMAIL=a@b.io"), plan, &env_file())
             .await
             .unwrap();
-        let output: Vec<bytes::Bytes> = redacted.stream.try_collect().await.unwrap();
+        let output = written_and_listed(redacted.output).await.0.unwrap();
         assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
 
         for data in not_text_files() {
@@ -2473,7 +2503,7 @@ mod tests {
                 .unwrap();
             assert_eq!(result.number_of_redactions, 0, "{data:?}");
             assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-            let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+            let output = written_and_listed(result.output).await.0.unwrap();
             assert_eq!(output.concat(), data, "the file is left as it is");
         }
     }
@@ -2502,7 +2532,7 @@ mod tests {
 
         assert_eq!(result.summary.blocked, None);
         assert_eq!(result.number_of_redactions, 1);
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let output = written_and_listed(result.output).await.0.unwrap();
         assert_eq!(
             output.concat(),
             format!("{padding}ADMIN_EMAIL=[REDACTED]\n").as_bytes()
@@ -2557,7 +2587,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let output = written_and_listed(result.output).await.0.unwrap();
         assert_eq!(output.concat(), b"\0heada@b.io");
     }
 
@@ -3025,10 +3055,7 @@ mod tests {
         let result = stream_redacter
             .redact_stream(futures::stream::iter(chunks), plan, &file)
             .await?;
-        Ok(futures::join!(
-            result.stream.try_collect::<Vec<_>>(),
-            result.redactions
-        ))
+        Ok(written_and_listed(result.output).await)
     }
 
     async fn copy_text(

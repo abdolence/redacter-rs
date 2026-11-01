@@ -469,6 +469,17 @@ impl UploadResult {
             redactions: Vec::new(),
         }
     }
+
+    /// A file that could not be redacted: it is skipped, and the error is the file's outcome.
+    fn redaction_failed(error: &AppError) -> Self {
+        tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
+        Self::without_redactions(
+            TransferFileResult::Skipped,
+            CopyFileOutcome::Error {
+                message: error.to_string(),
+            },
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -631,24 +642,16 @@ async fn redact_upload_file<
                 if redacted_result.number_of_redactions > 0
                     || redacter_base_options.allow_unsupported_copies =>
             {
-                let (uploaded, redactions) = futures::join!(
-                    destination_fs.upload(redacted_result.stream, Some(dest_file_ref)),
-                    redacted_result.redactions
-                );
+                let (uploaded, redactions) = redacted_result
+                    .output
+                    .drive(|stream| destination_fs.upload(stream, Some(dest_file_ref)))
+                    .await;
                 // A text read in pieces is redacted while it is uploaded. When redaction fails
                 // it ends the stream with the error, so the upload fails as well, and the
                 // redaction error is the one that belongs to the file.
                 let redactions = match redactions {
                     Ok(redactions) => redactions,
-                    Err(error) => {
-                        tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
-                        return Ok(UploadResult::without_redactions(
-                            TransferFileResult::Skipped,
-                            CopyFileOutcome::Error {
-                                message: error.to_string(),
-                            },
-                        ));
-                    }
+                    Err(error) => return Ok(UploadResult::redaction_failed(&error)),
                 };
                 uploaded?;
                 let summary = redacted_result.summary;
@@ -681,15 +684,7 @@ async fn redact_upload_file<
                     )),
                 },
             )),
-            Err(ref error) => {
-                tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
-                Ok(UploadResult::without_redactions(
-                    TransferFileResult::Skipped,
-                    CopyFileOutcome::Error {
-                        message: error.to_string(),
-                    },
-                ))
-            }
+            Err(error) => Ok(UploadResult::redaction_failed(&error)),
         }
     } else if redacter_base_options.allow_unsupported_copies {
         destination_fs
@@ -1379,8 +1374,12 @@ mod tests {
             "{} should have been redacted",
             file_ref.relative_path.value()
         );
-        let chunks: Vec<bytes::Bytes> = result.stream.try_collect().await?;
-        Ok(chunks.concat())
+        let (chunks, redactions) = result
+            .output
+            .drive(|stream| stream.try_collect::<Vec<bytes::Bytes>>())
+            .await;
+        redactions?;
+        Ok(chunks?.concat())
     }
 
     /// Drives `StreamRedacter` directly instead of `command_copy`: pdfium can only be bound
