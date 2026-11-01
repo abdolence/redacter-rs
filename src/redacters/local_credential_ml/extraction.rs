@@ -79,16 +79,24 @@ impl CredentialExtractor {
     }
 
     /// The values to redact on a line the model flagged: what the secret rules match on it
-    /// with their value checks off, and every credential-like word. Both, because a rule can
-    /// match a harmless value (`token: none`) beside the password it did not recognise, and a
-    /// redacter prefers redacting a host name beside the password to leaving the password.
+    /// with their value checks off, and every credential-like word that holds no such match.
+    /// Both, because a rule can match a harmless value (`token: none`) beside the password it
+    /// did not recognise, and a redacter prefers redacting a host name beside the password to
+    /// leaving the password. A word that holds a match is left to the rule, which places the
+    /// value more narrowly than the word does (`//registry.npmjs.org/:_authToken=npm_...`).
     fn values_in_line(&self, line: &str) -> Vec<Range<usize>> {
-        self.line_rules
+        let matched: Vec<Range<usize>> = self
+            .line_rules
             .find(line)
             .into_iter()
             .map(|finding| finding.start..finding.end)
-            .chain(credential_like_words(line))
-            .collect()
+            .collect();
+        let unmatched_words = credential_like_words(line).into_iter().filter(|word| {
+            !matched
+                .iter()
+                .any(|value| value.start < word.end && word.start < value.end)
+        });
+        matched.iter().cloned().chain(unmatched_words).collect()
     }
 }
 
@@ -257,6 +265,14 @@ mod tests {
     #[test]
     fn quotes_and_a_closing_full_stop_stay_outside_the_value() {
         assert_eq!(values(r#"auth = "tok3n-value"."#), ["tok3n-value"]);
+    }
+
+    #[test]
+    fn a_word_that_holds_a_rule_match_is_not_redacted_whole() {
+        assert_eq!(
+            values("//registry.npmjs.org/:_authToken=npm_aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY1z3A5c7"),
+            ["npm_aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY1z3A5c7"]
+        );
     }
 
     #[test]
