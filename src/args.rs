@@ -205,7 +205,6 @@ pub struct ReportArgs {
     pub report_format: ReportFormat,
 }
 
-/// Which ignore file `scan` reads.
 #[derive(Args, Debug, Clone)]
 pub struct IgnoreArgs {
     #[arg(
@@ -217,7 +216,7 @@ pub struct IgnoreArgs {
 
     #[arg(
         long,
-        help = "Do not read the .redacterignore at the root of a local source. Lines marked with redacter:allow are still left out of the findings"
+        help = "Do not read the .redacterignore at the root of a local source. Lines marked with redacter:allow are still ignored"
     )]
     pub no_ignore: bool,
 }

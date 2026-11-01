@@ -3,7 +3,6 @@
 
 use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
-use crate::redacters::RedacterDataItemContent;
 use crate::AppResult;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -177,56 +176,16 @@ impl Display for DetectionLocation {
     }
 }
 
-/// The text that, anywhere on a line or inside a table cell, leaves out the findings that start
-/// there. It is a substring, so it sits in whatever comment syntax the file uses.
+/// The text that makes a finding ignored when it stands on a line the finding covers, or in the
+/// table cell of the finding, outside the finding itself. It is a substring, so it sits in
+/// whatever comment syntax the file uses.
 pub const ALLOW_MARKER: &str = "redacter:allow";
 
-/// Where an item carries [`ALLOW_MARKER`]. Only text lines and table cells can: the words OCR
-/// reads from an image or a PDF page have no author-controlled place for it.
-#[derive(Debug, Default)]
-pub struct AllowMarks {
-    lines: HashSet<usize>,
-    cells: HashSet<(usize, usize)>,
-}
-
-impl From<&RedacterDataItemContent> for AllowMarks {
-    fn from(content: &RedacterDataItemContent) -> Self {
-        let mut marks = Self::default();
-        match content {
-            RedacterDataItemContent::Value(text) => {
-                marks.lines = text
-                    .lines()
-                    .enumerate()
-                    .filter(|(_, line)| line.contains(ALLOW_MARKER))
-                    .map(|(index, _)| index + 1)
-                    .collect();
-            }
-            RedacterDataItemContent::Table { rows, .. } => {
-                for (row, cells) in rows.iter().enumerate() {
-                    for (column, cell) in cells.iter().enumerate() {
-                        if cell.contains(ALLOW_MARKER) {
-                            marks.cells.insert((row + 1, column + 1));
-                        }
-                    }
-                }
-            }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {}
-        }
-        marks
-    }
-}
-
-impl AllowMarks {
-    /// Whether the finding at `location` starts on a marked line or in a marked cell.
-    pub fn allows(&self, location: &DetectionLocation) -> bool {
-        match location {
-            DetectionLocation::Text { line, .. } => self.lines.contains(line),
-            DetectionLocation::TableCell { row, column, .. } => {
-                self.cells.contains(&(*row, *column))
-            }
-            DetectionLocation::Image { .. } => false,
-        }
-    }
+/// Whether [`ALLOW_MARKER`] occurs in `text` outside the byte range `span`. A marker inside the
+/// span is part of the value the finding covers, so it cannot be used to hide that value.
+pub fn has_marker_outside(text: &str, span: Range<usize>) -> bool {
+    text.match_indices(ALLOW_MARKER)
+        .any(|(at, marker)| at + marker.len() <= span.start || at >= span.end)
 }
 
 /// A text with the byte offset of each line start, so many detections are placed in it without
@@ -244,6 +203,22 @@ impl<'a> TextLines<'a> {
                 .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
                 .collect(),
         }
+    }
+
+    /// Whether [`ALLOW_MARKER`] stands on a line that `range` covers, from the line it starts on
+    /// to the line it ends on, outside `range`.
+    pub fn has_marker_beside(&self, range: Range<usize>) -> bool {
+        let line_of =
+            |offset: usize| self.line_starts.partition_point(|&start| start <= offset) - 1;
+        let first_line = line_of(range.start);
+        let last_line = line_of(range.end.saturating_sub(1).max(range.start));
+        let from = self.line_starts[first_line];
+        let to = self
+            .line_starts
+            .get(last_line + 1)
+            .copied()
+            .unwrap_or(self.text.len());
+        has_marker_outside(&self.text[from..to], range.start - from..range.end - from)
     }
 
     /// The detection of `range`, with its value copied out of the text. An error when the range

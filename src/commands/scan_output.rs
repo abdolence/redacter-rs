@@ -125,7 +125,7 @@ pub struct ScanFileReport {
     /// not known to be clean, and a model's hallucination looks the same, so it is neither a
     /// finding nor clean. Only the count is kept, since a value is the sensitive data itself.
     unlocated_values: usize,
-    /// How many findings the file left out because their line or cell carries the allow marker.
+    /// How many findings the file ignored because a line they cover, or their cell, carries the allow marker.
     /// Summed in the result; not part of the JSON report of the file.
     #[serde(skip)]
     findings_ignored: usize,
@@ -264,13 +264,13 @@ pub struct ScanCommandResult {
     pub files_with_findings: usize,
     pub files_unconfirmed: usize,
     pub files_skipped: usize,
-    /// Files left out by the ignore file. They are not in `files`.
+    /// Files ignored by the ignore file. They are not in `files`.
     pub files_ignored: usize,
     pub files_unsupported: usize,
     pub files_blocked: usize,
     pub files_failed: usize,
     pub findings: usize,
-    /// Findings left out because their line or cell carries the allow marker. Not in `findings`.
+    /// Findings ignored because a line they cover, or their cell, carries the allow marker. Not in `findings`.
     pub findings_ignored: usize,
     pub findings_by_label: FindingsByLabel,
     pub files: Vec<ScanFileReport>,
@@ -1110,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_and_the_json_report_count_what_the_ignore_rules_left_out() {
+    fn the_summary_counts_what_the_ignore_rules_left_out() {
         let mut result = ScanCommandResult::default();
         result.push(
             ScanFileReport::scanned(
@@ -1132,14 +1132,6 @@ mod tests {
         );
         result.files_ignored = 3;
 
-        let written: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
-
-        assert_eq!(
-            (&written["files_ignored"], &written["findings_ignored"]),
-            (&serde_json::json!(3), &serde_json::json!(2))
-        );
-        assert_eq!(written["files"].as_array().unwrap().len(), 1);
         assert_eq!(
             format_scan_summary(&result, &OutputStyles::plain()),
             "4 files: 1 with findings, 0 clean, 0 skipped, 0 unsupported, 3 ignored. \

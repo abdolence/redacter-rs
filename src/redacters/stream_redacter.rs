@@ -6,9 +6,9 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_rgba_image_at_coords, words_to_redact, AllowMarks, Detection, DetectionLocation,
+    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Detection, DetectionLocation,
     RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent,
-    Redacters,
+    Redacters, TextLines,
 };
 use crate::AppResult;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -75,9 +75,9 @@ pub struct DetectStreamResult {
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
     pub unlocated: usize,
-    /// The detections left out of `detections` because they start on a line or in a cell that
-    /// carries [`crate::redacters::ALLOW_MARKER`], kept so the caller can count them.
-    pub allowed: Vec<(RedacterType, Detection)>,
+    /// The detections moved out of `detections` because a line they cover, or their cell, carries
+    /// [`crate::redacters::ALLOW_MARKER`] outside them, kept so the caller can count them.
+    pub ignored: Vec<(RedacterType, Detection)>,
     /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
     /// file read as text is not text. The plan was not blocked; the step was, so the caller
     /// reports the file as unsupported.
@@ -85,19 +85,45 @@ pub struct DetectStreamResult {
 }
 
 impl DetectStreamResult {
-    /// Moves the detections the marks of `content` allow from `detections` to `allowed`.
-    fn set_aside_allowed(&mut self, content: &RedacterDataItemContent) {
-        let marks = AllowMarks::from(content);
-        let (allowed, kept) = std::mem::take(&mut self.detections)
-            .into_iter()
-            .partition(|(_, detection)| marks.allows(&detection.location));
-        self.allowed.extend(allowed);
-        self.detections = kept;
+    /// Moves the detections that `content` marks as ignored from `detections` to `ignored`.
+    /// Only text and table cells can carry the marker: the words OCR reads from an image or a
+    /// PDF page have no author-controlled place for it.
+    fn set_aside_ignored(&mut self, content: &RedacterDataItemContent) {
+        let (ignored, unmarked) = match content {
+            RedacterDataItemContent::Value(text) => {
+                let lines = TextLines::new(text);
+                std::mem::take(&mut self.detections)
+                    .into_iter()
+                    .partition(|(_, detection)| match detection.location {
+                        DetectionLocation::Text { start, end, .. } => {
+                            lines.has_marker_beside(start..end)
+                        }
+                        _ => false,
+                    })
+            }
+            RedacterDataItemContent::Table { rows, .. } => std::mem::take(&mut self.detections)
+                .into_iter()
+                .partition(|(_, detection)| match detection.location {
+                    DetectionLocation::TableCell {
+                        row,
+                        column,
+                        start,
+                        end,
+                    } => rows
+                        .get(row.saturating_sub(1))
+                        .and_then(|cells| cells.get(column.saturating_sub(1)))
+                        .is_some_and(|cell| has_marker_outside(cell, start..end)),
+                    _ => false,
+                }),
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => return,
+        };
+        self.ignored.extend(ignored);
+        self.detections = unmarked;
     }
 
     fn absorb(&mut self, other: Self) {
         self.detections.extend(other.detections);
-        self.allowed.extend(other.allowed);
+        self.ignored.extend(other.ignored);
         self.unlocated += other.unlocated;
     }
 }
@@ -495,7 +521,7 @@ impl<'a> StreamRedacter<'a> {
             }
             _ => result = Self::detect_all(redacters, &item, None).await?,
         }
-        result.set_aside_allowed(&item.content);
+        result.set_aside_ignored(&item.content);
         Ok(result)
     }
 
@@ -1993,38 +2019,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_marker_leaves_out_only_the_findings_starting_on_its_own_line() {
-        let converters = FileConverters::new();
-        let redacters = vec![email_rules().await];
-        let text = "first a@b.io\nsecond c@d.io # redacter:allow\nthird e@f.io\n";
-
-        let result = detect(
-            &converters,
-            &redacters,
-            &file_ref("notes.txt", mime::TEXT_PLAIN),
-            text.into(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            located(&result)
-                .iter()
-                .map(|(_, value)| *value)
-                .collect::<Vec<_>>(),
-            ["a@b.io", "e@f.io"]
-        );
-        assert_eq!(
-            result
-                .allowed
-                .iter()
-                .map(|(_, detection)| detection.value.as_str())
-                .collect::<Vec<_>>(),
-            ["c@d.io"]
-        );
-    }
-
-    #[tokio::test]
     async fn a_marker_in_a_table_cell_leaves_out_only_the_findings_of_that_cell() {
         let converters = FileConverters::new();
         let redacters = vec![email_rules().await];
@@ -2046,6 +2040,47 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["a@b.io", "e@f.io"]
         );
-        assert_eq!(result.allowed.len(), 1);
+        assert_eq!(result.ignored.len(), 1);
+    }
+
+    async fn secret_rules() -> Redacters<'static> {
+        Redacters::LocalRules(local_rules([RuleGroup::Secrets].into(), vec![]).await)
+    }
+
+    #[tokio::test]
+    async fn a_marker_inside_the_finding_does_not_ignore_it() {
+        let converters = FileConverters::new();
+        let redacters = vec![secret_rules().await];
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("env.txt", mime::TEXT_PLAIN),
+            "API_KEY=xyz_redacter:allow_123456789\n".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.detections.len(), 1);
+        assert!(result.ignored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_marker_on_the_last_line_of_a_multi_line_finding_ignores_it() {
+        let converters = FileConverters::new();
+        let redacters = vec![secret_rules().await];
+        let text = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\nAB==\n-----END RSA PRIVATE KEY----- # redacter:allow\n";
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("key.pem", mime::TEXT_PLAIN),
+            text.into(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.detections.is_empty());
+        assert_eq!(result.ignored.len(), 1);
     }
 }

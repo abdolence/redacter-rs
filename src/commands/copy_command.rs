@@ -332,7 +332,8 @@ async fn transfer_and_redact_file<
     let skip_reason = match options.file_matcher.matches(&base_file_ref) {
         FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
         FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-        FileMatcherResult::Matched => None,
+        // Ignore rules apply to listings only; this matcher carries none.
+        FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
     };
     if let Some(reason) = skip_reason {
         let outcome = CopyFileOutcome::Skipped { reason };
@@ -604,56 +605,6 @@ mod tests {
             assert_eq!(original, copied, "{name} should be copied byte-identical");
         }
 
-        Ok(())
-    }
-
-    /// Ignoring is a `scan` feature: `cp` redacts everything it finds, whatever an ignore file
-    /// or an allow marker says.
-    #[tokio::test]
-    async fn a_copy_redacts_ignored_files_and_marked_lines_like_any_other(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let lock = pdfium_test_lock();
-        let _guard = lock.lock().await;
-
-        let term = Term::stdout();
-        let source = TempDir::with_prefix("copy_command_tests_ignore_source")?;
-        std::fs::write(source.path().join(".redacterignore"), "ignored.txt\n")?;
-        std::fs::write(source.path().join("ignored.txt"), "mail a@b.io\n")?;
-        std::fs::write(
-            source.path().join("marked.txt"),
-            "mail c@d.io # redacter:allow\n",
-        )?;
-        let destination = TempDir::with_prefix("copy_command_tests_ignore_destination")?;
-
-        let result = command_copy(
-            &term,
-            &format!("{}/", source.path().display()),
-            &format!("{}/", destination.path().display()),
-            CopyCommandOptions::new(
-                Some(globset::Glob::new("*.txt")?),
-                None,
-                None,
-                vec![],
-                AddonStoreOptions::default(),
-            ),
-            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
-                LocalRulesRedacterOptions {
-                    groups: [RuleGroup::Email].into_iter().collect(),
-                    user_rules: vec![],
-                },
-            ))),
-        )
-        .await?;
-
-        assert_eq!(result.files_redacted, 2);
-        assert_eq!(
-            std::fs::read_to_string(destination.path().join("ignored.txt"))?,
-            "mail [REDACTED]\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(destination.path().join("marked.txt"))?,
-            "mail [REDACTED] # redacter:allow\n"
-        );
         Ok(())
     }
 

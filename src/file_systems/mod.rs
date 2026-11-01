@@ -8,7 +8,7 @@ use gcloud_sdk::prost::bytes;
 use gcloud_sdk::prost::bytes::Bytes;
 use mime::Mime;
 use rvstruct::ValueStruct;
-use std::path::PathBuf;
+use std::path::Path;
 
 mod aws_s3;
 mod gcs;
@@ -21,7 +21,7 @@ mod clipboard;
 mod noop;
 
 use crate::file_systems::aws_s3::AwsS3FileSystem;
-use crate::file_tools::FileMatcher;
+use crate::file_tools::{FileMatcher, FileMatcherResult};
 use crate::reporter::AppReporter;
 
 #[derive(Debug, Clone, ValueStruct)]
@@ -52,14 +52,49 @@ pub struct FileSystemRef {
 #[derive(Debug, Clone)]
 pub struct ListFilesResult {
     pub files: Vec<FileSystemRef>,
+    /// Files skipped by the size limit or the name filter.
     pub skipped: usize,
+    /// Files ignored by the ignore rules of the matcher.
+    pub ignored: usize,
 }
 
 impl ListFilesResult {
     pub const EMPTY: ListFilesResult = ListFilesResult {
         files: Vec::new(),
         skipped: 0,
+        ignored: 0,
     };
+
+    /// The files of `found` that `file_matcher` keeps, with the counts of those it skipped and
+    /// of those it ignored.
+    pub fn matching(
+        found: impl IntoIterator<Item = FileSystemRef>,
+        file_matcher: Option<&FileMatcher>,
+    ) -> Self {
+        let mut result = Self::EMPTY;
+        for file_ref in found {
+            result.add(file_ref, file_matcher);
+        }
+        result
+    }
+
+    /// Lists `file_ref` if `file_matcher` keeps it, and counts it by reason if not.
+    pub fn add(&mut self, file_ref: FileSystemRef, file_matcher: Option<&FileMatcher>) {
+        match file_matcher.map(|matcher| matcher.matches(&file_ref)) {
+            None | Some(FileMatcherResult::Matched) => self.files.push(file_ref),
+            Some(FileMatcherResult::SkippedDueToIgnore) => self.ignored += 1,
+            Some(FileMatcherResult::SkippedDueToSize | FileMatcherResult::SkippedDueToName) => {
+                self.skipped += 1
+            }
+        }
+    }
+
+    /// Appends the files and adds the counts of `other`.
+    pub fn merge(&mut self, other: Self) {
+        self.files.extend(other.files);
+        self.skipped += other.skipped;
+        self.ignored += other.ignored;
+    }
 }
 
 pub trait FileSystemConnection<'a> {
@@ -90,19 +125,11 @@ pub trait FileSystemConnection<'a> {
     async fn accepts_multiple_files(&self) -> AppResult<bool>;
 
     fn resolve(&self, file_ref: Option<&FileSystemRef>) -> AbsoluteFilePath;
-}
 
-fn is_local_source(source: &str) -> bool {
-    source.starts_with("file://") || !source.contains("://")
-}
-
-/// The directory a local source names, or `None` for a remote source and for a single file.
-pub fn local_source_directory(source: &str) -> Option<PathBuf> {
-    if !is_local_source(source) {
-        return None;
+    /// The directory of the source when it is a local one.
+    fn local_directory(&self) -> Option<&Path> {
+        None
     }
-    let path = PathBuf::from(source.trim_start_matches("file://"));
-    path.is_dir().then_some(path)
 }
 
 pub enum DetectFileSystem<'a> {
@@ -119,7 +146,7 @@ impl<'a> DetectFileSystem<'a> {
         file_path: &str,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<impl FileSystemConnection<'a>> {
-        if is_local_source(file_path) {
+        if file_path.starts_with("file://") || !file_path.contains("://") {
             Ok(DetectFileSystem::Local(
                 LocalFileSystem::new(file_path, reporter).await?,
             ))
@@ -247,6 +274,13 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::ZipFile(fs) => fs.resolve(file_ref),
             #[cfg(feature = "clipboard")]
             DetectFileSystem::Clipboard(fs) => fs.resolve(file_ref),
+        }
+    }
+
+    fn local_directory(&self) -> Option<&Path> {
+        match self {
+            DetectFileSystem::Local(fs) => fs.local_directory(),
+            _ => None,
         }
     }
 }

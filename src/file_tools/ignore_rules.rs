@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::file_systems::{local_source_directory, FileSystemRef, RelativeFilePath};
+use crate::file_systems::RelativeFilePath;
 use crate::AppResult;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rvstruct::ValueStruct;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub const IGNORE_FILE_NAME: &str = ".redacterignore";
 
 /// Which ignore file `scan` reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum IgnoreFileChoice {
     /// `.redacterignore` at the root of a local source, when it has one.
     SourceRoot,
@@ -19,75 +19,88 @@ pub enum IgnoreFileChoice {
 }
 
 impl IgnoreFileChoice {
-    /// The rules for a scan of `source`, or `None` when no ignore file applies.
-    pub fn load(&self, source: &str) -> AppResult<Option<IgnoreRules>> {
+    /// The rules for a scan whose source is the local directory `source_directory`, or `None`
+    /// for any other source. `None` is also the result when no ignore file applies.
+    pub fn load(&self, source_directory: Option<&Path>) -> AppResult<Option<IgnoreRules>> {
         match self {
             Self::Disabled => Ok(None),
             Self::Explicit(path) => IgnoreRules::from_file(path).map(Some),
-            Self::SourceRoot => match local_source_directory(source) {
-                Some(directory) => {
-                    let path = directory.join(IGNORE_FILE_NAME);
-                    if path.is_file() {
-                        IgnoreRules::from_file(&path).map(Some)
-                    } else {
-                        Ok(None)
-                    }
+            Self::SourceRoot => {
+                let path = match source_directory {
+                    Some(directory) => directory.join(IGNORE_FILE_NAME),
+                    None => return Ok(None),
+                };
+                if path.is_file() {
+                    IgnoreRules::from_source_root_file(&path).map(Some)
+                } else {
+                    Ok(None)
                 }
-                None => Ok(None),
-            },
+            }
         }
     }
 }
 
 /// The patterns of an ignore file in gitignore syntax. They match the path of a file relative
 /// to the source root, the path the reports show.
+///
+/// A `!` pattern brings back a file even when a pattern ignores one of its directories, which
+/// git does not.
 #[derive(Debug, Clone)]
 pub struct IgnoreRules(Gitignore);
 
 impl IgnoreRules {
-    pub fn from_file(path: &Path) -> AppResult<Self> {
-        let text =
-            std::fs::read_to_string(path).map_err(|source| AppError::IgnoreFileUnreadable {
-                path: path.display().to_string(),
-                source,
-            })?;
-        Self::parse(&text, path)
+    /// The rules of the ignore file at `path`.
+    fn from_file(path: &Path) -> AppResult<Self> {
+        Self::build(path, None)
     }
 
-    fn parse(text: &str, path: &Path) -> AppResult<Self> {
+    /// The rules of the `.redacterignore` at the root of the source it applies to. The file is
+    /// ignored too, since it is never a file to scan.
+    fn from_source_root_file(path: &Path) -> AppResult<Self> {
+        Self::build(path, Some(&format!("/{IGNORE_FILE_NAME}")))
+    }
+
+    fn build(path: &Path, implicit_pattern: Option<&str>) -> AppResult<Self> {
         let mut builder = GitignoreBuilder::new("");
-        for (index, pattern) in text.lines().enumerate() {
+        if let Some(pattern) = implicit_pattern {
             builder
                 .add_line(None, pattern)
-                .map_err(|reason| AppError::InvalidIgnorePattern {
-                    path: path.display().to_string(),
-                    line: Some(index + 1),
-                    reason,
-                })?;
+                .map_err(|source| AppError::InvalidIgnoreFile { source })?;
+        }
+        if let Some(source) = builder.add(path) {
+            return Err(AppError::InvalidIgnoreFile { source });
         }
         let gitignore = builder
             .build()
-            .map_err(|reason| AppError::InvalidIgnorePattern {
-                path: path.display().to_string(),
-                line: None,
-                reason,
-            })?;
+            .map_err(|source| AppError::InvalidIgnoreFile { source })?;
         Ok(Self(gitignore))
-    }
-
-    /// Removes the ignored files from `files` and returns how many it removed.
-    pub fn remove_ignored(&self, files: &mut Vec<FileSystemRef>) -> usize {
-        let listed = files.len();
-        files.retain(|file| !self.is_ignored(&file.relative_path));
-        listed - files.len()
     }
 
     /// Whether the file at `path` is ignored: a pattern matches it or one of its directories,
     /// and no later `!` pattern brings it back.
-    pub fn is_ignored(&self, path: &RelativeFilePath) -> bool {
+    pub fn ignores_file(&self, path: &RelativeFilePath) -> bool {
         self.0
-            .matched_path_or_any_parents(path.value().trim_start_matches('/'), false)
+            .matched_path_or_any_parents(Self::normalised(path), false)
             .is_ignore()
+    }
+
+    /// Whether every file under the directory at `path` is ignored, so a walk need not enter it.
+    /// Never true while a `!` pattern exists, since one can bring back a file under it.
+    pub fn ignores_directory(&self, path: &RelativeFilePath) -> bool {
+        self.0.num_whitelists() == 0
+            && self
+                .0
+                .matched_path_or_any_parents(Self::normalised(path), true)
+                .is_ignore()
+    }
+
+    /// `path` with `/` as its only separator and no leading separator: remote listings and
+    /// Windows paths use `\`, and a path with a root is not matched against the patterns.
+    fn normalised(path: &RelativeFilePath) -> String {
+        path.value()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string()
     }
 }
 
@@ -95,12 +108,23 @@ impl IgnoreRules {
 mod tests {
     use super::*;
 
-    fn rules(patterns: &str) -> IgnoreRules {
-        IgnoreRules::parse(patterns, Path::new(IGNORE_FILE_NAME)).unwrap()
+    fn rules_from(text: &str) -> AppResult<IgnoreRules> {
+        let dir = tempfile::TempDir::with_prefix("ignore_rules").unwrap();
+        let file = dir.path().join(IGNORE_FILE_NAME);
+        std::fs::write(&file, text).unwrap();
+        IgnoreRules::from_file(&file)
     }
 
-    fn ignored(rules: &IgnoreRules, path: &str) -> bool {
-        rules.is_ignored(&RelativeFilePath(path.to_string()))
+    fn rules(text: &str) -> IgnoreRules {
+        rules_from(text).unwrap()
+    }
+
+    fn path(path: &str) -> RelativeFilePath {
+        RelativeFilePath(path.to_string())
+    }
+
+    fn ignores(rules: &IgnoreRules, file: &str) -> bool {
+        rules.ignores_file(&path(file))
     }
 
     #[test]
@@ -109,80 +133,101 @@ mod tests {
             "# mock credentials\n\
              *.mock\n\
              /root-only.txt\n\
+             /anchored/*\n\
              fixtures/\n\
-             docs/**/draft.md\n\
              logs/*\n\
              !logs/keep.txt\n",
         );
 
-        assert!(ignored(&rules, "a.mock"));
-        assert!(ignored(&rules, "deep/er/a.mock"));
-        assert!(ignored(&rules, "root-only.txt"));
-        assert!(!ignored(&rules, "sub/root-only.txt"));
-        assert!(ignored(&rules, "fixtures/key.txt"));
-        assert!(ignored(&rules, "src/fixtures/nested/key.txt"));
-        assert!(!ignored(&rules, "fixtures.txt"));
-        assert!(ignored(&rules, "docs/a/b/draft.md"));
-        assert!(ignored(&rules, "docs/draft.md"));
-        assert!(!ignored(&rules, "docs/final.md"));
-        assert!(ignored(&rules, "logs/today.txt"));
-        assert!(!ignored(&rules, "logs/keep.txt"));
-        assert!(!ignored(&rules, "src/main.rs"));
+        assert!(ignores(&rules, "deep/er/a.mock"));
+        assert!(ignores(&rules, "root-only.txt"));
+        assert!(!ignores(&rules, "sub/root-only.txt"));
+        assert!(ignores(&rules, "anchored/a.txt"));
+        assert!(!ignores(&rules, "sub/anchored/a.txt"));
+        assert!(ignores(&rules, "src/fixtures/nested/key.txt"));
+        assert!(!ignores(&rules, "fixtures.txt"));
+        assert!(ignores(&rules, "logs/today.txt"));
+        assert!(!ignores(&rules, "logs/keep.txt"));
     }
 
     #[test]
-    fn a_remote_style_path_with_a_leading_slash_is_matched_from_the_source_root() {
+    fn a_path_is_matched_whatever_separator_and_prefix_a_listing_gives_it() {
         let rules = rules("/root-only.txt\nfixtures/\n");
 
-        assert!(ignored(&rules, "/root-only.txt"));
-        assert!(ignored(&rules, "/fixtures/key.txt"));
+        assert!(ignores(&rules, "/root-only.txt"));
+        assert!(ignores(&rules, "/fixtures/key.txt"));
+        assert!(ignores(&rules, "fixtures\\key.txt"));
+        assert!(ignores(&rules, "\\fixtures\\key.txt"));
+        assert!(!ignores(&rules, "sub\\root-only.txt"));
     }
 
     #[test]
-    fn a_malformed_pattern_is_a_config_error_naming_the_file_and_line() {
-        let error =
-            IgnoreRules::parse("*.ok\n\n{unclosed\n", Path::new("ci/.redacterignore")).unwrap_err();
+    fn a_byte_order_mark_does_not_disable_the_first_pattern() {
+        let rules = rules("\u{feff}mocks/\n*.mock\n");
 
+        assert!(ignores(&rules, "mocks/key.txt"));
+        assert!(ignores(&rules, "a.mock"));
+    }
+
+    #[test]
+    fn a_directory_is_skipped_only_while_no_pattern_can_bring_a_file_back() {
+        let plain = rules("fixtures/\n");
+        let with_negation = rules("fixtures/\n!fixtures/keep.txt\n");
+
+        assert!(plain.ignores_directory(&path("src/fixtures")));
+        assert!(!plain.ignores_directory(&path("src")));
+        assert!(!with_negation.ignores_directory(&path("fixtures")));
+        assert!(ignores(&with_negation, "fixtures/other.txt"));
+        assert!(!ignores(&with_negation, "fixtures/keep.txt"));
+    }
+
+    #[test]
+    fn a_malformed_pattern_is_an_error() {
         assert!(matches!(
-            error,
-            AppError::InvalidIgnorePattern { ref path, line: Some(3), .. } if path == "ci/.redacterignore"
+            rules_from("*.ok\n\n{unclosed\n"),
+            Err(AppError::InvalidIgnoreFile { .. })
         ));
     }
 
     #[test]
-    fn the_source_root_file_is_read_only_for_a_local_directory() {
+    fn the_source_root_file_is_read_for_a_local_directory_and_lists_itself() {
         let dir = tempfile::TempDir::with_prefix("ignore_rules_pickup").unwrap();
         std::fs::write(dir.path().join(IGNORE_FILE_NAME), "*.mock\n").unwrap();
-        let source = format!("{}/", dir.path().display());
 
-        let picked_up = IgnoreFileChoice::SourceRoot.load(&source).unwrap().unwrap();
-        assert!(ignored(&picked_up, "a.mock"));
-        assert!(IgnoreFileChoice::Disabled.load(&source).unwrap().is_none());
-        assert!(IgnoreFileChoice::SourceRoot
-            .load("gs://bucket/dir/")
+        let picked_up = IgnoreFileChoice::SourceRoot
+            .load(Some(dir.path()))
+            .unwrap()
+            .unwrap();
+        assert!(ignores(&picked_up, "a.mock"));
+        assert!(ignores(&picked_up, IGNORE_FILE_NAME));
+        assert!(!ignores(&picked_up, &format!("sub/{IGNORE_FILE_NAME}")));
+        assert!(IgnoreFileChoice::Disabled
+            .load(Some(dir.path()))
             .unwrap()
             .is_none());
+        assert!(IgnoreFileChoice::SourceRoot.load(None).unwrap().is_none());
         let empty = tempfile::TempDir::with_prefix("ignore_rules_none").unwrap();
         assert!(IgnoreFileChoice::SourceRoot
-            .load(&format!("{}/", empty.path().display()))
+            .load(Some(empty.path()))
             .unwrap()
             .is_none());
     }
 
     #[test]
-    fn an_explicit_file_applies_to_a_remote_source_and_a_missing_one_is_an_error() {
+    fn an_explicit_file_applies_to_any_source_and_a_missing_one_is_an_error() {
         let dir = tempfile::TempDir::with_prefix("ignore_rules_explicit").unwrap();
         let file = dir.path().join("ci-ignore");
         std::fs::write(&file, "fixtures/\n").unwrap();
 
         let rules = IgnoreFileChoice::Explicit(file)
-            .load("gs://bucket/dir/")
+            .load(None)
             .unwrap()
             .unwrap();
-        assert!(ignored(&rules, "fixtures/key.txt"));
+        assert!(ignores(&rules, "fixtures/key.txt"));
+        assert!(!ignores(&rules, IGNORE_FILE_NAME));
         assert!(matches!(
-            IgnoreFileChoice::Explicit(dir.path().join("missing")).load("gs://bucket/dir/"),
-            Err(AppError::IgnoreFileUnreadable { .. })
+            IgnoreFileChoice::Explicit(dir.path().join("missing")).load(None),
+            Err(AppError::InvalidIgnoreFile { .. })
         ));
     }
 }

@@ -84,22 +84,10 @@ pub enum AppError {
     },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
-    #[error("Cannot read the ignore file {path}")]
-    IgnoreFileUnreadable {
-        path: String,
+    #[error("Invalid ignore file: {source}")]
+    InvalidIgnoreFile {
         #[source]
-        source: std::io::Error,
-    },
-    /// `line` is empty when the patterns are valid one by one but cannot be compiled together.
-    #[error(
-        "Invalid ignore file {path}{}: {reason}",
-        .line.map(|line| format!(" at line {line}")).unwrap_or_default()
-    )]
-    InvalidIgnorePattern {
-        path: String,
-        line: Option<usize>,
-        #[source]
-        reason: ignore::Error,
+        source: ignore::Error,
     },
     #[error("Score must be a number between 0 and 1, got `{value}`")]
     InvalidScore { value: String },

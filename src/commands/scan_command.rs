@@ -84,7 +84,6 @@ pub async fn command_scan(
     options: ScanCommandOptions,
     redacter_options: RedacterOptions,
 ) -> AppResult<ScanCommandResult> {
-    let ignore_rules = options.ignore.load(source)?;
     let term_reporter = AppReporter::from(term);
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
@@ -105,13 +104,13 @@ pub async fn command_scan(
 
     let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
     let source_listing = if source_fs.has_multiple_files().await? {
-        let mut listing = source_fs
-            .list_files(Some(&options.file_matcher), options.max_files_limit)
-            .await?;
-        let files_ignored = ignore_rules
-            .as_ref()
-            .map_or(0, |rules| rules.remove_ignored(&mut listing.files));
-        Some((listing, files_ignored))
+        let ignore_rules = options.ignore.load(source_fs.local_directory())?;
+        let listing_matcher = options.file_matcher.clone().with_ignore(ignore_rules);
+        Some(
+            source_fs
+                .list_files(Some(&listing_matcher), options.max_files_limit)
+                .await?,
+        )
     } else {
         None
     };
@@ -159,17 +158,17 @@ pub async fn command_scan(
 
     let mut result = ScanCommandResult::default();
     match source_listing {
-        Some((listing, files_ignored)) => {
+        Some(listing) => {
             let total_size: usize = listing.files.iter().filter_map(|file| file.file_size).sum();
             let mut header = vec![format!(
                 "Found {} files. Total size: {}",
                 styles.highlighted.apply_to(listing.files.len()),
                 styles.highlighted.apply_to(HumanBytes(total_size as u64))
             )];
-            if files_ignored > 0 {
+            if listing.ignored > 0 {
                 header.push(format!(
                     "{} files ignored.",
-                    styles.highlighted.apply_to(files_ignored)
+                    styles.highlighted.apply_to(listing.ignored)
                 ));
             }
             if !listing.files.is_empty() {
@@ -177,7 +176,7 @@ pub async fn command_scan(
             }
             write_lines(term, &bar, &header)?;
             result.files_skipped += listing.skipped;
-            result.files_ignored += files_ignored;
+            result.files_ignored += listing.ignored;
             bar.set_length(listing.files.len() as u64);
             for file in &listing.files {
                 let report =
@@ -217,7 +216,8 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
             let skip_reason = match context.options.file_matcher.matches(&base_file_ref) {
                 FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
                 FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-                FileMatcherResult::Matched => None,
+                // Ignore rules apply to listings only; this matcher carries none.
+                FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
             };
             match skip_reason {
                 Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
@@ -313,7 +313,7 @@ async fn detect_in_file(
                 SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
             ),
             Ok(scanned) => {
-                let kept = |detection: &Detection| {
+                let meets_min_score = |detection: &Detection| {
                     context.options.min_score.is_none_or(|min_score| {
                         detection.score.is_none_or(|score| score >= min_score)
                     })
@@ -323,7 +323,7 @@ async fn detect_in_file(
                     scanned
                         .detections
                         .iter()
-                        .filter(|(_, detection)| kept(detection))
+                        .filter(|(_, detection)| meets_min_score(detection))
                         .map(|(redacter, detection)| {
                             FindingReport::new(*redacter, detection, context.options.values)
                         })
@@ -332,9 +332,9 @@ async fn detect_in_file(
                 )
                 .with_findings_ignored(
                     scanned
-                        .allowed
+                        .ignored
                         .iter()
-                        .filter(|(_, detection)| kept(detection))
+                        .filter(|(_, detection)| meets_min_score(detection))
                         .count(),
                 )
             }
@@ -424,6 +424,7 @@ mod tests {
     async fn scan_directory(
         directory: &std::path::Path,
         ignore: IgnoreFileChoice,
+        max_files_limit: Option<usize>,
     ) -> ScanCommandResult {
         command_scan(
             &silent_term(),
@@ -431,7 +432,7 @@ mod tests {
             ScanCommandOptions::new(
                 None,
                 None,
-                None,
+                max_files_limit,
                 Vec::new(),
                 AddonStoreOptions::default(),
                 None,
@@ -461,7 +462,7 @@ mod tests {
     async fn the_ignore_file_at_the_source_root_keeps_its_files_out_of_the_scan() {
         let dir = source_with_mock_files();
 
-        let result = scan_directory(dir.path(), IgnoreFileChoice::SourceRoot).await;
+        let result = scan_directory(dir.path(), IgnoreFileChoice::SourceRoot, None).await;
 
         assert_eq!(
             (
@@ -470,8 +471,8 @@ mod tests {
                 result.files_unsupported,
                 result.findings
             ),
-            (2, 2, 1, 1),
-            "the ignored files are not read, and the ignore file itself is a file of the source"
+            (2, 2, 0, 1),
+            "the ignored files are not read, and the ignore file excludes itself"
         );
         assert_eq!(result.exit_code(FailOn::Findings), 2);
     }
@@ -480,7 +481,7 @@ mod tests {
     async fn no_ignore_scans_every_file_of_the_source() {
         let dir = source_with_mock_files();
 
-        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled).await;
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
 
         assert_eq!((result.files_ignored, result.findings), (0, 3));
     }
@@ -492,7 +493,7 @@ mod tests {
         let explicit = elsewhere.path().join("ci-ignore");
         std::fs::write(&explicit, "real.txt\n").unwrap();
 
-        let result = scan_directory(dir.path(), IgnoreFileChoice::Explicit(explicit)).await;
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Explicit(explicit), None).await;
 
         assert_eq!((result.files_ignored, result.findings), (1, 2));
     }
@@ -506,7 +507,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled).await;
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
 
         assert_eq!(
             (
@@ -547,5 +548,22 @@ mod tests {
         .unwrap();
 
         assert_eq!((result.files_ignored, result.findings), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn ignored_files_do_not_use_up_the_file_limit() {
+        let dir = tempfile::TempDir::with_prefix("scan_ignore_limit").unwrap();
+        std::fs::create_dir(dir.path().join("mocks")).unwrap();
+        for index in 0..20 {
+            std::fs::write(dir.path().join(format!("mocks/{index}.txt")), "mail a@b.io").unwrap();
+        }
+        std::fs::write(dir.path().join("real.txt"), "mail c@d.io").unwrap();
+        std::fs::write(dir.path().join("config.mock"), "mail e@f.io").unwrap();
+        std::fs::write(dir.path().join(".redacterignore"), "mocks/\n*.mock\n").unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::SourceRoot, Some(1)).await;
+
+        assert_eq!((result.files_scanned, result.findings), (1, 1));
+        assert_eq!(result.exit_code(FailOn::Findings), 2);
     }
 }
