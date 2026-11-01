@@ -25,6 +25,16 @@ pub(crate) struct TextChange {
     pub output: Range<usize>,
 }
 
+/// Where a position of a step's input is in its output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutputPosition {
+    /// At this position of the output.
+    At(usize),
+    /// Inside a change, after its start and before its end, where the output has no position of
+    /// its own: the range of the output the change wrote.
+    Inside(Range<usize>),
+}
+
 /// Every change one step made to a text, in order on both sides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TextChanges(Vec<TextChange>);
@@ -76,6 +86,47 @@ impl TextChanges {
                 })
                 .collect(),
         )
+    }
+
+    /// The changes of a step whose replacements are all known. Both ranges of every change are
+    /// on character boundaries, and the changes are in order and apart on both sides.
+    pub(crate) fn new(changes: Vec<TextChange>) -> Self {
+        debug_assert!(
+            changes.windows(2).all(|pair| {
+                pair[0].input.end <= pair[1].input.start
+                    && pair[0].output.end <= pair[1].output.start
+            }),
+            "changes must be in order and apart"
+        );
+        Self(changes)
+    }
+
+    /// Where `position` of the input is in the output.
+    pub(crate) fn in_output(&self, position: usize) -> OutputPosition {
+        let before = self
+            .0
+            .partition_point(|change| change.input.end <= position);
+        match self.0.get(before) {
+            Some(change) if change.input.start < position => {
+                OutputPosition::Inside(change.output.clone())
+            }
+            _ => OutputPosition::At(match before.checked_sub(1).map(|last| &self.0[last]) {
+                Some(change) => position - change.input.end + change.output.end,
+                None => position,
+            }),
+        }
+    }
+
+    /// The output range of the change that `position` of the output is inside, after its start
+    /// and before its end.
+    pub(crate) fn enclosing_output(&self, position: usize) -> Option<Range<usize>> {
+        let before = self
+            .0
+            .partition_point(|change| change.output.end <= position);
+        self.0
+            .get(before)
+            .filter(|change| change.output.start < position)
+            .map(|change| change.output.clone())
     }
 
     /// `range` of the output as the range of the input it came from. An end inside a change
@@ -873,6 +924,53 @@ mod tests {
 
             assert_eq!(rebuilt, output, "{input:?} to {output:?}");
         }
+    }
+
+    #[test]
+    fn a_position_of_the_input_is_shifted_by_the_changes_before_it() {
+        let changes = TextChanges::new(vec![
+            TextChange {
+                input: 4..16,
+                output: 4..14,
+            },
+            TextChange {
+                input: 21..25,
+                output: 19..29,
+            },
+        ]);
+
+        assert_eq!(changes.in_output(0), OutputPosition::At(0));
+        assert_eq!(changes.in_output(4), OutputPosition::At(4));
+        assert_eq!(changes.in_output(16), OutputPosition::At(14));
+        assert_eq!(changes.in_output(17), OutputPosition::At(15));
+        assert_eq!(changes.in_output(21), OutputPosition::At(19));
+        assert_eq!(changes.in_output(25), OutputPosition::At(29));
+        assert_eq!(changes.in_output(26), OutputPosition::At(30));
+    }
+
+    #[test]
+    fn a_position_inside_a_change_has_no_place_in_the_output() {
+        let changes = TextChanges::new(vec![TextChange {
+            input: 4..16,
+            output: 4..14,
+        }]);
+
+        assert_eq!(changes.in_output(5), OutputPosition::Inside(4..14));
+        assert_eq!(changes.in_output(15), OutputPosition::Inside(4..14));
+    }
+
+    #[test]
+    fn a_position_of_the_output_is_inside_a_change_between_its_start_and_its_end() {
+        let changes = TextChanges::new(vec![TextChange {
+            input: 4..16,
+            output: 4..14,
+        }]);
+
+        assert_eq!(changes.enclosing_output(3), None);
+        assert_eq!(changes.enclosing_output(4), None);
+        assert_eq!(changes.enclosing_output(5), Some(4..14));
+        assert_eq!(changes.enclosing_output(13), Some(4..14));
+        assert_eq!(changes.enclosing_output(14), None);
     }
 
     #[test]

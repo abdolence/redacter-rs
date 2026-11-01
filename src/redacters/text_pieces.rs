@@ -15,7 +15,7 @@ use std::ops::Range;
 
 /// The most bytes a window can hold beyond the context it was asked for on one side, because a
 /// cut moves out to the start of a character.
-const CUT_ROUNDING_BYTES: usize = 3;
+pub(crate) const CUT_ROUNDING_BYTES: usize = 3;
 
 /// A place in a text read in pieces: the bytes, the lines and the characters of its line before
 /// it.
@@ -25,6 +25,25 @@ pub(crate) struct TextPosition {
     pub lines_before: usize,
     /// The characters between the start of the line the position is on and the position.
     pub columns_before: usize,
+}
+
+impl TextPosition {
+    /// The position `text` ends at, when it starts at this one.
+    pub fn after(self, text: &str) -> Self {
+        let bytes = text.as_bytes();
+        match bytes.iter().rposition(|&byte| byte == b'\n') {
+            Some(last_newline) => Self {
+                offset: self.offset + bytes.len(),
+                lines_before: self.lines_before + newlines(bytes),
+                columns_before: characters(&bytes[last_newline + 1..]),
+            },
+            None => Self {
+                offset: self.offset + bytes.len(),
+                lines_before: self.lines_before,
+                columns_before: self.columns_before + characters(bytes),
+            },
+        }
+    }
 }
 
 /// How a text is cut into pieces.
@@ -63,6 +82,46 @@ impl PieceLayout {
             })?;
         Ok(Some(Self::new(piece_bytes, context_bytes)))
     }
+
+    /// The text each step of a chain reads on each side of a piece: the contexts of the step and
+    /// of every step after it, since a step is right only where the text it reads was made right
+    /// by the steps before it.
+    pub fn chain_reaches(limits: &[TextPieceLimits]) -> Vec<usize> {
+        let mut reaches: Vec<usize> = limits
+            .iter()
+            .rev()
+            .scan(0usize, |reach, limit| {
+                *reach = reach.saturating_add(limit.context_bytes);
+                Some(*reach)
+            })
+            .collect();
+        reaches.reverse();
+        reaches
+    }
+
+    /// The layout for redacters that run one after another on each window, the first on the
+    /// window as read: it carries the context the first step reaches, and the piece is the
+    /// largest that leaves every step a window within its request limit. Fails when that leaves
+    /// no room for a piece.
+    pub fn chained(limits: &[TextPieceLimits]) -> AppResult<Option<Self>> {
+        let reaches = Self::chain_reaches(limits);
+        let Some(&first_reach) = reaches.first() else {
+            return Ok(None);
+        };
+        let mut piece_bytes = usize::MAX;
+        for (limit, reach) in limits.iter().zip(reaches) {
+            piece_bytes = limit
+                .max_request_bytes
+                .checked_sub(2 * (reach + CUT_ROUNDING_BYTES))
+                .filter(|&room| room > 0)
+                .ok_or(AppError::TextPieceLimitsTooTight {
+                    max_request_bytes: limit.max_request_bytes,
+                    context_bytes: reach,
+                })?
+                .min(piece_bytes);
+        }
+        Ok(Some(Self::new(piece_bytes, first_reach)))
+    }
 }
 
 /// A piece of the text with its context.
@@ -75,6 +134,9 @@ pub(crate) struct TextWindow {
     pub piece: Range<usize>,
     /// Whether `text` reaches the end of the file.
     pub reaches_end: bool,
+    /// Where the window after this one starts, or `None` after the last. A later window can
+    /// change nothing before it.
+    pub next_start: Option<usize>,
 }
 
 impl TextWindow {
@@ -147,6 +209,7 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
             self.char_start_at_or_after(piece_end + context).await?
         };
         let reaches_end = last_piece || self.is_end_of_text(window_end).await?;
+        let keep_from = self.char_start_at_or_before(piece_end.saturating_sub(context));
 
         let bytes = &self.buffer
             [window_start - self.buffer_start.offset..window_end - self.buffer_start.offset];
@@ -158,11 +221,11 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
             start: self.position_of(window_start),
             piece: piece_start..piece_end,
             reaches_end,
+            next_start: (!last_piece).then_some(keep_from),
         };
 
         self.next_piece_start = piece_end;
         self.finished = last_piece;
-        let keep_from = self.char_start_at_or_before(piece_end.saturating_sub(context));
         self.drop_before(keep_from);
         Ok(Some(window))
     }
@@ -340,6 +403,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_window_says_where_the_next_one_starts() {
+        let text = "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n日本語 and a very long line without end";
+        let found = windows(text.as_bytes(), 3, PieceLayout::new(10, 5)).await;
+
+        let next_starts: Vec<_> = found.iter().map(|window| window.next_start).collect();
+        let expected: Vec<_> = found
+            .iter()
+            .skip(1)
+            .map(|window| Some(window.start.offset))
+            .chain([None])
+            .collect();
+        assert!(found.len() > 4);
+        assert_eq!(next_starts, expected);
+    }
+
+    #[tokio::test]
     async fn a_text_that_fits_in_one_window_is_one_whole_window() {
         for text in ["one\ntwo\n", ""] {
             let found = windows(text.as_bytes(), 3, PieceLayout::new(1000, 100)).await;
@@ -475,6 +554,42 @@ mod tests {
             })
         ));
         assert!(PieceLayout::fitting(&[]).unwrap().is_none());
+    }
+
+    fn limits(max_request_bytes: usize, context_bytes: usize) -> TextPieceLimits {
+        TextPieceLimits {
+            max_request_bytes,
+            context_bytes,
+        }
+    }
+
+    #[test]
+    fn a_step_reaches_the_contexts_of_itself_and_of_every_step_after_it() {
+        let chain = [limits(9000, 100), limits(9000, 30), limits(9000, 7)];
+
+        assert_eq!(PieceLayout::chain_reaches(&chain), vec![137, 37, 7]);
+        assert!(PieceLayout::chain_reaches(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_chained_layout_carries_the_first_reach_and_fits_the_window_of_every_step() {
+        let layout = PieceLayout::chained(&[limits(1000, 100), limits(500, 50)])
+            .unwrap()
+            .unwrap();
+
+        // The second step is the narrower: 500 less its own reach of 50 and the rounding, twice.
+        assert_eq!(layout, PieceLayout::new(500 - 2 * (50 + 3), 150));
+    }
+
+    #[test]
+    fn a_chain_whose_first_reach_leaves_a_later_step_no_room_is_refused() {
+        assert!(matches!(
+            PieceLayout::chained(&[limits(1000, 100), limits(240, 120)]),
+            Err(AppError::TextPieceLimitsTooTight {
+                max_request_bytes: 240,
+                context_bytes: 120
+            })
+        ));
     }
 
     #[tokio::test]

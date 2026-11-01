@@ -121,6 +121,14 @@ pub enum AppError {
         max_request_bytes: usize,
         context_bytes: usize,
     },
+    #[error(
+        "A piece of {piece_bytes} bytes, with the masks of the redacters before, is longer than \
+         the {max_request_bytes} bytes a request takes"
+    )]
+    TextPieceMaskedTooLong {
+        piece_bytes: usize,
+        max_request_bytes: usize,
+    },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
     #[error("Invalid ignore file: {source}")]
