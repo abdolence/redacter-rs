@@ -66,16 +66,15 @@ impl<'a> LocalFileSystem<'a> {
         while let Some(entry) = entries.next_entry().await? {
             let file_type = entry.file_type().await?;
             if file_type.is_file() {
-                let file_ref = FileSystemRef {
-                    relative_path: entry
+                let file_ref = FileSystemRef::with_guessed_media_type(
+                    entry
                         .path()
                         .to_string_lossy()
                         .to_string()
                         .replace(self.root_path.as_str(), "")
                         .into(),
-                    media_type: mime_guess::from_path(entry.path()).first(),
-                    file_size: Some(entry.metadata().await?.len() as usize),
-                };
+                    entry.metadata().await?.len() as usize,
+                );
                 listing.add(file_ref, *file_matcher);
             } else if file_type.is_dir() {
                 let new_max_files_limit =
@@ -126,11 +125,10 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
                 .to_string(),
         };
         let file_metadata = tokio::fs::metadata(&file_path).await?;
-        let file_ref = FileSystemRef {
-            relative_path: relative_file_path.into(),
-            media_type: mime_guess::from_path(&file_path).first(),
-            file_size: Some(file_metadata.len() as usize),
-        };
+        let file_ref = FileSystemRef::with_guessed_media_type(
+            relative_file_path.into(),
+            file_metadata.len() as usize,
+        );
         Ok((file_ref, Box::new(stream)))
     }
 
