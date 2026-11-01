@@ -34,14 +34,22 @@ pub struct ZipFileSystem<'a> {
 
 enum ZipFileSystemMode {
     Read(OpenedArchive),
-    Write(ZipWriter<File>),
+    Write(ArchiveWriter),
     /// The archive was removed after a failure; nothing more is written to it.
     Aborted,
 }
 
+/// The archive being written, with how many entries it holds. An archive with no entry left
+/// cannot be finished: the bytes of an entry taken back out stay in the file, and a footer
+/// written after them leaves a file that readers reject.
+struct ArchiveWriter {
+    zip: ZipWriter<File>,
+    entries: usize,
+}
+
 /// Why an entry could not be written.
 enum EntryFailure {
-    /// The content did not arrive, and the entry was taken out of the archive.
+    /// The content did not arrive, and the entry was taken out of the archive's entries.
     Content(AppError),
     /// The archive itself can no longer be trusted.
     Archive(AppError),
@@ -356,8 +364,9 @@ impl<'a> ZipFileSystem<'a> {
     }
 
     /// Writes `input` as the entry `name`. An entry whose content fails to arrive is taken back
-    /// out of the archive, which stays complete without it: a copy of many files goes on past one
-    /// that cannot be read.
+    /// out of the archive, which stays readable without it: a copy of many files goes on past one
+    /// that cannot be read. The compressed bytes already written stay in the file as unused
+    /// space until a later entry overwrites them.
     async fn write_entry<S: Stream<Item = AppResult<Bytes>> + Unpin>(
         zip_writer: &mut ZipWriter<File>,
         name: String,
@@ -440,16 +449,22 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
                 File::create_new(&self.zip_file_path)?
             };
 
-            let zip_writer = ZipWriter::new(zip_file);
-            self.mode = Some(ZipFileSystemMode::Write(zip_writer));
+            self.mode = Some(ZipFileSystemMode::Write(ArchiveWriter {
+                zip: ZipWriter::new(zip_file),
+                entries: 0,
+            }));
         }
         let written = match self.mode {
-            Some(ZipFileSystemMode::Write(ref mut zip_writer)) => match file_ref {
+            Some(ZipFileSystemMode::Write(ref mut writer)) => match file_ref {
                 Some(file_ref) => {
                     let name = Path::new(file_ref.relative_path.value())
                         .to_string_lossy()
                         .to_string();
-                    Self::write_entry(zip_writer, name, input).await
+                    let written = Self::write_entry(&mut writer.zip, name, input).await;
+                    if written.is_ok() {
+                        writer.entries += 1;
+                    }
+                    written
                 }
                 None => Err(EntryFailure::Archive(AppError::SystemError {
                     message: "FileSystemRef is required for ZipFileSystem".into(),
@@ -505,8 +520,13 @@ impl<'a> FileSystemConnection<'a> for ZipFileSystem<'a> {
     }
 
     async fn close(mut self) -> AppResult<()> {
-        if let Some(ZipFileSystemMode::Write(zip_writer)) = self.mode.take() {
-            if let Err(error) = zip_writer.finish() {
+        if let Some(ZipFileSystemMode::Write(writer)) = self.mode.take() {
+            if writer.entries == 0 {
+                drop(writer);
+                self.remove_archive_file();
+                return Ok(());
+            }
+            if let Err(error) = writer.zip.finish() {
                 self.remove_archive_file();
                 return Err(error.into());
             }
@@ -1078,6 +1098,36 @@ mod tests {
         assert_eq!(
             archive_contents(&zip_file_path)?,
             vec![("complete.txt".to_string(), b"complete".to_vec())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_archive_without_a_surviving_entry_is_not_left_behind() -> TestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = TempDir::with_prefix("zip_file_system_tests_no_entry_left")?;
+        let zip_file_path = temp_dir.path().join("test.zip");
+
+        let mut fs = open(&zip_file_path, &reporter).await?;
+        let failed = fs
+            .upload(
+                crate::file_systems::stream_failing_after_first_chunk(),
+                Some(&reference("broken.txt")),
+            )
+            .await;
+        fs.close().await?;
+
+        assert!(failed.is_err());
+        assert!(!zip_file_path.exists());
+
+        let mut again = open(&zip_file_path, &reporter).await?;
+        let content = futures::stream::iter(vec![Ok(bytes::Bytes::from_static(b"content"))]);
+        again.upload(content, Some(&reference("file1.txt"))).await?;
+        again.close().await?;
+        assert_eq!(
+            archive_contents(&zip_file_path)?,
+            vec![("file1.txt".to_string(), b"content".to_vec())]
         );
         Ok(())
     }
