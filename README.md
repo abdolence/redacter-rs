@@ -940,7 +940,7 @@ below:
 
 | Addon | Files | Size | Source | Licence |
 |---|---|---|---|---|
-| `ocr`, in `ocrs/` | `text-detection.rten`, `text-recognition.rten` | 11.7 MiB | [release `models-ocrs-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-1), from the [ocrs](https://github.com/robertknight/ocrs) project | MIT OR Apache-2.0 (ocrs); weights trained on open, liberally licensed datasets |
+| `ocr`, in `ocrs-2/` | `text-detection.onnx`, `text-recognition.onnx` | 11.6 MiB | [release `models-ocrs-2`](https://github.com/abdolence/redacter-rs/releases/tag/models-ocrs-2), from the [ocrs-models](https://github.com/robertknight/ocrs-models) project of [ocrs](https://github.com/robertknight/ocrs) | CC BY-SA 4.0, inherited from the HierText training dataset, attribution in the release notes; ocrs code MIT OR Apache-2.0 |
 | `pdf`, in `pdfium-8125/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.6 to 7.8 MiB | [release `models-pdfium-8125`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-8125), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/8125` (Pdfium 158.0.8125.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
 | `local-ner`, in `distilbert-base-multilingual-cased-ner-hrl/` | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
 | `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
@@ -962,11 +962,15 @@ and `%LOCALAPPDATA%\redacter\addons\` on Windows, one directory per addon:
 An interrupted install can leave `*.part` files in the addon's directory; they are safe to delete while no install is running.
 
 For air-gapped machines, download the files listed above on another computer and copy them into the addon's
-directory under the names in the table, for example `~/.cache/redacter/addons/ocrs/text-detection.rten`. This works
+directory under the names in the table, for example `~/.cache/redacter/addons/ocrs-2/text-detection.onnx`. This works
 for Pdfium too, which is checked against its digest. For the models the tool also looks in
 `addons/<addon directory>/` next to its own executable. Breaking change: earlier versions used `models/<addon directory>/`;
-move it to `addons/` or run `redacter addons install` again. The OCR models are still found in `~/.cache/ocrs` and
-`../share/ocrs` as in earlier versions; these copies are used as they are, checked against nothing.
+move it to `addons/` or run `redacter addons install` again. Copies of the OCR models named `text-detection.onnx` and `text-recognition.onnx` are still found in
+`~/.cache/ocrs` and `../share/ocrs`; these are used as they are, checked against nothing.
+
+Breaking change: the OCR models are now ONNX files in the `ocrs-2/` directory, and the `.rten` files of earlier
+versions are not read any more. Run `redacter addons install ocr` again; the old `ocrs/` directory is not used and can
+be deleted.
 
 `--download-models` and its download prompt are removed: install the addons with `addons install` instead.
 `--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
@@ -977,8 +981,7 @@ directory is `addons` instead of `models`: move the old `models` directory to `a
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
-Install the OCR models with `redacter addons install ocr`, see [Addons](#addons); `~/.cache/ocrs` from earlier
-versions keeps working.
+Install the OCR models with `redacter addons install ocr`, see [Addons](#addons).
 
 ## Examples:
 
