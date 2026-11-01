@@ -1002,6 +1002,21 @@ Zip archives are supported too:
 redacter cp gs://my-bucket-name/sensitive-files/ zip://tmp/sensitive-files.zip
 ```
 
+A zip archive as a source is read in place, nothing is extracted. Files are listed from the archive index, so
+`-f`, `-m` and `-n` apply before anything is decompressed, and each file is decompressed when it is copied or scanned.
+An absolute entry name such as `/docs/a.txt` is read as `docs/a.txt`.
+
+These entries are skipped and reported with their reason, up to the last file the listing reaches (`-n` stops it
+early). An entry that the ignore file ignores is counted as ignored, not reported:
+
+- entries with a path that leaves the archive or is not valid;
+- symbolic links;
+- encrypted entries;
+- entries with the same path as an earlier entry, once `./` is removed.
+
+When the archive lists the same raw name more than once, only the last entry with that name is read. The earlier ones
+are neither listed nor counted as skipped, and a warning says so.
+
 Filter files by name:
 
 ```sh

@@ -31,6 +31,8 @@ pub enum AppError {
     HttpClientError(#[from] reqwest::Error),
     #[error("Zip error:\n{0}")]
     ZipError(#[from] zip::result::ZipError),
+    #[error("A background task failed: {0}")]
+    BackgroundTaskFailed(#[from] tokio::task::JoinError),
     #[error("CSV parser error:\n{0}")]
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]

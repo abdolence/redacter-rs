@@ -49,10 +49,21 @@ pub struct FileSystemRef {
     pub file_size: Option<usize>,
 }
 
+impl FileSystemRef {
+    pub fn with_guessed_media_type(relative_path: RelativeFilePath, file_size: usize) -> Self {
+        Self {
+            media_type: mime_guess::from_path(relative_path.value()).first(),
+            relative_path,
+            file_size: Some(file_size),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ListFilesResult {
     pub files: Vec<FileSystemRef>,
-    /// Files skipped by the size limit or the name filter.
+    /// Files skipped by the size limit or the name filter, and entries of an archive that cannot
+    /// be read.
     pub skipped: usize,
     /// Files ignored by the ignore rules of the matcher.
     pub ignored: usize,
