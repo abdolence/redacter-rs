@@ -3,7 +3,7 @@
 
 use crate::args::RedacterType;
 use crate::commands::scan_output::mask_value;
-use crate::redacters::{is_credential_rule, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score};
 
 /// A file of a run and what the command found in it.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,11 +64,7 @@ impl ReportedFinding {
 
     /// Whether the finding is a credential: a password, a key or a token.
     pub(super) fn is_secret(&self) -> bool {
-        match self.redacter {
-            RedacterType::LocalRules => is_credential_rule(&self.label.to_string()),
-            RedacterType::LocalCredentialMl => true,
-            _ => false,
-        }
+        self.label.category(self.redacter) == Category::Credential
     }
 }
 

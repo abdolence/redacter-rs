@@ -923,6 +923,27 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_is_high_whichever_redacter_found_it() {
+        for (redacter, label) in [
+            (RedacterType::GcpDlp, "PASSWORD"),
+            (RedacterType::AwsComprehend, "PASSWORD"),
+            (RedacterType::LocalCredentialMl, "credential"),
+        ] {
+            let credential = finding(redacter, label, None, DetectionLocation::File, "hunter2");
+            let event = event_of(found("a.txt", vec![credential]));
+            assert_eq!(event["severity_id"], 4, "{redacter}");
+        }
+        let name = finding(
+            RedacterType::GcpDlp,
+            "PERSON_NAME",
+            None,
+            DetectionLocation::File,
+            "Akira",
+        );
+        assert_eq!(event_of(found("a.txt", vec![name]))["severity_id"], 3);
+    }
+
+    #[test]
     fn a_credential_is_high_and_other_findings_are_medium() {
         let credential = finding(
             RedacterType::LocalRules,

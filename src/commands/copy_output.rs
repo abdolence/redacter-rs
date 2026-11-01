@@ -8,7 +8,7 @@
 use crate::addon_store::Addon;
 use crate::args::RedacterType;
 use crate::file_converters::FileConverters;
-use crate::redacters::{RedactionBlocked, RedactionConversion};
+use crate::redacters::{Categories, RedactionBlocked, RedactionConversion};
 use console::{pad_str, Alignment, Style};
 
 /// Why a file was copied without being redacted, or skipped instead of redacted.
@@ -165,6 +165,7 @@ pub struct Capabilities {
     pub pdf_rendering: Capability,
     pub ocr: Capability,
     pub sampling_size: Option<usize>,
+    pub categories: Option<Categories>,
 }
 
 impl Capabilities {
@@ -175,6 +176,7 @@ impl Capabilities {
         redacters: Vec<RedacterType>,
         file_converters: &FileConverters<'_>,
         sampling_size: Option<usize>,
+        categories: Option<Categories>,
     ) -> Self {
         Self {
             redacters,
@@ -193,6 +195,7 @@ impl Capabilities {
                 None => Capability::No(None),
             },
             sampling_size,
+            categories,
         }
     }
 }
@@ -541,13 +544,20 @@ pub fn format_capabilities_line(capabilities: &Capabilities, styles: &OutputStyl
         Some(size) => styles.highlighted.apply_to(format!("{size} bytes")),
         None => styles.dimmed.apply_to("off".to_string()),
     };
-    format!(
+    let mut line = format!(
         "Redacters: {} · PDF rendering: {} · OCR: {} · Sampling: {}",
         redacters,
         yes_no(capabilities.pdf_rendering),
         yes_no(capabilities.ocr),
         sampling
-    )
+    );
+    if let Some(categories) = &capabilities.categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
+    line
 }
 
 /// The closing summary, replacing the per-file step lines with one count line.
@@ -590,6 +600,7 @@ pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redacters::Category;
 
     fn row(
         width: usize,
@@ -865,6 +876,7 @@ mod tests {
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::No(None),
                     sampling_size: None,
+                    categories: None,
                 },
                 &styles
             ),
@@ -877,6 +889,7 @@ mod tests {
                     pdf_rendering: Capability::No(None),
                     ocr: Capability::Yes,
                     sampling_size: Some(1024),
+                    categories: None,
                 },
                 &styles
             ),
@@ -889,10 +902,31 @@ mod tests {
                     pdf_rendering: Capability::Yes,
                     ocr: Capability::Yes,
                     sampling_size: None,
+                    categories: None,
                 },
                 &styles
             ),
             "Redacters: gcp-dlp, aws-comprehend · PDF rendering: yes · OCR: yes · Sampling: off"
+        );
+    }
+
+    #[test]
+    fn capabilities_line_ends_with_the_categories_only_when_they_limit_the_run() {
+        let mut capabilities = Capabilities {
+            redacters: vec![RedacterType::LocalRules],
+            pdf_rendering: Capability::Yes,
+            ocr: Capability::Yes,
+            sampling_size: None,
+            categories: None,
+        };
+        let styles = OutputStyles::plain();
+        let unlimited = format_capabilities_line(&capabilities, &styles);
+        assert!(!unlimited.contains("Categories"));
+
+        capabilities.categories = Categories::limiting([Category::Credential, Category::Contact]);
+        assert_eq!(
+            format_capabilities_line(&capabilities, &styles),
+            format!("{unlimited} · Categories: contact, credential")
         );
     }
 
@@ -905,6 +939,7 @@ mod tests {
                     pdf_rendering: Capability::No(Some(Addon::Pdf)),
                     ocr: Capability::No(Some(Addon::Ocr)),
                     sampling_size: None,
+                    categories: None,
                 },
                 &OutputStyles::plain()
             ),

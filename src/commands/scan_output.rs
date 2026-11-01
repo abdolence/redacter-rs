@@ -12,7 +12,7 @@ use crate::commands::copy_output::{
 };
 use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
 use console::{measure_text_width, pad_str, Alignment};
 use indicatif::HumanBytes;
 use rvstruct::ValueStruct;
@@ -325,6 +325,10 @@ pub struct ScanCommandResult {
     pub findings_ignored: usize,
     pub findings_by_label: FindingsByLabel,
     pub files: Vec<ScanFileReport>,
+    /// The categories `--categories` limited the scan to; absent when every category was
+    /// scanned for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Categories>,
 }
 
 impl ScanCommandResult {
@@ -396,7 +400,12 @@ impl ScanCommandResult {
                 .max()
                 .unwrap_or(0),
         );
-        let mut lines = vec![format_legend(&SCAN_LEGEND, &styles)];
+        let mut lines: Vec<String> = self
+            .categories
+            .iter()
+            .map(|categories| format!("Categories: {categories}"))
+            .collect();
+        lines.push(format_legend(&SCAN_LEGEND, &styles));
         for file in &self.files {
             lines.extend(format_file_lines(file, layout, &styles));
         }
@@ -561,6 +570,7 @@ mod tests {
     use crate::commands::copy_output::NotRedactedReason;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::SarifLog;
+    use crate::redacters::Category;
     use clap::ValueEnum;
     use std::path::Path;
 
@@ -729,8 +739,8 @@ mod tests {
         ));
         let locator = ArtifactLocator::new("./", Path::new("/work"));
 
-        let sarif =
-            serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator)).unwrap();
+        let sarif = serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator, None))
+            .unwrap();
 
         assert!(sarif.contains("j********************m"), "{sarif}");
         assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
@@ -1259,6 +1269,28 @@ mod tests {
                 .collect();
             assert_eq!(exit_codes, expected, "{result:?}");
         }
+    }
+
+    #[test]
+    fn the_json_and_text_reports_state_the_categories_only_when_they_limit_the_run() {
+        let mut result = sample_result();
+        let unlimited_json = serde_json::to_value(&result).unwrap();
+        let unlimited_text = result.to_text();
+        assert!(unlimited_json.get("categories").is_none());
+        assert!(!unlimited_text.contains("Categories:"));
+
+        result.categories = Categories::limiting([Category::Credential, Category::Contact]);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["categories"],
+            serde_json::json!(["contact", "credential"])
+        );
+        let text = result.to_text();
+        assert_eq!(text.lines().next(), Some("Categories: contact, credential"));
+        assert_eq!(
+            text.strip_prefix("Categories: contact, credential\n"),
+            Some(unlimited_text.as_str())
+        );
     }
 
     #[test]

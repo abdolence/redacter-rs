@@ -363,7 +363,9 @@ is no longer accepted. `scan` takes the same two options, see [Scan command](#sc
 
 The JSON report of `cp` is one object with the counters `files_copied`, `files_redacted` and `files_skipped`, and
 `files`, an entry for each file the copy met, in the order it met them. Files that `--max-size-limit` or
-`--filename-filter` leave out of a directory listing are only counted in `files_skipped` and have no entry.
+`--filename-filter` leave out of a directory listing are only counted in `files_skipped` and have no entry. With
+`--categories` the report also has `categories`, the list of the categories the copy was limited to, such as
+`["contact", "credential"]`. A copy without `--categories`, or with every category, has no such field.
 
 An entry has the fields `path`, `mime_type`, `status`, `reason` and `redactions`:
 
@@ -1334,7 +1336,9 @@ The report is one JSON object with the counters of the run and an entry for each
   `files`;
 - `findings`: the number of findings, and `findings_by_label`: the same count for each label;
 - `findings_ignored`: the number of findings ignored by the `redacter:allow` marker, not counted in `findings`;
-- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
+- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`;
+- `categories`: the categories `--categories` limited the scan to, such as `["contact", "credential"]`. The field is
+  left out when the scan looked for every category.
 
 A finding has the fields `redacter`, `label`, `score`, `location` and `value`.
 
@@ -1367,7 +1371,9 @@ Fields are only ever added to the report, never renamed or removed.
 ### Text report
 
 `--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
-enough for the longest path, so no path is shortened.
+enough for the longest path, so no path is shortened. With `--categories` the first line is `Categories: contact,
+credential`, and the terminal shows them at the end of the line that lists the redacters and converters. The text report
+of `cp` has the same first line.
 
 ### SARIF report
 
@@ -1388,6 +1394,7 @@ requests. `scan` and `cp` both write it, and a redaction of `cp` is a finding he
 | failed, blocked and unsupported files | `invocations[0].toolExecutionNotifications` with the reason; `executionSuccessful` is `false` when a file failed or is blocked |
 | skipped files | Not reported |
 | `partialFingerprints` | `primaryLocationLineHash`, see below |
+| `properties` of the run | `categories`, the categories `--categories` limited the run to; left out when the run looked for every category |
 
 Columns count characters (Unicode code points), as in the other reports, and the run says so with
 `columnKind` `unicodeCodePoints`. GitHub does not document which unit it counts columns in. GitHub shows a result under the file of its location, and a pull request annotation
@@ -1491,7 +1498,7 @@ The severity and the confidence of an event come from its findings:
 
 | Attribute | Value |
 |---|---|
-| `severity_id` | High (4) when the file has a credential: a finding of the `secrets` or `url-credentials` rules of `local-rules`, or of `local-credential-ml`. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
+| `severity_id` | High (4) when the file has a credential: a finding in the `credential` category, such as one of the `secrets` or `url-credentials` rules of `local-rules`, one of `local-credential-ml`, or a `PASSWORD` of GCP DLP. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
 | `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
 | `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
 

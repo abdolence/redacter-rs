@@ -129,6 +129,7 @@ pub async fn command_scan(
                 .collect(),
             &file_converters,
             redacter_options.base_options.sampling_size,
+            redacter_options.base_options.categories.clone(),
         ),
         &styles,
     ))?;
@@ -156,7 +157,10 @@ pub async fn command_scan(
         bar: &bar,
     };
 
-    let mut result = ScanCommandResult::default();
+    let mut result = ScanCommandResult {
+        categories: redacter_options.base_options.categories.clone(),
+        ..ScanCommandResult::default()
+    };
     match source_listing {
         Some(listing) => {
             let total_size: usize = listing.files.iter().filter_map(|file| file.file_size).sum();

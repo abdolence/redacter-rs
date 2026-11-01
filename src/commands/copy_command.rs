@@ -12,7 +12,8 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+    Categories, Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters,
+    StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -35,6 +36,10 @@ pub struct CopyCommandResult {
     /// Every file the copy met, in the order it met them. Files the listing left out by size or
     /// name are only counted in `files_skipped`.
     pub files: Vec<CopyFileReport>,
+    /// The categories `--categories` limited the copy to; absent when every category was
+    /// redacted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Categories>,
 }
 
 /// One file of the copy, as the JSON report lists it. The redactions come in the order a reader
@@ -158,8 +163,13 @@ impl CopyCommandResult {
 
     /// The report for people.
     pub fn to_text(&self) -> String {
+        let categories = self
+            .categories
+            .as_ref()
+            .map(|categories| format!("Categories: {categories}\n"))
+            .unwrap_or_default();
         format!(
-            "Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
+            "{categories}Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
             self.files_copied, self.files_redacted, self.files_skipped
         )
     }
@@ -212,6 +222,9 @@ pub async fn command_copy(
     let term_reporter = AppReporter::from(term);
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
+    let categories = redacter_options
+        .as_ref()
+        .and_then(|options| options.base_options.categories.clone());
 
     // The bar is not drawn until the converters and redacters have been bound: they report
     // straight to the terminal, those lines must not land under a live progress bar, and a
@@ -338,6 +351,7 @@ pub async fn command_copy(
             files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
             files,
+            categories,
         })
     } else {
         bar.println(format_legend(&COPY_LEGEND, &styles));
@@ -366,6 +380,7 @@ pub async fn command_copy(
             files_redacted,
             files_skipped,
             files: vec![report.file],
+            categories,
         })
     };
 
@@ -414,6 +429,9 @@ fn report_copy_info(
         redacter_options
             .as_ref()
             .and_then(|o| o.base_options.sampling_size),
+        redacter_options
+            .as_ref()
+            .and_then(|o| o.base_options.categories.clone()),
     );
 
     term.write_line(
@@ -709,7 +727,7 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
+        Category, DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
         GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions,
         RedacterProviderOptions, RuleGroup,
     };
@@ -831,7 +849,30 @@ mod tests {
             files_redacted: 0,
             files_skipped: 0,
             files,
+            categories: None,
         }
+    }
+
+    #[test]
+    fn the_json_and_text_reports_state_the_categories_only_when_they_limit_the_run() {
+        let mut result = result_of(Vec::new());
+        let unlimited_json = serde_json::to_value(&result).unwrap();
+        let unlimited_text = result.to_text();
+        assert!(unlimited_json.get("categories").is_none());
+        assert!(!unlimited_text.contains("Categories:"));
+
+        result.categories = Categories::limiting([Category::Credential, Category::Contact]);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            json["categories"],
+            serde_json::json!(["contact", "credential"])
+        );
+        let text = result.to_text();
+        assert_eq!(text.lines().next(), Some("Categories: contact, credential"));
+        assert_eq!(
+            text.strip_prefix("Categories: contact, credential\n"),
+            Some(unlimited_text.as_str())
+        );
     }
 
     fn sarif_outcome_names(files: Vec<CopyFileReport>) -> Vec<(String, &'static str)> {
@@ -930,7 +971,7 @@ mod tests {
     fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
         let result = result_of(files);
         let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
-        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator)).unwrap()
+        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None)).unwrap()
     }
 
     #[test]
@@ -1020,7 +1061,7 @@ mod tests {
             &format!("{}/", source.path().display()),
             std::path::Path::new("/work"),
         );
-        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator))?;
+        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None))?;
         let results = sarif["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["ruleId"], "local-rules/email");
