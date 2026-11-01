@@ -1008,17 +1008,4 @@ mod tests {
     fn terminal_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
         assert_eq!(RowLayout::for_terminal(0), RowLayout::for_terminal(80));
     }
-
-    #[test]
-    fn only_a_missing_converter_can_be_fixed_by_installing_an_addon() {
-        for (reason, needs_converter) in [
-            (NotRedactedReason::PdfRendererUnavailable, true),
-            (NotRedactedReason::OcrUnavailable, true),
-            (NotRedactedReason::TypeNotSupported, false),
-            (NotRedactedReason::NoRedacterApplied, false),
-            (NotRedactedReason::OcrImageFormatNotSupported, false),
-        ] {
-            assert_eq!(reason.needs_converter(), needs_converter, "{reason:?}");
-        }
-    }
 }

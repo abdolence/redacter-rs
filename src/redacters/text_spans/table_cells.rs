@@ -10,6 +10,11 @@ use crate::AppResult;
 /// `"Madrid"`: a model reads a one-word cell better as a sentence. The prefix is scoring
 /// context only: `shift_into_cell` maps the findings back onto the cell, so no header text
 /// can reach a redacted cell or a detection.
+#[cfg(any(
+    feature = "local-ner",
+    feature = "local-gliner",
+    feature = "local-credential-ml"
+))]
 pub fn find_in_cell<F, E>(
     headers: &[String],
     column: usize,
@@ -78,6 +83,11 @@ where
 /// prefix is the model matching the header itself and is dropped; one that crosses the
 /// boundary keeps only the part that falls in the cell. `prefix_len` is a byte length and the
 /// cell starts exactly there, so every clamped offset stays on a character boundary.
+#[cfg(any(
+    feature = "local-ner",
+    feature = "local-gliner",
+    feature = "local-credential-ml"
+))]
 fn shift_into_cell(findings: Vec<Finding>, prefix_len: usize) -> Vec<Finding> {
     findings
         .into_iter()

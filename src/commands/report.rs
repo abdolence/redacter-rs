@@ -5,7 +5,6 @@ use crate::commands::sarif::{ArtifactLocator, SarifArtifact, SarifLog};
 use crate::AppResult;
 use console::{Style, Term};
 use serde::Serialize;
-use std::path::Path;
 
 impl ReportArgs {
     /// Writes the report of a command run over `source` to `--report-file` in
@@ -32,18 +31,14 @@ impl ReportArgs {
                 (serde_json::to_string_pretty(&log)?, "SARIF")
             }
         };
-        save(term, path, content, format_name).await
+        tokio::fs::write(path, content).await?;
+        term.write_line(
+            format!(
+                "Results saved to {format_name} file: {}",
+                Style::new().bold().apply_to(path.display())
+            )
+            .as_str(),
+        )?;
+        Ok(())
     }
-}
-
-async fn save(term: &Term, path: &Path, content: String, format_name: &str) -> AppResult<()> {
-    tokio::fs::write(path, content).await?;
-    term.write_line(
-        format!(
-            "Results saved to {format_name} file: {}",
-            Style::new().bold().apply_to(path.display())
-        )
-        .as_str(),
-    )?;
-    Ok(())
 }

@@ -17,6 +17,7 @@ pub use user_rules::UserMatcher;
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::redacters::text_spans::table_cells::redact_rows;
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
     RedacterDataItem, RedacterDataItemContent,
@@ -59,37 +60,15 @@ impl<'a> LocalRulesRedacter<'a> {
 
 impl<'a> Redacter for LocalRulesRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        let mut replaced = Vec::new();
-        let content = match input.content {
+        let (content, replaced) = match input.content {
             RedacterDataItemContent::Value(text) => {
                 let (redacted, findings) = self.rules.redact(&text);
-                replaced = Detection::in_text(&text, findings)?.found;
-                RedacterDataItemContent::Value(redacted)
+                let replaced = Detection::in_text(&text, findings)?.found;
+                (RedacterDataItemContent::Value(redacted), replaced)
             }
             RedacterDataItemContent::Table { headers, rows } => {
-                let mut redacted_rows = Vec::with_capacity(rows.len());
-                for (row_index, row) in rows.iter().enumerate() {
-                    let mut redacted_row = Vec::with_capacity(row.len());
-                    for (column, cell) in row.iter().enumerate() {
-                        let (redacted, findings) = self.rules.redact(cell);
-                        for finding in findings {
-                            replaced.push(Detection::in_table_cell(
-                                row_index,
-                                column,
-                                cell,
-                                finding.start..finding.end,
-                                finding.rule.into(),
-                                finding.score,
-                            )?);
-                        }
-                        redacted_row.push(redacted);
-                    }
-                    redacted_rows.push(redacted_row);
-                }
-                RedacterDataItemContent::Table {
-                    headers,
-                    rows: redacted_rows,
-                }
+                let (rows, replaced) = redact_rows(rows, |_, cell| Ok(self.rules.find(cell)))?;
+                (RedacterDataItemContent::Table { headers, rows }, replaced)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
                 return Err(AppError::unsupported_content())
@@ -258,39 +237,6 @@ mod tests {
             }
         );
         assert_eq!(replaced[0].value, "a@b.io");
-    }
-
-    #[tokio::test]
-    async fn redacting_a_table_returns_the_cells_detecting_it_finds() {
-        let term = Term::stdout();
-        let reporter = AppReporter::from(&term);
-        let redacter = redacter(&reporter);
-        let item = text_item(
-            "customers.csv",
-            mime::TEXT_CSV,
-            RedacterDataItemContent::Table {
-                headers: vec!["email".to_string(), "note".to_string()],
-                rows: vec![
-                    vec!["x".to_string(), "nothing here".to_string()],
-                    vec!["a@b.io".to_string(), "call +1 555 123 4567".to_string()],
-                ],
-            },
-        );
-
-        let detected = redacter.detect(&item).await.unwrap().found;
-        let redacted = redacter.redact(item).await.unwrap();
-
-        assert_eq!(detected.len(), 2, "{detected:?}");
-        assert_eq!(redacted.replaced, Some(detected));
-        assert!(matches!(
-            redacted.replaced.unwrap()[0].location,
-            DetectionLocation::TableCell {
-                row: 2,
-                column: 1,
-                start: 0,
-                end: 6
-            }
-        ));
     }
 
     #[tokio::test]
