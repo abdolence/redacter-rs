@@ -833,7 +833,7 @@ The local redacters run on your machine, so nothing leaves it, nothing is billed
 content of the files. The table gives the recall of each redacter on four datasets (recall is the share of the
 sensitive values that it found) and the time per file on `public`. A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
 
-| Redacter | Fixtures | Secrets | Public | Images | Per file on public |
+| Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form | Per file on public PII sample |
 |---|---|---|---|---|---|
 | `local-rules` | 54% | 93% | 24% | 62% | under 1 ms |
 | `local-ner` | 23% | 0% | 23% | 19% | 39 ms |
@@ -849,10 +849,10 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 | `gcp-vertex-ai` | 98% | 100% | 86% | 100% | 9062 ms |
 | `aws-bedrock` | 98% | 93% | 87% | 94% | 583 ms |
 
-Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
-secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
-and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
-models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. The `Secrets` column of the local rows and their chains comes from a run on commit `19874f5`. `gemini-llm` and `open-ai-llm` were not measured.
+PII documents is `fixtures`: 8 text files with personal data in several formats and languages. Secrets in config and code is `secrets`: 29 files with 41 planted passwords, keys and tokens. Public PII sample is `public`: 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0), synthetic personal data. Scanned form is `images`: a PNG and a PDF of one customer form.
+
+Measured on commit `2390a25` on an Apple M6 Mac mini. The time per file includes the start of the process and the load of the
+models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. The `Secrets in config and code` column of the local rows and their chains comes from a run on commit `19874f5`. `gemini-llm` and `open-ai-llm` were not measured.
 
 For secrets, `local-rules` found 93% at 1 ms per file, `local-rules+local-credential-ml` 95%, and `gcp-vertex-ai` found all of them. For personal information
 in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
