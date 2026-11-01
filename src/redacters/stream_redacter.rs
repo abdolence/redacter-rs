@@ -7,8 +7,8 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
-    DetectionLocation, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters, StreamRedactions, TextLines,
+    DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters, StreamRedactions, TextLines, TextPieces, TextPosition,
 };
 use crate::AppResult;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -75,7 +75,8 @@ const NOT_TEXT_PROBE_SIZE: usize = 8 * 1024;
 #[derive(Default)]
 pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
-    /// in the order the redacter reported.
+    /// in the order the redacter reported. A text read in pieces gives this order for each piece
+    /// in turn.
     pub detections: Vec<(RedacterType, Detection)>,
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
@@ -156,6 +157,52 @@ impl DetectStreamResult {
         }
     }
 
+    /// What the window that starts at `window_start` of the file reports, placed in the file,
+    /// given that `piece` is the byte range of the file the window owns. A detection is
+    /// reported by the window of the piece it starts in. One that starts before the piece and
+    /// reaches into it is reported here too, unless an earlier window reported one that starts
+    /// at the same place: its own window did not see it whole. `reported_across` holds what
+    /// the windows so far reported and that reaches past the end of the piece they own, as
+    /// redacter, start and end, and is updated for the next window.
+    fn owned_by(
+        self,
+        piece: &Range<usize>,
+        window_start: TextPosition,
+        reported_across: &mut Vec<(RedacterType, Range<usize>)>,
+    ) -> Self {
+        let mut across: Vec<(RedacterType, Range<usize>)> = reported_across
+            .iter()
+            .filter(|(_, range)| range.end > piece.end)
+            .cloned()
+            .collect();
+        let mut owned = |(redacter, detection): (RedacterType, Detection)| {
+            let placed = detection.in_file(window_start);
+            if let Some(range) = placed.location.byte_range() {
+                let starts_here = piece.contains(&range.start);
+                let reaches_in = range.start < piece.start
+                    && range.end > piece.start
+                    && !reported_across.iter().any(|(other, reported)| {
+                        *other == redacter && reported.start == range.start
+                    });
+                if !starts_here && !reaches_in {
+                    return None;
+                }
+                if range.end > piece.end {
+                    across.push((redacter, range));
+                }
+            }
+            Some((redacter, placed))
+        };
+        let result = Self {
+            detections: self.detections.into_iter().filter_map(&mut owned).collect(),
+            ignored: self.ignored.into_iter().filter_map(&mut owned).collect(),
+            unlocated: self.unlocated,
+            blocked: self.blocked,
+        };
+        *reported_across = across;
+        result
+    }
+
     fn absorb(&mut self, other: Self) {
         self.detections.extend(other.detections);
         self.ignored.extend(other.ignored);
@@ -183,12 +230,29 @@ pub struct StreamRedactPlan<'a> {
     /// read as text.
     pub read_unsupported_as_text: bool,
     pub supported_redacters: Vec<&'a Redacters<'a>>,
+    /// The file is text and every redacter of the plan reads text in pieces, see
+    /// [`Redacter::text_piece_limits`]. A text that fits in one window is read whole all the same.
+    pub read_in_pieces: bool,
     /// Set when `supported_redacters` is empty because a PDF or image needs a conversion
     /// engine (pdfium, OCR) that this build does not have, rather than because none of the
     /// configured redacters is willing to work on this file. `redact_stream` is never called
     /// in that case, so the caller reads this directly to report the real reason instead of
     /// defaulting to "type not supported".
     pub blocked: Option<RedactionBlocked>,
+}
+
+impl StreamRedactPlan<'_> {
+    /// How the plan cuts a text into pieces, or `None` when the file is read whole.
+    pub fn piece_layout(&self) -> Option<PieceLayout> {
+        if !self.read_in_pieces {
+            return None;
+        }
+        PieceLayout::fitting(
+            self.supported_redacters
+                .iter()
+                .filter_map(|redacter| redacter.text_piece_limits()),
+        )
+    }
 }
 
 impl<'a> StreamRedacter<'a> {
@@ -238,6 +302,7 @@ impl<'a> StreamRedacter<'a> {
             read_unsupported_as_text: false,
             // Supports natively
             supported_redacters: Self::supporting(redacters, file_ref, None, &supports).await?,
+            read_in_pieces: false,
             blocked: None,
         };
 
@@ -306,6 +371,20 @@ impl<'a> StreamRedacter<'a> {
                 _ => {}
             }
         }
+
+        // Sampling cuts the text to a prefix, and a file read as text only on its content is not
+        // known to be text before it is all read.
+        stream_redact_plan.read_in_pieces = file_ref
+            .media_type
+            .as_ref()
+            .is_some_and(Redacters::is_mime_text)
+            && !stream_redact_plan.read_unsupported_as_text
+            && self.redacter_base_options.sampling_size.is_none()
+            && !stream_redact_plan.supported_redacters.is_empty()
+            && stream_redact_plan
+                .supported_redacters
+                .iter()
+                .all(|redacter| redacter.text_piece_limits().is_some());
 
         Ok(stream_redact_plan)
     }
@@ -509,6 +588,11 @@ impl<'a> StreamRedacter<'a> {
         plan: &StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<DetectStreamResult> {
+        let redacters = &plan.supported_redacters;
+        let categories = self.redacter_base_options.categories.as_ref();
+        if let Some(layout) = plan.piece_layout() {
+            return Self::detect_text(input, layout, redacters, categories, file_ref).await;
+        }
         let Ok(item) = self
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
             .await?
@@ -518,8 +602,6 @@ impl<'a> StreamRedacter<'a> {
                 ..DetectStreamResult::default()
             });
         };
-        let redacters = &plan.supported_redacters;
-        let categories = self.redacter_base_options.categories.as_ref();
         let mut result = DetectStreamResult::default();
         match &item.content {
             RedacterDataItemContent::Pdf { data } if plan.apply_pdf_image_converter => {
@@ -587,6 +669,38 @@ impl<'a> StreamRedacter<'a> {
             _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
         result.set_aside_ignored(&item.content);
+        Ok(result)
+    }
+
+    /// What `redacters` find in the text `input` holds, read in pieces of `layout`. A text that
+    /// fits in one window is read whole, as `detect_stream` reads any other file.
+    ///
+    /// A finding is reported by the window of the piece it starts in, so once, and it is the one
+    /// the whole text gives when its redacter finds there what the whole text would give it
+    /// within the context of the window.
+    async fn detect_text<S: Stream<Item = AppResult<bytes::Bytes>> + Unpin>(
+        input: S,
+        layout: PieceLayout,
+        redacters: &[&Redacters<'a>],
+        categories: Option<&Categories>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<DetectStreamResult> {
+        let mut pieces = TextPieces::new(input, layout);
+        let mut result = DetectStreamResult::default();
+        let mut reported_across = Vec::new();
+        while let Some(window) = pieces.next_window().await? {
+            let (is_whole, piece, start) = (window.is_whole_text(), window.piece, window.start);
+            let item = RedacterDataItem {
+                content: RedacterDataItemContent::Value(window.text),
+                file_ref: file_ref.clone(),
+            };
+            let mut found = Self::detect_all(redacters, &item, None, categories).await?;
+            found.set_aside_ignored(&item.content);
+            if is_whole {
+                return Ok(found);
+            }
+            result.absorb(found.owned_by(&piece, start, &mut reported_across));
+        }
         Ok(result)
     }
 
@@ -2410,5 +2524,243 @@ mod tests {
 
         assert!(result.detections.is_empty());
         assert_eq!(result.ignored.len(), 1);
+    }
+    /// The detections of `redacters` in `text` read whole, and in pieces of `layout`, in
+    /// chunks of 7 bytes so that no chunk ends where a line does.
+    async fn detect_whole_and_in_pieces(
+        redacters: &[Redacters<'static>],
+        text: &str,
+        layout: PieceLayout,
+    ) -> (DetectStreamResult, DetectStreamResult) {
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let whole = detect(
+            &FileConverters::new(),
+            redacters,
+            &file,
+            bytes::Bytes::from(text.to_string()),
+        )
+        .await
+        .unwrap();
+        let chunks = text
+            .as_bytes()
+            .chunks(7)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let references: Vec<&Redacters> = redacters.iter().collect();
+        let in_pieces = StreamRedacter::detect_text(
+            futures::stream::iter(chunks),
+            layout,
+            &references,
+            None,
+            &file,
+        )
+        .await
+        .unwrap();
+        (whole, in_pieces)
+    }
+
+    fn assert_same_findings(whole: DetectStreamResult, in_pieces: DetectStreamResult) {
+        let by_start = |findings: Vec<(RedacterType, Detection)>| {
+            let mut findings = findings;
+            findings.sort_by(|(_, a), (_, b)| a.location.partial_cmp(&b.location).unwrap());
+            findings
+        };
+        let (whole_detections, piece_detections) =
+            (by_start(whole.detections), by_start(in_pieces.detections));
+        let missing: Vec<_> = whole_detections
+            .iter()
+            .filter(|found| !piece_detections.contains(found))
+            .collect();
+        let extra: Vec<_> = piece_detections
+            .iter()
+            .filter(|found| !whole_detections.contains(found))
+            .collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "missing in pieces: {missing:?}\nonly in pieces: {extra:?}"
+        );
+        assert_eq!(
+            piece_detections.len(),
+            whole_detections.len(),
+            "{piece_detections:?}"
+        );
+        assert_eq!(piece_detections, whole_detections);
+        assert_eq!(by_start(in_pieces.ignored), by_start(whole.ignored));
+        assert_eq!(in_pieces.unlocated, whole.unlocated);
+    }
+
+    const KEY_BLOCK: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
+        MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n\
+        VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qQQvfnJRk59PqapcHcd0lXCbl2G\n\
+        h0fvBLD3eRy6pbyBtqY08c6rN3j4JfNXx6NkQcb/kVApkbNmVoQpvE6wPFEwXn1q\n\
+        -----END RSA PRIVATE KEY-----\n";
+
+    /// Lines a reader would find in an application log, with values that need the lines around
+    /// them: a passport number a blank line after its keyword, a private key block, and a value
+    /// the author marked to be ignored.
+    fn log_with_values_across_lines() -> String {
+        let mut log = String::new();
+        for line in 0..90 {
+            log.push_str(&format!(
+                "2026-11-01 INFO request {line} sent to user{line}@example.com in 3ms\n"
+            ));
+            match line % 13 {
+                3 => log.push_str("Passport\n\nAB1234567 on file\n"),
+                7 => log.push_str(KEY_BLOCK),
+                11 => log.push_str("copy ops@example.com # redacter:allow\n"),
+                _ => {}
+            }
+            if line % 9 == 0 {
+                log.push_str("\n\n");
+            }
+        }
+        log
+    }
+
+    #[tokio::test]
+    async fn a_text_read_in_pieces_gives_the_findings_of_the_whole_text() {
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(RuleGroup::all(), vec![]).await,
+        )];
+        let log = log_with_values_across_lines();
+        for layout in [
+            PieceLayout::new(1, 600),
+            PieceLayout::new(64, 600),
+            PieceLayout::new(500, 900),
+            PieceLayout::new(2000, 700),
+        ] {
+            let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &log, layout).await;
+            assert!(whole.detections.len() > 100, "the log has values to find");
+            assert!(!whole.ignored.is_empty());
+            assert_same_findings(whole, in_pieces);
+        }
+    }
+
+    #[tokio::test]
+    async fn lines_ending_in_crlf_and_multibyte_text_keep_their_lines_and_columns() {
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(RuleGroup::all(), vec![]).await,
+        )];
+        let log = log_with_values_across_lines()
+            .replace("sent to", "envoyé à Zoë, Σίσυφος, 日本語 and")
+            .replace('\n', "\r\n");
+        let layout = PieceLayout::new(100, 600);
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &log, layout).await;
+
+        let last_line = in_pieces
+            .detections
+            .iter()
+            .filter_map(|(_, detection)| match detection.location {
+                DetectionLocation::Text { line, column, .. } => Some((line, column)),
+                _ => None,
+            })
+            .max()
+            .unwrap();
+        assert!(last_line.0 > 90 && last_line.1 > 50, "{last_line:?}");
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn a_private_key_block_across_a_boundary_is_one_finding() {
+        let redacters = vec![secret_rules().await];
+        for lines_before in 0..8 {
+            let text = format!("{}{KEY_BLOCK}after\n", "filler line\n".repeat(lines_before));
+            let layout = PieceLayout::new(40, 400);
+
+            let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &text, layout).await;
+
+            assert_eq!(in_pieces.detections.len(), 1, "{lines_before} lines before");
+            assert_eq!(in_pieces.detections[0].1.value, KEY_BLOCK.trim_end());
+            assert_same_findings(whole, in_pieces);
+        }
+    }
+
+    /// Ten bytes and a newline, so the pieces of 40 bytes are 44 bytes and fall on known lines.
+    const FILLER: &str = "0123456789\n";
+
+    async fn block_rule() -> Vec<Redacters<'static>> {
+        let block = parse_inline_rule("block=(?s)BEGIN.*?END").unwrap();
+        vec![Redacters::LocalRules(
+            local_rules(BTreeSet::new(), vec![block]).await,
+        )]
+    }
+
+    #[tokio::test]
+    async fn a_value_both_windows_see_whole_is_reported_once() {
+        let text = format!(
+            "{}BEGIN\n{FILLER}END\n{}",
+            FILLER.repeat(3),
+            FILLER.repeat(20)
+        );
+        let (whole, in_pieces) =
+            detect_whole_and_in_pieces(&block_rule().await, &text, PieceLayout::new(40, 60)).await;
+
+        assert_eq!(whole.detections.len(), 1);
+        assert_same_findings(whole, in_pieces);
+    }
+
+    /// The block starts in the second piece, which ends before the block does, further than its
+    /// window reaches: only the window of the third piece sees the block whole.
+    #[tokio::test]
+    async fn a_value_only_the_later_window_sees_whole_is_reported() {
+        let block = format!("BEGIN\n{}END\n", FILLER.repeat(12));
+        let text = format!("{}{block}{}", FILLER.repeat(5), FILLER.repeat(8));
+        let layout = PieceLayout::new(40, 60);
+        let mut pieces =
+            TextPieces::new(futures::stream::iter(vec![Ok(text.clone().into())]), layout);
+        let second_window = {
+            pieces.next_window().await.unwrap();
+            pieces.next_window().await.unwrap().unwrap()
+        };
+        let block_start = FILLER.len() * 5;
+        assert!(second_window.piece.contains(&block_start));
+        assert!(!second_window.text.contains("END"), "{second_window:?}");
+
+        let (whole, in_pieces) =
+            detect_whole_and_in_pieces(&block_rule().await, &text, layout).await;
+
+        assert_eq!(in_pieces.detections.len(), 1);
+        assert_eq!(
+            in_pieces.detections[0].1.location,
+            DetectionLocation::Text {
+                start: block_start,
+                end: block_start + block.len() - 1,
+                line: 6,
+                column: 1
+            }
+        );
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn only_text_that_every_redacter_reads_in_pieces_is_planned_in_pieces() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let plan = |options: RedacterBaseOptions, file: FileSystemRef| {
+            let (redacters, converters) = (&redacters, &converters);
+            async move {
+                StreamRedacter::new(&options, converters)
+                    .create_detect_plan(redacters, &file)
+                    .await
+                    .unwrap()
+                    .read_in_pieces
+            }
+        };
+        let text = file_ref("app.log", mime::TEXT_PLAIN);
+        let sampled = RedacterBaseOptions {
+            sampling_size: Some(100),
+            ..base_options()
+        };
+        let as_text = RedacterBaseOptions {
+            unsupported_as_text: true,
+            ..base_options()
+        };
+        let unknown = file_ref("data.bin", mime::APPLICATION_OCTET_STREAM);
+
+        assert!(plan(base_options(), text.clone()).await);
+        assert!(!plan(sampled, text).await);
+        assert!(!plan(as_text, unknown).await);
+        assert!(!plan(base_options(), file_ref("table.csv", mime::TEXT_CSV)).await);
     }
 }

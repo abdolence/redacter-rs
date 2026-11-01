@@ -111,6 +111,8 @@ pub enum AppError {
         redacter_type: RedacterType,
         missing: &'static str,
     },
+    #[error("The text is not valid UTF-8 at byte {offset}")]
+    TextNotUtf8 { offset: usize },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
     #[error("Invalid ignore file: {source}")]

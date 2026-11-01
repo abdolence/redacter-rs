@@ -8,7 +8,7 @@ use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, Ru
 use crate::redacters::Entity;
 use crate::redacters::{
     AwsBedrockGuardrailsRedacter, AwsComprehendRedacter, Category, GcpDlpRedacter, LlmTextFinding,
-    PresidioRedacter, RuleSet, TextMask,
+    PresidioRedacter, RuleSet, TextMask, TextPosition,
 };
 use crate::AppResult;
 use serde::Serialize;
@@ -399,6 +399,27 @@ impl Detection {
             score,
             value,
         })
+    }
+
+    /// The detection as it sits in the file, when it was made in a window of the file that starts
+    /// at `window`. Only a text location moves: the column stays, since a window starts at the
+    /// start of a line.
+    pub fn in_file(self, window: TextPosition) -> Self {
+        let location = match self.location {
+            DetectionLocation::Text {
+                start,
+                end,
+                line,
+                column,
+            } => DetectionLocation::Text {
+                start: start + window.offset,
+                end: end + window.offset,
+                line: line + window.lines_before,
+                column,
+            },
+            other => other,
+        };
+        Self { location, ..self }
     }
 
     /// The detections of `findings` in `text`, for providers that report ranges of the text.

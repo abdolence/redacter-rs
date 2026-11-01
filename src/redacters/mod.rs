@@ -65,6 +65,9 @@ pub use detection::*;
 
 mod text_changes;
 
+mod text_pieces;
+pub use text_pieces::*;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
@@ -820,6 +823,27 @@ pub enum TextMask {
     Label,
 }
 
+/// How a redacter reads a text longer than one call takes, in pieces of whole lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextPieceLimits {
+    /// The most text one `detect` call may carry, in bytes, a piece with its context: the
+    /// provider's request limit, or the memory a local redacter may hold.
+    pub max_request_bytes: usize,
+    /// How much text, in bytes, the redacter needs on each side of a piece to find what it
+    /// would find there in the whole text. It is read in whole lines.
+    pub context_bytes: usize,
+}
+
+impl TextPieceLimits {
+    /// What the local redacters read at once. The size is a memory bound, not a limit of the
+    /// redacter. The context holds a private key block, the longest value a local rule reads
+    /// across lines: an RSA key of 4096 bits is under 4 KiB.
+    pub const LOCAL: Self = Self {
+        max_request_bytes: 1024 * 1024,
+        context_bytes: 16 * 1024,
+    };
+}
+
 pub trait Redacter {
     /// Redacts `input` and returns the result with what was replaced, as [`Redacted`] says.
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted>;
@@ -841,6 +865,12 @@ pub trait Redacter {
     /// What replaces a value this redacter detected, when `cp` masks it locally.
     fn text_mask(&self) -> TextMask {
         TextMask::EveryCharacter
+    }
+
+    /// How this redacter reads a long text in pieces, or `None` to read it whole. A redacter
+    /// that returns limits places every value its `detect` finds in the text it is given.
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        None
     }
 }
 
@@ -971,6 +1001,26 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalGliner(redacter) => redacter.text_mask(),
             #[cfg(feature = "local-credential-ml")]
             Redacters::LocalCredentialMl(redacter) => redacter.text_mask(),
+        }
+    }
+
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.text_piece_limits(),
+            Redacters::AwsComprehend(redacter) => redacter.text_piece_limits(),
+            Redacters::Presidio(redacter) => redacter.text_piece_limits(),
+            Redacters::GeminiLlm(redacter) => redacter.text_piece_limits(),
+            Redacters::OpenAiLlm(redacter) => redacter.text_piece_limits(),
+            Redacters::GcpVertexAi(redacter) => redacter.text_piece_limits(),
+            Redacters::AwsBedrock(redacter) => redacter.text_piece_limits(),
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.text_piece_limits(),
+            Redacters::LocalRules(redacter) => redacter.text_piece_limits(),
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.text_piece_limits(),
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.text_piece_limits(),
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.text_piece_limits(),
         }
     }
 }
