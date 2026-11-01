@@ -319,6 +319,9 @@ pub struct TextLines<'a> {
     /// The offset and column of the last detection. Detections come mostly in order, so counting
     /// from it keeps a long line, such as minified JSON, from being counted again for each one.
     last_column: Cell<(usize, usize)>,
+    /// The bytes of `text` in which [`ALLOW_MARKER`] counts: the whole lines of a window that
+    /// starts or ends inside a line.
+    marker_span: Range<usize>,
 }
 
 impl<'a> TextLines<'a> {
@@ -329,7 +332,16 @@ impl<'a> TextLines<'a> {
                 .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
                 .collect(),
             last_column: Cell::new((0, 1)),
+            marker_span: 0..text.len(),
         }
+    }
+
+    /// Counts [`ALLOW_MARKER`] only inside `span`, the part of `text` made of whole lines, when
+    /// `text` is a window of a longer one. A marker on a line cut by the window may sit inside a
+    /// value the window cannot see whole, and would then set aside the findings beside it.
+    pub fn with_marker_span(mut self, span: Range<usize>) -> Self {
+        self.marker_span = span;
+        self
     }
 
     /// Whether [`ALLOW_MARKER`] stands, clear of every range of `findings`, on a line that
@@ -342,7 +354,9 @@ impl<'a> TextLines<'a> {
             .get(last_line + 1)
             .copied()
             .unwrap_or(self.text.len());
-        has_marker_clear_of(self.text, self.line_starts[first_line]..to, findings)
+        let from = self.line_starts[first_line].max(self.marker_span.start);
+        let to = to.min(self.marker_span.end);
+        from < to && has_marker_clear_of(self.text, from..to, findings)
     }
 
     /// The 0-based index of the line `offset` is on.

@@ -38,7 +38,7 @@ impl PieceLayout {
     /// Pieces of at most `piece_bytes`, and `context_bytes` of the text on each side of a piece.
     pub fn new(piece_bytes: usize, context_bytes: usize) -> Self {
         Self {
-            piece_bytes: piece_bytes.max(1),
+            piece_bytes,
             context_bytes,
         }
     }
@@ -85,6 +85,24 @@ impl TextWindow {
 
     pub fn end(&self) -> usize {
         self.start.offset + self.text.len()
+    }
+
+    /// The bytes of `text` that hold only whole lines of the file: a window that starts or ends
+    /// inside a line leaves that line's part out.
+    pub fn whole_lines(&self) -> Range<usize> {
+        let from = if self.start.columns_before == 0 {
+            0
+        } else {
+            self.text
+                .find('\n')
+                .map_or(self.text.len(), |newline| newline + 1)
+        };
+        let to = if self.reaches_end || self.text.ends_with('\n') {
+            self.text.len()
+        } else {
+            self.text.rfind('\n').map_or(0, |newline| newline + 1)
+        };
+        from..to.max(from)
     }
 }
 

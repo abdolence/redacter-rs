@@ -95,10 +95,20 @@ impl DetectStreamResult {
     /// Moves the detections that `content` marks as ignored from `detections` to `ignored`.
     /// Only text and table cells can carry the marker: the words OCR reads from an image or a
     /// PDF page have no author-controlled place for it.
-    fn set_aside_ignored(&mut self, content: &RedacterDataItemContent) {
+    ///
+    /// `whole_lines` is the part of a text that holds whole lines of the file, `None` for all of
+    /// it. A marker outside it does not count.
+    fn set_aside_ignored(
+        &mut self,
+        content: &RedacterDataItemContent,
+        whole_lines: Option<Range<usize>>,
+    ) {
         let marked: Vec<bool> = match content {
             RedacterDataItemContent::Value(text) => {
-                let lines = TextLines::new(text);
+                let lines = match whole_lines {
+                    Some(span) => TextLines::new(text).with_marker_span(span),
+                    None => TextLines::new(text),
+                };
                 let findings: Vec<Range<usize>> = self
                     .detections
                     .iter()
@@ -644,16 +654,14 @@ impl<'a> StreamRedacter<'a> {
             }
             _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
-        result.set_aside_ignored(&item.content);
+        result.set_aside_ignored(&item.content, None);
         Ok(result)
     }
 
     /// What `redacters` find in the text `input` holds, read in pieces of `layout`. A text that
     /// fits in one window is read whole, as `detect_stream` reads any other file.
     ///
-    /// A finding is reported by the window of the piece it starts in, see
-    /// `owned_by`, and it is the one the whole text gives when its redacter
-    /// finds there what the whole text would give it within the context of the window.
+    /// A finding is reported by the window of the piece it starts in, see `owned_by`.
     async fn detect_text<S: Stream<Item = AppResult<bytes::Bytes>> + Unpin>(
         input: S,
         layout: PieceLayout,
@@ -667,13 +675,14 @@ impl<'a> StreamRedacter<'a> {
         let mut windows = 0;
         while let Some(window) = pieces.next_window().await? {
             let (is_whole, window_end) = (window.is_whole_text(), window.end());
+            let whole_lines = window.whole_lines();
             let (piece, start) = (window.piece, window.start);
             let item = RedacterDataItem {
                 content: RedacterDataItemContent::Value(window.text),
                 file_ref: file_ref.clone(),
             };
             let mut found = Self::detect_all(redacters, &item, None, categories).await?;
-            found.set_aside_ignored(&item.content);
+            found.set_aside_ignored(&item.content, Some(whole_lines));
             if is_whole {
                 return Ok(found);
             }
@@ -2653,18 +2662,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_private_key_block_across_a_boundary_is_one_finding() {
-        let redacters = vec![secret_rules().await];
-        for lines_before in 0..8 {
-            let text = format!("{}{KEY_BLOCK}after\n", "filler line\n".repeat(lines_before));
-            let layout = PieceLayout::new(40, 400);
+    async fn a_marker_in_a_value_cut_by_a_window_edge_ignores_nothing() {
+        let redacters = vec![secret_rules().await, email_rules().await];
+        let mut text = ".".repeat(1200);
+        text.replace_range(100..117, " ops@example.com ");
+        text.replace_range(530..565, "\"password\":\"xyz_redacter:allow_123\"");
 
-            let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &text, layout).await;
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &text, cut_at_400()).await;
 
-            assert_eq!(in_pieces.detections.len(), 1, "{lines_before} lines before");
-            assert_eq!(in_pieces.detections[0].1.value, KEY_BLOCK.trim_end());
-            assert_same_findings(whole, in_pieces);
-        }
+        assert_eq!(whole.detections.len(), 2);
+        assert!(whole.ignored.is_empty());
+        assert_same_findings(whole, in_pieces);
     }
 
     async fn user_rules(rules: &[&str]) -> Vec<Redacters<'static>> {
