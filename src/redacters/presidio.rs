@@ -6,8 +6,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
+    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -53,6 +53,120 @@ impl<'a> PresidioRedacter<'a> {
         AppError::SystemError {
             message: format!("Failed to {operation}. HTTP status: {status}."),
         }
+    }
+
+    /// The entities of the supported-entities list of Presidio, by what they hold.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    const ENTITY_CATEGORIES: &'static [(&'static str, Category)] = &[
+        ("PERSON", Category::Person),
+        ("EMAIL_ADDRESS", Category::Contact),
+        ("PHONE_NUMBER", Category::Contact),
+        ("ZA_MOBILE_NUMBER", Category::Contact),
+        ("ZA_TELEPHONE_NUMBER", Category::Contact),
+        ("UK_POSTCODE", Category::Address),
+        ("CA_POSTAL_CODE", Category::Address),
+        ("DE_PLZ", Category::Address),
+        ("CREDIT_CARD", Category::Financial),
+        ("CRYPTO", Category::Financial),
+        ("IBAN_CODE", Category::Financial),
+        ("US_BANK_NUMBER", Category::Financial),
+        ("IP_ADDRESS", Category::Network),
+        ("MAC_ADDRESS", Category::Network),
+        ("URL", Category::Network),
+        ("DATE_TIME", Category::Other),
+        ("NRP", Category::Other),
+        ("LOCATION", Category::Other),
+        ("UUID", Category::Other),
+        ("MEDICAL_BIOLOGICAL_ATTRIBUTE", Category::Other),
+        ("MEDICAL_BIOLOGICAL_STRUCTURE", Category::Other),
+        ("MEDICAL_CLINICAL_EVENT", Category::Other),
+        ("MEDICAL_DISEASE_DISORDER", Category::Other),
+        ("MEDICAL_FAMILY_HISTORY", Category::Other),
+        ("MEDICAL_HISTORY", Category::Other),
+        ("MEDICAL_MEDICATION", Category::Other),
+        ("MEDICAL_THERAPEUTIC_PROCEDURE", Category::Other),
+        ("MEDICAL_LICENSE", Category::IdNumber),
+        ("US_DRIVER_LICENSE", Category::IdNumber),
+        ("US_ITIN", Category::IdNumber),
+        ("US_CLAIM_NUMBER", Category::IdNumber),
+        ("US_HEALTH_INSURANCE_MEMBER_ID", Category::IdNumber),
+        ("US_MBI", Category::IdNumber),
+        ("US_NPI", Category::IdNumber),
+        ("US_PASSPORT", Category::IdNumber),
+        ("US_PRESCRIPTION_NUMBER", Category::IdNumber),
+        ("US_PRIOR_AUTHORIZATION_NUMBER", Category::IdNumber),
+        ("US_PROVIDER_TAX_ID", Category::IdNumber),
+        ("US_REFERRAL_NUMBER", Category::IdNumber),
+        ("US_SSN", Category::IdNumber),
+        ("UK_DRIVING_LICENCE", Category::IdNumber),
+        ("UK_NHS", Category::IdNumber),
+        ("UK_NINO", Category::IdNumber),
+        ("UK_PASSPORT", Category::IdNumber),
+        ("UK_VEHICLE_REGISTRATION", Category::IdNumber),
+        ("ES_NIF", Category::IdNumber),
+        ("ES_NIE", Category::IdNumber),
+        ("ES_PASSPORT", Category::IdNumber),
+        ("IT_FISCAL_CODE", Category::IdNumber),
+        ("IT_DRIVER_LICENSE", Category::IdNumber),
+        ("IT_VAT_CODE", Category::IdNumber),
+        ("IT_PASSPORT", Category::IdNumber),
+        ("IT_IDENTITY_CARD", Category::IdNumber),
+        ("PL_PESEL", Category::IdNumber),
+        ("SG_NRIC_FIN", Category::IdNumber),
+        ("SG_UEN", Category::IdNumber),
+        ("AU_ABN", Category::IdNumber),
+        ("AU_ACN", Category::IdNumber),
+        ("AU_TFN", Category::IdNumber),
+        ("AU_MEDICARE", Category::IdNumber),
+        ("IN_PAN", Category::IdNumber),
+        ("IN_AADHAAR", Category::IdNumber),
+        ("IN_VEHICLE_REGISTRATION", Category::IdNumber),
+        ("IN_VOTER", Category::IdNumber),
+        ("IN_PASSPORT", Category::IdNumber),
+        ("IN_GSTIN", Category::IdNumber),
+        ("FI_PERSONAL_IDENTITY_CODE", Category::IdNumber),
+        ("KR_DRIVER_LICENSE", Category::IdNumber),
+        ("KR_FRN", Category::IdNumber),
+        ("KR_PASSPORT", Category::IdNumber),
+        ("KR_BRN", Category::IdNumber),
+        ("KR_RRN", Category::IdNumber),
+        ("NG_NIN", Category::IdNumber),
+        ("NG_VEHICLE_REGISTRATION", Category::IdNumber),
+        ("PH_PASSPORT", Category::IdNumber),
+        ("PH_TIN", Category::IdNumber),
+        ("PH_UMID", Category::IdNumber),
+        ("CA_SIN", Category::IdNumber),
+        ("SE_ORGANISATIONSNUMMER", Category::IdNumber),
+        ("SE_PERSONNUMMER", Category::IdNumber),
+        ("ZA_ID_NUMBER", Category::IdNumber),
+        ("ZA_PASSPORT", Category::IdNumber),
+        ("ZA_INCOME_TAX_NUMBER", Category::IdNumber),
+        ("ZA_DRIVER_LICENSE", Category::IdNumber),
+        ("ZA_VAT_NUMBER", Category::IdNumber),
+        ("ZA_COMPANY_REGISTRATION", Category::IdNumber),
+        ("ZA_TRAFFIC_REGISTER_NUMBER", Category::IdNumber),
+        ("ZA_LICENSE_PLATE", Category::IdNumber),
+        ("TH_TNIN", Category::IdNumber),
+        ("TR_NATIONAL_ID", Category::IdNumber),
+        ("TR_LICENSE_PLATE", Category::IdNumber),
+        ("DE_TAX_ID", Category::IdNumber),
+        ("DE_TAX_NUMBER", Category::IdNumber),
+        ("DE_PASSPORT", Category::IdNumber),
+        ("DE_ID_CARD", Category::IdNumber),
+        ("DE_SOCIAL_SECURITY", Category::IdNumber),
+        ("DE_HEALTH_INSURANCE", Category::IdNumber),
+        ("DE_KFZ", Category::IdNumber),
+        ("DE_HANDELSREGISTER", Category::IdNumber),
+    ];
+
+    /// The category of a finding of the entity type `name`: that of the supported entity of
+    /// the name, `other` for the entity of a custom recogniser.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn entity_category(name: &str) -> Category {
+        Self::ENTITY_CATEGORIES
+            .iter()
+            .find(|(entity, _)| *entity == name)
+            .map_or(Category::Other, |(_, category)| *category)
     }
 
     /// List of entity types that should be disallowed for redacting
@@ -452,6 +566,34 @@ mod tests {
                     && detection.score.is_some()
             }),
             "{detections:?}"
+        );
+    }
+
+    #[test]
+    fn a_supported_entity_is_listed_once() {
+        let mut names: Vec<&str> = PresidioRedacter::ENTITY_CATEGORIES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let listed = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), listed);
+    }
+
+    #[test]
+    fn an_entity_is_placed_by_what_it_holds_and_a_custom_one_is_other() {
+        assert_eq!(
+            PresidioRedacter::entity_category("UK_POSTCODE"),
+            Category::Address
+        );
+        assert_eq!(
+            PresidioRedacter::entity_category("LOCATION"),
+            Category::Other
+        );
+        assert_eq!(
+            PresidioRedacter::entity_category("EMPLOYEE_BADGE"),
+            Category::Other
         );
     }
 }

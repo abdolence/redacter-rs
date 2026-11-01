@@ -37,6 +37,8 @@ pub enum AppError {
     CsvParserError(#[from] csv_async::Error),
     #[error("Redacter config error: {message}")]
     RedacterConfigError { message: String },
+    #[error(transparent)]
+    Categories(#[from] crate::redacters::CategoriesError),
     #[error("Template error: {0}")]
     TemplateError(#[from] TemplateError),
     #[cfg(feature = "pdf-render")]

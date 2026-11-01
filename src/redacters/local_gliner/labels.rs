@@ -4,28 +4,40 @@
 //! This list is PII only. `organization` is deliberately absent: measured against this model,
 //! it over-redacts team and desk names (`Marketing team`, `The Support Desk`) that are not PII.
 
-pub const DEFAULT_LABELS: &[&str] = &[
-    "person",
-    "address",
-    "email",
-    "phone number",
-    "date of birth",
-    "passport number",
-    "national id number",
-    "credit card number",
-    "iban",
-    "ip address",
-    "username",
-    "medical condition",
-    "postal code",
-    "license plate number",
+use crate::redacters::Category;
+
+pub const DEFAULT_LABELS: [(&str, Category); 14] = [
+    ("person", Category::Person),
+    ("address", Category::Address),
+    ("email", Category::Contact),
+    ("phone number", Category::Contact),
+    ("date of birth", Category::DateOfBirth),
+    ("passport number", Category::IdNumber),
+    ("national id number", Category::IdNumber),
+    ("credit card number", Category::Financial),
+    ("iban", Category::Financial),
+    ("ip address", Category::Network),
+    ("username", Category::Person),
+    ("medical condition", Category::Other),
+    ("postal code", Category::Address),
+    ("license plate number", Category::IdNumber),
 ];
 
 pub fn default_labels() -> Vec<String> {
     DEFAULT_LABELS
         .iter()
-        .map(|label| label.to_string())
+        .map(|(label, _)| label.to_string())
         .collect()
+}
+
+/// The category of a finding the model labelled `label`, ignoring case: that of the default
+/// label of the name, `other` for a label the user added.
+#[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+pub fn label_category(label: &str) -> Category {
+    DEFAULT_LABELS
+        .iter()
+        .find(|(default, _)| default.eq_ignore_ascii_case(label))
+        .map_or(Category::Other, |(_, category)| *category)
 }
 
 /// Splits `labels` into batches of at most `max_types`, the model's limit on how many entity
@@ -41,6 +53,23 @@ pub fn batch_labels(labels: &[String], max_types: usize) -> Vec<&[String]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_default_label_but_medical_condition_is_in_a_named_category() {
+        for (label, category) in DEFAULT_LABELS {
+            assert_eq!(
+                category != Category::Other,
+                label != "medical condition",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_is_placed_ignoring_case_and_a_label_the_user_added_is_other() {
+        assert_eq!(label_category("Phone Number"), Category::Contact);
+        assert_eq!(label_category("employer"), Category::Other);
+    }
 
     #[test]
     fn default_labels_has_no_organization() {

@@ -2,6 +2,7 @@ use super::error::LocalRulesError;
 use super::user_rules::{UserMatcher, UserRule};
 use super::validators::Validator;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
+use crate::redacters::Category;
 use clap::ValueEnum;
 use regex::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
@@ -32,6 +33,23 @@ pub enum RuleGroup {
 impl RuleGroup {
     pub fn all() -> BTreeSet<RuleGroup> {
         RuleGroup::value_variants().iter().copied().collect()
+    }
+
+    /// The category of what the group finds.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn category(self) -> Category {
+        match self {
+            RuleGroup::Email | RuleGroup::Phone => Category::Contact,
+            RuleGroup::PaymentCard | RuleGroup::Iban => Category::Financial,
+            RuleGroup::Network => Category::Network,
+            RuleGroup::Url | RuleGroup::Secrets => Category::Credential,
+            RuleGroup::UsIdentifiers | RuleGroup::EuIdentifiers | RuleGroup::WorldIdentifiers => {
+                Category::IdNumber
+            }
+            RuleGroup::Postcodes => Category::Address,
+            RuleGroup::BirthDates => Category::DateOfBirth,
+            RuleGroup::Custom => Category::Other,
+        }
     }
 
     /// One line per group for `--help`-style listings and the rules reference. Read only
@@ -197,6 +215,16 @@ pub const URL_CREDENTIALS_RULE: &str = "url-credentials";
 pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
 
 impl RuleSet {
+    /// The category of a finding named `rule`: that of the group of the built-in rule of the
+    /// name, `other` for any other name, which is a user-defined rule.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn category_of(rule: &str) -> Category {
+        builtin_rules()
+            .iter()
+            .find(|spec| spec.name == rule)
+            .map_or(Category::Other, |spec| spec.group.category())
+    }
+
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
         Self::from_builtin(|spec| groups.contains(&spec.group), Strictness::Strict)
@@ -383,6 +411,31 @@ pub(super) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[test]
+    fn every_group_but_custom_finds_a_named_category() {
+        for group in RuleGroup::value_variants() {
+            let named = group.category() != Category::Other;
+            assert_eq!(named, *group != RuleGroup::Custom, "{group}");
+        }
+    }
+
+    #[test]
+    fn a_built_in_rule_has_the_category_of_its_group_and_a_user_rule_is_other() {
+        for spec in builtin_rules() {
+            assert_eq!(
+                RuleSet::category_of(spec.name),
+                spec.group.category(),
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(
+            RuleSet::category_of("generic-api-key"),
+            Category::Credential
+        );
+        assert_eq!(RuleSet::category_of("employee-number"), Category::Other);
+    }
 
     #[cfg(feature = "local-credential-ml")]
     #[test]

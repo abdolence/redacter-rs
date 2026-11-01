@@ -1,8 +1,15 @@
 //! What a provider found in an item, and where: the contract `scan` reports from. A
 //! detection never changes the item; redaction is a separate path.
 
+use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
+#[cfg(feature = "local-ner")]
+use crate::redacters::Entity;
+use crate::redacters::{
+    AwsBedrockGuardrailsRedacter, AwsComprehendRedacter, Category, GcpDlpRedacter, LlmTextFinding,
+    PresidioRedacter, RuleSet,
+};
 use crate::AppResult;
 use serde::Serialize;
 use std::cell::Cell;
@@ -26,6 +33,38 @@ impl DetectionLabel {
     /// The label of data a redacter replaced or boxed without saying what kind it is.
     pub fn unclassified() -> Self {
         Self::new("sensitive_data")
+    }
+
+    /// The category of a finding `redacter` labelled with this label. A label the redacter's
+    /// map does not know is `other`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn category(&self, redacter: RedacterType) -> Category {
+        let label = self.0.as_str();
+        match redacter {
+            RedacterType::LocalRules => RuleSet::category_of(label),
+            #[cfg(feature = "local-ner")]
+            RedacterType::LocalNer => Entity::label_category(label),
+            #[cfg(feature = "local-gliner")]
+            RedacterType::LocalGliner => {
+                crate::redacters::local_gliner::labels::label_category(label)
+            }
+            // Without the feature the redacter cannot be built, so no finding carries its label.
+            #[cfg(not(feature = "local-ner"))]
+            RedacterType::LocalNer => Category::Other,
+            #[cfg(not(feature = "local-gliner"))]
+            RedacterType::LocalGliner => Category::Other,
+            RedacterType::LocalCredentialMl => Category::Credential,
+            RedacterType::GcpDlp => GcpDlpRedacter::info_type_category(label),
+            RedacterType::AwsComprehend => AwsComprehendRedacter::entity_category(label),
+            RedacterType::Presidio => PresidioRedacter::entity_category(label),
+            RedacterType::AwsBedrockGuardrails => {
+                AwsBedrockGuardrailsRedacter::label_category(label)
+            }
+            RedacterType::GeminiLlm
+            | RedacterType::OpenAiLlm
+            | RedacterType::GcpVertexAi
+            | RedacterType::AwsBedrock => LlmTextFinding::label_category(label),
+        }
     }
 }
 
@@ -549,6 +588,37 @@ pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_is_placed_by_the_map_of_the_redacter_that_found_it() {
+        let rows = [
+            (RedacterType::LocalRules, "email", Category::Contact),
+            #[cfg(feature = "local-ner")]
+            (RedacterType::LocalNer, "per", Category::Person),
+            #[cfg(feature = "local-gliner")]
+            (RedacterType::LocalGliner, "iban", Category::Financial),
+            (
+                RedacterType::LocalCredentialMl,
+                "credential",
+                Category::Credential,
+            ),
+            (RedacterType::GcpDlp, "PASSWORD", Category::Credential),
+            (RedacterType::AwsComprehend, "EMAIL", Category::Contact),
+            (RedacterType::Presidio, "IP_ADDRESS", Category::Network),
+            (RedacterType::AwsBedrockGuardrails, "NAME", Category::Person),
+            (RedacterType::GeminiLlm, "api_key", Category::Credential),
+            (RedacterType::OpenAiLlm, "api_key", Category::Credential),
+            (RedacterType::GcpVertexAi, "api_key", Category::Credential),
+            (RedacterType::AwsBedrock, "api_key", Category::Credential),
+        ];
+        for (redacter, label, category) in rows {
+            assert_eq!(
+                DetectionLabel::new(label).category(redacter),
+                category,
+                "{redacter} {label}"
+            );
+        }
+    }
 
     fn score(value: f32) -> Score {
         Score::try_from(value).unwrap()

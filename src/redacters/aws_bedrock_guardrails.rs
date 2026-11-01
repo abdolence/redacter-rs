@@ -1,7 +1,8 @@
 use aws_config::Region;
 use aws_sdk_bedrockruntime::operation::apply_guardrail::ApplyGuardrailOutput;
 use aws_sdk_bedrockruntime::types::{
-    GuardrailAction, GuardrailContentBlock, GuardrailContentSource, GuardrailTextBlock,
+    GuardrailAction, GuardrailContentBlock, GuardrailContentSource, GuardrailPiiEntityType,
+    GuardrailTextBlock,
 };
 use rvstruct::ValueStruct;
 
@@ -9,8 +10,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    bedrock_error, Detection, DetectionLabel, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters,
+    bedrock_error, Category, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -87,6 +88,44 @@ fn interpret_guardrail_output(
 }
 
 impl<'a> AwsBedrockGuardrailsRedacter<'a> {
+    /// The category of a finding labelled `name`: the PII entity type of the name, `other` for
+    /// any other name, such as a regex filter's, or a type this version of the SDK does not know.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn label_category(name: &str) -> Category {
+        match GuardrailPiiEntityType::from(name) {
+            GuardrailPiiEntityType::Name | GuardrailPiiEntityType::Username => Category::Person,
+            GuardrailPiiEntityType::Email | GuardrailPiiEntityType::Phone => Category::Contact,
+            GuardrailPiiEntityType::Address => Category::Address,
+            GuardrailPiiEntityType::DriverId
+            | GuardrailPiiEntityType::LicensePlate
+            | GuardrailPiiEntityType::VehicleIdentificationNumber
+            | GuardrailPiiEntityType::CaHealthNumber
+            | GuardrailPiiEntityType::CaSocialInsuranceNumber
+            | GuardrailPiiEntityType::UkNationalHealthServiceNumber
+            | GuardrailPiiEntityType::UkNationalInsuranceNumber
+            | GuardrailPiiEntityType::UkUniqueTaxpayerReferenceNumber
+            | GuardrailPiiEntityType::UsIndividualTaxIdentificationNumber
+            | GuardrailPiiEntityType::UsPassportNumber
+            | GuardrailPiiEntityType::UsSocialSecurityNumber => Category::IdNumber,
+            GuardrailPiiEntityType::CreditDebitCardCvv
+            | GuardrailPiiEntityType::CreditDebitCardExpiry
+            | GuardrailPiiEntityType::CreditDebitCardNumber
+            | GuardrailPiiEntityType::InternationalBankAccountNumber
+            | GuardrailPiiEntityType::SwiftCode
+            | GuardrailPiiEntityType::UsBankAccountNumber
+            | GuardrailPiiEntityType::UsBankRoutingNumber => Category::Financial,
+            GuardrailPiiEntityType::AwsAccessKey
+            | GuardrailPiiEntityType::AwsSecretKey
+            | GuardrailPiiEntityType::Password
+            | GuardrailPiiEntityType::Pin => Category::Credential,
+            GuardrailPiiEntityType::IpAddress
+            | GuardrailPiiEntityType::MacAddress
+            | GuardrailPiiEntityType::Url => Category::Network,
+            GuardrailPiiEntityType::Age => Category::Other,
+            _ => Category::Other,
+        }
+    }
+
     pub async fn new(
         options: AwsBedrockGuardrailsRedacterOptions,
         reporter: &'a AppReporter<'a>,
@@ -525,5 +564,27 @@ mod tests {
             .unwrap()
             .found
             .is_empty());
+    }
+
+    #[test]
+    fn only_age_is_other() {
+        let other: Vec<&str> = GuardrailPiiEntityType::values()
+            .iter()
+            .copied()
+            .filter(|name| AwsBedrockGuardrailsRedacter::label_category(name) == Category::Other)
+            .collect();
+        assert_eq!(other, ["AGE"]);
+    }
+
+    #[test]
+    fn a_pii_type_is_placed_by_what_it_holds_and_a_regex_filter_is_other() {
+        assert_eq!(
+            AwsBedrockGuardrailsRedacter::label_category("US_SOCIAL_SECURITY_NUMBER"),
+            Category::IdNumber
+        );
+        assert_eq!(
+            AwsBedrockGuardrailsRedacter::label_category("internal-ticket"),
+            Category::Other
+        );
     }
 }

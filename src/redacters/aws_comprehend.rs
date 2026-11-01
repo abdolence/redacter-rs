@@ -2,13 +2,13 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
+    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_config::Region;
-use aws_sdk_comprehend::types::PiiEntity;
+use aws_sdk_comprehend::types::{PiiEntity, PiiEntityType};
 
 #[derive(Debug, Clone)]
 pub struct AwsComprehendRedacterOptions {
@@ -23,6 +23,48 @@ pub struct AwsComprehendRedacter<'a> {
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
+    /// The category of a finding of the PII entity type `name`, other for a type this
+    /// version of the SDK does not know.
+    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    pub fn entity_category(name: &str) -> Category {
+        match PiiEntityType::from(name) {
+            PiiEntityType::Name | PiiEntityType::Username => Category::Person,
+            PiiEntityType::Email | PiiEntityType::Phone => Category::Contact,
+            PiiEntityType::Address => Category::Address,
+            PiiEntityType::Ssn
+            | PiiEntityType::PassportNumber
+            | PiiEntityType::DriverId
+            | PiiEntityType::LicensePlate
+            | PiiEntityType::VehicleIdentificationNumber
+            | PiiEntityType::CaHealthNumber
+            | PiiEntityType::CaSocialInsuranceNumber
+            | PiiEntityType::InAadhaar
+            | PiiEntityType::InNrega
+            | PiiEntityType::InPermanentAccountNumber
+            | PiiEntityType::InVoterNumber
+            | PiiEntityType::UkNationalHealthServiceNumber
+            | PiiEntityType::UkNationalInsuranceNumber
+            | PiiEntityType::UkUniqueTaxpayerReferenceNumber
+            | PiiEntityType::UsIndividualTaxIdentificationNumber => Category::IdNumber,
+            PiiEntityType::BankAccountNumber
+            | PiiEntityType::BankRouting
+            | PiiEntityType::CreditDebitNumber
+            | PiiEntityType::CreditDebitCvv
+            | PiiEntityType::CreditDebitExpiry
+            | PiiEntityType::InternationalBankAccountNumber
+            | PiiEntityType::SwiftCode => Category::Financial,
+            PiiEntityType::Password
+            | PiiEntityType::Pin
+            | PiiEntityType::AwsAccessKey
+            | PiiEntityType::AwsSecretKey => Category::Credential,
+            PiiEntityType::IpAddress | PiiEntityType::MacAddress | PiiEntityType::Url => {
+                Category::Network
+            }
+            PiiEntityType::Age | PiiEntityType::DateTime | PiiEntityType::All => Category::Other,
+            _ => Category::Other,
+        }
+    }
+
     pub async fn new(
         aws_dlp_options: AwsComprehendRedacterOptions,
         reporter: &'a AppReporter<'a>,
@@ -302,6 +344,33 @@ mod tests {
                     && detection.score.is_some()
             }),
             "{detections:?}"
+        );
+    }
+
+    #[test]
+    fn only_age_all_and_date_time_are_other() {
+        let mut other: Vec<&str> = PiiEntityType::values()
+            .iter()
+            .copied()
+            .filter(|name| AwsComprehendRedacter::entity_category(name) == Category::Other)
+            .collect();
+        other.sort_unstable();
+        assert_eq!(other, ["AGE", "ALL", "DATE_TIME"]);
+    }
+
+    #[test]
+    fn an_entity_type_is_placed_by_what_it_holds() {
+        assert_eq!(
+            AwsComprehendRedacter::entity_category("PASSWORD"),
+            Category::Credential
+        );
+        assert_eq!(
+            AwsComprehendRedacter::entity_category("CREDIT_DEBIT_NUMBER"),
+            Category::Financial
+        );
+        assert_eq!(
+            AwsComprehendRedacter::entity_category("A_TYPE_FROM_A_NEWER_SDK"),
+            Category::Other
         );
     }
 }

@@ -54,6 +54,12 @@ pub use local_credential_ml::{LocalCredentialMlRedacter, LocalCredentialMlRedact
 /// `local-credential-ml`).
 pub(crate) mod text_spans;
 
+mod category;
+pub use category::*;
+
+mod category_filter;
+pub use category_filter::*;
+
 mod detection;
 pub use detection::*;
 
