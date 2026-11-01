@@ -86,10 +86,11 @@ pub async fn command_copy(
     let addons = AddonStore::new(&options.addon_store);
     let styles = OutputStyles::new();
 
-    // The bar exists from here on because the file systems report through it, but it is
-    // not drawn until the converters and redacters have been bound: they report straight to
-    // the terminal, those lines must not land under a live progress bar, and a failure to
-    // bind one must not leave a bar running.
+    // The bar is not drawn until the converters and redacters have been bound: they report
+    // straight to the terminal, those lines must not land under a live progress bar, and a
+    // failure to bind one must not leave a bar running. A hidden bar drops what is printed
+    // through it, so the source reports to the terminal: a zip source reports the entries it
+    // skips while it is listed, before the bar is drawn.
     let bar = ProgressBar::new(1);
     bar.set_style(
         ProgressStyle::with_template(
@@ -100,7 +101,7 @@ pub async fn command_copy(
     bar.set_draw_target(ProgressDrawTarget::hidden());
     let app_reporter = AppReporter::from(&bar);
 
-    let mut source_fs = DetectFileSystem::open(source, &app_reporter).await?;
+    let mut source_fs = DetectFileSystem::open(source, &term_reporter).await?;
     let mut destination_fs = DetectFileSystem::open(destination, &app_reporter).await?;
 
     let source_listing = if source_fs.has_multiple_files().await? {
