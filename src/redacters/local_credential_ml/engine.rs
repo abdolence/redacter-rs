@@ -283,6 +283,13 @@ mod tests {
     }
 
     #[test]
+    fn a_temperature_that_is_not_finite_is_rejected() {
+        for value in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert!(Temperature::try_from(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn a_temperature_the_scores_cannot_use_is_rejected() {
         for policy in [
             r#"{"temperature": 0}"#,
