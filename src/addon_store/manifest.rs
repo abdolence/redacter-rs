@@ -158,7 +158,7 @@ macro_rules! credential_line_url {
 }
 
 #[cfg(any(feature = "local-credential-ml", test))]
-static CREDENTIAL_LINE_FILES: [AddonFile; 2] = [
+static CREDENTIAL_LINE_FILES: [AddonFile; 4] = [
     AddonFile {
         name: "model.onnx",
         url: credential_line_url!("model.onnx"),
@@ -170,6 +170,18 @@ static CREDENTIAL_LINE_FILES: [AddonFile; 2] = [
         url: credential_line_url!("tokenizer.json"),
         size: 3_583_485,
         sha256: "218484396a9d08293b108b0e5ea31e0a1b7c801dcbed35a821deb392d2fe9bb4",
+    },
+    AddonFile {
+        name: "config.json",
+        url: credential_line_url!("config.json"),
+        size: 1_918,
+        sha256: "1fb928ec87f399096fdd444914c15a6643c9a0c4a7a7fc17c1e20f8bd61f7ea6",
+    },
+    AddonFile {
+        name: "policy.json",
+        url: credential_line_url!("policy.json"),
+        size: 754,
+        sha256: "db74709c4c08dc5d20732ec34aea723194bfa347553e97e81240f896a8de9770",
     },
 ];
 
