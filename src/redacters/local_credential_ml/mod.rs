@@ -86,8 +86,11 @@ impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
             RedacterDataItemContent::Table { headers, rows } => {
                 let (headers, rows, findings) = self
                     .run_blocking(move |engine, min_score| {
-                        let (rows, findings) =
-                            redact_rows(&headers, rows, |text| engine.find(text, min_score))?;
+                        let (rows, findings) = redact_rows(rows, |column, cell| {
+                            find_in_cell(&headers, column, cell, &mut |text| {
+                                engine.find(text, min_score)
+                            })
+                        })?;
                         Ok((headers, rows, findings))
                     })
                     .await?;

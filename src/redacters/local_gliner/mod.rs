@@ -116,8 +116,11 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
             RedacterDataItemContent::Table { headers, rows } => {
                 let (headers, rows, findings) = self
                     .run_blocking(move |engine, options| {
-                        let (rows, findings) =
-                            redact_rows(&headers, rows, |text| engine.find(text, options))?;
+                        let (rows, findings) = redact_rows(rows, |column, cell| {
+                            find_in_cell(&headers, column, cell, &mut |text| {
+                                engine.find(text, options)
+                            })
+                        })?;
                         Ok((headers, rows, findings))
                     })
                     .await?;
@@ -249,9 +252,11 @@ mod tests {
         let rows = vec![row.iter().map(|cell| cell.to_string()).collect::<Vec<_>>()];
         let mut seen: Vec<String> = Vec::new();
         let mut replies = replies.into_iter();
-        let (rows, findings) = redact_rows(&headers, rows, |text| {
-            seen.push(text.to_string());
-            Ok::<_, LocalGlinerError>(replies.next().unwrap_or_default())
+        let (rows, findings) = redact_rows(rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                seen.push(text.to_string());
+                Ok::<_, LocalGlinerError>(replies.next().unwrap_or_default())
+            })
         })
         .unwrap();
         (rows.into_iter().next().unwrap(), seen, findings)
@@ -308,9 +313,11 @@ mod tests {
             vec!["-7".to_string(), "Osaka".to_string(), String::new()],
         ];
         let mut seen: Vec<String> = Vec::new();
-        let (redacted, findings) = redact_rows(&headers, rows, |text| {
-            seen.push(text.to_string());
-            Ok::<_, LocalGlinerError>(vec![finding(text.len() - 5, text.len())])
+        let (redacted, findings) = redact_rows(rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                seen.push(text.to_string());
+                Ok::<_, LocalGlinerError>(vec![finding(text.len() - 5, text.len())])
+            })
         })
         .unwrap();
         assert_eq!(
