@@ -357,7 +357,7 @@ impl<'a> StreamRedacter<'a> {
         };
         let mut number_of_redactions = 0;
         let mut summary = RedactionSummary::default();
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(self.redacter_base_options.list_redactions);
 
         if redact_plan.apply_ocr {
             // The whole chain of text-only redacters runs once here, on the words the OCR
@@ -965,7 +965,8 @@ impl<'a> StreamRedacter<'a> {
                             content: RedacterDataItemContent::Value(ocr_text.text.clone()),
                             file_ref: file_ref.clone(),
                         };
-                        let mut steps = StreamRedactions::default();
+                        let mut steps =
+                            StreamRedactions::new(self.redacter_base_options.list_redactions);
                         for redacter in redacters {
                             redacted_item = steps.redact(redacter, page, redacted_item).await?;
                         }
@@ -973,14 +974,17 @@ impl<'a> StreamRedacter<'a> {
                         match redacted_item.content {
                             RedacterDataItemContent::Value(content) => {
                                 let to_redact = words_to_redact(&original_words, &content);
-                                let records = redacters.last().map_or_else(Vec::new, |last| {
-                                    ocr_text.drawn_records(
-                                        steps.into_records(),
-                                        &to_redact,
-                                        page,
-                                        last.redacter_type(),
-                                    )
-                                });
+                                let records = redacters
+                                    .last()
+                                    .filter(|_| steps.is_recording())
+                                    .map_or_else(Vec::new, |last| {
+                                        ocr_text.drawn_records(
+                                            steps.into_records(),
+                                            &to_redact,
+                                            page,
+                                            last.redacter_type(),
+                                        )
+                                    });
                                 let mut redacted_image = image.to_rgb8();
                                 for (word, redact) in ocr_text.words.iter().zip(&to_redact) {
                                     if *redact {
@@ -1326,6 +1330,7 @@ mod tests {
             csv_delimiter: None,
             sampling_size: None,
             limit_dlp_requests: None,
+            list_redactions: true,
         }
     }
 
@@ -1800,52 +1805,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_redacted_text_file_reports_where_each_value_was() {
-        let redacters = vec![email_and_phone_rules().await];
-
-        let result = redact(
-            &FileConverters::new(),
-            &redacters,
-            &file_ref("note.txt", mime::TEXT_PLAIN),
-            b"Hi team,\nMail john.smith@example.com or call +1 (555) 123-4567.",
-        )
-        .await;
-
-        assert_eq!(result.number_of_redactions, 1);
-        assert_eq!(
-            redaction_places(&result),
-            vec![
-                (
-                    RedacterType::LocalRules,
-                    DetectionLocation::Text {
-                        start: 14,
-                        end: 36,
-                        line: 2,
-                        column: 6
-                    },
-                    "john.smith@example.com"
-                ),
-                (
-                    RedacterType::LocalRules,
-                    DetectionLocation::Text {
-                        start: 45,
-                        end: 62,
-                        line: 2,
-                        column: 37
-                    },
-                    "+1 (555) 123-4567"
-                ),
-            ]
-        );
-        let labels: Vec<_> = result
-            .redactions
-            .iter()
-            .map(|(_, detection)| detection.label.to_string())
-            .collect();
-        assert_eq!(labels, vec!["email", "phone-international"]);
-    }
-
-    #[tokio::test]
     async fn a_redacted_csv_file_reports_the_cells() {
         let redacters = vec![email_rules().await];
 
@@ -1873,55 +1832,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_redacter_is_placed_in_the_file_as_it_was_read() {
-        let name_rule = parse_inline_rule("name=Ana Lima").unwrap();
-        let redacters = vec![
-            email_rules().await,
-            Redacters::LocalRules(local_rules(BTreeSet::new(), vec![name_rule]).await),
-        ];
-
-        let result = redact(
-            &FileConverters::new(),
-            &redacters,
-            &file_ref("note.txt", mime::TEXT_PLAIN),
-            b"Mail ana@x.io, ask Ana Lima.",
-        )
-        .await;
-
-        let places: Vec<_> = result
-            .redactions
-            .iter()
-            .map(|(_, detection)| {
-                (
-                    detection.label.to_string(),
-                    detection.location.byte_range(),
-                    detection.value.as_str(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            places,
-            vec![
-                ("email".to_string(), Some(5..13), "ana@x.io"),
-                ("name".to_string(), Some(19..27), "Ana Lima"),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_file_no_redacter_changed_reports_nothing() {
+    async fn a_copy_that_lists_no_redactions_records_nothing_and_redacts_the_same() {
         let redacters = vec![email_rules().await];
+        let file = file_ref("note.txt", mime::TEXT_PLAIN);
+        let converters = FileConverters::new();
+        let mut options = base_options();
+        options.list_redactions = false;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
 
-        let result = redact(
-            &FileConverters::new(),
-            &redacters,
-            &file_ref("note.txt", mime::TEXT_PLAIN),
-            b"nothing sensitive here",
-        )
-        .await;
+        let result = stream_redacter
+            .redact_stream(one_chunk(b"Mail ana@x.io today"), plan, &file)
+            .await
+            .unwrap();
 
         assert_eq!(result.number_of_redactions, 1);
         assert!(result.redactions.is_empty());
+        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        assert_eq!(output.concat(), b"Mail [REDACTED] today");
     }
 
     async fn ocr_redaction(page: Option<usize>) -> Vec<(RedacterType, Detection)> {

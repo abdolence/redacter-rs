@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 /// How long one step's diff may run before it settles for coarser changes.
 pub(crate) const TEXT_DIFF_TIME_LIMIT: Duration = Duration::from_secs(5);
 
+/// The largest text a step is compared on. The time limit bounds the diff's time and not its
+/// memory, which grows with the number of pieces on both sides: about 50 times the text in
+/// bytes on a log, so the largest text compared peaks near 1 GiB.
+pub(crate) const MAX_DIFFED_BYTES: usize = 16 * 1024 * 1024;
+
 /// One change a step made to a text: `input` of what it read became `output` of what it
 /// returned. Byte ranges on character boundaries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +103,6 @@ impl TextChanges {
         start..end.max(start)
     }
 
-    /// The input position of output position `position`, which lies after the first `before`
-    /// changes and outside the rest.
     fn shifted(&self, before: usize, position: usize) -> usize {
         match before.checked_sub(1).map(|last| &self.0[last]) {
             Some(change) => position - change.output.end + change.input.end,
@@ -121,8 +124,6 @@ impl TextChanges {
 }
 
 impl TextChange {
-    /// The change from `input[old]` to `output[new]` without the characters both sides share
-    /// at the start and at the end; `None` when nothing is left.
     fn narrowed(input: &str, output: &str, old: Range<usize>, new: Range<usize>) -> Option<Self> {
         let (replaced, replacement) = (&input[old.clone()], &output[new.clone()]);
         let same_start = shared_length(replaced.chars(), replacement.chars());
@@ -138,7 +139,6 @@ impl TextChange {
     }
 }
 
-/// The byte length of the characters `a` and `b` agree on from their start.
 fn shared_length(a: impl Iterator<Item = char>, b: impl Iterator<Item = char>) -> usize {
     a.zip(b)
         .take_while(|(a, b)| a == b)
@@ -146,7 +146,6 @@ fn shared_length(a: impl Iterator<Item = char>, b: impl Iterator<Item = char>) -
         .sum()
 }
 
-/// A text cut into the pieces the diff compares.
 struct Tokens<'a> {
     pieces: Vec<&'a str>,
     /// The byte offset of every piece, then the length of the text.
@@ -208,10 +207,46 @@ pub(crate) struct TextChain {
     steps: Vec<TextChanges>,
 }
 
-/// A detection of one step, with its range in the original text.
 struct Located<'a> {
     range: Range<usize>,
     detection: &'a Detection,
+    /// The place in the step's list, which settles a tie between equal overlaps.
+    order: usize,
+}
+
+/// A step's detections in the original text, sorted by start so that those near a range are
+/// found by search. Comparing each change with every detection is quadratic, and a log with
+/// hundreds of thousands of redactions never finishes.
+struct LocatedDetections<'a> {
+    sorted: Vec<Located<'a>>,
+    /// `reach[i]` is the greatest end among `sorted[..=i]`.
+    reach: Vec<usize>,
+}
+
+impl<'a> LocatedDetections<'a> {
+    fn new(mut sorted: Vec<Located<'a>>) -> Self {
+        sorted.sort_by_key(|located| located.range.start);
+        let reach = sorted
+            .iter()
+            .scan(0, |reach, located| {
+                *reach = (*reach).max(located.range.end);
+                Some(*reach)
+            })
+            .collect();
+        Self { sorted, reach }
+    }
+
+    fn overlapping<'s>(&'s self, range: &'s Range<usize>) -> impl Iterator<Item = &'s Located<'a>> {
+        let starting_before_end = self
+            .sorted
+            .partition_point(|located| located.range.start < range.end);
+        let reaching_start = self.reach.partition_point(|&reach| reach <= range.start);
+        self.sorted
+            .get(reaching_start..starting_before_end)
+            .unwrap_or_default()
+            .iter()
+            .filter(move |located| overlap(&located.range, range) > 0)
+    }
 }
 
 impl TextChain {
@@ -257,7 +292,8 @@ impl TextChain {
         let located = found
             .iter()
             .filter_map(|detection| Some((detection.location.byte_range()?, detection)))
-            .map(|(range, detection)| {
+            .enumerate()
+            .map(|(order, (range, detection))| {
                 if input.get(range.clone()).is_none() {
                     return Err(AppError::DetectionOutsideContent {
                         start: range.start,
@@ -267,9 +303,11 @@ impl TextChain {
                 Ok(Located {
                     range: self.to_original(range),
                     detection,
+                    order,
                 })
             })
-            .collect::<AppResult<Vec<_>>>()?;
+            .collect::<AppResult<Vec<_>>>()
+            .map(LocatedDetections::new)?;
 
         let mut spans: Vec<Span> = changes
             .redactions(input)
@@ -297,7 +335,6 @@ impl TextChain {
             .collect()
     }
 
-    /// `range` of the text a step returned as the range of the original it came from.
     fn to_original(&self, range: Range<usize>) -> Range<usize> {
         self.steps
             .iter()
@@ -314,10 +351,9 @@ struct Span {
 }
 
 impl Span {
-    fn widened_by(change: Range<usize>, located: &[Located]) -> Self {
+    fn widened_by(change: Range<usize>, located: &LocatedDetections) -> Self {
         let range = located
-            .iter()
-            .filter(|candidate| overlap(&candidate.range, &change) > 0)
+            .overlapping(&change)
             .fold(change.clone(), |range, candidate| {
                 range.start.min(candidate.range.start)..range.end.max(candidate.range.end)
             });
@@ -334,25 +370,25 @@ impl Span {
 
     /// The label and score of the detection that overlaps the most: the change when the span
     /// is one change, the whole span when changes were joined. The first detection wins a tie.
-    fn label(&self, located: &[Located]) -> (DetectionLabel, Option<Score>) {
+    fn label(&self, located: &LocatedDetections) -> (DetectionLabel, Option<Score>) {
         let measured = match self.changes.as_slice() {
             [change] => change,
             _ => &self.range,
         };
-        let mut best: Option<(usize, &Detection)> = None;
-        for candidate in located {
-            let overlapped = overlap(&candidate.range, measured);
-            if overlapped > best.map_or(0, |(most, _)| most) {
-                best = Some((overlapped, candidate.detection));
-            }
-        }
-        best.map_or((DetectionLabel::unclassified(), None), |(_, detection)| {
-            (detection.label.clone(), detection.score)
-        })
+        located
+            .overlapping(measured)
+            .max_by_key(|candidate| {
+                (
+                    overlap(&candidate.range, measured),
+                    std::cmp::Reverse(candidate.order),
+                )
+            })
+            .map_or((DetectionLabel::unclassified(), None), |best| {
+                (best.detection.label.clone(), best.detection.score)
+            })
     }
 }
 
-/// How many bytes `a` and `b` have in common.
 fn overlap(a: &Range<usize>, b: &Range<usize>) -> usize {
     a.end.min(b.end).saturating_sub(a.start.max(b.start))
 }
@@ -371,20 +407,17 @@ mod tests {
         Score::try_from(value).unwrap()
     }
 
-    /// A detection of `range` in `text` as a redacter located it.
     fn found(text: &str, range: Range<usize>, label: &str, score: Option<Score>) -> Detection {
         TextLines::new(text)
             .detection(range, DetectionLabel::new(label), score)
             .unwrap()
     }
 
-    /// The range of the first `needle` in `text`.
     fn range_of(text: &str, needle: &str) -> Range<usize> {
         let start = text.find(needle).unwrap();
         start..start + needle.len()
     }
 
-    /// The text range, label and value of each detection, in order.
     fn placed(detections: &[Detection]) -> Vec<(Range<usize>, String, &str)> {
         detections
             .iter()
@@ -632,6 +665,43 @@ mod tests {
             vec![(5..13, "person".to_string(), "Ana Lima")]
         );
         assert_eq!(records[0].score, Some(score(0.9)));
+    }
+
+    #[test]
+    fn equal_overlaps_go_to_the_detection_listed_first_wherever_it_starts() {
+        let input = "call Ana Lima now";
+        let output = "call [REDACTED] now";
+        let detections = [
+            found(input, 9..13, "last-name", None),
+            found(input, 5..9, "first-name", None),
+        ];
+
+        let records = step_once(input, output, &detections).unwrap();
+
+        assert_eq!(
+            placed(&records),
+            vec![(5..13, "last-name".to_string(), "Ana Lima")]
+        );
+    }
+
+    #[test]
+    fn a_detection_reaching_far_past_many_others_still_labels_a_change_beyond_them() {
+        let input = "a@x.io b@x.io c@x.io d@x.io";
+        let output = "[REDACTED] [REDACTED] [REDACTED] [REDACTED]";
+        let detections = [
+            found(input, 0..6, "email", None),
+            found(input, 7..13, "email", None),
+            found(input, 14..20, "email", None),
+            found(input, 21..27, "email", None),
+            found(input, 0..27, "document", None),
+        ];
+
+        let records = step_once(input, output, &detections).unwrap();
+
+        assert_eq!(
+            placed(&records),
+            vec![(0..27, "document".to_string(), input)]
+        );
     }
 
     #[test]

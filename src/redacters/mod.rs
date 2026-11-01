@@ -582,6 +582,10 @@ pub struct RedacterBaseOptions {
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+    /// Record where each redaction sits in the file, for a report that lists them. Recording
+    /// keeps the content of every step and compares it with the next, so a copy that writes no
+    /// such report leaves it off.
+    pub list_redactions: bool,
 }
 
 #[derive(Debug, Clone)]

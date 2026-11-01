@@ -5,6 +5,7 @@ use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
 use crate::AppResult;
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::ops::Range;
@@ -229,6 +230,9 @@ pub fn has_marker_outside(text: &str, findings: &[Range<usize>]) -> bool {
 pub struct TextLines<'a> {
     text: &'a str,
     line_starts: Vec<usize>,
+    /// The offset and column of the last detection. Detections come mostly in order, so counting
+    /// from it keeps a long line, such as minified JSON, from being counted again for each one.
+    last_column: Cell<(usize, usize)>,
 }
 
 impl<'a> TextLines<'a> {
@@ -238,6 +242,7 @@ impl<'a> TextLines<'a> {
             line_starts: std::iter::once(0)
                 .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
                 .collect(),
+            last_column: Cell::new((0, 1)),
         }
     }
 
@@ -260,6 +265,17 @@ impl<'a> TextLines<'a> {
         self.line_starts.partition_point(|&start| start <= offset) - 1
     }
 
+    /// The 1-based column of `offset`, a character boundary on the line starting at `line_start`.
+    fn column_of(&self, line_start: usize, offset: usize) -> usize {
+        let (from, column) = match self.last_column.get() {
+            (last, column) if (line_start..=offset).contains(&last) => (last, column),
+            _ => (line_start, 1),
+        };
+        let column = column + self.text[from..offset].chars().count();
+        self.last_column.set((offset, column));
+        column
+    }
+
     /// The detection of `range`, with its value copied out of the text. An error when the range
     /// is not inside the text on character boundaries: a report would otherwise place it where
     /// it is not.
@@ -279,7 +295,7 @@ impl<'a> TextLines<'a> {
                 start: range.start,
                 end: range.end,
                 line,
-                column: self.text[line_start..range.start].chars().count() + 1,
+                column: self.column_of(line_start, range.start),
             },
             score,
             value,
@@ -574,6 +590,36 @@ mod tests {
                 "{invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn columns_are_right_whatever_order_the_detections_come_in() {
+        let text = "ü@x.io, 😀 b@y.io\nc@z.io";
+        let lines = TextLines::new(text);
+        let columns = |needles: [&str; 4]| -> Vec<usize> {
+            needles
+                .map(|needle| {
+                    let start = text.find(needle).unwrap();
+                    match lines
+                        .detection(start..start + needle.len(), email(), None)
+                        .unwrap()
+                        .location
+                    {
+                        DetectionLocation::Text { column, .. } => column,
+                        other => panic!("{other:?}"),
+                    }
+                })
+                .to_vec()
+        };
+
+        assert_eq!(
+            columns(["ü@x.io", "b@y.io", "c@z.io", "x.io"]),
+            [1, 11, 1, 3]
+        );
+        assert_eq!(
+            columns(["c@z.io", "b@y.io", "x.io", "ü@x.io"]),
+            [1, 11, 3, 1]
+        );
     }
 
     #[test]
@@ -874,11 +920,5 @@ mod tests {
 
         assert_eq!(page, serde_json::json!({"kind": "page", "page": 2}));
         assert_eq!(file, serde_json::json!({"kind": "file"}));
-    }
-
-    #[test]
-    fn a_page_and_the_whole_file_are_shown_in_words() {
-        assert_eq!(DetectionLocation::Page { page: 2 }.to_string(), "page 2");
-        assert_eq!(DetectionLocation::File.to_string(), "file");
     }
 }

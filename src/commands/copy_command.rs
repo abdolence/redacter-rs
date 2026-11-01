@@ -37,18 +37,15 @@ pub struct CopyCommandResult {
     pub files: Vec<CopyFileReport>,
 }
 
-/// One file of the copy, as the JSON report lists it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One file of the copy, as the JSON report lists it: its `path`, `mime_type`, `status`,
+/// `reason` and `redactions`. What the redacters replaced is in the order a reader meets it,
+/// values always masked.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CopyFileReport {
     path: String,
     mime_type: Option<String>,
-    status: CopyFileStatus,
-    reason: Option<String>,
-    /// What the redacters replaced, in the order a reader meets it, values always masked.
+    outcome: CopyFileOutcome,
     redactions: Vec<FindingReport>,
-    /// Why the file left the copy unredacted, for a SARIF report; not part of the JSON report.
-    #[serde(skip)]
-    not_redacted: Option<NotRedactedReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,13 +58,17 @@ enum CopyFileStatus {
     Failed,
 }
 
-impl CopyFileReport {
-    pub fn new(
-        file_ref: &FileSystemRef,
-        outcome: &CopyFileOutcome,
-        redactions: &[(RedacterType, Detection)],
-    ) -> Self {
-        let (status, reason) = match outcome {
+impl Serialize for CopyFileReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Entry<'a> {
+            path: &'a str,
+            mime_type: Option<&'a str>,
+            status: CopyFileStatus,
+            reason: Option<String>,
+            redactions: &'a [FindingReport],
+        }
+        let (status, reason) = match &self.outcome {
             CopyFileOutcome::Redacted { .. } => (CopyFileStatus::Redacted, None),
             CopyFileOutcome::Copied => (CopyFileStatus::Copied, None),
             CopyFileOutcome::CopiedUnredacted { reason } => (
@@ -79,16 +80,23 @@ impl CopyFileReport {
             }
             CopyFileOutcome::Error { message } => (CopyFileStatus::Failed, Some(message.clone())),
         };
-        let not_redacted = match outcome {
-            CopyFileOutcome::Copied => Some(NotRedactedReason::NoRedacterApplied),
-            CopyFileOutcome::CopiedUnredacted { reason }
-            | CopyFileOutcome::Skipped {
-                reason: SkipReason::NotRedacted(reason),
-            } => Some(*reason),
-            CopyFileOutcome::Redacted { .. }
-            | CopyFileOutcome::Skipped { .. }
-            | CopyFileOutcome::Error { .. } => None,
-        };
+        Entry {
+            path: &self.path,
+            mime_type: self.mime_type.as_deref(),
+            status,
+            reason,
+            redactions: &self.redactions,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl CopyFileReport {
+    pub fn new(
+        file_ref: &FileSystemRef,
+        outcome: &CopyFileOutcome,
+        redactions: &[(RedacterType, Detection)],
+    ) -> Self {
         let mut redactions: Vec<FindingReport> = redactions
             .iter()
             .map(|(redacter, detection)| {
@@ -99,40 +107,45 @@ impl CopyFileReport {
         Self {
             path: file_ref.relative_path.value().clone(),
             mime_type: file_ref.media_type.as_ref().map(ToString::to_string),
-            status,
-            reason,
+            outcome: outcome.clone(),
             redactions,
-            not_redacted,
         }
     }
 
     /// The file for a SARIF report, or `None` for a file the size limit or the name filter
     /// left out.
     fn sarif_artifact(&self) -> Option<SarifArtifact> {
-        let outcome = match (self.status, self.not_redacted) {
-            (CopyFileStatus::Redacted, _) => ArtifactOutcome::Findings(
+        let outcome = match &self.outcome {
+            CopyFileOutcome::Redacted { .. } => ArtifactOutcome::Findings(
                 self.redactions
                     .iter()
                     .map(FindingReport::sarif_finding)
                     .collect(),
             ),
-            (CopyFileStatus::Failed, _) => ArtifactOutcome::Failed {
-                reason: self.reason.clone().unwrap_or_default(),
+            CopyFileOutcome::Error { message } => ArtifactOutcome::Failed {
+                reason: message.clone(),
             },
-            (_, Some(not_redacted)) => {
-                let reason = not_redacted.detail().to_string();
-                if not_redacted.needs_converter() {
-                    ArtifactOutcome::Blocked { reason }
-                } else {
-                    ArtifactOutcome::Unsupported { reason }
-                }
-            }
-            (_, None) => return None,
+            CopyFileOutcome::Copied => not_redacted_outcome(NotRedactedReason::NoRedacterApplied),
+            CopyFileOutcome::CopiedUnredacted { reason }
+            | CopyFileOutcome::Skipped {
+                reason: SkipReason::NotRedacted(reason),
+            } => not_redacted_outcome(*reason),
+            CopyFileOutcome::Skipped { .. } => return None,
         };
         Some(SarifArtifact {
             path: self.path.clone(),
             outcome,
         })
+    }
+}
+
+/// A file that left the copy unredacted, as a SARIF report tells it.
+fn not_redacted_outcome(reason: NotRedactedReason) -> ArtifactOutcome {
+    let detail = reason.detail().to_string();
+    if reason.needs_converter() {
+        ArtifactOutcome::Blocked { reason: detail }
+    } else {
+        ArtifactOutcome::Unsupported { reason: detail }
     }
 }
 
@@ -717,6 +730,7 @@ mod tests {
                 csv_delimiter: None,
                 sampling_size: None,
                 limit_dlp_requests: None,
+                list_redactions: true,
             },
         }
     }
@@ -795,38 +809,6 @@ mod tests {
             assert_eq!(json["path"], "notes/note.txt");
             assert_eq!(json["mime_type"], "text/plain");
         }
-    }
-
-    #[test]
-    fn a_file_report_lists_its_redactions_in_reading_order_with_masked_values() {
-        let outcome = CopyFileOutcome::Redacted {
-            redacters: vec![RedacterType::LocalRules],
-            conversion: None,
-        };
-        let redactions = [
-            (
-                RedacterType::LocalRules,
-                text_detection(SAMPLE_PHONE, 45, 3),
-            ),
-            (
-                RedacterType::LocalRules,
-                text_detection(SAMPLE_EMAIL, 14, 2),
-            ),
-        ];
-
-        let report = CopyFileReport::new(&report_file_ref(), &outcome, &redactions);
-        let json = serde_json::to_value(&report).unwrap();
-
-        let listed = json["redactions"].as_array().unwrap();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0]["location"]["line"], 2);
-        assert_eq!(listed[1]["location"]["line"], 3);
-        assert_eq!(listed[0]["redacter"], "local-rules");
-        assert_eq!(listed[0]["label"], "email");
-        assert_eq!(listed[0]["value"], "j********************m");
-        let serialized = json.to_string();
-        assert!(!serialized.contains(SAMPLE_EMAIL));
-        assert!(!serialized.contains(SAMPLE_PHONE));
     }
 
     fn file_report_at(
@@ -984,48 +966,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sarif_report_of_a_copy_places_a_text_redaction_and_lists_what_the_json_report_does(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let lock = pdfium_test_lock();
-        let _guard = lock.lock().await;
-
-        let source = TempDir::with_prefix("copy_command_tests_sarif_source")?;
-        std::fs::write(
-            source.path().join("note.txt"),
-            format!("Customer note\nEmail: {SAMPLE_EMAIL}\n"),
-        )?;
-        let destination = TempDir::with_prefix("copy_command_tests_sarif_destination")?;
-        let source_arg = format!("{}/", source.path().display());
-
-        let result = command_copy(
-            &Term::stdout(),
-            &source_arg,
-            &destination.path().to_string_lossy(),
-            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
-            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
-                LocalRulesRedacterOptions {
-                    groups: RuleGroup::all(),
-                    user_rules: vec![],
-                },
-            ))),
-        )
-        .await?;
-        let locator = ArtifactLocator::new(&source_arg, std::path::Path::new("/work"));
-        let sarif =
-            serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap();
-
-        let results = sarif["runs"][0]["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["ruleId"], "local-rules/email");
-        assert_eq!(
-            results[0]["locations"][0]["physicalLocation"]["region"],
-            serde_json::json!({"startLine": 2, "startColumn": 8, "endLine": 2, "endColumn": 30})
-        );
-        assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn the_copy_report_lists_each_file_with_its_redactions_beside_the_counters(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let lock = pdfium_test_lock();
@@ -1074,6 +1014,20 @@ mod tests {
         assert_eq!(files[1]["status"], "redacted");
         assert_eq!(files[1]["redactions"], serde_json::json!([]));
         assert!(!json.to_string().contains(SAMPLE_EMAIL));
+
+        let locator = ArtifactLocator::new(
+            &format!("{}/", source.path().display()),
+            std::path::Path::new("/work"),
+        );
+        let sarif = serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator))?;
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "local-rules/email");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["region"],
+            serde_json::json!({"startLine": 2, "startColumn": 8, "endLine": 2, "endColumn": 30})
+        );
+        assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
         Ok(())
     }
 

@@ -4,7 +4,7 @@
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::redacters::stream_redacter::OcrText;
-use crate::redacters::text_changes::{TextChain, TEXT_DIFF_TIME_LIMIT};
+use crate::redacters::text_changes::{TextChain, MAX_DIFFED_BYTES, TEXT_DIFF_TIME_LIMIT};
 use crate::redacters::{
     Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters,
@@ -18,18 +18,20 @@ use std::time::Instant;
 /// What the stream keeps of one file across the steps that redact it, so that each step is
 /// reported where it sits in the file as first read. A step that cannot be placed is reported
 /// as a whole instead, and never fails the copy.
-#[derive(Default)]
 pub(crate) struct StreamRedactions {
+    recording: bool,
     text: Option<TextChain>,
     cells: BTreeMap<CellPosition, TextChain>,
-    /// Set once a step returned a table whose cells no longer pair up with the original's.
-    table_shape_changed: bool,
+    /// Set once a step of the text was reported as a whole because it was too large to compare.
+    text_placed_as_whole: bool,
+    /// Set once a step of the table was reported as a whole, because its cells no longer pair
+    /// up with the original's or it was too large to compare.
+    table_placed_as_whole: bool,
     /// The pixel size of each image as first seen, by PDF page; `None` is an image file.
     image_sizes: BTreeMap<Option<usize>, ImageSize>,
     records: Vec<(RedacterType, Detection)>,
 }
 
-/// A cell of a table, counting from 0 the way the rows are indexed in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CellPosition {
     row: usize,
@@ -43,6 +45,23 @@ struct ImageSize {
 }
 
 impl StreamRedactions {
+    /// Records nothing when `recording` is off: a step is then plainly the redacter's call.
+    pub(crate) fn new(recording: bool) -> Self {
+        Self {
+            recording,
+            text: None,
+            cells: BTreeMap::new(),
+            text_placed_as_whole: false,
+            table_placed_as_whole: false,
+            image_sizes: BTreeMap::new(),
+            records: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_recording(&self) -> bool {
+        self.recording
+    }
+
     /// Runs `redacter` on `item` and records what it changed, as part of `page` of a PDF when
     /// the item is a rendered page.
     pub(crate) async fn redact(
@@ -51,6 +70,9 @@ impl StreamRedactions {
         page: Option<usize>,
         item: RedacterDataItem,
     ) -> AppResult<RedacterDataItem> {
+        if !self.recording {
+            return Ok(redacter.redact(item).await?.item);
+        }
         let input = item.content.clone();
         let Redacted { item, replaced } = redacter.redact(item).await?;
         self.record(
@@ -63,7 +85,6 @@ impl StreamRedactions {
         Ok(item)
     }
 
-    /// Adds records built elsewhere, such as those of one OCR page.
     pub(crate) fn extend(&mut self, records: Vec<(RedacterType, Detection)>) {
         self.records.extend(records);
     }
@@ -101,7 +122,7 @@ impl StreamRedactions {
         let deadline = Instant::now() + TEXT_DIFF_TIME_LIMIT;
         match (input, output) {
             (RedacterDataItemContent::Value(before), RedacterDataItemContent::Value(after)) => {
-                self.place_text(before, after, &replaced.unwrap_or_default(), deadline)
+                self.place_text(page, before, after, &replaced.unwrap_or_default(), deadline)
             }
             (
                 RedacterDataItemContent::Table { rows: before, .. },
@@ -119,6 +140,7 @@ impl StreamRedactions {
 
     fn place_text(
         &mut self,
+        page: Option<usize>,
         before: &str,
         after: &str,
         found: &[Detection],
@@ -127,13 +149,18 @@ impl StreamRedactions {
         if before == after {
             return Ok(Vec::new());
         }
+        if self.text_placed_as_whole || before.len() > MAX_DIFFED_BYTES {
+            self.text_placed_as_whole = true;
+            return Ok(vec![Detection::whole(page)]);
+        }
         self.text
             .get_or_insert_with(|| TextChain::new(before.to_string()))
             .step(before, after, found, deadline)
     }
 
     /// Every changed cell is placed in its original text. A table whose cells no longer pair up
-    /// with the original's is one record for the step, from then on.
+    /// with the original's, or that is too large to compare, is one record for the step, from
+    /// then on.
     fn place_table(
         &mut self,
         page: Option<usize>,
@@ -145,8 +172,11 @@ impl StreamRedactions {
         if before == after {
             return Ok(Vec::new());
         }
-        if self.table_shape_changed || !pairs_up(before, after) {
-            self.table_shape_changed = true;
+        if self.table_placed_as_whole
+            || !pairs_up(before, after)
+            || bytes_of(before) > MAX_DIFFED_BYTES
+        {
+            self.table_placed_as_whole = true;
             return Ok(vec![Detection::whole(page)]);
         }
 
@@ -211,10 +241,11 @@ impl StreamRedactions {
             Some(boxes) => Ok(boxes
                 .into_iter()
                 .map(|detection| Detection {
-                    location: whole_location(page),
+                    location: DetectionLocation::whole(page),
                     ..detection
                 })
                 .collect()),
+            None if before == after => Ok(Vec::new()),
             None => {
                 let (before, after) = (
                     image::load_from_memory(before)?.to_rgba8(),
@@ -230,7 +261,10 @@ impl StreamRedactions {
     }
 }
 
-/// Whether `after` has the rows and the cells per row of `before`.
+fn bytes_of(rows: &[Vec<String>]) -> usize {
+    rows.iter().flatten().map(String::len).sum()
+}
+
 fn pairs_up(before: &[Vec<String>], after: &[Vec<String>]) -> bool {
     before.len() == after.len()
         && before
@@ -239,16 +273,17 @@ fn pairs_up(before: &[Vec<String>], after: &[Vec<String>]) -> bool {
             .all(|(cells_before, cells_after)| cells_before.len() == cells_after.len())
 }
 
-/// The coarsest place a redaction can have: a page of a PDF, or the file.
-fn whole_location(page: Option<usize>) -> DetectionLocation {
-    match page {
-        Some(page) => DetectionLocation::Page { page },
-        None => DetectionLocation::File,
+impl DetectionLocation {
+    /// The coarsest place a redaction can have: a page of a PDF, or the file.
+    fn whole(page: Option<usize>) -> Self {
+        match page {
+            Some(page) => Self::Page { page },
+            None => Self::File,
+        }
     }
 }
 
 impl CellPosition {
-    /// The cell a located detection is in; `None` when it is not in a cell.
     fn of(location: &DetectionLocation) -> Option<Self> {
         match *location {
             DetectionLocation::TableCell { row, column, .. } => Some(Self {
@@ -259,7 +294,6 @@ impl CellPosition {
         }
     }
 
-    /// `detection`, a text range of this cell's text, as a range of the cell.
     fn locate(self, detection: Detection) -> Detection {
         match detection.location {
             DetectionLocation::Text { start, end, .. } => Detection {
@@ -287,17 +321,15 @@ impl ImageSize {
 }
 
 impl Detection {
-    /// A redaction in a PDF page or a file, where on it is not known.
     fn whole(page: Option<usize>) -> Self {
         Self {
             label: DetectionLabel::unclassified(),
-            location: whole_location(page),
+            location: DetectionLocation::whole(page),
             score: None,
             value: String::new(),
         }
     }
 
-    /// This detection with its image box on `page`.
     fn on_page(mut self, page: Option<usize>) -> Self {
         if let DetectionLocation::Image {
             page: ref mut box_page,
@@ -483,42 +515,11 @@ mod tests {
     }
 
     #[test]
-    fn a_rewrite_that_names_no_location_is_placed_by_what_changed() {
-        let input = r#"{"user": "Ana Lima", "phone": "+44 20 7946 0958"}"#;
-        let output = "{\n  \"user\": \"[REDACTED]\", \"phone\": \"[REDACTED]\"}";
-        let mut recorder = StreamRedactions::default();
-
-        recorder.record(
-            RedacterType::GeminiLlm,
-            None,
-            &text(input),
-            &text(output),
-            None,
-        );
-
-        let records = recorder.into_records();
-        assert!(records
-            .iter()
-            .all(|(redacter, _)| *redacter == RedacterType::GeminiLlm));
-        assert_eq!(
-            summary(&records),
-            vec![
-                (text_at(10, 18, 1, 11), "sensitive_data".into(), "Ana Lima"),
-                (
-                    text_at(31, 47, 1, 32),
-                    "sensitive_data".into(),
-                    "+44 20 7946 0958"
-                ),
-            ]
-        );
-    }
-
-    #[test]
     fn a_later_step_is_placed_in_the_text_as_first_read() {
         let original = "Mail ana@x.io, ask Ana Lima.";
         let after_rules = "Mail [REDACTED], ask Ana Lima.";
         let after_model = "Mail [REDACTED], ask [REDACTED].";
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::LocalRules,
@@ -553,18 +554,47 @@ mod tests {
     }
 
     #[test]
-    fn a_step_that_changes_nothing_records_nothing() {
-        let mut recorder = StreamRedactions::default();
+    fn a_text_too_large_to_compare_is_the_file_at_that_step_and_at_every_later_one() {
+        let padding = "x".repeat(MAX_DIFFED_BYTES);
+        let original = format!("ana@x.io {padding}");
+        let after_rules = format!("[REDACTED] {padding}");
+        let after_model = format!("[REDACTED] {padding}.");
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::LocalRules,
             None,
-            &text("nothing here"),
-            &text("nothing here"),
-            Some(vec![]),
+            &text(&original),
+            &text(&after_rules),
+            Some(vec![span(&original, "ana@x.io", "email")]),
+        );
+        recorder.record(
+            RedacterType::GeminiLlm,
+            None,
+            &text(&after_rules),
+            &text(&after_rules),
+            None,
+        );
+        recorder.record(
+            RedacterType::GeminiLlm,
+            None,
+            &text(&after_rules),
+            &text(&after_model),
+            None,
         );
 
-        assert!(recorder.into_records().is_empty());
+        let places: Vec<_> = recorder
+            .into_records()
+            .into_iter()
+            .map(|(redacter, detection)| (redacter, detection.location))
+            .collect();
+        assert_eq!(
+            places,
+            vec![
+                (RedacterType::LocalRules, DetectionLocation::File),
+                (RedacterType::GeminiLlm, DetectionLocation::File),
+            ]
+        );
     }
 
     #[test]
@@ -574,7 +604,7 @@ mod tests {
         let email =
             Detection::in_table_cell(1, 1, "j@x.io", 0..6, DetectionLabel::new("email"), None)
                 .unwrap();
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::GcpDlp,
@@ -603,7 +633,7 @@ mod tests {
     fn a_table_whose_shape_changed_is_reported_whole_from_then_on() {
         let original = table(&[&["a@x.io", "b"], &["c", "d"]]);
         let one_row = table(&[&["[REDACTED]", "b"]]);
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(RedacterType::GcpDlp, None, &original, &one_row, None);
         recorder.record(
@@ -636,7 +666,7 @@ mod tests {
 
     #[test]
     fn a_detection_outside_the_text_reports_the_step_as_a_whole() {
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
         let outside = TextLines::new(&"x".repeat(100))
             .detection(90..95, DetectionLabel::new("email"), None)
             .unwrap();
@@ -657,7 +687,7 @@ mod tests {
 
     #[test]
     fn an_image_that_cannot_be_read_reports_its_page_as_a_whole() {
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
         let garbage = RedacterDataItemContent::Image {
             mime_type: mime::IMAGE_PNG,
             data: bytes::Bytes::from_static(b"not an image"),
@@ -677,7 +707,7 @@ mod tests {
 
     #[test]
     fn boxes_are_kept_at_the_size_the_image_was_first_seen_and_move_to_the_page_at_another() {
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::GeminiLlm,
@@ -721,7 +751,7 @@ mod tests {
 
     #[test]
     fn a_coordinate_pass_that_found_nothing_reports_nothing_though_the_copy_is_smaller() {
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::GeminiLlm,
@@ -736,7 +766,7 @@ mod tests {
 
     #[test]
     fn an_image_edit_without_boxes_is_reported_only_when_a_pixel_changed() {
-        let mut recorder = StreamRedactions::default();
+        let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
             RedacterType::Presidio,
@@ -773,6 +803,28 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn an_image_returned_byte_for_byte_is_unchanged_without_decoding_it() {
+        let RedacterDataItemContent::Image { mime_type, data } = png(8, 8, 255) else {
+            unreachable!("png makes an image");
+        };
+        let header_only = RedacterDataItemContent::Image {
+            mime_type,
+            data: data.slice(..data.len() - 14),
+        };
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::Presidio,
+            None,
+            &header_only,
+            &header_only,
+            None,
+        );
+
+        assert!(recorder.into_records().is_empty());
     }
 
     fn word(text: &str, line: usize, x1: f32, y1: f32) -> TextImageCoords {

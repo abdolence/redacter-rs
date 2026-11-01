@@ -366,6 +366,7 @@ mod tests {
                 csv_delimiter: None,
                 sampling_size: None,
                 limit_dlp_requests: None,
+                list_redactions: false,
             },
         }
     }

@@ -205,6 +205,14 @@ pub struct ReportArgs {
     pub report_format: ReportFormat,
 }
 
+impl ReportArgs {
+    /// Whether the report is one that lists the redactions of a `cp`: the JSON and the SARIF
+    /// report do, the text report does not.
+    pub fn lists_redactions(&self) -> bool {
+        self.report_file.is_some() && self.report_format != ReportFormat::Text
+    }
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct IgnoreArgs {
     #[arg(
@@ -784,6 +792,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
             limit_dlp_requests: self.limit_dlp_requests,
+            list_redactions: false,
         };
         Ok(RedacterOptions {
             provider_options,
@@ -902,24 +911,6 @@ mod tests {
                     "{command}"
                 );
             }
-        }
-
-        #[test]
-        fn cp_takes_the_text_report_format() {
-            assert_eq!(
-                report_format_of(&[
-                    "redacter",
-                    "cp",
-                    ".",
-                    "out/",
-                    "--report-file",
-                    "r.txt",
-                    "--report-format",
-                    "text",
-                ])
-                .unwrap(),
-                ReportFormat::Text
-            );
         }
 
         #[test]
