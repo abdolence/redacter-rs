@@ -7,7 +7,7 @@ use futures::{Stream, TryStreamExt};
 use gcloud_sdk::prost::bytes;
 use rvstruct::ValueStruct;
 use std::path::{Path, PathBuf};
-use tokio::fs::File;
+use tempfile::TempPath;
 
 /// The path a local source names. On Windows a `file://` URL puts a slash of its own before the
 /// drive letter: `file:///C:/project` is `C:/project`. Elsewhere `/C:/project` is an absolute path.
@@ -137,17 +137,42 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
         input: S,
         file_ref: Option<&FileSystemRef>,
     ) -> AppResult<()> {
-        let file_path = PathBuf::from(self.resolve(file_ref).file_path);
+        let requested_path = PathBuf::from(self.resolve(file_ref).file_path);
 
-        if let Some(parent) = file_path.parent() {
+        if let Some(parent) = requested_path.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
 
-        let mut file = File::create(file_path).await?;
+        // The content is written beside the destination and renamed over it once complete, so a
+        // failed copy leaves neither a partial file nor a truncated one it would have replaced.
+        // A symlink at the destination is resolved first, because the rename would replace the
+        // link itself and a plain write goes through it.
+        let file_path = tokio::fs::canonicalize(&requested_path)
+            .await
+            .unwrap_or(requested_path);
+        let file_name = file_path.file_name().ok_or_else(|| AppError::SystemError {
+            message: format!("`{}` has no file name", file_path.to_string_lossy()),
+        })?;
+        let partial = TempPath::try_from_path(file_path.with_file_name(format!(
+            ".{}.{:016x}.partial",
+            file_name.to_string_lossy(),
+            rand::random::<u64>()
+        )))?;
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .await?;
+        if let Ok(replaced) = tokio::fs::metadata(&file_path).await {
+            file.set_permissions(replaced.permissions()).await?;
+        }
         let mut reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
         tokio::io::copy(&mut reader, &mut file).await?;
+        drop(file);
+        partial.persist(&file_path).map_err(std::io::Error::from)?;
         Ok(())
     }
 
@@ -197,7 +222,7 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
     }
 }
 
-#[allow(unused_imports)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::file_systems::DetectFileSystem;
@@ -290,6 +315,128 @@ mod tests {
 
         fs.close().await?;
 
+        Ok(())
+    }
+
+    async fn open_directory<'a>(
+        directory: &Path,
+        reporter: &'a AppReporter<'a>,
+    ) -> AppResult<LocalFileSystem<'a>> {
+        LocalFileSystem::new(&directory.to_string_lossy(), reporter).await
+    }
+
+    fn file_named(relative_path: &str) -> FileSystemRef {
+        FileSystemRef {
+            relative_path: relative_path.into(),
+            media_type: None,
+            file_size: None,
+        }
+    }
+
+    fn names_in(directory: &Path) -> Result<Vec<String>, std::io::Error> {
+        let mut names = std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        Ok(names)
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_leaves_no_file() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_failed_upload")?;
+        let mut fs = open_directory(temp_dir.path(), &reporter).await?;
+
+        let result = fs
+            .upload(
+                crate::file_systems::stream_failing_after_first_chunk(),
+                Some(&file_named("nested/temp_file.txt")),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!temp_dir.path().join("nested/temp_file.txt").exists());
+        assert_eq!(
+            names_in(&temp_dir.path().join("nested"))?,
+            Vec::<String>::new()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_keeps_the_file_it_would_have_replaced(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_keeps_existing")?;
+        let existing = temp_dir.path().join("temp_file.txt");
+        std::fs::write(&existing, "previous content")?;
+        let mut fs = open_directory(temp_dir.path(), &reporter).await?;
+
+        let result = fs
+            .upload(
+                crate::file_systems::stream_failing_after_first_chunk(),
+                Some(&file_named("temp_file.txt")),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&existing)?, "previous content");
+        assert_eq!(names_in(temp_dir.path())?, vec!["temp_file.txt"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_upload_replaces_an_existing_file(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_replaces")?;
+        let existing = temp_dir.path().join("temp_file.txt");
+        std::fs::write(&existing, "previous content that is longer")?;
+        let mut fs = open_directory(temp_dir.path(), &reporter).await?;
+
+        fs.upload(
+            futures::stream::iter(vec![Ok(bytes::Bytes::from("new content"))]),
+            Some(&file_named("temp_file.txt")),
+        )
+        .await?;
+
+        assert_eq!(std::fs::read_to_string(&existing)?, "new content");
+        assert_eq!(names_in(temp_dir.path())?, vec!["temp_file.txt"]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_replaced_file_keeps_its_permissions_and_a_symlink_keeps_pointing_at_it(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::os::unix::fs::PermissionsExt;
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_symlink")?;
+        let target = temp_dir.path().join("target.txt");
+        std::fs::write(&target, "previous content")?;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))?;
+        std::os::unix::fs::symlink(&target, temp_dir.path().join("link.txt"))?;
+        let mut fs = open_directory(temp_dir.path(), &reporter).await?;
+
+        fs.upload(
+            futures::stream::iter(vec![Ok(bytes::Bytes::from("new content"))]),
+            Some(&file_named("link.txt")),
+        )
+        .await?;
+
+        assert!(std::fs::symlink_metadata(temp_dir.path().join("link.txt"))?
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&target)?, "new content");
+        assert_eq!(
+            std::fs::metadata(&target)?.permissions().mode() & 0o777,
+            0o640
+        );
         Ok(())
     }
 

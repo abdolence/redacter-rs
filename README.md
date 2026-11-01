@@ -412,6 +412,10 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 - Zip archive: `zip://tmp/archive.zip`
 - Clipboard: `clipboard://`
 
+A copy that fails leaves no partial output at a local or zip destination. A local file is written to a temporary file
+beside the destination and renamed into place once complete, so a file it would have replaced stays intact. A zip
+archive is deleted, because the format cannot drop a single entry.
+
 ## DLP and redacters
 
 ### Google Cloud Platform DLP
