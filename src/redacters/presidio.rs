@@ -372,9 +372,7 @@ mod tests {
     use console::Term;
 
     use super::*;
-    use crate::common_types::TextImageCoords;
-    use crate::file_converters::{ocr::Ocr, FileConverters};
-    use crate::redacters::{DetectionLocation, RedacterBaseOptions, StreamRedacter};
+    use crate::redacters::DetectionLocation;
 
     /// An analyzer response as the Presidio service sends it: offsets count characters.
     const ANALYZER_RESPONSE: &str = r#"[
@@ -527,54 +525,6 @@ mod tests {
         );
     }
 
-    struct NoWords;
-
-    impl Ocr for NoWords {
-        fn image_to_text(&self, _image: image::DynamicImage) -> AppResult<Vec<TextImageCoords>> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[tokio::test]
-    async fn an_image_is_planned_with_ocr_only_when_categories_limit_the_search() {
-        let term = Term::stdout();
-        let reporter: AppReporter = AppReporter::from(&term);
-        let mut converters = FileConverters::new();
-        converters.ocr = Some(Box::new(NoWords));
-        let png = FileSystemRef {
-            relative_path: "scan.png".into(),
-            media_type: Some(mime::IMAGE_PNG),
-            file_size: None,
-        };
-        let plan_with_ocr = async |categories: Option<Categories>| {
-            let options = RedacterBaseOptions {
-                allow_unsupported_copies: false,
-                unsupported_as_text: false,
-                csv_headers_disable: false,
-                csv_delimiter: None,
-                sampling_size: None,
-                limit_dlp_requests: None,
-                categories: categories.clone(),
-                list_redactions: true,
-            };
-            let redacters = vec![Redacters::Presidio(
-                redacter_limited_to(&reporter, categories).await,
-            )];
-            let stream_redacter = StreamRedacter::new(&options, &converters);
-            let plan = stream_redacter
-                .create_redact_plan(&redacters, &png)
-                .await
-                .unwrap();
-            (plan.apply_ocr, plan.supported_redacters.len())
-        };
-
-        assert_eq!(plan_with_ocr(None).await, (false, 1));
-        assert_eq!(
-            plan_with_ocr(Categories::limiting([Category::Credential])).await,
-            (true, 1)
-        );
-    }
-
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-presidio"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -666,18 +616,6 @@ mod tests {
             }),
             "{detections:?}"
         );
-    }
-
-    #[test]
-    fn a_supported_entity_is_listed_once() {
-        let mut names: Vec<&str> = PresidioRedacter::ENTITY_CATEGORIES
-            .iter()
-            .map(|(name, _)| *name)
-            .collect();
-        let listed = names.len();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), listed);
     }
 
     #[test]

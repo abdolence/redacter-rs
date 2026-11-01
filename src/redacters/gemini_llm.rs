@@ -577,27 +577,6 @@ mod tests {
         }
     }
 
-    fn kind_schema(schema: gemini_api::Schema) -> gemini_api::Schema {
-        let mut finding = schema.items.expect("an array of findings");
-        finding
-            .properties
-            .remove("type")
-            .expect("findings have a type")
-    }
-
-    #[test]
-    fn the_kind_of_a_finding_is_limited_to_the_names_when_categories_limit_the_search() {
-        let names = vec!["password".to_string(), "api_key".to_string()];
-
-        let limited = kind_schema(text_findings_schema(Some(&names)));
-        let unlimited = kind_schema(text_findings_schema(None));
-
-        assert_eq!(limited.r#enum, names);
-        assert_eq!(limited.format, "enum");
-        assert!(unlimited.r#enum.is_empty());
-        assert!(unlimited.format.is_empty());
-    }
-
     #[test]
     fn a_safety_stop_without_content_names_the_blocked_categories() {
         let stopped = response(

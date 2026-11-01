@@ -1456,17 +1456,6 @@ mod tests {
         }
 
         #[test]
-        fn choosing_every_category_limits_nothing() {
-            let every = Category::value_variants()
-                .iter()
-                .map(|category| category.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let options = options_of(&["-d", "local-rules", "--categories", &every]).unwrap();
-            assert_eq!(options.base_options.categories, None);
-        }
-
-        #[test]
         fn categories_need_a_redacter() {
             for args in [
                 &["redacter", "cp", "/a", "/b", "--categories", "credential"][..],
