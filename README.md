@@ -1343,6 +1343,14 @@ For example:
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
+A text file of more than about 1 MiB is read in pieces of whole lines when every selected redacter is `local-rules` or
+`local-credential-ml`, so the text no longer sets the memory `scan` needs. Each piece is read with 16 KiB of lines on
+each side, which is enough for a value across lines such as a private key block, and a finding is reported once, at the
+location it has when the file is read whole. Other redacters, `--sampling-size` and `--unsupported-as-text` read the
+file whole. `scan -d local-rules` on a 319 MB log with 26 findings peaks near 54 MB of memory, against 731 MB before.
+The findings are still kept in memory until the reports are written, so a file with millions of findings needs memory
+for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.9 GB, against 4.8 GB.
+
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
 
