@@ -24,7 +24,7 @@ Email addresses.
 
 | Rule | Description | Validator | Keyword | Example |
 |---|---|---|---|---|
-| `email` | Email address | no | no | `john.smith@example.com` (synthetic) |
+| `email` | Email address; not the `user:password` part of a URL | no | no | `john.smith@example.com` (synthetic) |
 
 ## `phone`
 

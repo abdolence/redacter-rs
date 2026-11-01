@@ -582,9 +582,47 @@ mod tests {
     fn url_credentials() {
         assert_redacts(
             "https://alice:s3cret@example.com/path",
-            "https://[REDACTED]/path",
+            "https://[REDACTED]@example.com/path",
         );
         assert_untouched("https://example.com/path");
+    }
+
+    #[test]
+    fn url_credentials_with_an_email_like_password_keep_the_host() {
+        assert_redacts(
+            "https://alice:jane%40corp.com@example.com/path",
+            "https://[REDACTED]@example.com/path",
+        );
+        assert_redacts(
+            "ftp://alice:s3cret@localhost/path",
+            "ftp://[REDACTED]@localhost/path",
+        );
+    }
+
+    /// The user part is an address, so the credentials rule does not apply and the email rule
+    /// redacts the address on its own; the password after it stays.
+    #[test]
+    fn url_with_an_email_as_user_is_left_to_the_email_rule() {
+        assert_redacts(
+            "https://bob@corp.com:pw@host/",
+            "https://[REDACTED]:pw@host/",
+        );
+    }
+
+    #[test]
+    fn an_email_beside_a_url_with_credentials_is_still_found() {
+        assert_redacts(
+            "mail jane@example.com about https://alice:s3cret@example.com/path",
+            "mail [REDACTED] about https://[REDACTED]@example.com/path",
+        );
+        assert_redacts(
+            "https://alice:s3cret@example.com/path or mailto:jane@example.com",
+            "https://[REDACTED]@example.com/path or mailto:[REDACTED]",
+        );
+        assert_redacts(
+            "https://alice:s3cret@example.com/?cc=jane@example.com",
+            "https://[REDACTED]@example.com/?cc=[REDACTED]",
+        );
     }
 
     #[test]
