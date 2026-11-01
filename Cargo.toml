@@ -8,7 +8,13 @@ homepage = "https://github.com/abdolence/redacter-rs"
 repository = "https://github.com/abdolence/redacter-rs"
 documentation = "https://docs.rs/redacter"
 readme = "README.md"
-include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
+include = [
+    "Cargo.toml",
+    "src/**/*.rs",
+    "src/redacters/local_rules/rules/vendor/*",
+    "README.md",
+    "LICENSE",
+]
 rust-version = "1.94.0"
 keywords = ["redact", "pii", "secrets", "dlp", "scan"]
 categories = ["command-line-utilities"]
@@ -121,10 +127,12 @@ tokenizers = { version = "0.23", default-features = false, features = [
 dirs = "7.0.0"
 base64 = "0.23"
 regex = "1"
+aho-corasick = "1"
 sha2 = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
+toml = "1"
 cargo-husky = { version = "1.5", default-features = false, features = [
     "run-for-all",
     "prepush-hook",

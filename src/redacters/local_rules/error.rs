@@ -16,6 +16,8 @@ pub enum LocalRulesError {
     InvalidInlineRule { value: String },
     #[error("rule file {path}: {reason}")]
     RuleFile { path: String, reason: String },
+    #[error("the keywords of the vendored rules cannot be indexed: {reason}")]
+    InvalidKeywords { reason: String },
     #[error("no local rules are enabled: every group is disabled and no custom rules were given")]
     NoRules,
 }
