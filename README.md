@@ -228,6 +228,20 @@ Options:
       --gcp-dlp-stored-info-type <GCP_DLP_STORED_INFO_TYPE>
           Additional GCP DLP user defined stored info types for redaction
 
+      --categories <CATEGORIES>
+          Data categories to look for, comma separated; secrets is accepted for credential. scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category
+          
+          Possible values:
+          - person
+          - contact
+          - address
+          - id-number
+          - financial
+          - date-of-birth
+          - credential:    `secrets` is accepted on the command line for the user's word and the name of the local-rules group that finds credentials; everything printed says `credential`
+          - network
+          - other
+
       --llm-image-mode <LLM_IMAGE_MODE>
           How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images
 
@@ -358,6 +372,127 @@ With DLP enabled, the tool will redact files based on the DLP model and skip uns
 `--report-format text`, as a [SARIF report](#sarif-report) with `--report-format sarif`, or as an
 [OCSF report](#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
 is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
+
+`--categories` limits a run to some kinds of data, such as credentials only. `scan` takes it too, see
+[Limiting to data categories](#limiting-to-data-categories).
+
+### Limiting to data categories
+
+`--categories` takes a comma separated list of the categories to look for and needs `--redact`. Without it every
+category is in scope. `scan` reports only the findings in the chosen categories. `cp` redacts only the data in the
+chosen categories and copies everything else as it is.
+
+Be aware that `cp` with `--categories` leaves the data outside the chosen categories in the copy. Use it to remove one
+kind of data from files, and leave the option out, or name every kind that must go, for a copy that is safe to share.
+
+Every finding of every redacter is in exactly one of nine categories:
+
+| Category | Holds |
+|---|---|
+| `person` | Names of people and user names |
+| `contact` | Email addresses, phone and fax numbers |
+| `address` | Street addresses, postcodes and geographic coordinates |
+| `id-number` | National, tax, passport, driving licence, health, customer, employee, vehicle and device identifiers |
+| `financial` | Payment card numbers and their security codes, bank account and routing numbers, IBAN and SWIFT codes |
+| `date-of-birth` | Dates of birth |
+| `credential` | Passwords, PINs, API keys, access tokens, private keys, session cookies and other secrets |
+| `network` | IP addresses, MAC addresses and URLs |
+| `other` | Any other personal or sensitive information, such as organisations, places, other dates, ages, genders and medical details |
+
+`secrets` is accepted as another name for `credential`; the reports always say `credential`. A rule or a label that
+the list of its redacter does not place is `other`, which includes every rule of `--local-rule` and
+`--local-rules-file` and every stored info type of `--gcp-dlp-stored-info-type`. Naming all nine categories limits
+nothing, and the output is the same as without the option.
+
+How a redacter honours the categories depends on what its service lets the tool ask for. A redacter is *narrowed* when
+its request or configuration holds only the chosen categories, so the other kinds are not looked for at all, and
+*filtered* when it looks for everything and the tool drops the findings outside the chosen categories. For a
+filtered redacter `cp` detects the values and masks them itself, with one provider call for each item, as without
+the option.
+
+| Redacter | `scan` | `cp` on text | Images and PDF pages |
+|---|---|---|---|
+| `local-rules` | Narrowed: only the rule groups of the chosen categories run | The same groups; a value becomes `[REDACTED]` | OCR, then as for text |
+| `local-ner` | Narrowed: `per` is `person`, `org` and `loc` are `other` | The same entities; `[REDACTED]` | OCR, then as for text |
+| `local-gliner` | Narrowed: only the default labels of the chosen categories are asked for | The same labels; `[REDACTED]` | OCR, then as for text |
+| `local-credential-ml` | Runs only when `credential` is chosen | The same; `[REDACTED]` | OCR, then as for text |
+| `gcp-dlp` | Narrowed: only the info types of the chosen categories are in the request | The same info types; `[REDACTED]` | Read by DLP with the same info types |
+| `aws-comprehend` | Filtered | Detected, filtered and masked by the tool; one `X` for each character of the value | OCR, then as for text |
+| `presidio` | Filtered | The same as `aws-comprehend` | OCR, then as for text; the image endpoint is not used |
+| `aws-bedrock-guardrails` | Filtered | The same, with the type of the guardrail or the name of its regex in braces, such as `{EMAIL}`, in place of the value | OCR, then as for text |
+| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | Narrowed and filtered: the prompt asks only for the types of the chosen categories | Detected with that prompt, filtered and masked as for `aws-comprehend`; the model does not rewrite the text | OCR, then as for text; the model does not read the image |
+
+The category of a model's finding is the model's judgment, as the finding is, and a value can land in the wrong one.
+GLiNER given fewer labels can also settle on slightly different spans for the labels that remain.
+
+Presidio and the LLM redacters read an image with OCR under `--categories`, where without it they read the image
+themselves: the Presidio image endpoint takes no list of entities, and a model returns boxes with no category. The
+text OCR reads goes through the text path above, and the words found are blacked out. This has consequences:
+
+- the `ocr` addon is needed, see [Addons](#addons), and PDF pages need the `pdf` addon too. Without them the file is not
+  redacted: `scan` reports it as blocked and exits with 1, and `cp` skips it, or copies it as it is with
+  `--allow-unsupported-copies`;
+- text that OCR cannot read, such as handwriting or stylised lettering, is not found, where a model reading the image
+  could have found it;
+- as without `--categories`, a redacter that reads the image itself (GCP DLP) takes it, and OCR is used only when none
+  does, see [Multiple redacters](#multiple-redacters).
+
+#### Categories and redacter options
+
+The categories meet the options of a redacter as an intersection: a detector runs when its option selects it and its
+category is chosen.
+
+- A default list is narrowed without a message: the rule groups when `--local-rules` is absent, the entities of
+  `--local-ner-entities`, the default `--local-gliner-labels` and the 28 default info types of GCP DLP.
+- A value named on the command line is checked, and one outside the chosen categories is refused before any file is
+  read. This covers `--local-rules`, `--local-ner-entities`, `--local-gliner-labels`, `--gcp-dlp-built-in-info-type`,
+  `--gcp-dlp-stored-info-type`, `--local-rule` and `--local-rules-file`. `--local-rules-disable` only removes groups,
+  so it is applied after.
+- A redacter left with nothing to find is refused too.
+- The options that steer how Presidio and the LLM redacters redact images are refused, since those redacters read
+  images with OCR instead: `--llm-image-mode`, `--presidio-image-redact-url`, `--gemini-image-model`,
+  `--open-ai-image-model` and `--gcp-vertex-ai-image-model`.
+
+```
+$ redacter scan . -d local-rules --local-rules email,secrets --categories credential
+Error: --local-rules email is in the contact category, which --categories leaves out
+
+$ redacter scan . -d local-ner --categories credential
+Error: local-ner finds nothing in the chosen categories: credential
+```
+
+A redacter finds nothing when no rule group, entity, label or info type of it is in the chosen categories. This is
+checked for `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `gcp-dlp` and `aws-comprehend`, which has
+no entity type for `date-of-birth`. Presidio and Guardrails are configured on their server or in AWS, so they run and
+may find nothing: Presidio has no recogniser for `credential`. The LLM redacters can find any category.
+
+`cp` fails a file when an LLM redacter or Guardrails names a value in the chosen categories that the tool cannot place
+in the text. The file is reported as an error and is not copied, since copying it would leave the value in place. A value
+outside the chosen categories that cannot be placed is ignored, and does not make a file unconfirmed in `scan`.
+
+#### Categories in the reports
+
+With `--categories` the reports state the categories, and without it they have no such field or line. The
+[JSON report](#json-report) of `scan` and the [copy report](#copy-report) have `categories`, the
+[SARIF report](#sarif-report) has it in the properties of the run, and the [text report](#text-report) starts with a
+`Categories:` line. The terminal shows the categories at the end of the line that lists the redacters and converters
+and at the end of the closing summary line. A finding in the `credential` category is High severity in the
+[OCSF report](#ocsf-report).
+
+#### Examples of limiting to categories
+
+A CI job that fails on a secret in the repository. With `--categories credential`, `local-rules` runs the `secrets` and
+`url` groups only:
+
+```sh
+redacter scan . -d local-rules --categories credential --unsupported-as-text --report-file scan-report.json
+```
+
+A copy that removes emails and phone numbers and leaves the rest of the files as they are:
+
+```sh
+redacter cp -d local-rules --categories contact customers/ redacted/
+```
 
 ### Copy report
 
@@ -1156,6 +1291,9 @@ For example:
   but not tables, is skipped.
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
+
+`scan` can look for some kinds of data only, such as credentials, with `--categories`, see
+[Limiting to data categories](#limiting-to-data-categories).
 
 `scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and an inline
 marker, see [Ignoring files and findings](#ignoring-files-and-findings).
