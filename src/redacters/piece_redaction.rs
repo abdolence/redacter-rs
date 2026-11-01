@@ -88,7 +88,6 @@ struct ChainStep<'a> {
     mask: TextMask,
     /// How much of the window it reads on each side of the piece.
     reach: usize,
-    max_request_bytes: usize,
 }
 
 /// The chain of redacters that read the windows of one file.
@@ -131,14 +130,12 @@ impl<'a> PieceRedaction<'a> {
             .collect::<AppResult<Vec<TextPieceLimits>>>()?;
         let steps = redacters
             .iter()
-            .zip(&limits)
             .zip(PieceLayout::chain_reaches(&limits))
-            .map(|((redacter, limits), reach)| ChainStep {
+            .map(|(redacter, reach)| ChainStep {
                 redacter,
                 redacter_type: redacter.redacter_type(),
                 mask: redacter.text_mask(),
                 reach,
-                max_request_bytes: limits.max_request_bytes,
             })
             .collect();
         Ok(Self {
@@ -175,7 +172,7 @@ impl<'a> PieceRedaction<'a> {
             };
             // The first step reads the window as it was read, which the layout cut to its reach.
             let reach = if index == 0 { usize::MAX } else { step.reach };
-            let cut = step_window(read, text, changes, &piece, reach, step.max_request_bytes)?;
+            let cut = step_window(read, changes, &piece, reach);
             let item = RedacterDataItem {
                 content: RedacterDataItemContent::Value(text[cut.clone()].to_string()),
                 file_ref: self.file_ref.clone(),
@@ -497,84 +494,30 @@ pub(crate) fn written_windows() -> (
     (sender, Box::new(Box::pin(stream)))
 }
 
-/// The part of `masked` that a step reading `reach` bytes of `read` on each side of `piece` is
-/// given, where `masked` is `read` with the changes of the steps before it.
+/// The part of the window as the steps before a step left it that the step reads: `reach` bytes
+/// of `read` on each side of `piece`, where `changes` are the masks the steps before made in
+/// `read`.
 ///
 /// The part never cuts a mask: a cut that falls inside one leaves the mask out, which loses
-/// nothing since a mask holds nothing to detect. It is never longer than `max_request_bytes`;
-/// when the masks make it so, the context shrinks first.
+/// nothing since a mask holds nothing to detect. Masks can make it longer than the same part of
+/// `read`.
 fn step_window(
     read: &str,
-    masked: &str,
     changes: &TextChanges,
     piece: &Range<usize>,
     reach: usize,
-    max_request_bytes: usize,
-) -> AppResult<Range<usize>> {
-    let from = char_start_at_or_before(read, piece.start.saturating_sub(reach));
-    let to = char_start_at_or_after(read, piece.end.saturating_add(reach).min(read.len()));
-    let after_mask = |position: usize| match changes.in_output(position) {
+) -> Range<usize> {
+    let from = read.floor_char_boundary(piece.start.saturating_sub(reach));
+    let to = read.ceil_char_boundary(piece.end.saturating_add(reach));
+    let start = match changes.in_output(from) {
         OutputPosition::At(position) => position,
         OutputPosition::Inside(mask) => mask.end,
     };
-    let before_mask = |position: usize| match changes.in_output(position) {
+    let end = match changes.in_output(to) {
         OutputPosition::At(position) => position,
         OutputPosition::Inside(mask) => mask.start,
     };
-    let (mut start, mut end) = (after_mask(from), before_mask(to));
-    let (piece_start, piece_end) = (after_mask(piece.start), before_mask(piece.end));
-
-    let excess = (end - start).saturating_sub(max_request_bytes);
-    if excess > 0 {
-        let before = piece_start.saturating_sub(start);
-        let after = end.saturating_sub(piece_end);
-        let mut trim_before = before.min(excess.div_ceil(2));
-        let trim_after = after.min(excess - trim_before);
-        trim_before = before.min(excess - trim_after);
-        if trim_before + trim_after < excess {
-            return Err(AppError::TextPieceMaskedTooLong {
-                piece_bytes: piece_end.saturating_sub(piece_start),
-                max_request_bytes,
-            });
-        }
-        start = outside_mask_after(masked, changes, start + trim_before);
-        end = outside_mask_before(masked, changes, end - trim_after);
-    }
-    Ok(start..end.max(start))
-}
-
-/// `position`, or the character start before it, as a character start of `text` clear of the
-/// masks of `changes`: a position inside a mask moves to its start.
-fn outside_mask_before(text: &str, changes: &TextChanges, position: usize) -> usize {
-    let position = char_start_at_or_before(text, position);
-    changes
-        .enclosing_output(position)
-        .map_or(position, |mask| mask.start)
-}
-
-/// `position`, or the character start after it, as a character start of `text` clear of the
-/// masks of `changes`: a position inside a mask moves to its end.
-fn outside_mask_after(text: &str, changes: &TextChanges, position: usize) -> usize {
-    let position = char_start_at_or_after(text, position);
-    changes
-        .enclosing_output(position)
-        .map_or(position, |mask| mask.end)
-}
-
-fn char_start_at_or_before(text: &str, position: usize) -> usize {
-    let mut position = position.min(text.len());
-    while !text.is_char_boundary(position) {
-        position -= 1;
-    }
-    position
-}
-
-fn char_start_at_or_after(text: &str, position: usize) -> usize {
-    let mut position = position.min(text.len());
-    while !text.is_char_boundary(position) {
-        position += 1;
-    }
-    position
+    start..end.max(start)
 }
 
 #[cfg(test)]
@@ -670,10 +613,10 @@ mod tests {
     #[test]
     fn a_step_reads_its_reach_around_the_piece_in_the_masked_text() {
         let read = "0123456789".repeat(10);
-        let (masked, changes) = masked(&read, &[5..7, 60..62]);
+        let (_, changes) = masked(&read, &[5..7, 60..62]);
 
         // The piece is 30..50; a reach of 20 would start at 10 and end at 70 in the read text.
-        let window = step_window(&read, &masked, &changes, &(30..50), 20, 1000).unwrap();
+        let window = step_window(&read, &changes, &(30..50), 20);
 
         // 10 is after the first mask and 70 after the second, which each lengthen the text by 8.
         assert_eq!(window, 10 + 8..70 + 16);
@@ -685,56 +628,11 @@ mod tests {
         let (masked, changes) = masked(&read, &[8..14, 66..72]);
 
         // The reach of 20 around 30..50 cuts at 10 and 70, inside both masks.
-        let window = step_window(&read, &masked, &changes, &(30..50), 20, 1000).unwrap();
+        let window = step_window(&read, &changes, &(30..50), 20);
 
         // It starts after the first mask (14 in the read text) and ends before the second (66).
         assert_eq!(window, 14 + 4..66 + 4);
         assert!(!masked[window.clone()].contains('['));
-    }
-
-    #[test]
-    fn a_cut_falls_on_the_start_of_a_character() {
-        let read = "é".repeat(50);
-        let (masked, changes) = masked(&read, &[]);
-
-        let window = step_window(&read, &masked, &changes, &(40..60), 21, 1000).unwrap();
-
-        assert!(masked.is_char_boundary(window.start) && masked.is_char_boundary(window.end));
-        assert!(window.start <= 40 - 21 && window.end >= 60 + 21);
-    }
-
-    #[test]
-    fn masks_that_lengthen_the_text_shrink_the_context_and_not_the_piece() {
-        let read = "ab".repeat(100);
-        let masks: Vec<Range<usize>> = (0..100).map(|index| index * 2..index * 2 + 1).collect();
-        let (masked, changes) = masked(&read, &masks);
-
-        // Nine bytes added per mask: the piece 80..120 is 40 bytes of read text and 40 + 9 * 20
-        // of masked text.
-        let window = step_window(&read, &masked, &changes, &(80..120), 40, 260).unwrap();
-
-        assert!(window.len() <= 260, "{}", window.len());
-        let piece_start = 80 + 9 * 40;
-        let piece_end = 120 + 9 * 60;
-        assert!(window.start <= piece_start && window.end >= piece_end);
-        assert!(window.len() >= 220, "context is kept where it fits");
-    }
-
-    #[test]
-    fn a_piece_that_masks_make_longer_than_the_limit_fails() {
-        let read = "ab".repeat(100);
-        let masks: Vec<Range<usize>> = (0..100).map(|index| index * 2..index * 2 + 1).collect();
-        let (masked, changes) = masked(&read, &masks);
-
-        let result = step_window(&read, &masked, &changes, &(80..120), 40, 100);
-
-        assert!(matches!(
-            result,
-            Err(AppError::TextPieceMaskedTooLong {
-                max_request_bytes: 100,
-                ..
-            })
-        ));
     }
 
     fn text_of(chunks: AppResult<Vec<Bytes>>) -> String {

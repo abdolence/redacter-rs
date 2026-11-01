@@ -3401,4 +3401,36 @@ mod tests {
             .unwrap();
         assert_eq!(text, "Mail [REDACTED] today\n".repeat(60));
     }
+
+    #[tokio::test]
+    async fn masks_that_lengthen_the_text_do_not_stop_a_chain_from_reading_it() {
+        let redacters = vec![
+            Redacters::LocalRules(local_rules([RuleGroup::Network].into(), vec![]).await),
+            secret_rules().await,
+        ];
+        // The masks of the first step make a window longer than the 4 MiB a local step is
+        // given to read, which is a memory budget and not a limit.
+        let lines = 230_000;
+        let text: String = (0..lines)
+            .map(|index| {
+                format!(
+                    "src 1.{}.{}.{} dst 5.6.{}.8 ok\n",
+                    index % 10,
+                    (index / 10) % 10,
+                    (index / 100) % 10,
+                    index % 10
+                )
+            })
+            .collect();
+        let expected = "src [REDACTED] dst [REDACTED] ok\n".repeat(lines);
+
+        let layout = PieceLayout::chained(&[TextPieceLimits::LOCAL; 2])
+            .unwrap()
+            .unwrap();
+
+        let copied = copy_text(&base_options(), &redacters, text.as_bytes(), Some(layout)).await;
+
+        assert!(copied.chunks > 1);
+        assert!(copied.output == expected.as_bytes());
+    }
 }

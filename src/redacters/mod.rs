@@ -840,7 +840,8 @@ impl TextMask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPieceLimits {
     /// The most text, in bytes, one `detect` call is given: a piece with its context on each
-    /// side. A window is never longer, so this can be the provider's hard request limit.
+    /// side, as the file is read. A step after the first in a chain reads the same part with the
+    /// masks of the steps before it, which can be longer.
     pub max_request_bytes: usize,
     /// How much text, in bytes, the redacter needs on each side of a piece to find what it
     /// would find there in the whole text. A value no longer than twice this is found whichever

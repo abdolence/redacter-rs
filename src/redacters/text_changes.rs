@@ -117,18 +117,6 @@ impl TextChanges {
         }
     }
 
-    /// The output range of the change that `position` of the output is inside, after its start
-    /// and before its end.
-    pub(crate) fn enclosing_output(&self, position: usize) -> Option<Range<usize>> {
-        let before = self
-            .0
-            .partition_point(|change| change.output.end <= position);
-        self.0
-            .get(before)
-            .filter(|change| change.output.start < position)
-            .map(|change| change.output.clone())
-    }
-
     /// `range` of the output as the range of the input it came from. An end inside a change
     /// widens to that change's whole input range; a position outside every change shifts by
     /// the length difference of the changes before it. The result is empty only when `range`
@@ -957,20 +945,6 @@ mod tests {
 
         assert_eq!(changes.in_output(5), OutputPosition::Inside(4..14));
         assert_eq!(changes.in_output(15), OutputPosition::Inside(4..14));
-    }
-
-    #[test]
-    fn a_position_of_the_output_is_inside_a_change_between_its_start_and_its_end() {
-        let changes = TextChanges::new(vec![TextChange {
-            input: 4..16,
-            output: 4..14,
-        }]);
-
-        assert_eq!(changes.enclosing_output(3), None);
-        assert_eq!(changes.enclosing_output(4), None);
-        assert_eq!(changes.enclosing_output(5), Some(4..14));
-        assert_eq!(changes.enclosing_output(13), Some(4..14));
-        assert_eq!(changes.enclosing_output(14), None);
     }
 
     #[test]
