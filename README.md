@@ -341,10 +341,10 @@ Options:
           Write the report to this file
 
       --report-format <REPORT_FORMAT>
-          Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (values are always masked). Requires --report-file. Default is 'json'
+          Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (values are always masked in both). Requires --report-file. Default is 'json'
           
           [default: json]
-          [possible values: json, text, sarif]
+          [possible values: json, text, sarif, ocsf]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -355,8 +355,8 @@ Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
 
 `--report-file` saves the result of the command to a file as JSON by default, as the three counts with
-`--report-format text`, or as a [SARIF report](#sarif-report) with `--report-format sarif`. The terminal output is the
-same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
+`--report-format text`, as a [SARIF report](#sarif-report) with `--report-format sarif`, or as an
+[OCSF report](#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
 is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
 
 ### Copy report
@@ -1189,7 +1189,7 @@ by `*`, so the length shows, except the first and the last character of a value 
 number or an ID can be reversed by trying every candidate.
 
 `--show-values` shows the values as found, in the terminal output and in the report file.
-The SARIF report is the exception and always holds masked values.
+The SARIF and OCSF reports are the exception and always hold masked values.
 Be aware that a report written with `--show-values` contains the sensitive data itself.
 
 ### Scores
@@ -1318,7 +1318,7 @@ path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish pe
 
 ### JSON report
 
-`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text` or `sarif`. The terminal always shows the usual output,
+`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text`, `sarif` or `ocsf`. The terminal always shows the usual output,
 whatever the report options are; there is no mode that prints the JSON to stdout.
 
 The report is one JSON object with the counters of the run and an entry for each file:
@@ -1447,6 +1447,45 @@ jobs:
           sarif_file: redacter.sarif
           category: redacter-scan
 ```
+
+### OCSF report
+
+`--report-format ocsf` writes the report as [OCSF](https://schema.ocsf.io/1.9.0/) 1.9.0, the Open Cybersecurity Schema
+Framework, a vendor-neutral schema for security events. Use it to send the findings to a SIEM or a security data lake.
+`scan` and `cp` both write it, and a redaction of `cp` is a finding here.
+
+The file is NDJSON, newline-delimited JSON: one JSON object on each line and no enclosing array, so a log shipper can
+read it line by line. Every line is an event of the class Data Security Finding (`class_uid` 2006, `type_uid` 200601),
+one for each file that has findings or is unconfirmed. A run without such a file writes an empty file. A clean,
+skipped, unsupported, blocked or failed file has no event: the [JSON report](#json-report) and the exit code tell about
+them.
+
+| OCSF | What `scan` and `cp` write |
+|---|---|
+| `metadata` | `version` `1.9.0` and the `product`: `redacter`, its version and the repository URL |
+| `time`, `finding_info.created_time` | When the report was written, in milliseconds since the Unix epoch |
+| `finding_info.uid` | A hash of the URI of the file, so a file has the same `uid` in every run; the value is not part of it |
+| `file` | `name`, `path` relative to the source and the full `uri`, a `file:///` URI for a local file |
+| `data_security.discovery_details` | One entry for each redacter, label and masked value in the file: `type` is the label, `rule.name` the redacter, `value` the masked value, `count` the number of findings |
+| text finding | An `occurrences` entry with `start_line`, `end_line` and `column_number`, counted from 1 |
+| table cell | An `occurrences` entry with `row_number` and `column_number`, the header row not counted |
+| image or PDF page | An `occurrences` entry with `page_number` when there is a page |
+| `unmapped.redacter.findings` | What OCSF has no attribute for: the byte range and end column of a text finding, the byte range of a table cell, the box in pixels of an image, and the score as the redacter gave it |
+| unconfirmed file | An event with the severity Informational, no `data_security`, and `unmapped.redacter.unlocated_values` |
+
+The values are masked as in the other reports, and `--show-values` does not apply: an OCSF report is stored with a long
+retention and read by many. There is no hash of a value in it.
+
+The severity and the confidence of an event come from its findings:
+
+| Attribute | Value |
+|---|---|
+| `severity_id` | High (4) when the file has a credential: a finding of the `secrets` or `url-credentials` rules of `local-rules`, or of `local-credential-ml`. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
+| `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
+| `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
+
+Amazon Security Lake currently accepts custom sources in OCSF 1.3 or earlier only, as Parquet files, so this report is
+not accepted there as it is.
 
 ### Detection per redacter
 
