@@ -40,15 +40,17 @@ pub struct Finding {
     pub score: Option<Score>,
 }
 
-/// Sorts findings by start and drops any finding that overlaps an earlier kept one. On the
-/// same start the longest wins; on identical spans the first in input order wins, which is
-/// the rule declaration order.
+/// Sorts findings by start and unites those that overlap into one finding covering all of
+/// their spans, so no byte of any finding is left unredacted. The united finding keeps the
+/// rule and score of the one that starts first: on the same start the longest, and on
+/// identical spans the first in input order, which is the rule declaration order. Adjacent
+/// findings stay separate.
 pub fn merge_findings(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
     let mut merged: Vec<Finding> = Vec::with_capacity(findings.len());
     for finding in findings {
-        match merged.last() {
-            Some(last) if finding.start < last.end => continue,
+        match merged.last_mut() {
+            Some(last) if finding.start < last.end => last.end = last.end.max(finding.end),
             _ => merged.push(finding),
         }
     }
@@ -95,9 +97,36 @@ mod tests {
     }
 
     #[test]
-    fn merge_drops_a_finding_starting_inside_an_earlier_one() {
+    fn merge_unites_a_finding_that_starts_inside_an_earlier_one_and_runs_past_it() {
         let merged = merge_findings(vec![finding(0, 9, "a"), finding(4, 12, "b")]);
+        assert_eq!(merged, vec![finding(0, 12, "a")]);
+    }
+
+    #[test]
+    fn merge_drops_a_finding_contained_in_an_earlier_one() {
+        let merged = merge_findings(vec![finding(0, 9, "a"), finding(4, 6, "b")]);
         assert_eq!(merged, vec![finding(0, 9, "a")]);
+    }
+
+    #[test]
+    fn merge_unites_a_chain_of_overlapping_findings() {
+        let merged = merge_findings(vec![
+            finding(8, 14, "c"),
+            finding(0, 5, "a"),
+            finding(4, 10, "b"),
+            finding(20, 22, "d"),
+        ]);
+        assert_eq!(merged, vec![finding(0, 14, "a"), finding(20, 22, "d")]);
+    }
+
+    #[test]
+    fn merge_keeps_the_reach_of_a_long_finding_past_a_contained_one() {
+        let merged = merge_findings(vec![
+            finding(0, 10, "long"),
+            finding(2, 4, "inner"),
+            finding(8, 12, "tail"),
+        ]);
+        assert_eq!(merged, vec![finding(0, 12, "long")]);
     }
 
     #[test]

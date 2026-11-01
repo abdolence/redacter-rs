@@ -582,7 +582,7 @@ mod tests {
     fn url_credentials() {
         assert_redacts(
             "https://alice:s3cret@example.com/path",
-            "https://[REDACTED]@example.com/path",
+            "https://[REDACTED]/path",
         );
         assert_untouched("https://example.com/path");
     }
