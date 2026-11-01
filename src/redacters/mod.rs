@@ -66,7 +66,7 @@ pub use detection::*;
 mod text_changes;
 
 mod text_pieces;
-pub use text_pieces::*;
+pub(crate) use text_pieces::*;
 
 mod open_ai_llm;
 pub use open_ai_llm::*;
@@ -823,24 +823,25 @@ pub enum TextMask {
     Label,
 }
 
-/// How a redacter reads a text longer than one call takes, in pieces of whole lines.
+/// How a redacter reads a text longer than one call takes, in pieces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPieceLimits {
-    /// The most text one `detect` call may carry, in bytes, a piece with its context: the
-    /// provider's request limit, or the memory a local redacter may hold.
+    /// The most text, in bytes, one `detect` call is given: a piece with its context on each
+    /// side. A window is never longer, so this can be the provider's hard request limit.
     pub max_request_bytes: usize,
     /// How much text, in bytes, the redacter needs on each side of a piece to find what it
-    /// would find there in the whole text. It is read in whole lines.
+    /// would find there in the whole text. A value no longer than twice this is found whichever
+    /// way a cut falls through it.
     pub context_bytes: usize,
 }
 
 impl TextPieceLimits {
     /// What the local redacters read at once. The size is a memory bound, not a limit of the
-    /// redacter. The context holds a private key block, the longest value a local rule reads
-    /// across lines: an RSA key of 4096 bits is under 4 KiB.
+    /// redacter. The context keeps a value of up to 128 KiB safe across a cut, such as a
+    /// private key block holding an armoured keyring.
     pub const LOCAL: Self = Self {
         max_request_bytes: 1024 * 1024,
-        context_bytes: 16 * 1024,
+        context_bytes: 64 * 1024,
     };
 }
 

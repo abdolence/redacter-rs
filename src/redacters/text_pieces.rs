@@ -1,9 +1,10 @@
-//! Reads a long text in pieces of whole lines, so a redacter never holds the whole file.
+//! Reads a long text in pieces, so a redacter never holds the whole file.
 //!
-//! A piece is a run of whole lines. Pieces follow one another with no gap and no overlap, and
-//! where they fall depends on the text alone. A window is a piece with whole lines of context on
-//! each side, the text one `detect` call is given. Lines end at `\n`, so a text with no `\n` is
-//! one piece however long it is.
+//! A piece is a run of bytes that ends at a line start when it can. Pieces follow one another
+//! with no gap and no overlap, and where they fall depends on the text alone. A window is a
+//! piece with `context_bytes` of the text on each side, the text one `detect` call is given. A
+//! window is never longer than the limit it was laid out for, so a line longer than a window is
+//! cut inside, at a character boundary.
 
 use crate::errors::AppError;
 use crate::redacters::TextPieceLimits;
@@ -12,22 +13,29 @@ use bytes::Bytes;
 use futures::{Stream, TryStreamExt};
 use std::ops::Range;
 
-/// A place in a text read in pieces: the bytes and the lines that come before it.
+/// The most bytes a window can hold beyond the context it was asked for on one side, because a
+/// cut moves out to the start of a character.
+const CUT_ROUNDING_BYTES: usize = 3;
+
+/// A place in a text read in pieces: the bytes, the lines and the characters of its line before
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TextPosition {
+pub(crate) struct TextPosition {
     pub offset: usize,
     pub lines_before: usize,
+    /// The characters between the start of the line the position is on and the position.
+    pub columns_before: usize,
 }
 
 /// How a text is cut into pieces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PieceLayout {
+pub(crate) struct PieceLayout {
     piece_bytes: usize,
     context_bytes: usize,
 }
 
 impl PieceLayout {
-    /// Pieces of at least `piece_bytes` and windows with at least `context_bytes` on each side.
+    /// Pieces of at most `piece_bytes`, and `context_bytes` of the text on each side of a piece.
     pub fn new(piece_bytes: usize, context_bytes: usize) -> Self {
         Self {
             piece_bytes: piece_bytes.max(1),
@@ -36,23 +44,32 @@ impl PieceLayout {
     }
 
     /// The layout whose windows fit every one of `limits`, or `None` for no limits. Every
-    /// redacter reads the same window, so it carries the widest context asked for.
-    pub fn fitting(limits: impl IntoIterator<Item = TextPieceLimits>) -> Option<Self> {
-        let limits: Vec<TextPieceLimits> = limits.into_iter().collect();
-        let context_bytes = limits.iter().map(|limit| limit.context_bytes).max()?;
-        let window_bytes = limits.iter().map(|limit| limit.max_request_bytes).min()?;
-        Some(Self::new(
-            window_bytes.saturating_sub(2 * context_bytes),
-            context_bytes,
-        ))
+    /// redacter reads the same window, so it carries the widest context asked for, and a window
+    /// is never longer than the smallest request limit. Fails when that leaves no room for a
+    /// piece.
+    pub fn fitting(limits: &[TextPieceLimits]) -> AppResult<Option<Self>> {
+        let (Some(context_bytes), Some(window_bytes)) = (
+            limits.iter().map(|limit| limit.context_bytes).max(),
+            limits.iter().map(|limit| limit.max_request_bytes).min(),
+        ) else {
+            return Ok(None);
+        };
+        let piece_bytes = window_bytes
+            .checked_sub(2 * (context_bytes + CUT_ROUNDING_BYTES))
+            .filter(|&piece_bytes| piece_bytes > 0)
+            .ok_or(AppError::TextPieceLimitsTooTight {
+                max_request_bytes: window_bytes,
+                context_bytes,
+            })?;
+        Ok(Some(Self::new(piece_bytes, context_bytes)))
     }
 }
 
 /// A piece of the text with its context.
-#[derive(Debug, PartialEq, Eq)]
-pub struct TextWindow {
+#[derive(Debug)]
+pub(crate) struct TextWindow {
     pub text: String,
-    /// Where `text` starts in the file, at the start of a line.
+    /// Where `text` starts in the file.
     pub start: TextPosition,
     /// The byte range of the file this window's piece covers.
     pub piece: Range<usize>,
@@ -65,18 +82,20 @@ impl TextWindow {
     pub fn is_whole_text(&self) -> bool {
         self.start.offset == 0 && self.reaches_end
     }
+
+    pub fn end(&self) -> usize {
+        self.start.offset + self.text.len()
+    }
 }
 
 /// The windows of a text read from a stream, one at a time. It holds the bytes from the context
 /// of the next window to the end of the window it is reading.
-pub struct TextPieces<S> {
+pub(crate) struct TextPieces<S> {
     input: S,
     layout: PieceLayout,
-    /// The bytes read and kept, from `buffer_start`, which is the start of a line.
     buffer: Vec<u8>,
     buffer_start: TextPosition,
     input_ended: bool,
-    /// Where the next piece starts, at the start of a line.
     next_piece_start: usize,
     finished: bool,
 }
@@ -100,19 +119,16 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
         if self.finished {
             return Ok(None);
         }
-        let context = self.layout.context_bytes.max(1);
+        let context = self.layout.context_bytes;
         let piece_start = self.next_piece_start;
-        let piece_end = self
-            .line_start_at_or_after(piece_start + self.layout.piece_bytes)
-            .await?;
-        let last_piece = self.is_end_of_text(piece_end).await?;
+        let (piece_end, last_piece) = self.piece_end(piece_start).await?;
+        let window_start = self.char_start_at_or_before(piece_start.saturating_sub(context));
         let window_end = if last_piece {
             piece_end
         } else {
-            self.line_start_at_or_after(piece_end + context).await?
+            self.char_start_at_or_after(piece_end + context).await?
         };
         let reaches_end = last_piece || self.is_end_of_text(window_end).await?;
-        let window_start = self.line_start_at_or_before(piece_start.saturating_sub(context));
 
         let bytes = &self.buffer
             [window_start - self.buffer_start.offset..window_end - self.buffer_start.offset];
@@ -121,59 +137,73 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
         })?;
         let window = TextWindow {
             text,
-            start: TextPosition {
-                offset: window_start,
-                lines_before: self.buffer_start.lines_before
-                    + newlines(&self.buffer[..window_start - self.buffer_start.offset]),
-            },
+            start: self.position_of(window_start),
             piece: piece_start..piece_end,
             reaches_end,
         };
 
         self.next_piece_start = piece_end;
         self.finished = last_piece;
-        let keep_from = self.line_start_at_or_before(piece_end.saturating_sub(context));
+        let keep_from = self.char_start_at_or_before(piece_end.saturating_sub(context));
         self.drop_before(keep_from);
         Ok(Some(window))
     }
 
-    /// The first start of a line at or after `position`, or the end of the text when the text
-    /// ends first. Reads as far as it needs.
-    async fn line_start_at_or_after(&mut self, position: usize) -> AppResult<usize> {
-        if position <= self.buffer_start.offset {
-            return Ok(self.buffer_start.offset);
+    /// Where the piece that starts at `piece_start` ends, and whether it is the last. A piece
+    /// ends at the last line start it can, and inside a line when none is in reach.
+    async fn piece_end(&mut self, piece_start: usize) -> AppResult<(usize, bool)> {
+        let target = piece_start + self.layout.piece_bytes;
+        if self.is_end_of_text(target).await? {
+            return Ok((self.buffer_end(), true));
         }
-        // A line starts at `position` when the byte before it is a newline.
-        let mut search_from = position - 1;
-        loop {
-            let local = search_from - self.buffer_start.offset;
-            if local < self.buffer.len() {
-                if let Some(newline) = self.buffer[local..].iter().position(|&byte| byte == b'\n') {
-                    return Ok(self.buffer_start.offset + local + newline + 1);
-                }
-                search_from = self.buffer_end();
-            }
-            if !self.read_more().await? {
-                return Ok(self.buffer_end());
-            }
-        }
-    }
-
-    /// The last start of a line at or before `position` among the bytes kept.
-    fn line_start_at_or_before(&self, position: usize) -> usize {
-        let local = position
-            .saturating_sub(self.buffer_start.offset)
-            .min(self.buffer.len());
-        self.buffer[..local]
+        let from = piece_start - self.buffer_start.offset;
+        let to = target - self.buffer_start.offset;
+        if let Some(newline) = self.buffer[from..to]
             .iter()
             .rposition(|&byte| byte == b'\n')
-            .map_or(self.buffer_start.offset, |newline| {
-                self.buffer_start.offset + newline + 1
-            })
+        {
+            return Ok((piece_start + newline + 1, false));
+        }
+        let cut = self.char_start_at_or_before(target);
+        if cut > piece_start {
+            return Ok((cut, false));
+        }
+        // A piece shorter than a character still takes one whole character.
+        Ok((self.char_start_at_or_after(piece_start + 1).await?, false))
     }
 
-    /// Whether `position` is the end of the text. Reads until a byte at or after `position`
-    /// exists, or the input ends.
+    /// Looks back at most three bytes, so text that is not UTF-8 cannot stretch a window.
+    fn char_start_at_or_before(&self, position: usize) -> usize {
+        let mut start = position.clamp(self.buffer_start.offset, self.buffer_end());
+        for _ in 0..CUT_ROUNDING_BYTES {
+            let continues = self
+                .buffer
+                .get(start - self.buffer_start.offset)
+                .is_some_and(|&byte| is_continuation(byte));
+            if !continues || start == self.buffer_start.offset {
+                break;
+            }
+            start -= 1;
+        }
+        start
+    }
+
+    /// Reads ahead as far as it needs, and looks forward at most three bytes.
+    async fn char_start_at_or_after(&mut self, position: usize) -> AppResult<usize> {
+        let mut start = position;
+        for _ in 0..CUT_ROUNDING_BYTES {
+            if self.is_end_of_text(start).await? {
+                return Ok(self.buffer_end());
+            }
+            if !is_continuation(self.buffer[start - self.buffer_start.offset]) {
+                return Ok(start);
+            }
+            start += 1;
+        }
+        Ok(start)
+    }
+
+    /// Reads until a byte at `position` exists, or the input ends.
     async fn is_end_of_text(&mut self, position: usize) -> AppResult<bool> {
         while position >= self.buffer_end() {
             if !self.read_more().await? {
@@ -187,7 +217,6 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
         self.buffer_start.offset + self.buffer.len()
     }
 
-    /// Appends the next chunk of the input to the buffer. `false` when the input has ended.
     async fn read_more(&mut self) -> AppResult<bool> {
         while !self.input_ended {
             match self.input.try_next().await? {
@@ -202,17 +231,39 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
         Ok(false)
     }
 
-    /// Forgets the bytes before `offset`, which is the start of a line.
+    fn position_of(&self, offset: usize) -> TextPosition {
+        let before = &self.buffer[..offset - self.buffer_start.offset];
+        match before.iter().rposition(|&byte| byte == b'\n') {
+            Some(last_newline) => TextPosition {
+                offset,
+                lines_before: self.buffer_start.lines_before + newlines(before),
+                columns_before: characters(&before[last_newline + 1..]),
+            },
+            None => TextPosition {
+                offset,
+                lines_before: self.buffer_start.lines_before,
+                columns_before: self.buffer_start.columns_before + characters(before),
+            },
+        }
+    }
+
     fn drop_before(&mut self, offset: usize) {
         let local = offset - self.buffer_start.offset;
-        self.buffer_start.lines_before += newlines(&self.buffer[..local]);
-        self.buffer_start.offset = offset;
+        self.buffer_start = self.position_of(offset);
         self.buffer.drain(..local);
     }
 }
 
+fn is_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
+}
+
 fn newlines(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&byte| byte == b'\n').count()
+}
+
+fn characters(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&byte| !is_continuation(byte)).count()
 }
 
 #[cfg(test)]
@@ -238,65 +289,58 @@ mod tests {
         windows
     }
 
-    fn window(text: &str, offset: usize, lines_before: usize, piece: Range<usize>) -> TextWindow {
-        TextWindow {
-            text: text.to_string(),
-            start: TextPosition {
-                offset,
-                lines_before,
-            },
-            piece,
-            reaches_end: false,
-        }
-    }
-
     #[tokio::test]
-    async fn a_window_is_a_piece_of_whole_lines_with_whole_lines_of_context() {
+    async fn a_piece_ends_at_the_last_line_start_in_reach_and_its_window_adds_exact_context() {
         let text = "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n";
-        let found = windows(text.as_bytes(), 1000, PieceLayout::new(6, 5)).await;
+        let found = windows(text.as_bytes(), 1000, PieceLayout::new(10, 5)).await;
 
-        let reaches_end = |window: TextWindow| TextWindow {
-            reaches_end: true,
-            ..window
+        let shapes: Vec<_> = found
+            .iter()
+            .map(|window| {
+                (
+                    window.piece.clone(),
+                    window.text.as_str(),
+                    window.start,
+                    window.reaches_end,
+                )
+            })
+            .collect();
+        let start = |offset, lines_before, columns_before| TextPosition {
+            offset,
+            lines_before,
+            columns_before,
         };
         assert_eq!(
-            found,
+            shapes,
             vec![
-                window("aaa\nbbb\nccc\nddd\n", 0, 0, 0..8),
-                window("aaa\nbbb\nccc\nddd\neee\nfff\n", 0, 0, 8..16),
-                reaches_end(window("ccc\nddd\neee\nfff\nggg\n", 8, 2, 16..24)),
-                reaches_end(window("eee\nfff\nggg\n", 16, 4, 24..28)),
+                (0..8, "aaa\nbbb\nccc\nd", start(0, 0, 0), false),
+                (8..16, "\nbbb\nccc\nddd\neee\nf", start(3, 0, 3), false),
+                (16..24, "\nddd\neee\nfff\nggg\n", start(11, 2, 3), true),
+                (24..28, "\nfff\nggg\n", start(19, 4, 3), true),
             ]
         );
     }
 
     #[tokio::test]
     async fn a_text_that_fits_in_one_window_is_one_whole_window() {
-        let found = windows(b"one\ntwo\n", 3, PieceLayout::new(1000, 100)).await;
+        for text in ["one\ntwo\n", ""] {
+            let found = windows(text.as_bytes(), 3, PieceLayout::new(1000, 100)).await;
 
-        assert_eq!(found.len(), 1);
-        assert!(found[0].is_whole_text());
-        assert_eq!(found[0].text, "one\ntwo\n");
+            assert_eq!(found.len(), 1, "{text:?}");
+            assert!(found[0].is_whole_text());
+            assert_eq!(found[0].text, text);
+        }
     }
 
     #[tokio::test]
-    async fn a_text_without_bytes_is_one_empty_whole_window() {
-        let found = windows(b"", 8, PieceLayout::new(10, 10)).await;
-
-        assert_eq!(found.len(), 1);
-        assert!(found[0].is_whole_text());
-        assert_eq!(found[0].text, "");
-    }
-
-    #[tokio::test]
-    async fn pieces_tile_the_text_whatever_the_chunks_and_the_line_ends() {
+    async fn pieces_tile_the_text_whatever_the_chunks_cuts_and_line_ends() {
         let texts = [
             "alpha\nbeta\ngamma\ndelta\nepsilon",
             "crlf one\r\ncrlf two\r\ncrlf three\r\n",
             "é\né\nüüü\nλ\n日本語\n\n\n😀 x\n",
             "one very long line with no line end at all, longer than any piece",
             "short\none very long line that is longer than a piece\nshort\n",
-            "ends on a newline exactly\n",
+            "日本語 Σίσυφος 😀 on one line with no end that falls on a character",
         ];
         for text in texts {
             for layout in [
@@ -306,9 +350,16 @@ mod tests {
             ] {
                 let reference = windows(text.as_bytes(), usize::MAX, layout).await;
                 for chunk_size in [1, 2, 5] {
+                    let chunked = windows(text.as_bytes(), chunk_size, layout).await;
                     assert_eq!(
-                        windows(text.as_bytes(), chunk_size, layout).await,
-                        reference,
+                        chunked
+                            .iter()
+                            .map(|window| (&window.text, window.start, &window.piece))
+                            .collect::<Vec<_>>(),
+                        reference
+                            .iter()
+                            .map(|window| (&window.text, window.start, &window.piece))
+                            .collect::<Vec<_>>(),
                         "{text:?} in chunks of {chunk_size}"
                     );
                 }
@@ -319,18 +370,17 @@ mod tests {
                         "{text:?}: no gap, no overlap"
                     );
                     next_piece = found.piece.end;
-                    assert!(
-                        found.piece.start == 0 || text.as_bytes()[found.piece.start - 1] == b'\n',
-                        "{text:?}: a piece starts at the start of a line"
-                    );
                     assert!(found.start.offset <= found.piece.start);
                     assert_eq!(
-                        &text[found.start.offset..found.start.offset + found.text.len()],
-                        found.text
+                        &text[found.start.offset..found.end()],
+                        found.text,
+                        "{text:?}: the window is the text it starts at"
                     );
+                    let before = &text[..found.start.offset];
+                    assert_eq!(found.start.lines_before, before.matches('\n').count());
                     assert_eq!(
-                        found.start.lines_before,
-                        text[..found.start.offset].matches('\n').count()
+                        found.start.columns_before,
+                        before.rsplit('\n').next().unwrap().chars().count()
                     );
                 }
                 assert_eq!(
@@ -343,21 +393,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_window_holds_at_least_the_context_and_one_line_on_each_side() {
-        let text = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
-        let found = windows(text.as_bytes(), 1000, PieceLayout::new(4, 3)).await;
+    async fn no_window_is_longer_than_the_request_limit() {
+        let layout = PieceLayout::fitting(&[TextPieceLimits {
+            max_request_bytes: 400,
+            context_bytes: 100,
+        }])
+        .unwrap()
+        .unwrap();
+        let texts = [
+            "0123456789\n".repeat(200),
+            "é7\nλλλλ\n日本語日本語\n😀\n".repeat(60),
+            "日本語日本語日本語".repeat(200),
+            format!("{}\n{}\n", "a".repeat(1500), "b".repeat(30)),
+        ];
+        for text in &texts {
+            for found in windows(text.as_bytes(), 7, layout).await {
+                assert!(found.text.len() <= 400, "{} bytes", found.text.len());
+            }
+        }
+    }
 
-        let middle = &found[1];
-        assert_eq!(middle.piece, 4..8);
-        assert_eq!(
-            middle.text, "a\nb\nc\nd\ne\nf\n",
-            "3 bytes of context, rounded out to lines"
-        );
-        let no_context = windows(text.as_bytes(), 1000, PieceLayout::new(4, 0)).await;
-        assert_eq!(
-            no_context[1].text, "b\nc\nd\ne\n",
-            "one line when the context is none"
-        );
+    #[tokio::test]
+    async fn a_line_longer_than_a_window_is_cut_inside_and_never_held_whole() {
+        let text = format!("short\n{}\nshort\n", "x".repeat(10_000));
+        let layout = PieceLayout::fitting(&[TextPieceLimits {
+            max_request_bytes: 400,
+            context_bytes: 100,
+        }])
+        .unwrap()
+        .unwrap();
+        let mut pieces = TextPieces::new(chunks(text.as_bytes(), 64), layout);
+
+        let mut windows = 0;
+        while pieces.next_window().await.unwrap().is_some() {
+            windows += 1;
+            assert!(
+                pieces.buffer.len() <= 400 + 2 * 64,
+                "{}",
+                pieces.buffer.len()
+            );
+        }
+        assert!(windows > 30, "{windows} windows");
+    }
+
+    #[test]
+    fn limits_that_leave_no_room_for_a_piece_are_refused() {
+        let limits = [
+            TextPieceLimits {
+                max_request_bytes: 1000,
+                context_bytes: 100,
+            },
+            TextPieceLimits {
+                max_request_bytes: 500,
+                context_bytes: 247,
+            },
+        ];
+
+        assert!(matches!(
+            PieceLayout::fitting(&limits),
+            Err(AppError::TextPieceLimitsTooTight {
+                max_request_bytes: 500,
+                context_bytes: 247
+            })
+        ));
+        assert!(PieceLayout::fitting(&[]).unwrap().is_none());
     }
 
     #[tokio::test]

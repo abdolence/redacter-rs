@@ -227,6 +227,30 @@ impl DetectionLocation {
             Self::Image { .. } | Self::Page { .. } | Self::File => None,
         }
     }
+
+    /// The location as it sits in the file, when it was found in a window of the file that
+    /// starts at `window`. Only a text location moves: its offsets and line by the window's, and
+    /// its column on the first line, which the window may start inside of.
+    pub(crate) fn in_file(self, window: TextPosition) -> Self {
+        match self {
+            Self::Text {
+                start,
+                end,
+                line,
+                column,
+            } => Self::Text {
+                start: start + window.offset,
+                end: end + window.offset,
+                line: line + window.lines_before,
+                column: if line == 1 {
+                    column + window.columns_before
+                } else {
+                    column
+                },
+            },
+            other => other,
+        }
+    }
 }
 
 /// How a report shows a location: `line:column` in a text, `row:column` of a table cell,
@@ -399,27 +423,6 @@ impl Detection {
             score,
             value,
         })
-    }
-
-    /// The detection as it sits in the file, when it was made in a window of the file that starts
-    /// at `window`. Only a text location moves: the column stays, since a window starts at the
-    /// start of a line.
-    pub fn in_file(self, window: TextPosition) -> Self {
-        let location = match self.location {
-            DetectionLocation::Text {
-                start,
-                end,
-                line,
-                column,
-            } => DetectionLocation::Text {
-                start: start + window.offset,
-                end: end + window.offset,
-                line: line + window.lines_before,
-                column,
-            },
-            other => other,
-        };
-        Self { location, ..self }
     }
 
     /// The detections of `findings` in `text`, for providers that report ranges of the text.
