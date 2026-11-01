@@ -1780,6 +1780,26 @@ mod tests {
             ));
         }
 
+        #[cfg(feature = "local-gliner")]
+        #[test]
+        fn a_gliner_label_naming_an_organisation_can_be_asked_for_by_its_category() {
+            let options = options_of(&[
+                "-d",
+                "local-gliner",
+                "--local-gliner-labels",
+                "organization",
+                "--categories",
+                "organization",
+            ])
+            .unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalGliner(options)) => {
+                    assert_eq!(options.labels, ["organization"])
+                }
+                other => panic!("expected local gliner options, got {other:?}"),
+            }
+        }
+
         #[cfg(feature = "local-credential-ml")]
         #[test]
         fn local_credential_ml_needs_the_secrets_category() {
