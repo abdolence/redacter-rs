@@ -781,9 +781,11 @@ line is rated only when there is something to redact:
 - the secret rules of `local-rules` run on the line: `key=value` and `key: value` assignments, quoted values of any
   length, vendor tokens, `Authorization` header values and passwords in URLs. Their value checks are off, since the
   model rates the line;
-- when no rule matches, every word of the line that holds a digit or a symbol is a value, without the quotes
-  around it and without the `key=` in front of it. A redaction marker that an earlier redacter left is never a
-  value;
+- every word of the line that holds a digit or one of the symbols `!@#%^&*+=?~` is a value too, without the quotes
+  around it and without the `key=` in front of it, unless a rule already placed a value in that word. The
+  other symbols (`-`, `.`, `/`, `:`, `_` and `$`) do not count, so `api.example.com` is left alone and
+  `correct-horse-battery-staple` is never found by this step. A word is split at a redaction marker that an
+  earlier redacter left; the marker is never a value, and the text on either side of it can be;
 - a line with no value is not rated.
 
 A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
@@ -808,14 +810,15 @@ Limits:
 - the model rates a line on its own, without the lines around it, and reads the first 128 tokens of a line;
 - it rates the AWS documentation example keys and `password: value` lines with a plain value low. `local-rules`
   finds both, which is why it is chained;
-- when no rule matches, every word with a digit or a symbol on a flagged line is redacted, so a host name, an IP
-  address or a date next to the password is redacted too;
+- every word with a digit or one of `!@#%^&*+=?~` on a flagged line is redacted, so a host name, an IP address or
+  a date next to the password is redacted too;
 - it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
 - on 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly
   all of them test data that holds passwords and tokens;
-- the model takes about 4 ms for a line, and a line with no digit and no symbol is not rated. A scan of Rust source
-  of 30,036 non-blank lines took 32 s, and a log of 10,000 lines that each hold a digit took 49 s. The process holds
-  about 190 MiB and loading takes about 60 ms. These numbers are from an Apple M6 Mac mini.
+- the model takes 4 to 6 ms for a line, and a line with no value is not rated. A scan of Rust source of 30,036
+  non-blank lines took 32 s, and a log of 10,000 lines of 100 characters, each holding a digit, took 58 s (5.8 ms a
+  line). The process holds 190 to 210 MiB and loading takes about 60 ms. These numbers are from an Apple M6 Mac
+  mini that was running other work, with a load average of about 2.4.
 
 The model is [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) by
 Zain Dana Harper, released under the MIT licence and fine-tuned from

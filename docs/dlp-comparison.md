@@ -186,7 +186,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 - `gemini-llm` (the Gemini API) and `open-ai-llm` were not measured;
 - the `secrets` corpus is synthetic: the values are made up;
-- the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. When no rule matches, every word of a flagged line with a digit or a symbol is redacted, and no dataset here is built to test what that takes along;
+- the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. Every word of a flagged line with a digit or one of the symbols `!@#%^&*+=?~` is redacted, and no dataset here is built to test what that takes along;
 - `fixtures` has 8 files and `images` has 2 files and 16 boxes, so a difference of a few points is a few values;
 - each cell is one run, and an LLM redacter can answer differently for the same files: the re-run of the `gcp-vertex-ai` cell for `fixtures` differed in precision and in keep hits, see [How the numbers were measured](#how-the-numbers-were-measured);
 - the `local-rules` time on `fixtures` (412 ms for the run, 51 ms per file) is from the first scan of the first run. It is higher than the times of `local-ner` (40 ms) and `local-rules+local-ner` (43 ms) on the same files;
