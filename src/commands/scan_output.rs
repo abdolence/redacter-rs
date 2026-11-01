@@ -7,8 +7,8 @@
 
 use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
-    escaped, format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout,
-    RowOutcome, SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+    escaped, format_file_row, format_legend, OutputStyles, RowLayout, RowOutcome, SkipReason,
+    GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::commands::sarif::{ArtifactOutcome, Place, SarifArtifact, SarifFinding};
 use crate::file_systems::FileSystemRef;
@@ -102,6 +102,17 @@ impl FindingReport {
         }
     }
 
+    /// The finding for a SARIF report, which masks the value whatever the report holds.
+    pub(super) fn sarif_finding(&self) -> SarifFinding {
+        SarifFinding::new(
+            self.redacter,
+            self.label.clone(),
+            self.score,
+            self.place,
+            &self.value,
+        )
+    }
+
     /// Orders findings as a reader meets them; findings at the same place keep the order they
     /// are given in.
     pub(super) fn sort_by_location(findings: &mut [FindingReport]) {
@@ -172,14 +183,10 @@ impl ScanFileReport {
     pub fn not_scanned(file_ref: &FileSystemRef, reason: SkipReason) -> Self {
         let status = match reason {
             SkipReason::OverSizeLimit | SkipReason::NameFilter => ScanFileStatus::Skipped,
-            SkipReason::NotRedacted(
-                NotRedactedReason::TypeNotSupported
-                | NotRedactedReason::NoRedacterApplied
-                | NotRedactedReason::OcrImageFormatNotSupported,
-            ) => ScanFileStatus::Unsupported,
-            SkipReason::NotRedacted(
-                NotRedactedReason::PdfRendererUnavailable | NotRedactedReason::OcrUnavailable,
-            ) => ScanFileStatus::Blocked,
+            SkipReason::NotRedacted(not_redacted) if not_redacted.needs_converter() => {
+                ScanFileStatus::Blocked
+            }
+            SkipReason::NotRedacted(_) => ScanFileStatus::Unsupported,
         };
         Self::new(
             file_ref,
@@ -209,15 +216,7 @@ impl ScanFileReport {
             ScanFileStatus::Scanned => ArtifactOutcome::Findings(
                 self.findings
                     .iter()
-                    .map(|finding| {
-                        SarifFinding::new(
-                            finding.redacter,
-                            finding.label.clone(),
-                            finding.score,
-                            finding.place,
-                            &finding.value,
-                        )
-                    })
+                    .map(FindingReport::sarif_finding)
                     .collect(),
             ),
             ScanFileStatus::Failed => ArtifactOutcome::Failed { reason },
@@ -556,6 +555,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::copy_output::NotRedactedReason;
     use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use clap::ValueEnum;
     use std::path::Path;

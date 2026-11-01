@@ -242,6 +242,15 @@ impl CopyFileOutcome {
 }
 
 impl NotRedactedReason {
+    /// Whether the file is not read because this run lacks a converter for it, which a user
+    /// can fix by installing an addon, as opposed to a file no selected redacter reads at all.
+    pub(crate) fn needs_converter(self) -> bool {
+        matches!(
+            self,
+            NotRedactedReason::PdfRendererUnavailable | NotRedactedReason::OcrUnavailable
+        )
+    }
+
     pub(crate) fn detail(&self) -> &'static str {
         match self {
             NotRedactedReason::TypeNotSupported => "type not supported",
@@ -998,5 +1007,18 @@ mod tests {
     #[test]
     fn terminal_layout_falls_back_to_80_columns_when_the_width_is_unknown() {
         assert_eq!(RowLayout::for_terminal(0), RowLayout::for_terminal(80));
+    }
+
+    #[test]
+    fn only_a_missing_converter_can_be_fixed_by_installing_an_addon() {
+        for (reason, needs_converter) in [
+            (NotRedactedReason::PdfRendererUnavailable, true),
+            (NotRedactedReason::OcrUnavailable, true),
+            (NotRedactedReason::TypeNotSupported, false),
+            (NotRedactedReason::NoRedacterApplied, false),
+            (NotRedactedReason::OcrImageFormatNotSupported, false),
+        ] {
+            assert_eq!(reason.needs_converter(), needs_converter, "{reason:?}");
+        }
     }
 }

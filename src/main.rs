@@ -128,7 +128,13 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             )
             .await?;
             report
-                .write(term, &copy_result, &copy_result.to_text())
+                .write(
+                    term,
+                    &copy_result,
+                    &copy_result.to_text(),
+                    || copy_result.sarif_artifacts(),
+                    &source,
+                )
                 .await?;
             Ok(0)
         }
@@ -161,7 +167,15 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             .with_ignore(ignore.into());
             let scan_result =
                 command_scan(term, &source, options, redacter_args.try_into()?).await?;
-            report.write_scan(term, &scan_result, &source).await?;
+            report
+                .write(
+                    term,
+                    &scan_result,
+                    &scan_result.to_text(),
+                    || scan_result.sarif_artifacts(),
+                    &source,
+                )
+                .await?;
             Ok(scan_result.exit_code(fail_on))
         }
         CliCommand::Ls {

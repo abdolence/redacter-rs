@@ -5,6 +5,7 @@ use crate::commands::copy_output::{
     CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, RowLayout, SkipReason,
     COPY_LEGEND,
 };
+use crate::commands::sarif::{ArtifactOutcome, SarifArtifact};
 use crate::commands::scan_output::{FindingReport, ValueDisplay};
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -45,6 +46,9 @@ pub struct CopyFileReport {
     reason: Option<String>,
     /// What the redacters replaced, in the order a reader meets it, values always masked.
     redactions: Vec<FindingReport>,
+    /// Why the file left the copy unredacted, for a SARIF report; not part of the JSON report.
+    #[serde(skip)]
+    not_redacted: Option<NotRedactedReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -75,6 +79,16 @@ impl CopyFileReport {
             }
             CopyFileOutcome::Error { message } => (CopyFileStatus::Failed, Some(message.clone())),
         };
+        let not_redacted = match outcome {
+            CopyFileOutcome::Copied => Some(NotRedactedReason::NoRedacterApplied),
+            CopyFileOutcome::CopiedUnredacted { reason }
+            | CopyFileOutcome::Skipped {
+                reason: SkipReason::NotRedacted(reason),
+            } => Some(*reason),
+            CopyFileOutcome::Redacted { .. }
+            | CopyFileOutcome::Skipped { .. }
+            | CopyFileOutcome::Error { .. } => None,
+        };
         let mut redactions: Vec<FindingReport> = redactions
             .iter()
             .map(|(redacter, detection)| {
@@ -88,11 +102,49 @@ impl CopyFileReport {
             status,
             reason,
             redactions,
+            not_redacted,
         }
+    }
+
+    /// The file for a SARIF report, or `None` for a file the size limit or the name filter
+    /// left out.
+    fn sarif_artifact(&self) -> Option<SarifArtifact> {
+        let outcome = match (self.status, self.not_redacted) {
+            (CopyFileStatus::Redacted, _) => ArtifactOutcome::Findings(
+                self.redactions
+                    .iter()
+                    .map(FindingReport::sarif_finding)
+                    .collect(),
+            ),
+            (CopyFileStatus::Failed, _) => ArtifactOutcome::Failed {
+                reason: self.reason.clone().unwrap_or_default(),
+            },
+            (_, Some(not_redacted)) => {
+                let reason = not_redacted.detail().to_string();
+                if not_redacted.needs_converter() {
+                    ArtifactOutcome::Blocked { reason }
+                } else {
+                    ArtifactOutcome::Unsupported { reason }
+                }
+            }
+            (_, None) => return None,
+        };
+        Some(SarifArtifact {
+            path: self.path.clone(),
+            outcome,
+        })
     }
 }
 
 impl CopyCommandResult {
+    /// The files of the copy for a SARIF report.
+    pub fn sarif_artifacts(&self) -> Vec<SarifArtifact> {
+        self.files
+            .iter()
+            .filter_map(CopyFileReport::sarif_artifact)
+            .collect()
+    }
+
     /// The report for people.
     pub fn to_text(&self) -> String {
         format!(
@@ -637,6 +689,7 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "pdf-render", feature = "ocr"))]
     use crate::addon_store::Addon;
+    use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
         initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,
@@ -774,6 +827,202 @@ mod tests {
         let serialized = json.to_string();
         assert!(!serialized.contains(SAMPLE_EMAIL));
         assert!(!serialized.contains(SAMPLE_PHONE));
+    }
+
+    fn file_report_at(
+        path: &str,
+        outcome: &CopyFileOutcome,
+        redactions: &[(RedacterType, Detection)],
+    ) -> CopyFileReport {
+        let file_ref = FileSystemRef {
+            relative_path: path.into(),
+            media_type: Some(mime::TEXT_PLAIN),
+            file_size: Some(10),
+        };
+        CopyFileReport::new(&file_ref, outcome, redactions)
+    }
+
+    fn result_of(files: Vec<CopyFileReport>) -> CopyCommandResult {
+        CopyCommandResult {
+            files_copied: 0,
+            files_redacted: 0,
+            files_skipped: 0,
+            files,
+        }
+    }
+
+    fn sarif_outcome_names(files: Vec<CopyFileReport>) -> Vec<(String, &'static str)> {
+        result_of(files)
+            .sarif_artifacts()
+            .into_iter()
+            .map(|artifact| {
+                let outcome = match artifact.outcome {
+                    ArtifactOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    ArtifactOutcome::Findings(_) => "findings",
+                    ArtifactOutcome::Unconfirmed { .. } => "unconfirmed",
+                    ArtifactOutcome::Failed { .. } => "failed",
+                    ArtifactOutcome::Blocked { .. } => "blocked",
+                    ArtifactOutcome::Unsupported { .. } => "unsupported",
+                };
+                (artifact.path, outcome)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_sarif_report_maps_each_outcome_of_a_copy_and_leaves_out_filtered_files() {
+        let redacted = CopyFileOutcome::Redacted {
+            redacters: vec![RedacterType::LocalRules],
+            conversion: None,
+        };
+        let skipped = |reason| CopyFileOutcome::Skipped { reason };
+        let files = vec![
+            file_report_at(
+                "found.txt",
+                &redacted,
+                &[(
+                    RedacterType::LocalRules,
+                    text_detection(SAMPLE_EMAIL, 14, 2),
+                )],
+            ),
+            file_report_at("untouched.txt", &redacted, &[]),
+            file_report_at("plain.txt", &CopyFileOutcome::Copied, &[]),
+            file_report_at(
+                "binary.bin",
+                &CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::TypeNotSupported,
+                },
+                &[],
+            ),
+            file_report_at(
+                "scan.png",
+                &CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::OcrUnavailable,
+                },
+                &[],
+            ),
+            file_report_at("big.txt", &skipped(SkipReason::OverSizeLimit), &[]),
+            file_report_at("other.md", &skipped(SkipReason::NameFilter), &[]),
+            file_report_at(
+                "form.pdf",
+                &skipped(SkipReason::NotRedacted(
+                    NotRedactedReason::PdfRendererUnavailable,
+                )),
+                &[],
+            ),
+            file_report_at(
+                "data.bin",
+                &skipped(SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported)),
+                &[],
+            ),
+            file_report_at(
+                "broken.txt",
+                &CopyFileOutcome::Error {
+                    message: "the service refused".to_string(),
+                },
+                &[],
+            ),
+        ];
+
+        let outcomes = sarif_outcome_names(files);
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(path, outcome)| (path.as_str(), *outcome))
+                .collect::<Vec<_>>(),
+            [
+                ("found.txt", "findings"),
+                ("untouched.txt", "clean"),
+                ("plain.txt", "unsupported"),
+                ("binary.bin", "unsupported"),
+                ("scan.png", "blocked"),
+                ("form.pdf", "blocked"),
+                ("data.bin", "unsupported"),
+                ("broken.txt", "failed"),
+            ]
+        );
+    }
+
+    fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
+        let result = result_of(files);
+        let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
+        serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap()
+    }
+
+    #[test]
+    fn a_redaction_of_a_whole_file_or_a_page_has_no_region_and_no_value() {
+        let outcome = CopyFileOutcome::Redacted {
+            redacters: vec![RedacterType::GeminiLlm],
+            conversion: None,
+        };
+        let detection = |location| Detection {
+            label: DetectionLabel::new("sensitive_data"),
+            location,
+            score: None,
+            value: String::new(),
+        };
+        let redactions = [
+            (RedacterType::GeminiLlm, detection(DetectionLocation::File)),
+            (
+                RedacterType::GeminiLlm,
+                detection(DetectionLocation::Page { page: 3 }),
+            ),
+        ];
+
+        let sarif = sarif_of(vec![file_report_at("scan.pdf", &outcome, &redactions)]);
+
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        for result in results {
+            assert!(result["locations"][0]["physicalLocation"]["region"].is_null());
+            assert!(!result["message"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Value:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sarif_report_of_a_copy_places_a_text_redaction_and_lists_what_the_json_report_does(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let source = TempDir::with_prefix("copy_command_tests_sarif_source")?;
+        std::fs::write(
+            source.path().join("note.txt"),
+            format!("Customer note\nEmail: {SAMPLE_EMAIL}\n"),
+        )?;
+        let destination = TempDir::with_prefix("copy_command_tests_sarif_destination")?;
+        let source_arg = format!("{}/", source.path().display());
+
+        let result = command_copy(
+            &Term::stdout(),
+            &source_arg,
+            &destination.path().to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
+            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: vec![],
+                },
+            ))),
+        )
+        .await?;
+        let locator = ArtifactLocator::new(&source_arg, std::path::Path::new("/work"));
+        let sarif =
+            serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap();
+
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "local-rules/email");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["region"],
+            serde_json::json!({"startLine": 2, "startColumn": 8, "endLine": 2, "endColumn": 30})
+        );
+        assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
+        Ok(())
     }
 
     #[tokio::test]

@@ -115,7 +115,9 @@ impl SarifFinding {
         if let Some(place) = &self.place {
             message.push_str(&place.description());
         }
-        message.push_str(&format!(" Value: {}", escaped(&self.masked_value)));
+        if !self.masked_value.is_empty() {
+            message.push_str(&format!(" Value: {}", escaped(&self.masked_value)));
+        }
         message
     }
 }
@@ -947,6 +949,36 @@ mod tests {
                 "email found by local-rules. Image: page 2, box [310,193,622,218] in pixels. Value: a****o",
                 "email found by local-rules. Image: page 2. Value: a****o",
                 "email found by local-rules. Value: a****o",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_finding_without_a_value_has_no_value_in_its_message() {
+        let places = [
+            Some(Place::Image {
+                page: Some(3),
+                area: None,
+            }),
+            None,
+        ];
+
+        let messages: Vec<String> = places
+            .into_iter()
+            .flat_map(|place| {
+                results(&[artifact(
+                    "scan.pdf",
+                    ArtifactOutcome::Findings(vec![email(place, "")]),
+                )])
+            })
+            .map(|result| result["message"]["text"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            messages,
+            [
+                "email found by local-rules. Image: page 3.",
+                "email found by local-rules.",
             ]
         );
     }
