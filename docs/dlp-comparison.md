@@ -25,16 +25,16 @@ The full scoring rules are in [test-fixtures/bench-dlp/README.md](../test-fixtur
 
 ## Datasets
 
-- `fixtures`: eight text files from `test-fixtures/documents/` (text, JSON, HTML, CSV, German, French and Spanish, contextual PII, dates and words that look like PII). 48 sensitive values and 31 keep strings;
-- `secrets`: a synthetic corpus of 41 planted secrets in 25 files (passwords in config files, vendor API keys, tokens, JWTs, private keys, connection strings), and four control files with strings that look like secrets and are not. 29 files, 19 keep strings. The values are made up, apart from the AWS documentation example key;
-- `public`: a fixed sample of 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each record is one file, 981 sensitive values in all. The sample is 10 windows of 20 consecutive records of the `test` split. The text and label of every span are unchanged, and 15 of the 1,568 spans of the sample are left out because their offsets do not select their text. The annotation is not exhaustive;
-- `images`: a customer form as a PNG and as a PDF, 2 files and 16 boxes. The local redacters, Presidio, AWS Comprehend and AWS Bedrock Guardrails read an image through OCR, text recognition by the `ocr` addon. GCP DLP and the LLM redacters read the image themselves. See [Detection per redacter](../README.md#detection-per-redacter).
+- PII documents, `fixtures`: eight text files from `test-fixtures/documents/` (text, JSON, HTML, CSV, German, French and Spanish, contextual PII, dates and words that look like PII). 48 sensitive values and 31 keep strings;
+- Secrets in config and code, `secrets`: a synthetic corpus of 41 planted secrets in 25 files (passwords in config files, vendor API keys, tokens, JWTs, private keys, connection strings), and four control files with strings that look like secrets and are not. 29 files, 19 keep strings. The values are made up, apart from the AWS documentation example key;
+- Public PII sample, `public`: a fixed sample of 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each record is one file, 981 sensitive values in all. The sample is 10 windows of 20 consecutive records of the `test` split. The text and label of every span are unchanged, and 15 of the 1,568 spans of the sample are left out because their offsets do not select their text. The annotation is not exhaustive;
+- Scanned form, `images`: a customer form as a PNG and as a PDF, 2 files and 16 boxes. The local redacters, Presidio, AWS Comprehend and AWS Bedrock Guardrails read an image through OCR, text recognition by the `ocr` addon. GCP DLP and the LLM redacters read the image themselves. See [Detection per redacter](../README.md#detection-per-redacter).
 
 ## Overview
 
 Each cell is recall / precision / time per file. Time per file is described under [Speed](#speed). Precision is not reported for `public`.
 
-| Redacter | Fixtures | Secrets | Public | Images |
+| Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form |
 |---|---|---|---|---|
 | `local-rules` | 54% / 100% / 51 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
 | `local-ner` | 23% / 69% / 40 ms | 0% / 0% / 18 ms | 23% / - / 39 ms | 19% / 100% / 334 ms |
@@ -50,9 +50,11 @@ Each cell is recall / precision / time per file. Time per file is described unde
 | `gcp-vertex-ai` | 98% / 100% / 8073 ms | 100% / 95% / 8171 ms | 86% / - / 9062 ms | 100% / 100% / 16339 ms |
 | `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2109 ms |
 
+PII documents is `fixtures` (8 files), Secrets in config and code is `secrets` (29 files), Public PII sample is `public` (200 records) and Scanned form is `images` (a PNG and a PDF of one form). See [Datasets](#datasets).
+
 The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How the numbers were measured](#how-the-numbers-were-measured).
 
-## Fixtures
+## PII documents
 
 | Redacter | Recall | Precision | Person | Contact | Address | ID number | Financial | Date of birth | Other | Keep hit |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -74,7 +76,7 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 - the single `other` value was found by the two GLiNER rows only;
 - `aws-bedrock-guardrails` found none of the 4 dates of birth.
 
-## Secrets
+## Secrets in config and code
 
 | Redacter | Recall | Precision | Credential | Keep hit |
 |---|---|---|---|---|
@@ -95,7 +97,7 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 - `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
 - `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
 
-## Public
+## Public PII sample
 
 Recall only, since the annotation does not list everything sensitive.
 
@@ -118,7 +120,7 @@ Recall only, since the annotation does not list everything sensitive.
 - on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 38 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
 - every redacter found all 31 dates of birth except `local-ner` and `aws-bedrock-guardrails`, which found none.
 
-## Images
+## Scanned form
 
 The truth is 16 boxes, so one box is about 6 percentage points of recall (derived).
 
@@ -146,7 +148,7 @@ Time per file, in the overview, is the wall time of one `scan` over the dataset 
 
 The whole run over the 200 files of `public`, in milliseconds:
 
-| Redacter | Whole run on public |
+| Redacter | Whole run on public PII sample |
 |---|---|
 | `local-rules` | 62 ms |
 | `local-ner` | 7878 ms |
@@ -161,6 +163,8 @@ The whole run over the 200 files of `public`, in milliseconds:
 | `aws-bedrock-guardrails` | 32304 ms |
 | `gcp-vertex-ai` | 1812407 ms |
 | `aws-bedrock` | 116794 ms |
+
+Public PII sample is `public`: 200 records of synthetic personal data.
 
 The whole run of `gcp-vertex-ai` over `public` was about 30 minutes (derived).
 
