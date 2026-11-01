@@ -351,7 +351,7 @@ pub async fn command_copy(
             files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
             files,
-            categories,
+            categories: categories.clone(),
         })
     } else {
         bar.println(format_legend(&COPY_LEGEND, &styles));
@@ -380,7 +380,7 @@ pub async fn command_copy(
             files_redacted,
             files_skipped,
             files: vec![report.file],
-            categories,
+            categories: categories.clone(),
         })
     };
 
@@ -388,7 +388,7 @@ pub async fn command_copy(
     source_fs.close().await?;
     bar.finish_and_clear();
     term.write_line("")?;
-    term.write_line(format_summary_line(&summary, &styles).as_str())?;
+    term.write_line(format_summary_line(&summary, categories.as_ref(), &styles).as_str())?;
     copy_result
 }
 

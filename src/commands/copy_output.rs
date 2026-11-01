@@ -561,7 +561,11 @@ pub fn format_capabilities_line(capabilities: &Capabilities, styles: &OutputStyl
 }
 
 /// The closing summary, replacing the per-file step lines with one count line.
-pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> String {
+pub fn format_summary_line(
+    summary: &CopySummary,
+    categories: Option<&Categories>,
+    styles: &OutputStyles,
+) -> String {
     let total = summary.redacted + summary.copied_as_is + summary.skipped + summary.errors;
     let mut line = format!(
         "{} {}: {} redacted, {} copied as is, {} skipped",
@@ -594,6 +598,12 @@ pub fn format_summary_line(summary: &CopySummary, styles: &OutputStyles) -> Stri
         )
         .as_str(),
     );
+    if let Some(categories) = categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
     line
 }
 
@@ -960,6 +970,7 @@ mod tests {
                     errors: 1,
                     total_size: 6 * 1024,
                 },
+                None,
                 &styles
             ),
             "6 files: 3 redacted, 1 copied as is, 1 skipped, 1 error. Total size: 6.00 KiB"
@@ -973,6 +984,7 @@ mod tests {
                     errors: 0,
                     total_size: 0,
                 },
+                None,
                 &styles
             ),
             "6 files: 5 redacted, 0 copied as is, 1 skipped. Total size: 0 B"
@@ -986,6 +998,7 @@ mod tests {
                     errors: 0,
                     total_size: 12,
                 },
+                None,
                 &styles
             ),
             "1 file: 0 redacted, 1 copied as is, 0 skipped. Total size: 12 B"
@@ -999,9 +1012,33 @@ mod tests {
                     errors: 2,
                     total_size: 0,
                 },
+                None,
                 &styles
             ),
             "2 files: 0 redacted, 0 copied as is, 0 skipped, 2 errors. Total size: 0 B"
+        );
+    }
+
+    #[test]
+    fn summary_line_ends_with_the_categories_only_when_they_limit_the_run() {
+        let summary = CopySummary {
+            redacted: 1,
+            copied_as_is: 0,
+            skipped: 0,
+            errors: 0,
+            total_size: 12,
+        };
+        let styles = OutputStyles::plain();
+        let unlimited = format_summary_line(&summary, None, &styles);
+        assert_eq!(
+            unlimited,
+            "1 file: 1 redacted, 0 copied as is, 0 skipped. Total size: 12 B"
+        );
+
+        let credential = Categories::limiting([Category::Credential]);
+        assert_eq!(
+            format_summary_line(&summary, credential.as_ref(), &styles),
+            format!("{unlimited} · Categories: credential")
         );
     }
 

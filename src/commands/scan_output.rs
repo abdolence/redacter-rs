@@ -410,7 +410,8 @@ impl ScanCommandResult {
             lines.extend(format_file_lines(file, layout, &styles));
         }
         lines.push(String::new());
-        lines.push(format_scan_summary(self, &styles));
+        // The categories already head this report, so its summary leaves them out.
+        lines.push(format_scan_summary(self, None, &styles));
         lines.join("\n") + "\n"
     }
 }
@@ -481,7 +482,11 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
 }
 
 /// The closing summary: the file counts, the findings by label, and the size of the files.
-pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) -> String {
+pub fn format_scan_summary(
+    result: &ScanCommandResult,
+    categories: Option<&Categories>,
+    styles: &OutputStyles,
+) -> String {
     let total = result.files_scanned
         + result.files_skipped
         + result.files_ignored
@@ -560,6 +565,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         ". Total size: {}",
         styles.highlighted.apply_to(HumanBytes(total_size as u64))
     ));
+    if let Some(categories) = categories {
+        line.push_str(&format!(
+            " · Categories: {}",
+            styles.highlighted.apply_to(categories)
+        ));
+    }
     line
 }
 
@@ -878,7 +889,7 @@ mod tests {
         let text = result.to_text();
         assert!(!text.contains('\u{1b}'), "{text}");
         assert_eq!(text.lines().count(), 5, "{text}");
-        let summary = format_scan_summary(&result, &OutputStyles::plain());
+        let summary = format_scan_summary(&result, None, &OutputStyles::plain());
         assert!(summary.contains("ssn\\n\\u{1b}[31mred 1"), "{summary}");
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
@@ -1294,6 +1305,20 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_line_ends_with_the_categories_only_when_they_limit_the_run() {
+        let result = sample_result();
+        let styles = OutputStyles::plain();
+        let unlimited = format_scan_summary(&result, None, &styles);
+        assert!(!unlimited.contains("Categories"), "{unlimited}");
+
+        let credential = Categories::limiting([Category::Credential]);
+        assert_eq!(
+            format_scan_summary(&result, credential.as_ref(), &styles),
+            format!("{unlimited} · Categories: credential")
+        );
+    }
+
+    #[test]
     fn the_summary_counts_what_the_ignore_rules_left_out() {
         let mut result = ScanCommandResult::default();
         result.push(
@@ -1317,7 +1342,7 @@ mod tests {
         result.files_ignored = 3;
 
         assert_eq!(
-            format_scan_summary(&result, &OutputStyles::plain()),
+            format_scan_summary(&result, None, &OutputStyles::plain()),
             "4 files: 1 with findings, 0 clean, 0 skipped, 0 unsupported, 3 ignored. \
              1 finding (2 ignored): email 1. Total size: 0 B"
         );

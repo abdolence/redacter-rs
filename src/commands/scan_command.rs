@@ -198,7 +198,11 @@ pub async fn command_scan(
     source_fs.close().await?;
     bar.finish_and_clear();
     term.write_line("")?;
-    term.write_line(&format_scan_summary(&result, &styles))?;
+    term.write_line(&format_scan_summary(
+        &result,
+        result.categories.as_ref(),
+        &styles,
+    ))?;
     Ok(result)
 }
 
