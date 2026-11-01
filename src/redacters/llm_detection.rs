@@ -187,7 +187,8 @@ fn catch_all_name(category: Category) -> String {
 
 /// The names a model may give a finding in `categories`: those of [`MODEL_LABELS`] in the
 /// chosen categories, then the catch-all name of each chosen category for the kinds that have
-/// no label of their own (a MAC address, a fax number). Every name maps back to a chosen category through [`LlmTextFinding::label_category`].
+/// no label of their own (a MAC address, a fax number). Every name maps back to a chosen
+/// category through [`LlmTextFinding::label_category`].
 fn kind_names(categories: &Categories) -> Vec<String> {
     let labels = MODEL_LABELS
         .iter()

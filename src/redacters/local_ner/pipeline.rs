@@ -393,7 +393,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn a_person_is_a_person_and_places_and_organisations_are_other() {
+    fn an_entity_is_placed_by_what_it_names_and_misc_is_other() {
         assert_eq!(Entity::label_category("per"), Category::Person);
         assert_eq!(Entity::label_category("org"), Category::Organization);
         assert_eq!(Entity::label_category("loc"), Category::Location);

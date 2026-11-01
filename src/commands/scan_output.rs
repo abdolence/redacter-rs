@@ -556,10 +556,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         styles.highlighted.apply_to(HumanBytes(total_size as u64))
     ));
     if let Some(categories) = &result.categories {
-        line.push_str(&format!(
-            " · Categories: {}",
-            styles.highlighted.apply_to(categories)
-        ));
+        line.push_str(&styles.categories_suffix(categories));
     }
     line
 }
