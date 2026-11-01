@@ -336,7 +336,7 @@ mod tests {
         let detections = redacter.detect(&item).await.unwrap().found;
         let redacted = redacter.redact(item).await.unwrap();
 
-        let RedacterDataItemContent::Value(out) = redacted.content else {
+        let RedacterDataItemContent::Value(out) = redacted.item.content else {
             panic!("text stays text");
         };
         assert_eq!(out, "value [REDACTED] end");
