@@ -13,8 +13,8 @@ where, with an exit code a CI pipeline can gate on.
 The tool ships three redacters that run entirely on your machine, a rule-based one with checksum validation, a small
 multilingual named-entity model and a zero-shot span model that looks for labels you choose, and can also delegate to
 cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redaction keeps the data on the host and
-costs nothing per file; the cloud providers find more. See [Local or
-cloud](#local-or-cloud-quality-versus-performance) for the measured trade-off.
+costs nothing per file. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured recall and
+speed of every redacter.
 
 ![redacter-demo](media/redacter-demo.gif)
 
@@ -99,8 +99,9 @@ strings that carry a password. The redacters differ most on secrets.
 | `gcp-vertex-ai`, `gemini-llm`, `open-ai-llm`, `aws-bedrock` | Whatever the model recognises as personal information | Passwords, API keys, access tokens and private keys in text, as the prompt asks. In an image test, Gemini located the secrets of a `.env` screenshot, and Amazon Nova's boxes missed them, which is a limit of the model |
 
 Models answer differently from run to run, so check the output of an LLM redacter before relying on it. To cover both
-kinds of data, chain redacters: `-d local-rules -d gcp-dlp` finds the secrets and the pattern-shaped PII locally before
-the rest is sent to GCP DLP.
+kinds of data, chain redacters: for a text file, `-d local-rules -d gcp-dlp` redacts the secrets and the pattern-shaped
+PII locally before the rest is sent to GCP DLP. GCP DLP reads an image, or a PDF rendered to page images, natively, so
+those go to it whole, see [Multiple redacters](#multiple-redacters).
 
 ## Installation
 
@@ -725,10 +726,8 @@ far slower than release. In release, on an Intel i7-10700K (16 threads), loading
 0.6 s and it holds about 1.5 GB of peak memory while redacting a small text corpus; the download in
 [Addons](#addons) is about 1.17 GB, almost all of it the fp32 model weights
 (the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
-support). On the benchmark corpus under `test-fixtures/bench-dlp/` this measured 834 ms per file and
-2.8 s over the whole 8-file corpus. The per-file figure includes process start and the ~0.6 s model
-load, since the benchmark harness invokes the binary once per file rather than scoring in one
-long-lived process; the forward pass itself takes roughly 100-200 ms per 384-token window. A document
+support). The time per file on the benchmark datasets is in [docs/dlp-comparison.md](docs/dlp-comparison.md#speed).
+The forward pass takes roughly 100-200 ms per 384-token window. A document
 scores each label in batches of at most 25, so more labels cost more passes and, as with
 `organization` above, more false positives.
 
@@ -746,14 +745,14 @@ tool.
 
 ### Local or cloud: quality versus performance
 
-The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials. The
-cloud services and LLMs are billed for what they read, and they receive the content of the files. The table gives the
-recall of each redacter on four datasets, the share of the sensitive values that it found, and the time per file on
-`public`. A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
+The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials.
+`presidio` runs where you deploy it. The cloud services and LLMs are billed for what they read, and they receive the
+content of the files. The table gives the recall of each redacter on four datasets (recall is the share of the
+sensitive values that it found) and the time per file on `public`. A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
 
 | Redacter | Fixtures | Secrets | Public | Images | Per file on public |
 |---|---|---|---|---|---|
-| `local-rules` | 54% | 88% | 24% | 62% | 0 ms |
+| `local-rules` | 54% | 88% | 24% | 62% | under 1 ms |
 | `local-ner` | 23% | 0% | 23% | 19% | 39 ms |
 | `local-gliner` | 100% | 2% | 55% | 88% | 441 ms |
 | `local-rules+local-ner` | 77% | 88% | 46% | 94% | 38 ms |
@@ -768,12 +767,16 @@ recall of each redacter on four datasets, the share of the sensitive values that
 Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
 secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
 and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
-models, so compare it between redacters, not with another dataset. `gemini-llm` and `open-ai-llm` were not measured.
+models. `gemini-llm` and `open-ai-llm` were not measured.
 
 For secrets, `local-rules` found 88% at 1 ms per file, and `gcp-vertex-ai` found all of them. For personal information
 in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
 and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
 find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
+
+The local redacters give the same output for the same input, which makes results easy to test and audit.
+`local-gliner`'s model is a ~1.17 GB download and needs about 1.5 GB of memory while running, against 132 MB and 232 MB
+for `local-ner`.
 
 Precision, recall per category, speed on every dataset, what each redacter sends out, the limits of the measurement and
 the commands to reproduce it are in [docs/dlp-comparison.md](docs/dlp-comparison.md).
@@ -1217,14 +1220,15 @@ redacter ls gs://my-little-bucket/my-big-files/
 
 ## Recommended DLP providers
 
-Google Cloud Platform DLP is recommended for accurate and customizable redaction, since it is one of the most advanced
-DLP on the market.
-Image redaction in LLM models right now results in not very accurate redaction, however text redaction is quite good.
+Which redacter finds the most depends on the data. The recall of each one on text, secrets and images is in [Local or
+cloud](#local-or-cloud-quality-versus-performance). The image rows measure the coordinates a redacter reports to
+`scan`, not the native image edit of the LLM redacters.
 
-For the most protection, you can use multiple DLP providers in the order of the most accurate to the least accurate.
+For the most protection, you can use multiple DLP providers, see [Multiple redacters](#multiple-redacters).
 
-For secrets, `local-rules` and GCP DLP find the most. AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS
-keys, PINs and usernames only, and Presidio, `local-ner` and `local-gliner` find none by default.
+For secrets, `gcp-vertex-ai` found all 41 planted secrets, `aws-bedrock` 38 and `local-rules` 36. `aws-comprehend`,
+`aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
+AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS keys, PINs and usernames only.
 
 ## Licence
 
