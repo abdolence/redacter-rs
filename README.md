@@ -553,6 +553,15 @@ A copy that fails leaves no partial output at a local or zip destination. A loca
 beside the destination and renamed into place once complete, so a file it would have replaced stays intact. A zip
 archive is deleted, because the format cannot drop a single entry.
 
+S3 uploads over 8 MiB use multipart upload, so memory holds about one part rather than the whole file. An upload that is
+killed, or whose `AbortMultipartUpload` request fails, leaves its stored parts billed until they are aborted. Add an
+`AbortIncompleteMultipartUpload` lifecycle rule to the bucket to remove them. A bucket encrypted with SSE-KMS needs the
+`kms:Decrypt` permission, besides `kms:GenerateDataKey`, for uploads over one part.
+
+GCS uploads and downloads are verified with CRC32C. Cloud Storage rejects an upload whose data does not match the
+checksum sent with it, so no object is created. A download is checked against the checksum of the whole object, and a
+mismatch fails the copy with a checksum error.
+
 ## DLP and redacters
 
 ### Google Cloud Platform DLP
