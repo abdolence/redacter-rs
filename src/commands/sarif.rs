@@ -172,6 +172,19 @@ impl ArtifactLocator {
         }
     }
 
+    /// The URI of a file that names it whatever the working directory is: a `file:` URI for a
+    /// local file, the URI of the source for a remote one.
+    pub(super) fn full_uri(&self, path: &str) -> String {
+        match &self.base {
+            LocatorBase::Local {
+                source,
+                is_dir,
+                working_dir,
+            } => file_uri(working_dir, &local_file(source, *is_dir, path)),
+            LocatorBase::Remote { .. } => self.locate(path).uri,
+        }
+    }
+
     fn locate(&self, path: &str) -> ArtifactLocation {
         match &self.base {
             LocatorBase::Local {
@@ -179,12 +192,7 @@ impl ArtifactLocator {
                 is_dir,
                 working_dir,
             } => {
-                let full = if *is_dir {
-                    source.join(path)
-                } else {
-                    source.clone()
-                };
-                let full = lexically_normal(&full);
+                let full = lexically_normal(&local_file(source, *is_dir, path));
                 let from_working_dir = if full.is_absolute() {
                     full.strip_prefix(working_dir).ok().map(Path::to_path_buf)
                 } else {
@@ -195,13 +203,10 @@ impl ArtifactLocator {
                         uri: encoded_path(&relative),
                         uri_base_id: Some(SOURCE_ROOT_ID),
                     },
-                    _ => {
-                        let absolute = lexically_normal(&working_dir.join(&full));
-                        ArtifactLocation {
-                            uri: format!("file:///{}", encoded_path(&absolute)),
-                            uri_base_id: None,
-                        }
-                    }
+                    _ => ArtifactLocation {
+                        uri: file_uri(working_dir, &full),
+                        uri_base_id: None,
+                    },
                 }
             }
             LocatorBase::Remote {
@@ -217,6 +222,22 @@ impl ArtifactLocator {
             },
         }
     }
+}
+
+fn local_file(source: &Path, is_dir: bool, path: &str) -> PathBuf {
+    if is_dir {
+        source.join(path)
+    } else {
+        source.to_path_buf()
+    }
+}
+
+/// The `file:` URI of `path`, which may be relative to `working_dir`.
+fn file_uri(working_dir: &Path, path: &Path) -> String {
+    format!(
+        "file:///{}",
+        encoded_path(&lexically_normal(&working_dir.join(path)))
+    )
 }
 
 fn lexically_normal(path: &Path) -> PathBuf {

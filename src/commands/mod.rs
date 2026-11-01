@@ -7,6 +7,8 @@ mod report;
 
 mod findings;
 
+mod ocsf;
+
 mod sarif;
 
 mod scan_command;

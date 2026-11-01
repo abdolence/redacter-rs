@@ -139,3 +139,4 @@ cargo-husky = { version = "1.5", default-features = false, features = [
     "prepush-hook",
     "run-cargo-fmt",
 ] }
+jsonschema = { version = "0.60.2", default-features = false }

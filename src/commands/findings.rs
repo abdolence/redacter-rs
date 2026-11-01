@@ -3,7 +3,8 @@
 
 use crate::args::RedacterType;
 use crate::commands::scan_output::mask_value;
-use crate::redacters::{DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{is_credential_rule, DetectionLabel, DetectionLocation, Score};
+use serde::Serialize;
 
 /// A file of a run and what the command found in it.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +58,15 @@ impl ReportedFinding {
             masked_value: mask_value(value),
         }
     }
+
+    /// Whether the finding is a credential: a password, a key or a token.
+    pub(super) fn is_secret(&self) -> bool {
+        match self.redacter {
+            RedacterType::LocalRules => is_credential_rule(&self.label.to_string()),
+            RedacterType::LocalCredentialMl => true,
+            _ => false,
+        }
+    }
 }
 
 /// Where in a file something is, at the precision a command knows. Line, column, row and page
@@ -89,7 +99,7 @@ pub enum Place {
 }
 
 /// A box in pixels, `x1 <= x2` and `y1 <= y2`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PixelBox {
     pub x1: f32,
     pub y1: f32,
@@ -151,5 +161,32 @@ impl Place {
             },
             DetectionLocation::File => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding_of(redacter: RedacterType, label: &str) -> ReportedFinding {
+        ReportedFinding::new(redacter, DetectionLabel::new(label), None, None, "value")
+    }
+
+    #[test]
+    fn credentials_are_the_secrets_rules_of_local_rules_and_everything_local_credential_ml_finds() {
+        for label in ["aws-access-key", "private-key-block", "url-credentials"] {
+            assert!(
+                finding_of(RedacterType::LocalRules, label).is_secret(),
+                "{label}"
+            );
+        }
+        for label in ["email", "iban", "no-such-rule"] {
+            assert!(
+                !finding_of(RedacterType::LocalRules, label).is_secret(),
+                "{label}"
+            );
+        }
+        assert!(finding_of(RedacterType::LocalCredentialMl, "credential").is_secret());
+        assert!(!finding_of(RedacterType::LocalNer, "aws-access-key").is_secret());
     }
 }

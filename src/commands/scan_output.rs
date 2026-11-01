@@ -556,6 +556,7 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 mod tests {
     use super::*;
     use crate::commands::copy_output::NotRedactedReason;
+    use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use clap::ValueEnum;
     use std::path::Path;
@@ -730,6 +731,29 @@ mod tests {
 
         assert!(sarif.contains("j********************m"), "{sarif}");
         assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
+    }
+
+    #[test]
+    fn the_ocsf_report_has_the_masked_value_even_when_values_are_shown() {
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![FindingReport::new(
+                RedacterType::LocalRules,
+                &email_detection(),
+                ValueDisplay::Raw,
+            )],
+            0,
+        ));
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+        let time = EpochMillis::try_from(std::time::SystemTime::now()).unwrap();
+
+        let ndjson = OcsfEvents::new(&result.reported_files(), &locator, time)
+            .to_ndjson()
+            .unwrap();
+
+        assert!(ndjson.contains("j********************m"), "{ndjson}");
+        assert!(!ndjson.contains("john.smith@example.com"), "{ndjson}");
     }
 
     #[test]

@@ -74,6 +74,13 @@ impl Display for RuleGroup {
     }
 }
 
+/// Whether `name` is a built-in rule that finds a credential: a password, a key or a token.
+pub fn is_credential_rule(name: &str) -> bool {
+    builtin_rules().iter().any(|spec| {
+        spec.name == name && (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
+    })
+}
+
 /// One built-in rule as declared in the table. `capture_group` 0 redacts the whole match;
 /// a higher number redacts only that group (used where the pattern needs context such as
 /// the word "passport" that must survive). `validator` carries the name of the check for the

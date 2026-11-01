@@ -700,6 +700,7 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "pdf-render", feature = "ocr"))]
     use crate::addon_store::Addon;
+    use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
@@ -1026,6 +1027,21 @@ mod tests {
             serde_json::json!({"startLine": 2, "startColumn": 8, "endLine": 2, "endColumn": 30})
         );
         assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
+
+        let ndjson = OcsfEvents::new(
+            &result.reported_files(),
+            &locator,
+            EpochMillis::try_from(std::time::SystemTime::now())?,
+        )
+        .to_ndjson()?;
+        let event: serde_json::Value = serde_json::from_str(&ndjson)?;
+        assert_eq!(ndjson.lines().count(), 1);
+        assert_eq!(event["file"]["path"], "note.txt");
+        assert_eq!(
+            event["data_security"]["discovery_details"][0]["occurrences"],
+            serde_json::json!([{"start_line": 2, "end_line": 2, "column_number": 8}])
+        );
+        assert!(!ndjson.contains(SAMPLE_EMAIL));
         Ok(())
     }
 
