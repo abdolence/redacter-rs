@@ -7,9 +7,10 @@
 
 use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
-    escaped, format_file_row, format_legend, NotRedactedReason, OutputStyles, RowLayout,
-    RowOutcome, SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+    escaped, format_file_row, format_legend, OutputStyles, RowLayout, RowOutcome, SkipReason,
+    GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
+use crate::commands::sarif::{ArtifactOutcome, Place, SarifArtifact, SarifFinding};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
 use console::{measure_text_width, pad_str, Alignment};
@@ -48,7 +49,7 @@ pub enum ValueDisplay {
 /// Masks a value without hashing it, since a hash of a phone number or an ID is reversed by
 /// trying every candidate. Each character becomes a `*`, so the length shows, except the first
 /// and the last of a value longer than 4 characters.
-fn mask_value(value: &str) -> String {
+pub(super) fn mask_value(value: &str) -> String {
     let length = value.chars().count();
     match (value.chars().next(), value.chars().next_back()) {
         (Some(first), Some(last)) if length > 4 => {
@@ -80,6 +81,10 @@ pub struct FindingReport {
     score: Option<Score>,
     location: DetectionLocation,
     value: String,
+    /// Where the finding is for a SARIF report, which also needs where a range ends. Not part of
+    /// the JSON report. `None` when the location is the file as a whole.
+    #[serde(skip)]
+    place: Option<Place>,
 }
 
 impl FindingReport {
@@ -89,11 +94,33 @@ impl FindingReport {
             label: detection.label.clone(),
             score: detection.score,
             location: detection.location,
+            place: Place::new(detection.location, &detection.value),
             value: match values {
                 ValueDisplay::Masked => mask_value(&detection.value),
                 ValueDisplay::Raw => detection.value.clone(),
             },
         }
+    }
+
+    /// The finding for a SARIF report, which masks the value whatever the report holds.
+    pub(super) fn sarif_finding(&self) -> SarifFinding {
+        SarifFinding::new(
+            self.redacter,
+            self.label.clone(),
+            self.score,
+            self.place,
+            &self.value,
+        )
+    }
+
+    /// Orders findings as a reader meets them; findings at the same place keep the order they
+    /// are given in.
+    pub(super) fn sort_by_location(findings: &mut [FindingReport]) {
+        findings.sort_by(|a, b| {
+            a.location
+                .partial_cmp(&b.location)
+                .unwrap_or(Ordering::Equal)
+        });
     }
 
     /// The value for a terminal or a text report, see [`escaped`].
@@ -139,11 +166,7 @@ impl ScanFileReport {
         mut findings: Vec<FindingReport>,
         unlocated_values: usize,
     ) -> Self {
-        findings.sort_by(|a, b| {
-            a.location
-                .partial_cmp(&b.location)
-                .unwrap_or(Ordering::Equal)
-        });
+        FindingReport::sort_by_location(&mut findings);
         Self {
             unlocated_values,
             ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
@@ -160,14 +183,10 @@ impl ScanFileReport {
     pub fn not_scanned(file_ref: &FileSystemRef, reason: SkipReason) -> Self {
         let status = match reason {
             SkipReason::OverSizeLimit | SkipReason::NameFilter => ScanFileStatus::Skipped,
-            SkipReason::NotRedacted(
-                NotRedactedReason::TypeNotSupported
-                | NotRedactedReason::NoRedacterApplied
-                | NotRedactedReason::OcrImageFormatNotSupported,
-            ) => ScanFileStatus::Unsupported,
-            SkipReason::NotRedacted(
-                NotRedactedReason::PdfRendererUnavailable | NotRedactedReason::OcrUnavailable,
-            ) => ScanFileStatus::Blocked,
+            SkipReason::NotRedacted(not_redacted) if not_redacted.needs_converter() => {
+                ScanFileStatus::Blocked
+            }
+            SkipReason::NotRedacted(_) => ScanFileStatus::Unsupported,
         };
         Self::new(
             file_ref,
@@ -181,6 +200,36 @@ impl ScanFileReport {
         Self::new(file_ref, ScanFileStatus::Failed, Some(message), Vec::new())
     }
 
+    /// Whether the file has no findings but the redacters named values they could not locate in
+    /// it, so it is not known to be clean.
+    fn is_unconfirmed(&self) -> bool {
+        self.findings.is_empty() && self.unlocated_values > 0
+    }
+
+    /// The file for a SARIF report, or `None` for a file left out on request.
+    fn sarif_artifact(&self) -> Option<SarifArtifact> {
+        let reason = self.reason.clone().unwrap_or_default();
+        let outcome = match self.status {
+            ScanFileStatus::Scanned if self.is_unconfirmed() => ArtifactOutcome::Unconfirmed {
+                unlocated_values: self.unlocated_values,
+            },
+            ScanFileStatus::Scanned => ArtifactOutcome::Findings(
+                self.findings
+                    .iter()
+                    .map(FindingReport::sarif_finding)
+                    .collect(),
+            ),
+            ScanFileStatus::Failed => ArtifactOutcome::Failed { reason },
+            ScanFileStatus::Blocked => ArtifactOutcome::Blocked { reason },
+            ScanFileStatus::Unsupported => ArtifactOutcome::Unsupported { reason },
+            ScanFileStatus::Skipped => return None,
+        };
+        Some(SarifArtifact {
+            path: self.path.clone(),
+            outcome,
+        })
+    }
+
     /// What the file's row shows: `!` and the number of findings, `?` for a file without findings
     /// whose values could not be located, `✓` for a clean file, `↷` for a file left out or that
     /// no redacter reads, and `✗` for one that failed or is blocked, since both make the scan
@@ -191,7 +240,7 @@ impl ScanFileReport {
             ScanFileStatus::Scanned => {
                 let (glyph, style) = if !self.findings.is_empty() {
                     (GLYPH_FINDINGS, &styles.found)
-                } else if self.unlocated_values > 0 {
+                } else if self.is_unconfirmed() {
                     (GLYPH_UNCONFIRMED, &styles.unconfirmed)
                 } else {
                     (GLYPH_OK, &styles.ok)
@@ -284,7 +333,7 @@ impl ScanCommandResult {
                 self.files_scanned += 1;
                 if !file.findings.is_empty() {
                     self.files_with_findings += 1;
-                } else if file.unlocated_values > 0 {
+                } else if file.is_unconfirmed() {
                     self.files_unconfirmed += 1;
                 }
             }
@@ -303,6 +352,14 @@ impl ScanCommandResult {
                 .or_default() += 1;
         }
         self.files.push(file);
+    }
+
+    /// The files of the scan for a SARIF report.
+    pub fn sarif_artifacts(&self) -> Vec<SarifArtifact> {
+        self.files
+            .iter()
+            .filter_map(ScanFileReport::sarif_artifact)
+            .collect()
     }
 
     /// The process exit code: 1 when a file that should have been scanned was not, because it
@@ -498,7 +555,10 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::copy_output::NotRedactedReason;
+    use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use clap::ValueEnum;
+    use std::path::Path;
 
     fn file_ref(path: &str, media_type: mime::Mime) -> FileSystemRef {
         FileSystemRef {
@@ -519,6 +579,7 @@ mod tests {
             label: DetectionLabel::new(label),
             score: score.map(|score| Score::try_from(score).unwrap()),
             location,
+            place: Place::new(location, value),
             value: mask_value(value),
         }
     }
@@ -648,6 +709,69 @@ mod tests {
                 assert!(!report.contains(hidden), "{values:?}: {report}");
             }
         }
+    }
+
+    #[test]
+    fn the_sarif_report_has_the_masked_value_even_when_values_are_shown() {
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![FindingReport::new(
+                RedacterType::LocalRules,
+                &email_detection(),
+                ValueDisplay::Raw,
+            )],
+            0,
+        ));
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+
+        let sarif =
+            serde_json::to_string(&SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap();
+
+        assert!(sarif.contains("j********************m"), "{sarif}");
+        assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
+    }
+
+    #[test]
+    fn the_sarif_report_leaves_out_skipped_files_and_tells_unconfirmed_ones() {
+        let mut result = sample_result();
+        result.push(ScanFileReport::scanned(
+            &file_ref("reformatted.txt", mime::TEXT_PLAIN),
+            Vec::new(),
+            2,
+        ));
+
+        let outcomes: Vec<(String, &str)> = result
+            .sarif_artifacts()
+            .into_iter()
+            .map(|artifact| {
+                let outcome = match artifact.outcome {
+                    ArtifactOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    ArtifactOutcome::Findings(_) => "findings",
+                    ArtifactOutcome::Unconfirmed { .. } => "unconfirmed",
+                    ArtifactOutcome::Failed { .. } => "failed",
+                    ArtifactOutcome::Blocked { .. } => "blocked",
+                    ArtifactOutcome::Unsupported { .. } => "unsupported",
+                };
+                (artifact.path, outcome)
+            })
+            .collect();
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(path, outcome)| (path.as_str(), *outcome))
+                .collect::<Vec<_>>(),
+            [
+                ("customer-note.txt", "findings"),
+                ("customers.csv", "findings"),
+                ("form.pdf", "findings"),
+                ("clean.txt", "clean"),
+                ("scan.png", "blocked"),
+                ("archive.bin", "unsupported"),
+                ("reformatted.txt", "unconfirmed"),
+            ]
+        );
     }
 
     #[test]
@@ -943,6 +1067,7 @@ mod tests {
                 label: DetectionLabel::new(label),
                 score: score.map(|score| Score::try_from(score).unwrap()),
                 location,
+                place: Place::new(location, value),
                 value: value.to_string(),
             };
         let styles = OutputStyles::plain();

@@ -242,7 +242,16 @@ impl CopyFileOutcome {
 }
 
 impl NotRedactedReason {
-    fn detail(&self) -> &'static str {
+    /// Whether the file is not read because this run lacks a converter for it, which a user
+    /// can fix by installing an addon, as opposed to a file no selected redacter reads at all.
+    pub(crate) fn needs_converter(self) -> bool {
+        matches!(
+            self,
+            NotRedactedReason::PdfRendererUnavailable | NotRedactedReason::OcrUnavailable
+        )
+    }
+
+    pub(crate) fn detail(&self) -> &'static str {
         match self {
             NotRedactedReason::TypeNotSupported => "type not supported",
             NotRedactedReason::NoRedacterApplied => "no redacter applied",

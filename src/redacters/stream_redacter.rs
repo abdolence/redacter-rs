@@ -8,7 +8,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Detection, DetectionLocation,
     RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent,
-    Redacters, TextLines,
+    Redacters, StreamRedactions, TextLines,
 };
 use crate::AppResult;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -58,6 +58,9 @@ pub struct RedactStreamResult {
     /// no-op (see `summary`), because it decides whether the file is uploaded.
     pub number_of_redactions: usize,
     pub summary: RedactionSummary,
+    /// What each redacter replaced, placed in the file as it was read, in plan order and in the
+    /// order a reader meets it within a redacter. Empty when no redacter changed the file.
+    pub redactions: Vec<(RedacterType, Detection)>,
     pub stream: ContentStream,
 }
 
@@ -162,7 +165,8 @@ impl DetectStreamResult {
 
 /// The result of running one OCR conversion step.
 enum OcrStepResult {
-    Redacted,
+    /// The image was redacted; the records place what each redacter replaced on the image.
+    Redacted(Vec<(RedacterType, Detection)>),
     ImageFormatNotSupported,
 }
 
@@ -346,12 +350,14 @@ impl<'a> StreamRedacter<'a> {
                         blocked: Some(RedactionBlocked::NotText),
                         ..RedactionSummary::default()
                     },
+                    redactions: Vec::new(),
                     stream: data,
                 });
             }
         };
         let mut number_of_redactions = 0;
         let mut summary = RedactionSummary::default();
+        let mut recorder = StreamRedactions::new(self.redacter_base_options.list_redactions);
 
         if redact_plan.apply_ocr {
             // The whole chain of text-only redacters runs once here, on the words the OCR
@@ -381,6 +387,7 @@ impl<'a> StreamRedacter<'a> {
                                 redacters,
                                 pdf_to_image.as_ref(),
                                 Some(ocr.as_ref()),
+                                &mut recorder,
                             )
                             .await?;
                         redacted = item;
@@ -391,11 +398,18 @@ impl<'a> StreamRedacter<'a> {
                         summary.conversion = conversion.or(summary.conversion);
                     } else {
                         let (item, step) = self
-                            .redact_with_ocr_converter(file_ref, redacted, redacters, ocr.as_ref())
+                            .redact_with_ocr_converter(
+                                file_ref,
+                                redacted,
+                                redacters,
+                                ocr.as_ref(),
+                                None,
+                            )
                             .await?;
                         redacted = item;
                         match step {
-                            OcrStepResult::Redacted => {
+                            OcrStepResult::Redacted(records) => {
+                                recorder.extend(records);
                                 number_of_redactions += redacters.len();
                                 summary
                                     .applied
@@ -422,6 +436,7 @@ impl<'a> StreamRedacter<'a> {
                                     std::slice::from_ref(redacter),
                                     pdf_to_image.as_ref(),
                                     None,
+                                    &mut recorder,
                                 )
                                 .await?;
                             redacted = item;
@@ -439,7 +454,7 @@ impl<'a> StreamRedacter<'a> {
                         file = %file_ref.relative_path.value(),
                         "redacting"
                     );
-                    redacted = redacter.redact(redacted).await?;
+                    redacted = recorder.redact(redacter, None, redacted).await?;
                     number_of_redactions += 1;
                     summary.applied.push(redacter.redacter_type());
                 }
@@ -472,6 +487,7 @@ impl<'a> StreamRedacter<'a> {
         Ok(RedactStreamResult {
             number_of_redactions,
             summary,
+            redactions: recorder.into_records(),
             stream: output_stream,
         })
     }
@@ -831,6 +847,7 @@ impl<'a> StreamRedacter<'a> {
         redacters: &[&Redacters<'a>],
         converter: &dyn PdfToImage,
         ocr: Option<&dyn Ocr>,
+        recorder: &mut StreamRedactions,
     ) -> Result<(RedacterDataItem, Option<RedactionConversion>), AppError> {
         match redacted.content {
             RedacterDataItemContent::Pdf { data } => {
@@ -843,7 +860,8 @@ impl<'a> StreamRedacter<'a> {
                 let pages = pdf_info.pages.len();
                 tracing::debug!(pages, "converting the PDF pages to images");
                 let mut redacted_pages = Vec::with_capacity(pdf_info.pages.len());
-                for page in pdf_info.pages {
+                for (index, page) in pdf_info.pages.into_iter().enumerate() {
+                    let page_number = index + 1;
                     let mut png_image_bytes = std::io::Cursor::new(Vec::new());
                     page.page_as_images
                         .write_to(&mut png_image_bytes, ImageFormat::Png)?;
@@ -855,18 +873,23 @@ impl<'a> StreamRedacter<'a> {
                         file_ref: file_ref.clone(),
                     };
                     let redacted_image = if let Some(ocr_engine) = ocr {
-                        self.redact_with_ocr_converter(
-                            file_ref,
-                            image_to_redact,
-                            redacters,
-                            ocr_engine,
-                        )
-                        .await?
-                        .0
+                        let (item, step) = self
+                            .redact_with_ocr_converter(
+                                file_ref,
+                                image_to_redact,
+                                redacters,
+                                ocr_engine,
+                                Some(page_number),
+                            )
+                            .await?;
+                        if let OcrStepResult::Redacted(records) = step {
+                            recorder.extend(records);
+                        }
+                        item
                     } else {
                         let mut item = image_to_redact;
                         for redacter in redacters {
-                            item = redacter.redact(item).await?;
+                            item = recorder.redact(redacter, Some(page_number), item).await?;
                         }
                         item
                     };
@@ -918,6 +941,7 @@ impl<'a> StreamRedacter<'a> {
         redacted: RedacterDataItem,
         redacters: &[&Redacters<'a>],
         ocr: &dyn Ocr,
+        page: Option<usize>,
     ) -> Result<(RedacterDataItem, OcrStepResult), AppError> {
         match &redacted.content {
             RedacterDataItemContent::Image { data, mime_type } => {
@@ -941,13 +965,26 @@ impl<'a> StreamRedacter<'a> {
                             content: RedacterDataItemContent::Value(ocr_text.text.clone()),
                             file_ref: file_ref.clone(),
                         };
+                        let mut steps =
+                            StreamRedactions::new(self.redacter_base_options.list_redactions);
                         for redacter in redacters {
-                            redacted_item = redacter.redact(redacted_item).await?;
+                            redacted_item = steps.redact(redacter, page, redacted_item).await?;
                         }
 
                         match redacted_item.content {
                             RedacterDataItemContent::Value(content) => {
                                 let to_redact = words_to_redact(&original_words, &content);
+                                let records = redacters
+                                    .last()
+                                    .filter(|_| self.redacter_base_options.list_redactions)
+                                    .map_or_else(Vec::new, |last| {
+                                        ocr_text.drawn_records(
+                                            steps.into_records(),
+                                            &to_redact,
+                                            page,
+                                            last.redacter_type(),
+                                        )
+                                    });
                                 let mut redacted_image = image.to_rgb8();
                                 for (word, redact) in ocr_text.words.iter().zip(&to_redact) {
                                     if *redact {
@@ -968,7 +1005,7 @@ impl<'a> StreamRedacter<'a> {
                                             data: output.into_inner().into(),
                                         },
                                     },
-                                    OcrStepResult::Redacted,
+                                    OcrStepResult::Redacted(records),
                                 ))
                             }
                             _ => Err(AppError::SystemError {
@@ -986,7 +1023,7 @@ impl<'a> StreamRedacter<'a> {
                     }
                 }
             }
-            _ => Ok((redacted, OcrStepResult::Redacted)),
+            _ => Ok((redacted, OcrStepResult::Redacted(Vec::new()))),
         }
     }
 }
@@ -1115,9 +1152,20 @@ impl OcrText {
         end: usize,
         page: Option<usize>,
     ) -> Option<DetectionLocation> {
-        self.words
-            .iter()
-            .filter(|word| word.span.start < end && start < word.span.end)
+        Self::box_around(
+            self.words
+                .iter()
+                .filter(|word| word.span.start < end && start < word.span.end),
+            page,
+        )
+    }
+
+    /// The box around `words`, or `None` when there are none.
+    pub(super) fn box_around<'w>(
+        words: impl Iterator<Item = &'w OcrWord>,
+        page: Option<usize>,
+    ) -> Option<DetectionLocation> {
+        words
             .map(|word| &word.coords)
             .fold(None, |covered, coords| {
                 Some(match covered {
@@ -1282,6 +1330,7 @@ mod tests {
             csv_delimiter: None,
             sampling_size: None,
             limit_dlp_requests: None,
+            list_redactions: true,
         }
     }
 
@@ -1474,10 +1523,10 @@ mod tests {
         };
 
         let (result, step) = stream_redacter
-            .redact_with_ocr_converter(&file_ref, redacted_item, &redacter_refs, &ocr)
+            .redact_with_ocr_converter(&file_ref, redacted_item, &redacter_refs, &ocr, None)
             .await
             .expect("redacts");
-        assert!(matches!(step, OcrStepResult::Redacted));
+        assert!(matches!(step, OcrStepResult::Redacted(_)));
 
         let data = match result.content {
             RedacterDataItemContent::Image { data, .. } => data,
@@ -1727,6 +1776,158 @@ mod tests {
         );
     }
 
+    async fn redact(
+        converters: &FileConverters<'_>,
+        redacters: &[Redacters<'static>],
+        file_ref: &FileSystemRef,
+        data: &[u8],
+    ) -> RedactStreamResult {
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, converters);
+        let plan = stream_redacter
+            .create_redact_plan(redacters, file_ref)
+            .await
+            .unwrap();
+        stream_redacter
+            .redact_stream(one_chunk(data), plan, file_ref)
+            .await
+            .unwrap()
+    }
+
+    fn redaction_places(
+        result: &RedactStreamResult,
+    ) -> Vec<(RedacterType, DetectionLocation, &str)> {
+        result
+            .redactions
+            .iter()
+            .map(|(redacter, detection)| (*redacter, detection.location, detection.value.as_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_redacted_csv_file_reports_the_cells() {
+        let redacters = vec![email_rules().await];
+
+        let result = redact(
+            &FileConverters::new(),
+            &redacters,
+            &file_ref("customers.csv", mime::TEXT_CSV),
+            b"id,contact\n1,none\n2,a@b.io\n",
+        )
+        .await;
+
+        assert_eq!(
+            redaction_places(&result),
+            vec![(
+                RedacterType::LocalRules,
+                DetectionLocation::TableCell {
+                    row: 2,
+                    column: 2,
+                    start: 0,
+                    end: 6
+                },
+                "a@b.io"
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_lists_no_redactions_records_nothing_and_redacts_the_same() {
+        let redacters = vec![email_rules().await];
+        let file = file_ref("note.txt", mime::TEXT_PLAIN);
+        let converters = FileConverters::new();
+        let mut options = base_options();
+        options.list_redactions = false;
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let plan = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
+
+        let result = stream_redacter
+            .redact_stream(one_chunk(b"Mail ana@x.io today"), plan, &file)
+            .await
+            .unwrap();
+
+        assert_eq!(result.number_of_redactions, 1);
+        assert!(result.redactions.is_empty());
+        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        assert_eq!(output.concat(), b"Mail [REDACTED] today");
+    }
+
+    async fn ocr_redaction(page: Option<usize>) -> Vec<(RedacterType, Detection)> {
+        let redacters = [email_and_phone_rules().await];
+        let redacter_refs: Vec<&Redacters> = redacters.iter().collect();
+        let ocr = FakeOcr {
+            coords: form_words(),
+        };
+        let options = base_options();
+        let converters = FileConverters::new();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file_ref = png_file_ref("form.png");
+        let item = RedacterDataItem {
+            content: RedacterDataItemContent::Image {
+                mime_type: mime::IMAGE_PNG,
+                data: white_png(8, 8),
+            },
+            file_ref: file_ref.clone(),
+        };
+        match stream_redacter
+            .redact_with_ocr_converter(&file_ref, item, &redacter_refs, &ocr, page)
+            .await
+            .unwrap()
+            .1
+        {
+            OcrStepResult::Redacted(records) => records,
+            OcrStepResult::ImageFormatNotSupported => panic!("a PNG is supported"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ocr_redaction_is_boxed_by_the_drawn_words_on_the_page() {
+        for page in [None, Some(2)] {
+            let records = ocr_redaction(page).await;
+
+            let boxes: Vec<_> = records
+                .iter()
+                .map(|(_, detection)| {
+                    (
+                        detection.label.to_string(),
+                        detection.location,
+                        detection.value.as_str(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                boxes,
+                vec![
+                    (
+                        "email".to_string(),
+                        DetectionLocation::Image {
+                            page,
+                            x1: 310.0,
+                            y1: 193.0,
+                            x2: 622.0,
+                            y2: 218.0
+                        },
+                        "john.smith@example.com"
+                    ),
+                    (
+                        "phone-international".to_string(),
+                        DetectionLocation::Image {
+                            page,
+                            x1: 310.0,
+                            y1: 262.0,
+                            x2: 540.0,
+                            y2: 290.0
+                        },
+                        "+1 (555) 123-4567"
+                    ),
+                ]
+            );
+        }
+    }
+
     /// Ink extents of two values of the form, measured from the PNG fixture and from page 1
     /// of the PDF fixture as pdfium renders it (one pixel per point): `(x1, y1, x2, y2)`. The
     /// phone number is three OCR words, so its box is a union.
@@ -1758,12 +1959,8 @@ mod tests {
     ];
 
     /// Pdfium binds once per process, so the image and the PDF share one set of converters.
-    #[tokio::test]
-    #[cfg_attr(not(feature = "ci-ocr"), ignore)]
-    async fn detections_in_the_form_fixtures_are_boxed_where_the_values_are_printed() {
+    async fn form_converters() -> FileConverters<'static> {
         use crate::addon_store::{AddonStore, AddonStoreOptions};
-        use crate::redacters::test_support::pdfium_test_lock;
-        let _guard = pdfium_test_lock().lock().await;
         let store = AddonStore::new(&AddonStoreOptions::default());
         let converters = FileConverters::new()
             .init(reporter(), &store)
@@ -1773,48 +1970,72 @@ mod tests {
             converters.ocr.is_some() && converters.pdf_image_converter.is_some(),
             "the ci-ocr feature needs the OCR model and pdfium"
         );
+        converters
+    }
+
+    /// `found` must be a box on `page` that covers the ink of the value and reaches little past
+    /// it.
+    fn assert_box_on_ink(
+        path: &str,
+        page: Option<usize>,
+        label: &str,
+        found: &Detection,
+        [ink_x1, ink_y1, ink_x2, ink_y2]: [f32; 4],
+    ) {
+        let DetectionLocation::Image {
+            page: found_page,
+            x1,
+            y1,
+            x2,
+            y2,
+        } = found.location
+        else {
+            panic!("{path}: an image location is expected, got {found:?}");
+        };
+        assert_eq!(found_page, page, "{path}");
+        assert!(
+            x1 <= ink_x1 + 2.0 && y1 <= ink_y1 + 2.0 && x2 >= ink_x2 - 2.0 && y2 >= ink_y2 - 2.0,
+            "{path}: the {label} box {:?} does not cover its ink",
+            (x1, y1, x2, y2)
+        );
+        assert!(
+            x2 - x1 <= ink_x2 - ink_x1 + 10.0 && y2 - y1 <= ink_y2 - ink_y1 + 10.0,
+            "{path}: the {label} box {:?} reaches past its value",
+            (x1, y1, x2, y2)
+        );
+    }
+
+    /// Pdfium binds once per process, so detection and redaction share one test.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-ocr"), ignore)]
+    async fn detections_and_redactions_in_the_form_fixtures_are_boxed_where_the_values_are_printed()
+    {
+        use crate::redacters::test_support::pdfium_test_lock;
+        let _guard = pdfium_test_lock().lock().await;
+        let converters = form_converters().await;
         let redacters = vec![email_and_phone_rules().await];
 
-        for (path, page, label, [ink_x1, ink_y1, ink_x2, ink_y2]) in FORM_FIXTURE_INK {
+        for (path, page, label, ink) in FORM_FIXTURE_INK {
             let media_type = mime_guess::from_path(path).first().unwrap();
             let data = std::fs::read(path).unwrap();
-            let result = detect(
-                &converters,
-                &redacters,
-                &file_ref(path, media_type),
-                data.into(),
-            )
-            .await
-            .unwrap();
-            let (_, found) = result
+            let file_ref = file_ref(path, media_type);
+            let detected = detect(&converters, &redacters, &file_ref, data.clone().into())
+                .await
+                .unwrap();
+            let (_, found) = detected
                 .detections
                 .iter()
                 .find(|(_, detection)| detection.label == DetectionLabel::new(label))
                 .unwrap_or_else(|| panic!("{path}: no {label} found"));
-            let DetectionLocation::Image {
-                page: found_page,
-                x1,
-                y1,
-                x2,
-                y2,
-            } = found.location
-            else {
-                panic!("{path}: an image location is expected, got {found:?}");
-            };
-            assert_eq!(found_page, page, "{path}");
-            assert!(
-                x1 <= ink_x1 + 2.0
-                    && y1 <= ink_y1 + 2.0
-                    && x2 >= ink_x2 - 2.0
-                    && y2 >= ink_y2 - 2.0,
-                "{path}: the {label} box {:?} does not cover its ink",
-                (x1, y1, x2, y2)
-            );
-            assert!(
-                x2 - x1 <= ink_x2 - ink_x1 + 10.0 && y2 - y1 <= ink_y2 - ink_y1 + 10.0,
-                "{path}: the {label} box {:?} reaches past its value",
-                (x1, y1, x2, y2)
-            );
+            assert_box_on_ink(path, page, label, found, ink);
+
+            let redacted = redact(&converters, &redacters, &file_ref, &data).await;
+            let (_, replaced) = redacted
+                .redactions
+                .iter()
+                .find(|(_, detection)| detection.label == DetectionLabel::new(label))
+                .unwrap_or_else(|| panic!("{path}: no {label} redacted"));
+            assert_box_on_ink(path, page, label, replaced, ink);
         }
     }
 

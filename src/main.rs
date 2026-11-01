@@ -7,6 +7,7 @@ use std::error::Error;
 use crate::addon_store::AddonStoreOptions;
 use crate::commands::*;
 use crate::errors::AppError;
+use crate::redacters::RedacterOptions;
 use args::*;
 use console::{Style, Term};
 
@@ -119,16 +120,21 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                 mime_override,
                 addon_store,
             );
-            let copy_result = command_copy(
-                term,
-                &source,
-                &destination,
-                options,
-                redacter_args.map(|args| args.try_into()).transpose()?,
-            )
-            .await?;
+            let mut redacter_options: Option<RedacterOptions> =
+                redacter_args.map(|args| args.try_into()).transpose()?;
+            if let Some(redacter_options) = &mut redacter_options {
+                redacter_options.base_options.list_redactions = report.lists_redactions();
+            }
+            let copy_result =
+                command_copy(term, &source, &destination, options, redacter_options).await?;
             report
-                .write(term, &copy_result, &copy_result.to_text())
+                .write(
+                    term,
+                    &copy_result,
+                    &copy_result.to_text(),
+                    || copy_result.sarif_artifacts(),
+                    &source,
+                )
                 .await?;
             Ok(0)
         }
@@ -162,7 +168,13 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             let scan_result =
                 command_scan(term, &source, options, redacter_args.try_into()?).await?;
             report
-                .write(term, &scan_result, &scan_result.to_text())
+                .write(
+                    term,
+                    &scan_result,
+                    &scan_result.to_text(),
+                    || scan_result.sarif_artifacts(),
+                    &source,
+                )
                 .await?;
             Ok(scan_result.exit_code(fail_on))
         }

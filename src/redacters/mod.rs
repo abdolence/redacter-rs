@@ -7,6 +7,7 @@ use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::tonic;
 use mime::Mime;
+use rvstruct::ValueStruct;
 use std::fmt::Display;
 use std::future::Future;
 
@@ -56,6 +57,8 @@ pub(crate) mod text_spans;
 mod detection;
 pub use detection::*;
 
+mod text_changes;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
@@ -72,6 +75,9 @@ mod simple_image_redacter;
 pub use simple_image_redacter::*;
 mod stream_redacter;
 pub use stream_redacter::*;
+
+mod stream_redactions;
+pub(crate) use stream_redactions::StreamRedactions;
 
 mod redacter_throttler;
 pub use redacter_throttler::*;
@@ -249,10 +255,6 @@ pub struct PreparedImage {
     pub original_height: u32,
 }
 
-/// The kind of a box in an image whose text no text detection classified: the coordinate pass
-/// locates text a model takes for sensitive data, and does not classify it.
-const IMAGE_DETECTION_LABEL: &str = "sensitive_data";
-
 /// What a model found in an image: boxes in pixels of `image`, the scaled-down copy it saw.
 #[derive(Debug, Clone)]
 pub struct ImageBoxes {
@@ -275,7 +277,7 @@ impl ImageBoxes {
                 let (x1, x2) = (to_x(coords.x1), to_x(coords.x2));
                 let (y1, y2) = (to_y(coords.y1), to_y(coords.y2));
                 Detection {
-                    label: DetectionLabel::new(IMAGE_DETECTION_LABEL),
+                    label: DetectionLabel::unclassified(),
                     location: DetectionLocation::Image {
                         page: None,
                         x1: x1.min(x2),
@@ -288,6 +290,29 @@ impl ImageBoxes {
                 }
             })
             .collect()
+    }
+
+    /// Blacks out the boxes in the scaled-down copy the model saw, padded by
+    /// `approximation_factor` of each box, and returns that copy with the boxes as `replaced`.
+    pub fn redact(
+        self,
+        mime_type: Mime,
+        file_ref: FileSystemRef,
+        approximation_factor: f32,
+    ) -> AppResult<Redacted> {
+        let data = redact_image_at_coords(
+            mime_type.clone(),
+            self.image.data.clone(),
+            self.coords.clone(),
+            approximation_factor,
+        )?;
+        Ok(Redacted::located(
+            RedacterDataItem {
+                file_ref,
+                content: RedacterDataItemContent::Image { mime_type, data },
+            },
+            self.into_detections(),
+        ))
     }
 }
 
@@ -393,7 +418,9 @@ pub fn normalized_box_to_image_coords(
 }
 
 /// Redacts an image with the native editing path, the coordinate path, or both,
-/// according to `mode`.
+/// according to `mode`. The result names the redacted boxes only when the coordinate path made
+/// the last change: a native edit says where it edited nothing, and the verification pass
+/// after one finds boxes in pixels of the edited image, not of `input`.
 ///
 /// In `Auto` mode a successful native edit is not trusted on its own: the model can draw
 /// the black boxes but still write the personal information back inside or beside them.
@@ -408,20 +435,25 @@ pub async fn redact_image_with_mode<'a, NativeFn, NativeFut, CoordsFn, CoordsFut
     reporter: &'a AppReporter<'a>,
     native: NativeFn,
     coords: CoordsFn,
-) -> AppResult<RedacterDataItem>
+) -> AppResult<Redacted>
 where
     NativeFn: FnOnce(RedacterDataItem) -> NativeFut,
     NativeFut: Future<Output = Result<RedacterDataItem, NativeImageEditError>>,
     CoordsFn: FnOnce(RedacterDataItem) -> CoordsFut,
-    CoordsFut: Future<Output = AppResult<RedacterDataItem>>,
+    CoordsFut: Future<Output = AppResult<Redacted>>,
 {
     match mode {
         LlmImageMode::Coords => coords(input).await,
-        LlmImageMode::Native => native(input).await.map_err(|err| err.error),
+        LlmImageMode::Native => native(input)
+            .await
+            .map(Redacted::unlocated)
+            .map_err(|err| err.error),
         LlmImageMode::Auto => {
             let fallback_input = input.clone();
             match native(input).await {
-                Ok(redacted) => coords(redacted).await,
+                Ok(edited) => coords(edited)
+                    .await
+                    .map(|verified| Redacted::unlocated(verified.item)),
                 Err(err) if should_fall_back_to_coords(mode, err.failure) => {
                     reporter.report_debug(format!(
                         "Native image redaction is not available ({}). Falling back to redacting by coordinates.",
@@ -444,6 +476,59 @@ pub struct RedacterDataItem {
 impl RedacterDataItem {
     fn is_blank_text(&self) -> bool {
         matches!(&self.content, RedacterDataItemContent::Value(text) if text.trim().is_empty())
+    }
+}
+
+/// What `redact` returns: the redacted item and what the redacter says it replaced.
+#[derive(Debug, Clone)]
+pub struct Redacted {
+    pub item: RedacterDataItem,
+    /// What the redacter replaced, located in the item it was given as `detect` locates: a text
+    /// range, the range of one table cell, a box in pixels of the input image. Empty when it
+    /// replaced nothing. `None` when it changed the item without saying where: a model's
+    /// rewrite, a native image edit, a DLP de-identification, an image redactor that returns
+    /// only pixels. `Some(vec![])` and `None` differ: a coordinate pass that found no box still
+    /// returns a re-encoded copy of the image, which only the empty list tells apart from an
+    /// edit.
+    pub replaced: Option<Vec<Detection>>,
+}
+
+impl Redacted {
+    /// An item whose replaced data is located.
+    pub fn located(item: RedacterDataItem, replaced: Vec<Detection>) -> Self {
+        Self {
+            item,
+            replaced: Some(replaced),
+        }
+    }
+
+    /// An item changed, or left as it was, without saying where.
+    pub fn unlocated(item: RedacterDataItem) -> Self {
+        Self {
+            item,
+            replaced: None,
+        }
+    }
+
+    /// An item with the locations a call returned, when reading them is work that can fail
+    /// (a response to parse, values to place). Reading the locations never fails the
+    /// redaction: on an error the item is returned unlocated and the error is logged.
+    pub fn located_or_unlocated(
+        item: RedacterDataItem,
+        replaced: AppResult<Vec<Detection>>,
+        reporter: &AppReporter<'_>,
+        redacter: RedacterType,
+    ) -> Self {
+        match replaced {
+            Ok(replaced) => Self::located(item, replaced),
+            Err(error) => {
+                reporter.report_debug(format!(
+                    "{redacter}: where {} was redacted is not reported: {error}",
+                    item.file_ref.relative_path.value()
+                ));
+                Self::unlocated(item)
+            }
+        }
     }
 }
 
@@ -497,6 +582,10 @@ pub struct RedacterBaseOptions {
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+    /// Record where each redaction sits in the file, for a report that lists them. Recording
+    /// keeps the content of every step and compares it with the next, so a copy that writes no
+    /// such report leaves it off.
+    pub list_redactions: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -665,7 +754,8 @@ pub(crate) fn text_or_table_support(file_ref: &FileSystemRef) -> RedactSupport {
 }
 
 pub trait Redacter {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem>;
+    /// Redacts `input` and returns the result with what was replaced, as [`Redacted`] says.
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted>;
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport>;
 
@@ -686,9 +776,9 @@ impl<'a> Redacter for Redacters<'a> {
     // Text with nothing in it never reaches the redacter, in `redact` or in `detect`: a model
     // has nothing to answer for it and would make something up (written to the file by
     // `redact`), and the DLP services reject empty content as an invalid request.
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         if input.is_blank_text() {
-            return Ok(input);
+            return Ok(Redacted::located(input, Vec::new()));
         }
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
@@ -1043,6 +1133,22 @@ mod tests {
         }
     }
 
+    /// A box on a dummy image, standing for what a coordinate pass found.
+    fn found_box() -> Detection {
+        Detection {
+            label: DetectionLabel::new("sensitive_data"),
+            location: DetectionLocation::Image {
+                page: None,
+                x1: 1.0,
+                y1: 2.0,
+                x2: 30.0,
+                y2: 40.0,
+            },
+            score: None,
+            value: "john".to_string(),
+        }
+    }
+
     fn image_tag(item: &RedacterDataItem) -> &str {
         match &item.content {
             RedacterDataItemContent::Image { data, .. } => {
@@ -1099,9 +1205,10 @@ mod tests {
         let redacter = redacter_with_unreachable_service(&reporter).await;
         let redacted = redacter.redact(blank_text_item()).await.unwrap();
         assert!(matches!(
-            redacted.content,
+            redacted.item.content,
             RedacterDataItemContent::Value(text) if text == " \n\t"
         ));
+        assert_eq!(redacted.replaced.as_deref(), Some(&[][..]));
     }
 
     fn test_reporter(term: &console::Term) -> AppReporter<'_> {
@@ -1137,7 +1244,12 @@ mod tests {
             |item| {
                 let tag = image_tag(&item).to_string();
                 *coords_saw.borrow_mut() = Some(tag.clone());
-                async move { Ok(dummy_image_item(&format!("{tag}-coords"))) }
+                async move {
+                    Ok(Redacted::located(
+                        dummy_image_item(&format!("{tag}-coords")),
+                        vec![found_box()],
+                    ))
+                }
             },
         )
         .await
@@ -1148,7 +1260,11 @@ mod tests {
             Some("input-native"),
             "coords must verify the native output, not the original input"
         );
-        assert_eq!(image_tag(&result), "input-native-coords");
+        assert_eq!(image_tag(&result.item), "input-native-coords");
+        assert!(
+            result.replaced.is_none(),
+            "the verification boxes are in pixels of the edited image, not of the input"
+        );
     }
 
     #[tokio::test]
@@ -1188,14 +1304,130 @@ mod tests {
             |item| async move { Ok(dummy_image_item(&format!("{}-native", image_tag(&item)))) },
             |item| {
                 coords_called.set(true);
-                async move { Ok(item) }
+                async move { Ok(Redacted::unlocated(item)) }
             },
         )
         .await
         .expect("the native edit succeeds");
 
         assert!(!coords_called.get(), "coords must not run in native mode");
-        assert_eq!(image_tag(&result), "input-native");
+        assert_eq!(image_tag(&result.item), "input-native");
+        assert!(
+            result.replaced.is_none(),
+            "a native edit says where it edited nothing"
+        );
+    }
+
+    /// A white 2000x1000 image as a model sees it, scaled down to the model input limit.
+    fn white_png_prepared() -> PreparedImage {
+        let white = image::RgbImage::from_pixel(2000, 1000, image::Rgb([255, 255, 255]));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        white
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        prepare_image_for_llm(&mime::IMAGE_PNG, &encoded.into_inner().into()).unwrap()
+    }
+
+    fn redact_boxes(image: PreparedImage, coords: Vec<TextImageCoords>) -> Redacted {
+        let item = dummy_image_item("input");
+        ImageBoxes { image, coords }
+            .redact(mime::IMAGE_PNG, item.file_ref, 0.0)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_coordinate_pass_returns_its_boxes_in_the_input_image_and_blacks_them_out() {
+        let image = white_png_prepared();
+        let (width, height) = (image.width as f32, image.height as f32);
+        let redacted = redact_boxes(
+            image.clone(),
+            vec![TextImageCoords {
+                x1: width * 0.1,
+                y1: height * 0.1,
+                x2: width * 0.5,
+                y2: height * 0.5,
+                text: Some("john".to_string()),
+                line: 0,
+            }],
+        );
+
+        let RedacterDataItemContent::Image { data, .. } = &redacted.item.content else {
+            panic!("an image stays an image");
+        };
+        let blacked_out = image::load_from_memory(data).unwrap().to_rgb8();
+        assert_eq!(
+            blacked_out.get_pixel(image.width / 4, image.height / 4),
+            &image::Rgb([0, 0, 0])
+        );
+        assert_eq!(
+            blacked_out.get_pixel(image.width * 3 / 4, image.height * 3 / 4),
+            &image::Rgb([255, 255, 255])
+        );
+        let replaced = redacted.replaced.expect("the boxes are located");
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].value, "john");
+        let DetectionLocation::Image {
+            page,
+            x1,
+            y1,
+            x2,
+            y2,
+        } = replaced[0].location
+        else {
+            panic!("a box is an image location");
+        };
+        assert_eq!(page, None);
+        for (found, expected) in [(x1, 200.0), (y1, 100.0), (x2, 1000.0), (y2, 500.0)] {
+            assert!(
+                (found - expected).abs() < 2.0,
+                "{found} is not near {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_coordinate_pass_that_found_nothing_returns_an_empty_list_not_none() {
+        assert_eq!(
+            redact_boxes(white_png_prepared(), Vec::new()).replaced,
+            Some(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn coords_mode_returns_the_boxes_the_coordinate_pass_found() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+
+        let result = redact_image_with_mode(
+            LlmImageMode::Coords,
+            dummy_image_item("input"),
+            &reporter,
+            |item| async move { Ok(item) },
+            |item| async move { Ok(Redacted::located(item, vec![found_box()])) },
+        )
+        .await
+        .expect("the coordinate pass succeeds");
+
+        assert_eq!(result.replaced, Some(vec![found_box()]));
+    }
+
+    #[tokio::test]
+    async fn auto_mode_falling_back_to_coords_returns_their_boxes() {
+        let term = console::Term::stdout();
+        let reporter = test_reporter(&term);
+
+        let result = redact_image_with_mode(
+            LlmImageMode::Auto,
+            dummy_image_item("input"),
+            &reporter,
+            |_item| async move { Err(NativeImageEditError::no_image_in_response()) },
+            |item| async move { Ok(Redacted::located(item, vec![found_box()])) },
+        )
+        .await
+        .expect("the coordinate fallback succeeds");
+
+        assert_eq!(image_tag(&result.item), "input");
+        assert_eq!(result.replaced, Some(vec![found_box()]));
     }
 
     #[test]

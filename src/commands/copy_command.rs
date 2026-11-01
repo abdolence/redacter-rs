@@ -1,15 +1,18 @@
 use crate::addon_store::{AddonStore, AddonStoreOptions};
+use crate::args::RedacterType;
 use crate::commands::copy_output::{
     format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
     CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, RowLayout, SkipReason,
     COPY_LEGEND,
 };
+use crate::commands::sarif::{ArtifactOutcome, SarifArtifact};
+use crate::commands::scan_output::{FindingReport, ValueDisplay};
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+    Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -22,14 +25,137 @@ use serde::Serialize;
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+/// What `cp` reports. Fields are only ever added, so a consumer of the JSON report can rely
+/// on every one here.
 #[derive(Debug, Clone, Serialize)]
 pub struct CopyCommandResult {
     pub files_copied: usize,
     pub files_redacted: usize,
     pub files_skipped: usize,
+    /// Every file the copy met, in the order it met them. Files the listing left out by size or
+    /// name are only counted in `files_skipped`.
+    pub files: Vec<CopyFileReport>,
+}
+
+/// One file of the copy, as the JSON report lists it. The redactions come in the order a reader
+/// meets them, and their values are always masked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CopyFileReport {
+    path: String,
+    mime_type: Option<String>,
+    outcome: CopyFileOutcome,
+    redactions: Vec<FindingReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CopyFileStatus {
+    Redacted,
+    Copied,
+    CopiedUnredacted,
+    Skipped,
+    Failed,
+}
+
+impl Serialize for CopyFileReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Entry<'a> {
+            path: &'a str,
+            mime_type: Option<&'a str>,
+            status: CopyFileStatus,
+            reason: Option<String>,
+            redactions: &'a [FindingReport],
+        }
+        let (status, reason) = match &self.outcome {
+            CopyFileOutcome::Redacted { .. } => (CopyFileStatus::Redacted, None),
+            CopyFileOutcome::Copied => (CopyFileStatus::Copied, None),
+            CopyFileOutcome::CopiedUnredacted { reason } => (
+                CopyFileStatus::CopiedUnredacted,
+                Some(reason.detail().to_string()),
+            ),
+            CopyFileOutcome::Skipped { reason } => {
+                (CopyFileStatus::Skipped, Some(reason.detail().to_string()))
+            }
+            CopyFileOutcome::Error { message } => (CopyFileStatus::Failed, Some(message.clone())),
+        };
+        Entry {
+            path: &self.path,
+            mime_type: self.mime_type.as_deref(),
+            status,
+            reason,
+            redactions: &self.redactions,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl CopyFileReport {
+    pub fn new(
+        file_ref: &FileSystemRef,
+        outcome: &CopyFileOutcome,
+        redactions: &[(RedacterType, Detection)],
+    ) -> Self {
+        let mut redactions: Vec<FindingReport> = redactions
+            .iter()
+            .map(|(redacter, detection)| {
+                FindingReport::new(*redacter, detection, ValueDisplay::Masked)
+            })
+            .collect();
+        FindingReport::sort_by_location(&mut redactions);
+        Self {
+            path: file_ref.relative_path.value().clone(),
+            mime_type: file_ref.media_type.as_ref().map(ToString::to_string),
+            outcome: outcome.clone(),
+            redactions,
+        }
+    }
+
+    /// The file for a SARIF report, or `None` for a file the size limit or the name filter
+    /// left out.
+    fn sarif_artifact(&self) -> Option<SarifArtifact> {
+        let outcome = match &self.outcome {
+            CopyFileOutcome::Redacted { .. } => ArtifactOutcome::Findings(
+                self.redactions
+                    .iter()
+                    .map(FindingReport::sarif_finding)
+                    .collect(),
+            ),
+            CopyFileOutcome::Error { message } => ArtifactOutcome::Failed {
+                reason: message.clone(),
+            },
+            CopyFileOutcome::Copied => not_redacted_outcome(NotRedactedReason::NoRedacterApplied),
+            CopyFileOutcome::CopiedUnredacted { reason }
+            | CopyFileOutcome::Skipped {
+                reason: SkipReason::NotRedacted(reason),
+            } => not_redacted_outcome(*reason),
+            CopyFileOutcome::Skipped { .. } => return None,
+        };
+        Some(SarifArtifact {
+            path: self.path.clone(),
+            outcome,
+        })
+    }
+}
+
+fn not_redacted_outcome(reason: NotRedactedReason) -> ArtifactOutcome {
+    let detail = reason.detail().to_string();
+    if reason.needs_converter() {
+        ArtifactOutcome::Blocked { reason: detail }
+    } else {
+        ArtifactOutcome::Unsupported { reason: detail }
+    }
 }
 
 impl CopyCommandResult {
+    /// The files of the copy for a SARIF report.
+    pub fn sarif_artifacts(&self) -> Vec<SarifArtifact> {
+        self.files
+            .iter()
+            .filter_map(CopyFileReport::sarif_artifact)
+            .collect()
+    }
+
     /// The report for people.
     pub fn to_text(&self) -> String {
         format!(
@@ -73,6 +199,7 @@ struct TransferReport {
     result: TransferFileResult,
     outcome: CopyFileOutcome,
     file_size: Option<usize>,
+    file: CopyFileReport,
 }
 
 pub async fn command_copy(
@@ -178,6 +305,7 @@ pub async fn command_copy(
         let mut total_files_copied = 0;
         let mut total_files_redacted = 0;
         let mut total_files_skipped = listing.skipped;
+        let mut files = Vec::with_capacity(files_found);
         summary.skipped = listing.skipped;
         summary.total_size = files_total_size as u64;
         for source_file in source_files {
@@ -203,11 +331,13 @@ pub async fn command_copy(
                 TransferFileResult::Skipped => total_files_skipped += 1,
             }
             summary.count(&report.outcome);
+            files.push(report.file);
         }
         Ok(CopyCommandResult {
             files_copied: total_files_copied,
             files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
+            files,
         })
     } else {
         bar.println(format_legend(&COPY_LEGEND, &styles));
@@ -226,22 +356,16 @@ pub async fn command_copy(
         .await?;
         summary.count(&report.outcome);
         summary.total_size = report.file_size.unwrap_or(0) as u64;
-        Ok(match report.result {
-            TransferFileResult::Copied => CopyCommandResult {
-                files_copied: 1,
-                files_redacted: 0,
-                files_skipped: 0,
-            },
-            TransferFileResult::RedactedAndCopied => CopyCommandResult {
-                files_copied: 1,
-                files_redacted: 1,
-                files_skipped: 0,
-            },
-            TransferFileResult::Skipped => CopyCommandResult {
-                files_copied: 0,
-                files_redacted: 0,
-                files_skipped: 1,
-            },
+        let (files_copied, files_redacted, files_skipped) = match report.result {
+            TransferFileResult::Copied => (1, 0, 0),
+            TransferFileResult::RedactedAndCopied => (1, 1, 0),
+            TransferFileResult::Skipped => (0, 0, 1),
+        };
+        Ok(CopyCommandResult {
+            files_copied,
+            files_redacted,
+            files_skipped,
+            files: vec![report.file],
         })
     };
 
@@ -311,6 +435,24 @@ enum TransferFileResult {
     Skipped,
 }
 
+/// What redacting and uploading one file produced.
+struct UploadResult {
+    result: TransferFileResult,
+    outcome: CopyFileOutcome,
+    /// What the redacters replaced, placed in the file as it was read.
+    redactions: Vec<(RedacterType, Detection)>,
+}
+
+impl UploadResult {
+    fn without_redactions(result: TransferFileResult, outcome: CopyFileOutcome) -> Self {
+        Self {
+            result,
+            outcome,
+            redactions: Vec::new(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transfer_and_redact_file<
     'a,
@@ -342,6 +484,7 @@ async fn transfer_and_redact_file<
         bar.inc(1);
         return Ok(TransferReport {
             result: TransferFileResult::Skipped,
+            file: CopyFileReport::new(&base_file_ref, &outcome, &[]),
             outcome,
             file_size: base_file_ref.file_size,
         });
@@ -359,7 +502,11 @@ async fn transfer_and_redact_file<
         destination = %destination_fs.resolve(Some(&dest_file_ref)).file_path,
         "processing a file"
     );
-    let (transfer_result, outcome) = if let Some(ref redacter_with_options) = redacter {
+    let UploadResult {
+        result: transfer_result,
+        outcome,
+        redactions,
+    } = if let Some(ref redacter_with_options) = redacter {
         redact_upload_file::<SFS, DFS, _>(
             bar,
             destination_fs,
@@ -376,12 +523,13 @@ async fn transfer_and_redact_file<
         destination_fs
             .upload(source_reader, Some(&dest_file_ref))
             .await?;
-        (TransferFileResult::Copied, CopyFileOutcome::Copied)
+        UploadResult::without_redactions(TransferFileResult::Copied, CopyFileOutcome::Copied)
     };
     print_file_row(term, bar, file_ref, &outcome, styles);
     bar.inc(1);
     Ok(TransferReport {
         result: transfer_result,
+        file: CopyFileReport::new(file_ref, &outcome, &redactions),
         outcome,
         file_size: file_ref.file_size,
     })
@@ -428,7 +576,7 @@ async fn redact_upload_file<
     redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-) -> AppResult<(TransferFileResult, CopyFileOutcome)> {
+) -> AppResult<UploadResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters);
 
@@ -469,6 +617,7 @@ async fn redact_upload_file<
                     .upload(redacted_result.stream, Some(dest_file_ref))
                     .await?;
                 let summary = redacted_result.summary;
+                let redactions = redacted_result.redactions;
                 let outcome = if !summary.applied.is_empty() {
                     CopyFileOutcome::Redacted {
                         redacters: summary.applied,
@@ -479,13 +628,18 @@ async fn redact_upload_file<
                         reason: not_redacted_reason(summary.blocked),
                     }
                 };
-                if redacted_result.number_of_redactions > 0 {
-                    Ok((TransferFileResult::RedactedAndCopied, outcome))
+                let result = if redacted_result.number_of_redactions > 0 {
+                    TransferFileResult::RedactedAndCopied
                 } else {
-                    Ok((TransferFileResult::Copied, outcome))
-                }
+                    TransferFileResult::Copied
+                };
+                Ok(UploadResult {
+                    result,
+                    outcome,
+                    redactions,
+                })
             }
-            Ok(redacted_result) => Ok((
+            Ok(redacted_result) => Ok(UploadResult::without_redactions(
                 TransferFileResult::Skipped,
                 CopyFileOutcome::Skipped {
                     reason: SkipReason::NotRedacted(not_redacted_reason(
@@ -495,7 +649,7 @@ async fn redact_upload_file<
             )),
             Err(ref error) => {
                 tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
-                Ok((
+                Ok(UploadResult::without_redactions(
                     TransferFileResult::Skipped,
                     CopyFileOutcome::Error {
                         message: error.to_string(),
@@ -507,14 +661,14 @@ async fn redact_upload_file<
         destination_fs
             .upload(source_reader, Some(dest_file_ref))
             .await?;
-        Ok((
+        Ok(UploadResult::without_redactions(
             TransferFileResult::Copied,
             CopyFileOutcome::CopiedUnredacted {
                 reason: plan_blocked_reason(redact_plan.blocked),
             },
         ))
     } else {
-        Ok((
+        Ok(UploadResult::without_redactions(
             TransferFileResult::Skipped,
             CopyFileOutcome::Skipped {
                 reason: SkipReason::NotRedacted(plan_blocked_reason(redact_plan.blocked)),
@@ -546,14 +700,16 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "pdf-render", feature = "ocr"))]
     use crate::addon_store::Addon;
+    use crate::commands::sarif::{ArtifactLocator, SarifLog};
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
         initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        GcpDlpRedacterOptions, GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter,
-        LocalRulesRedacterOptions, RedacterProviderOptions, RuleGroup,
+        DetectionLabel, DetectionLocation, GcpDlpRedacterOptions, GcpVertexAiRedacterOptions,
+        LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions, RedacterProviderOptions,
+        RuleGroup,
     };
     use tempfile::TempDir;
 
@@ -572,8 +728,305 @@ mod tests {
                 csv_delimiter: None,
                 sampling_size: None,
                 limit_dlp_requests: None,
+                list_redactions: true,
             },
         }
+    }
+
+    fn report_file_ref() -> FileSystemRef {
+        FileSystemRef {
+            relative_path: "notes/note.txt".into(),
+            media_type: Some(mime::TEXT_PLAIN),
+            file_size: Some(10),
+        }
+    }
+
+    fn text_detection(value: &str, start: usize, line: usize) -> Detection {
+        Detection {
+            label: DetectionLabel::new("email"),
+            location: DetectionLocation::Text {
+                start,
+                end: start + value.len(),
+                line,
+                column: 1,
+            },
+            score: None,
+            value: value.to_string(),
+        }
+    }
+
+    fn report_json(outcome: &CopyFileOutcome) -> serde_json::Value {
+        serde_json::to_value(CopyFileReport::new(&report_file_ref(), outcome, &[])).unwrap()
+    }
+
+    #[test]
+    fn a_file_report_takes_its_status_and_reason_from_the_outcome() {
+        let outcomes = [
+            (
+                CopyFileOutcome::Redacted {
+                    redacters: vec![RedacterType::LocalRules],
+                    conversion: None,
+                },
+                "redacted",
+                None,
+            ),
+            (CopyFileOutcome::Copied, "copied", None),
+            (
+                CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::TypeNotSupported,
+                },
+                "copied_unredacted",
+                Some("type not supported"),
+            ),
+            (
+                CopyFileOutcome::Skipped {
+                    reason: SkipReason::OverSizeLimit,
+                },
+                "skipped",
+                Some("over size limit"),
+            ),
+            (
+                CopyFileOutcome::Skipped {
+                    reason: SkipReason::NotRedacted(NotRedactedReason::OcrUnavailable),
+                },
+                "skipped",
+                Some("ocr unavailable"),
+            ),
+            (
+                CopyFileOutcome::Error {
+                    message: "the service refused".to_string(),
+                },
+                "failed",
+                Some("the service refused"),
+            ),
+        ];
+        for (outcome, status, reason) in outcomes {
+            let json = report_json(&outcome);
+            assert_eq!(json["status"], status, "{outcome:?}");
+            assert_eq!(json["reason"], serde_json::json!(reason), "{outcome:?}");
+            assert_eq!(json["path"], "notes/note.txt");
+            assert_eq!(json["mime_type"], "text/plain");
+        }
+    }
+
+    fn file_report_at(
+        path: &str,
+        outcome: &CopyFileOutcome,
+        redactions: &[(RedacterType, Detection)],
+    ) -> CopyFileReport {
+        let file_ref = FileSystemRef {
+            relative_path: path.into(),
+            media_type: Some(mime::TEXT_PLAIN),
+            file_size: Some(10),
+        };
+        CopyFileReport::new(&file_ref, outcome, redactions)
+    }
+
+    fn result_of(files: Vec<CopyFileReport>) -> CopyCommandResult {
+        CopyCommandResult {
+            files_copied: 0,
+            files_redacted: 0,
+            files_skipped: 0,
+            files,
+        }
+    }
+
+    fn sarif_outcome_names(files: Vec<CopyFileReport>) -> Vec<(String, &'static str)> {
+        result_of(files)
+            .sarif_artifacts()
+            .into_iter()
+            .map(|artifact| {
+                let outcome = match artifact.outcome {
+                    ArtifactOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    ArtifactOutcome::Findings(_) => "findings",
+                    ArtifactOutcome::Unconfirmed { .. } => "unconfirmed",
+                    ArtifactOutcome::Failed { .. } => "failed",
+                    ArtifactOutcome::Blocked { .. } => "blocked",
+                    ArtifactOutcome::Unsupported { .. } => "unsupported",
+                };
+                (artifact.path, outcome)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_sarif_report_maps_each_outcome_of_a_copy_and_leaves_out_filtered_files() {
+        let redacted = CopyFileOutcome::Redacted {
+            redacters: vec![RedacterType::LocalRules],
+            conversion: None,
+        };
+        let skipped = |reason| CopyFileOutcome::Skipped { reason };
+        let files = vec![
+            file_report_at(
+                "found.txt",
+                &redacted,
+                &[(
+                    RedacterType::LocalRules,
+                    text_detection(SAMPLE_EMAIL, 14, 2),
+                )],
+            ),
+            file_report_at("untouched.txt", &redacted, &[]),
+            file_report_at("plain.txt", &CopyFileOutcome::Copied, &[]),
+            file_report_at(
+                "binary.bin",
+                &CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::TypeNotSupported,
+                },
+                &[],
+            ),
+            file_report_at(
+                "scan.png",
+                &CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::OcrUnavailable,
+                },
+                &[],
+            ),
+            file_report_at("big.txt", &skipped(SkipReason::OverSizeLimit), &[]),
+            file_report_at("other.md", &skipped(SkipReason::NameFilter), &[]),
+            file_report_at(
+                "form.pdf",
+                &skipped(SkipReason::NotRedacted(
+                    NotRedactedReason::PdfRendererUnavailable,
+                )),
+                &[],
+            ),
+            file_report_at(
+                "data.bin",
+                &skipped(SkipReason::NotRedacted(NotRedactedReason::TypeNotSupported)),
+                &[],
+            ),
+            file_report_at(
+                "broken.txt",
+                &CopyFileOutcome::Error {
+                    message: "the service refused".to_string(),
+                },
+                &[],
+            ),
+        ];
+
+        let outcomes = sarif_outcome_names(files);
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|(path, outcome)| (path.as_str(), *outcome))
+                .collect::<Vec<_>>(),
+            [
+                ("found.txt", "findings"),
+                ("untouched.txt", "clean"),
+                ("plain.txt", "unsupported"),
+                ("binary.bin", "unsupported"),
+                ("scan.png", "blocked"),
+                ("form.pdf", "blocked"),
+                ("data.bin", "unsupported"),
+                ("broken.txt", "failed"),
+            ]
+        );
+    }
+
+    fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
+        let result = result_of(files);
+        let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
+        serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap()
+    }
+
+    #[test]
+    fn a_redaction_of_a_whole_file_or_a_page_has_no_region_and_no_value() {
+        let outcome = CopyFileOutcome::Redacted {
+            redacters: vec![RedacterType::GeminiLlm],
+            conversion: None,
+        };
+        let detection = |location| Detection {
+            label: DetectionLabel::new("sensitive_data"),
+            location,
+            score: None,
+            value: String::new(),
+        };
+        let redactions = [
+            (RedacterType::GeminiLlm, detection(DetectionLocation::File)),
+            (
+                RedacterType::GeminiLlm,
+                detection(DetectionLocation::Page { page: 3 }),
+            ),
+        ];
+
+        let sarif = sarif_of(vec![file_report_at("scan.pdf", &outcome, &redactions)]);
+
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        for result in results {
+            assert!(result["locations"][0]["physicalLocation"]["region"].is_null());
+            assert!(!result["message"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Value:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_copy_report_lists_each_file_with_its_redactions_beside_the_counters(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let source = TempDir::with_prefix("copy_command_tests_report_source")?;
+        std::fs::write(
+            source.path().join("note.txt"),
+            format!("Customer note\nEmail: {SAMPLE_EMAIL}\n"),
+        )?;
+        std::fs::write(source.path().join("plain.txt"), "nothing to find here\n")?;
+        let destination = TempDir::with_prefix("copy_command_tests_report_destination")?;
+
+        let result = command_copy(
+            &Term::stdout(),
+            &format!("{}/", source.path().display()),
+            &destination.path().to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
+            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: vec![],
+                },
+            ))),
+        )
+        .await?;
+        let json = serde_json::to_value(&result)?;
+
+        assert_eq!(json["files_copied"], 2);
+        assert_eq!(json["files_redacted"], 2);
+        assert_eq!(json["files_skipped"], 0);
+        let mut files = json["files"].as_array().unwrap().clone();
+        files.sort_by_key(|file| file["path"].as_str().unwrap().to_string());
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "note.txt");
+        assert_eq!(files[0]["status"], "redacted");
+        let redactions = files[0]["redactions"].as_array().unwrap();
+        assert_eq!(redactions.len(), 1);
+        assert_eq!(redactions[0]["redacter"], "local-rules");
+        assert_eq!(redactions[0]["label"], "email");
+        assert_eq!(redactions[0]["location"]["kind"], "text");
+        assert_eq!(redactions[0]["location"]["line"], 2);
+        assert_eq!(redactions[0]["location"]["column"], 8);
+        assert_eq!(redactions[0]["value"], "j********************m");
+        assert_eq!(files[1]["path"], "plain.txt");
+        assert_eq!(files[1]["status"], "redacted");
+        assert_eq!(files[1]["redactions"], serde_json::json!([]));
+        assert!(!json.to_string().contains(SAMPLE_EMAIL));
+
+        let locator = ArtifactLocator::new(
+            &format!("{}/", source.path().display()),
+            std::path::Path::new("/work"),
+        );
+        let sarif = serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator))?;
+        let results = sarif["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["ruleId"], "local-rules/email");
+        assert_eq!(
+            results[0]["locations"][0]["physicalLocation"]["region"],
+            serde_json::json!({"startLine": 2, "startColumn": 8, "endLine": 2, "endColumn": 30})
+        );
+        assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
+        Ok(())
     }
 
     #[tokio::test]

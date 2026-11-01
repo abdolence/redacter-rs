@@ -3,7 +3,7 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacter,
+    Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacted, Redacter,
     RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
@@ -17,13 +17,11 @@ use rvstruct::ValueStruct;
 use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::ops::Range;
-use tokio_util::bytes;
 
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
     client: GoogleApi<DlpServiceClient<GoogleAuthMiddleware>>,
     gcp_dlp_options: GcpDlpRedacterOptions,
-    #[allow(dead_code)]
     reporter: &'a AppReporter<'a>,
 }
 
@@ -79,7 +77,7 @@ impl<'a> GcpDlpRedacter<'a> {
         })
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let request = self.request(dlp::DeidentifyContentRequest {
             parent: self.parent(),
             inspect_config: Some(self.create_inspect_config()),
@@ -91,10 +89,10 @@ impl<'a> GcpDlpRedacter<'a> {
 
         if let Some(content_item) = response.into_inner().item {
             let content: RedacterDataItemContent = content_item.try_into()?;
-            Ok(RedacterDataItem {
+            Ok(Redacted::unlocated(RedacterDataItem {
                 file_ref: input.file_ref,
                 content,
-            })
+            }))
         } else {
             Err(AppError::SystemError {
                 message: "No content item in the response".to_string(),
@@ -102,36 +100,60 @@ impl<'a> GcpDlpRedacter<'a> {
         }
     }
 
+    /// Redacts the image and asks for the findings it was redacted at in the same call. The
+    /// quote is requested because it is the only text DLP gives for an image finding.
     async fn redact_image_content(
         &self,
         input_bytes_content: gcloud_sdk::google::privacy::dlp::v2::ByteContentItem,
-    ) -> AppResult<bytes::Bytes> {
+    ) -> AppResult<dlp::RedactImageResponse> {
         let request = self.request(dlp::RedactImageRequest {
             parent: self.parent(),
-            inspect_config: Some(self.create_inspect_config()),
+            inspect_config: Some(dlp::InspectConfig {
+                include_quote: true,
+                ..self.create_inspect_config()
+            }),
+            include_findings: true,
             byte_item: Some(input_bytes_content),
             ..dlp::RedactImageRequest::default()
         })?;
         let response = self.client.get().redact_image(request).await?;
-        Ok(response.into_inner().redacted_image.into())
+        Ok(response.into_inner())
     }
 
-    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        match &input.content {
-            RedacterDataItemContent::Image { mime_type, data: _ } => {
-                let output_mime = mime_type.clone();
+    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
+        let RedacterDataItemContent::Image { mime_type, .. } = &input.content else {
+            return Err(AppError::unsupported_content());
+        };
+        let response = self
+            .redact_image_content(input.content.clone().try_into()?)
+            .await?;
+        let replaced = Self::boxes_drawn(&input.content, response.inspect_result);
+        let item = RedacterDataItem {
+            content: RedacterDataItemContent::Image {
+                mime_type: mime_type.clone(),
+                data: response.redacted_image.into(),
+            },
+            file_ref: input.file_ref,
+        };
+        Ok(Redacted::located_or_unlocated(
+            item,
+            replaced,
+            self.reporter,
+            RedacterType::GcpDlp,
+        ))
+    }
 
-                let content = RedacterDataItemContent::Image {
-                    mime_type: output_mime,
-                    data: self.redact_image_content(input.content.try_into()?).await?,
-                };
-                Ok(RedacterDataItem {
-                    file_ref: input.file_ref,
-                    content,
-                })
-            }
-            _ => Err(AppError::unsupported_content()),
-        }
+    /// The boxes DLP drew on `image`, from the findings of the redaction call. A response
+    /// without a result, or with a truncated one, is an error: either could leave out a box
+    /// that was drawn.
+    fn boxes_drawn(
+        image: &RedacterDataItemContent,
+        inspect_result: Option<dlp::InspectResult>,
+    ) -> AppResult<Vec<Detection>> {
+        let result = inspect_result.ok_or_else(|| {
+            AppError::incomplete_result(RedacterType::GcpDlp, "an inspect result")
+        })?;
+        Self::detections_in(image, &[], result)
     }
 
     fn parent(&self) -> String {
@@ -356,7 +378,7 @@ impl<'a> GcpDlpRedacter<'a> {
 }
 
 impl<'a> Redacter for GcpDlpRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Value(_) => {
                 self.redact_text_file(input).await
@@ -635,6 +657,7 @@ impl TryInto<gcloud_sdk::google::privacy::dlp::v2::ByteContentItem> for Redacter
 mod tests {
     use super::*;
     use console::Term;
+    use tokio_util::bytes;
 
     fn finding(
         info_type: &str,
@@ -917,6 +940,81 @@ mod tests {
         .is_err());
     }
 
+    fn form_image() -> RedacterDataItemContent {
+        RedacterDataItemContent::Image {
+            mime_type: mime::IMAGE_PNG,
+            data: bytes::Bytes::new(),
+        }
+    }
+
+    fn email_box_finding() -> dlp::Finding {
+        finding(
+            "EMAIL_ADDRESS",
+            dlp::Likelihood::VeryLikely,
+            dlp::Location {
+                content_locations: vec![dlp::ContentLocation {
+                    location: Some(dlp::content_location::Location::ImageLocation(
+                        dlp::ImageLocation {
+                            bounding_boxes: vec![dlp::BoundingBox {
+                                top: 193,
+                                left: 310,
+                                width: 312,
+                                height: 25,
+                            }],
+                        },
+                    )),
+                    ..dlp::ContentLocation::default()
+                }],
+                ..dlp::Location::default()
+            },
+            "john.smith@example.com",
+        )
+    }
+
+    #[test]
+    fn the_findings_of_a_redacted_image_are_the_boxes_drawn() {
+        let detections =
+            GcpDlpRedacter::boxes_drawn(&form_image(), Some(result_of(vec![email_box_finding()])))
+                .unwrap();
+
+        assert_eq!(
+            detections,
+            vec![Detection {
+                label: DetectionLabel::new("EMAIL_ADDRESS"),
+                location: DetectionLocation::Image {
+                    page: None,
+                    x1: 310.0,
+                    y1: 193.0,
+                    x2: 622.0,
+                    y2: 218.0,
+                },
+                score: score(0.9),
+                value: "john.smith@example.com".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_redacted_image_with_no_findings_has_no_boxes() {
+        let detections =
+            GcpDlpRedacter::boxes_drawn(&form_image(), Some(result_of(Vec::new()))).unwrap();
+        assert!(detections.is_empty());
+    }
+
+    #[test]
+    fn a_redaction_response_without_a_result_does_not_say_what_was_drawn() {
+        assert!(GcpDlpRedacter::boxes_drawn(&form_image(), None).is_err());
+    }
+
+    #[test]
+    fn a_truncated_redaction_result_does_not_say_what_was_drawn() {
+        let result = dlp::InspectResult {
+            findings_truncated: true,
+            ..result_of(vec![email_box_finding()])
+        };
+        assert!(GcpDlpRedacter::boxes_drawn(&form_image(), Some(result)).is_err());
+    }
+
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn redact_text_file_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -948,7 +1046,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value, "Hello, [REDACTED]");
             }
@@ -1113,6 +1211,34 @@ mod tests {
         ("EMAIL_ADDRESS", [310.0, 195.0, 620.0, 218.0]),
         ("PHONE_NUMBER", [313.0, 265.0, 538.0, 286.0]),
     ];
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn redacting_an_image_returns_the_boxes_over_the_values_printed_on_it() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let input = crate::redacters::test_support::test_image_item();
+
+        let redacted = live_redacter(&reporter).await.redact(input).await.unwrap();
+
+        let replaced = redacted
+            .replaced
+            .expect("DLP returns the findings of the redaction call");
+        for (info_type, [ink_x1, ink_y1, ink_x2, ink_y2]) in FORM_IMAGE_INK {
+            assert!(
+                replaced.iter().any(|detection| {
+                    detection.label == DetectionLabel::new(info_type)
+                        && !detection.value.is_empty()
+                        && matches!(
+                            detection.location,
+                            DetectionLocation::Image { x1, y1, x2, y2, .. }
+                                if x1 < ink_x2 && x2 > ink_x1 && y1 < ink_y2 && y2 > ink_y1
+                        )
+                }),
+                "no {info_type} box on the ink: {replaced:?}"
+            );
+        }
+    }
 
     /// DLP boxes words with padding and splits a value over several boxes, so the boxes of a
     /// value are joined, and the join must contain the ink and stay within a word's padding of it.

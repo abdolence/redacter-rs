@@ -6,8 +6,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -129,7 +129,7 @@ impl<'a> PresidioRedacter<'a> {
             .collect()
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -137,15 +137,18 @@ impl<'a> PresidioRedacter<'a> {
             }),
         }?;
 
-        let redacted_text_content =
-            mask_detections(&text_content, &self.detect_text(&text_content).await?);
-        Ok(RedacterDataItem {
-            file_ref: input.file_ref,
-            content: RedacterDataItemContent::Value(redacted_text_content),
-        })
+        let detections = self.detect_text(&text_content).await?;
+        let redacted_text_content = mask_detections(&text_content, &detections);
+        Ok(Redacted::located(
+            RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(redacted_text_content),
+            },
+            detections,
+        ))
     }
 
-    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let redact_url = self.presidio_options.image_redact_url.as_ref().ok_or(
             AppError::RedacterConfigError {
                 message: "Image redact URL is not configured".to_string(),
@@ -174,13 +177,13 @@ impl<'a> PresidioRedacter<'a> {
                     return Err(Self::request_failure("redact image", response.status()));
                 }
                 let redacted_image_bytes = response.bytes().await?;
-                Ok(RedacterDataItem {
+                Ok(Redacted::unlocated(RedacterDataItem {
                     file_ref: input.file_ref,
                     content: RedacterDataItemContent::Image {
                         mime_type,
                         data: redacted_image_bytes,
                     },
-                })
+                }))
             }
             _ => Err(AppError::SystemError {
                 message: "Unsupported item for image redacting".to_string(),
@@ -190,7 +193,7 @@ impl<'a> PresidioRedacter<'a> {
 }
 
 impl<'a> Redacter for PresidioRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
@@ -392,7 +395,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value, "Hello, XXXX");
             }

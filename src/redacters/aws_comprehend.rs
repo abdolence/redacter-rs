@@ -2,8 +2,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -36,7 +36,7 @@ impl<'a> AwsComprehendRedacter<'a> {
         Ok(Self { client, reporter })
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let text_content = match input.content {
             RedacterDataItemContent::Value(content) => Ok(content),
             _ => Err(AppError::SystemError {
@@ -44,12 +44,15 @@ impl<'a> AwsComprehendRedacter<'a> {
             }),
         }?;
 
-        let redacted_content =
-            mask_detections(&text_content, &self.detect_text(&text_content).await?);
-        Ok(RedacterDataItem {
-            file_ref: input.file_ref,
-            content: RedacterDataItemContent::Value(redacted_content),
-        })
+        let detections = self.detect_text(&text_content).await?;
+        let redacted_content = mask_detections(&text_content, &detections);
+        Ok(Redacted::located(
+            RedacterDataItem {
+                file_ref: input.file_ref,
+                content: RedacterDataItemContent::Value(redacted_content),
+            },
+            detections,
+        ))
     }
 }
 
@@ -107,7 +110,7 @@ impl<'a> AwsComprehendRedacter<'a> {
 }
 
 impl<'a> Redacter for AwsComprehendRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
             RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
             RedacterDataItemContent::Table { .. }
@@ -248,7 +251,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value, "Hello, XXXX");
             }

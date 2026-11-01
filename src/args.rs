@@ -128,7 +128,7 @@ pub enum CliCommand {
 
         #[arg(
             long,
-            help = "Show the matched values in the output and the report. They are masked by default"
+            help = "Show the matched values in the output and the report. They are masked by default. Does not apply to the SARIF report, which always masks them"
         )]
         show_values: bool,
 
@@ -200,9 +200,15 @@ pub struct ReportArgs {
         value_enum,
         default_value = "json",
         requires = "report_file",
-        help = "Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'"
+        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (values are always masked). Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
+}
+
+impl ReportArgs {
+    pub fn lists_redactions(&self) -> bool {
+        self.report_file.is_some() && self.report_format != ReportFormat::Text
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -246,6 +252,8 @@ pub enum FailOn {
 pub enum ReportFormat {
     Json,
     Text,
+    /// SARIF 2.1.0, for GitHub code scanning
+    Sarif,
 }
 
 impl CliCommand {
@@ -782,6 +790,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
             limit_dlp_requests: self.limit_dlp_requests,
+            list_redactions: false,
         };
         Ok(RedacterOptions {
             provider_options,
@@ -876,6 +885,30 @@ mod tests {
 
         fn parse(args: &[&str]) -> Result<CliArgs, clap::Error> {
             CliArgs::try_parse_from([&["redacter", "scan", "test-fixtures"], args].concat())
+        }
+
+        fn report_format_of(args: &[&str]) -> Result<ReportFormat, clap::Error> {
+            let cli = CliArgs::try_parse_from(args)?;
+            match cli.command {
+                CliCommand::Scan { report, .. } | CliCommand::Cp { report, .. } => {
+                    Ok(report.report_format)
+                }
+                other => unreachable!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn sarif_is_a_report_format_of_scan_and_of_cp() {
+            for (command, extra) in [("scan", &["-d", "local-rules"][..]), ("cp", &["out/"][..])] {
+                let mut args = vec!["redacter", command, "."];
+                args.extend_from_slice(extra);
+                args.extend(["--report-file", "r.sarif", "--report-format", "sarif"]);
+                assert_eq!(
+                    report_format_of(&args).unwrap(),
+                    ReportFormat::Sarif,
+                    "{command}"
+                );
+            }
         }
 
         #[test]

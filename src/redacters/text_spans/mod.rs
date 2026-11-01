@@ -3,11 +3,6 @@ use std::fmt::Display;
 
 pub const REDACTED: &str = "[REDACTED]";
 
-#[cfg(any(
-    feature = "local-ner",
-    feature = "local-gliner",
-    feature = "local-credential-ml"
-))]
 pub mod table_cells;
 
 /// Name of the rule that produced a finding, e.g. `email` or a user's `employee-id`.
