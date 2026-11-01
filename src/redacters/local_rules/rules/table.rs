@@ -3,7 +3,10 @@
 //! the same span (the first declared wins).
 
 use super::super::validators;
-use super::{Example, RuleGroup, RuleSpec, PRIVATE_KEY_BLOCK_RULE, URL_CREDENTIALS_RULE};
+use super::{
+    Example, RuleGroup, RuleSpec, GENERIC_API_KEY_RULE, PRIVATE_KEY_BLOCK_RULE,
+    URL_CREDENTIALS_RULE,
+};
 
 pub(super) fn builtin_rules() -> &'static [RuleSpec] {
     RULES
@@ -57,12 +60,16 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "email",
         group: RuleGroup::Email,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
         keyword: false,
-        description: "Email address",
+        description: "Email address; not the `user:password` part of a URL",
         example: Example::Synthetic("john.smith@example.com"),
-        pattern: r"(?i)\b[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
+        // The first alternative is the `url-credentials` shape and has no capture group: it
+        // matches only to consume the credentials, so the `password@host` inside them cannot
+        // start an email match that overlaps the credentials and, once overlapping findings
+        // are united, pulls the host into the redaction.
+        pattern: r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@|\b([a-z0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b)",
     },
     RuleSpec {
         name: "phone-international",
@@ -156,7 +163,10 @@ const RULES: &[RuleSpec] = &[
         keyword: false,
         description: "`user:password` embedded in a URL; only the credentials are redacted",
         example: Example::Synthetic("https://alice:s3cret@example.com/path"),
-        pattern: r"\b[a-zA-Z][a-zA-Z0-9+.-]*://([^\s/@:]+:[^\s/@]+)@",
+        // The user part may hold an `@` (`bob@corp.com:pw`) and ends at the first `:`; the
+        // password ends at the next `@`. The `email` rule repeats this shape to consume it, so
+        // keep the two in step.
+        pattern: r"\b[a-zA-Z][a-zA-Z0-9+.-]*://([^\s/:]+:[^\s/@]+)@",
     },
     RuleSpec {
         name: "aws-access-key",
@@ -454,6 +464,21 @@ const RULES: &[RuleSpec] = &[
         example: Example::Synthetic(concat!("MTAwMDAwMDAwMDAwMDAwMDAw", ".", "G1aB2c", ".", "abcdefghijklmnopqrstuvwxyz0")),
         // No `\b` at the end: the class includes `-`, so a token ending in one would keep it.
         pattern: r"\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}",
+    },
+    RuleSpec {
+        name: GENERIC_API_KEY_RULE,
+        group: RuleGroup::Secrets,
+        capture_group: 1,
+        validator: Some((
+            "entropy above 3.5 bits per character, not letters only, no stopword",
+            validators::generic_api_key_value,
+        )),
+        keyword: true,
+        description: "Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`; ported from the `generic-api-key` rule of gitleaks",
+        example: Example::Synthetic("access_token = \"k8Jd2Lw9QzX7vNb3RtY5\""),
+        // The classes are written out in ASCII, as RE2 reads `\w` and `\s`: the Unicode `\w`
+        // repeated 150 times exceeds the regex size limit.
+        pattern: r#"(?i)[0-9A-Za-z_.-]{0,50}?(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t0-9A-Za-z_.-]{0,20})[\t\n\f\r '"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\t\n\f\r =]{0,5}([0-9A-Za-z_.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\t\n\f\r ;]|\\[nr]|$)"#,
     },
     RuleSpec {
         name: "us-ssn",

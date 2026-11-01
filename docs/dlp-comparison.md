@@ -25,34 +25,36 @@ The full scoring rules are in [test-fixtures/bench-dlp/README.md](../test-fixtur
 
 ## Datasets
 
-- `fixtures`: eight text files from `test-fixtures/documents/` (text, JSON, HTML, CSV, German, French and Spanish, contextual PII, dates and words that look like PII). 48 sensitive values and 31 keep strings;
-- `secrets`: a synthetic corpus of 41 planted secrets in 25 files (passwords in config files, vendor API keys, tokens, JWTs, private keys, connection strings), and four control files with strings that look like secrets and are not. 29 files, 19 keep strings. The values are made up, apart from the AWS documentation example key;
-- `public`: a fixed sample of 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each record is one file, 981 sensitive values in all. The sample is 10 windows of 20 consecutive records of the `test` split. The text and label of every span are unchanged, and 15 of the 1,568 spans of the sample are left out because their offsets do not select their text. The annotation is not exhaustive;
-- `images`: a customer form as a PNG and as a PDF, 2 files and 16 boxes. The local redacters, Presidio, AWS Comprehend and AWS Bedrock Guardrails read an image through OCR, text recognition by the `ocr` addon. GCP DLP and the LLM redacters read the image themselves. See [Detection per redacter](../README.md#detection-per-redacter).
+- PII documents, `fixtures`: eight text files from `test-fixtures/documents/` (text, JSON, HTML, CSV, German, French and Spanish, contextual PII, dates and words that look like PII). 48 sensitive values and 31 keep strings;
+- Secrets in config and code, `secrets`: a synthetic corpus of 41 planted secrets in 25 files (passwords in config files, vendor API keys, tokens, JWTs, private keys, connection strings), and four control files with strings that look like secrets and are not. 29 files, 19 keep strings. The values are made up, apart from the AWS documentation example key;
+- Public PII sample, `public`: a fixed sample of 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Each record is one file, 981 sensitive values in all. The sample is 10 windows of 20 consecutive records of the `test` split. The text and label of every span are unchanged, and 15 of the 1,568 spans of the sample are left out because their offsets do not select their text. The annotation is not exhaustive;
+- Scanned form, `images`: a customer form as a PNG and as a PDF, 2 files and 16 boxes. The local redacters, Presidio, AWS Comprehend and AWS Bedrock Guardrails read an image through OCR, text recognition by the `ocr` addon. GCP DLP and the LLM redacters read the image themselves. See [Detection per redacter](../README.md#detection-per-redacter).
 
 ## Overview
 
 Each cell is recall / precision / time per file. Time per file is described under [Speed](#speed). Precision is not reported for `public`.
 
-| Redacter | Fixtures | Secrets | Public | Images |
+| Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form |
 |---|---|---|---|---|
-| `local-rules` | 54% / 100% / 51 ms | 88% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
+| `local-rules` | 54% / 100% / 51 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
 | `local-ner` | 23% / 69% / 40 ms | 0% / 0% / 18 ms | 23% / - / 39 ms | 19% / 100% / 334 ms |
 | `local-gliner` | 100% / 94% / 443 ms | 2% / 33% / 146 ms | 55% / - / 441 ms | 88% / 100% / 658 ms |
-| `local-rules+local-ner` | 77% / 89% / 43 ms | 88% / 97% / 19 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
-| `local-rules+local-gliner` | 100% / 95% / 435 ms | 88% / 95% / 141 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
+| `local-rules+local-ner` | 77% / 89% / 43 ms | 93% / 97% / 25 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
+| `local-rules+local-gliner` | 100% / 95% / 435 ms | 93% / 95% / 177 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
 | `local-credential-ml` | 0% / - / 77 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 389 ms |
-| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 93% / 100% / 11 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
+| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 95% / 100% / 15 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
 | `presidio` | 69% / 56% / 18 ms | 7% / 21% / 6 ms | 66% / - / 12 ms | 69% / 92% / 312 ms |
 | `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
 | `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
 | `aws-bedrock-guardrails` | 90% / 96% / 238 ms | 46% / 83% / 157 ms | 74% / - / 161 ms | 81% / 100% / 602 ms |
-| `gcp-vertex-ai` | 98% / 100% / 8073 ms | 100% / 95% / 8171 ms | 86% / - / 9062 ms | 100% / 100% / 16339 ms |
-| `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2109 ms |
+| `gcp-vertex-ai` | 98% / 100% / 8.1 s | 100% / 95% / 8.2 s | 86% / - / 9.1 s | 100% / 100% / 16.3 s |
+| `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2.1 s |
+
+PII documents is `fixtures` (8 files), Secrets in config and code is `secrets` (29 files), Public PII sample is `public` (200 records) and Scanned form is `images` (a PNG and a PDF of one form). See [Datasets](#datasets).
 
 The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How the numbers were measured](#how-the-numbers-were-measured).
 
-## Fixtures
+## PII documents
 
 | Redacter | Recall | Precision | Person | Contact | Address | ID number | Financial | Date of birth | Other | Keep hit |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -74,17 +76,17 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 - the single `other` value was found by the two GLiNER rows only;
 - `aws-bedrock-guardrails` found none of the 4 dates of birth.
 
-## Secrets
+## Secrets in config and code
 
 | Redacter | Recall | Precision | Credential | Keep hit |
 |---|---|---|---|---|
-| `local-rules` | 88% | 100% | 36/41 | 0/19 |
+| `local-rules` | 93% | 100% | 38/41 | 0/19 |
 | `local-ner` | 0% | 0% | 0/41 | 0/19 |
 | `local-gliner` | 2% | 33% | 1/41 | 0/19 |
-| `local-rules+local-ner` | 88% | 97% | 36/41 | 0/19 |
-| `local-rules+local-gliner` | 88% | 95% | 36/41 | 0/19 |
+| `local-rules+local-ner` | 93% | 97% | 38/41 | 0/19 |
+| `local-rules+local-gliner` | 93% | 95% | 38/41 | 0/19 |
 | `local-credential-ml` | 61% | 100% | 25/41 | 0/19 |
-| `local-rules+local-credential-ml` | 93% | 100% | 38/41 | 0/19 |
+| `local-rules+local-credential-ml` | 95% | 100% | 39/41 | 0/19 |
 | `presidio` | 7% | 21% | 3/41 | 0/19 |
 | `gcp-dlp` | 41% | 100% | 17/41 | 0/19 |
 | `aws-comprehend` | 56% | 82% | 23/41 | 2/19 |
@@ -92,10 +94,10 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 | `gcp-vertex-ai` | 100% | 95% | 41/41 | 1/19 |
 | `aws-bedrock` | 93% | 59% | 38/41 | 11/19 |
 
-- `local-rules` found 88% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
-- `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 93% (38 of 41). The three it and `local-rules` both miss are the `SECRET_KEY_BASE` hex value, the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 98% (40 of 41), again with 100% precision and no keep string hit;
+- `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
+- `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
 
-## Public
+## Public PII sample
 
 Recall only, since the annotation does not list everything sensitive.
 
@@ -115,10 +117,10 @@ Recall only, since the annotation does not list everything sensitive.
 | `gcp-vertex-ai` | 86% | 239/244 | 161/161 | 46/57 | 186/187 | 126/126 | 31/31 | 27/33 | 15/82 | 11/60 |
 | `aws-bedrock` | 87% | 232/244 | 161/161 | 45/57 | 187/187 | 125/126 | 31/31 | 31/33 | 36/82 | 6/60 |
 
-- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 36 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
+- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 38 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
 - every redacter found all 31 dates of birth except `local-ner` and `aws-bedrock-guardrails`, which found none.
 
-## Images
+## Scanned form
 
 The truth is 16 boxes, so one box is about 6 percentage points of recall (derived).
 
@@ -144,25 +146,25 @@ The truth is 16 boxes, so one box is about 6 percentage points of recall (derive
 
 Time per file, in the overview, is the wall time of one `scan` over the dataset divided by the number of files. It includes the start of the process and, for a local redacter, the load of its models. Compare the times within a dataset, not between datasets. For the cloud rows it includes the network round trip from the machine of the run.
 
-The whole run over the 200 files of `public`, in milliseconds:
+The whole run over the 200 files of `public`:
 
-| Redacter | Whole run on public |
+| Redacter | Whole run on public PII sample |
 |---|---|
 | `local-rules` | 62 ms |
-| `local-ner` | 7878 ms |
-| `local-gliner` | 88352 ms |
-| `local-rules+local-ner` | 7797 ms |
-| `local-rules+local-gliner` | 93374 ms |
-| `local-credential-ml` | 5738 ms |
-| `local-rules+local-credential-ml` | 5771 ms |
-| `presidio` | 2568 ms |
-| `gcp-dlp` | 14526 ms |
-| `aws-comprehend` | 16962 ms |
-| `aws-bedrock-guardrails` | 32304 ms |
-| `gcp-vertex-ai` | 1812407 ms |
-| `aws-bedrock` | 116794 ms |
+| `local-ner` | 7.9 s |
+| `local-gliner` | 1 min 28 s |
+| `local-rules+local-ner` | 7.8 s |
+| `local-rules+local-gliner` | 1 min 33 s |
+| `local-credential-ml` | 5.7 s |
+| `local-rules+local-credential-ml` | 5.8 s |
+| `presidio` | 2.6 s |
+| `gcp-dlp` | 14.5 s |
+| `aws-comprehend` | 17.0 s |
+| `aws-bedrock-guardrails` | 32.3 s |
+| `gcp-vertex-ai` | 30 min 12 s |
+| `aws-bedrock` | 1 min 57 s |
 
-The whole run of `gcp-vertex-ai` over `public` was about 30 minutes (derived).
+Public PII sample is `public`: 200 records of synthetic personal data.
 
 ## Local or cloud
 
@@ -200,9 +202,10 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 - commit `2390a25` of this repository, release build;
 - the `local-credential-ml` rows come from a later run, in the same way: commit `c71f738`, release build, the same machine, on 2026-11-01;
+- the `secrets` cells of the local redacters and their chains come from a run on commit `19874f5` (the `generic-api-key` rule), in the same way;
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
-- the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6785 ms per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8073 ms, and its numbers are used;
+- the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6.8 s per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8.1 s, and its numbers are used;
 - Presidio is the analyzer image 2.2.366 from `ghcr.io/data-privacy-stack`, run as a container on the same machine;
 - no file failed, was blocked or was unsupported in any cell used here.
 

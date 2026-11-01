@@ -316,6 +316,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partially_overlapping_user_rules_redact_and_report_the_union() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let options = LocalRulesRedacterOptions {
+            groups: BTreeSet::new(),
+            user_rules: vec![
+                parse_inline_rule("head=abcdef").unwrap(),
+                parse_inline_rule("tail=defghi").unwrap(),
+            ],
+        };
+        let redacter = LocalRulesRedacter::new(options, &reporter).await.unwrap();
+        let item = text_item(
+            "note.txt",
+            mime::TEXT_PLAIN,
+            RedacterDataItemContent::Value("value abcdefghi end".to_string()),
+        );
+
+        let detections = redacter.detect(&item).await.unwrap().found;
+        let redacted = redacter.redact(item).await.unwrap();
+
+        let RedacterDataItemContent::Value(out) = redacted.content else {
+            panic!("text stays text");
+        };
+        assert_eq!(out, "value [REDACTED] end");
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].value, "abcdefghi");
+    }
+
+    #[tokio::test]
     async fn supports_text_and_csv_but_not_images_or_pdf() {
         let term = Term::stdout();
         let reporter = AppReporter::from(&term);
