@@ -53,6 +53,10 @@ impl Score {
         assert!(value >= 0.0 && value <= 1.0, "a score is between 0 and 1");
         Self(value)
     }
+
+    pub fn value(self) -> f32 {
+        self.0
+    }
 }
 
 impl TryFrom<f32> for Score {
