@@ -684,6 +684,8 @@ mod tests {
 
         assert_eq!((result.files_copied, result.files_skipped), (1, 2));
         assert!(destination.join("a/notes.txt").is_file());
+        assert!(!destination.join("b").exists());
+        assert!(!destination.join("top.txt").exists());
         Ok(())
     }
 

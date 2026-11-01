@@ -50,7 +50,6 @@ pub struct FileSystemRef {
 }
 
 impl FileSystemRef {
-    /// A reference whose media type is guessed from the extension of its path.
     pub fn with_guessed_media_type(relative_path: RelativeFilePath, file_size: usize) -> Self {
         Self {
             media_type: mime_guess::from_path(relative_path.value()).first(),
