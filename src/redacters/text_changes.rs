@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 pub(crate) const TEXT_DIFF_TIME_LIMIT: Duration = Duration::from_secs(5);
 
 /// The largest text a step is compared on. The time limit bounds the diff's time and not its
-/// memory, which grows with the number of pieces on both sides: about 50 times the text in
-/// bytes on a log, so the largest text compared peaks near 1 GiB.
+/// memory, which grows with the number of pieces on both sides: 50 to 100 times the text in
+/// bytes, so the largest text compared peaks between 0.8 GB (a sparse log) and 1.7 GB
+/// (punctuation-dense text with a finding on every line).
 pub(crate) const MAX_DIFFED_BYTES: usize = 16 * 1024 * 1024;
 
 /// One change a step made to a text: `input` of what it read became `output` of what it

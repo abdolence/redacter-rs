@@ -396,9 +396,10 @@ How exactly a redaction is located depends on the redacter and the content:
 of a PDF. So is an image step that follows a step that changed the size of the image; the step that changed the size
 still reports its boxes.
 
-The before and after of a step are compared only for a text, or a table, of up to 16 MiB. The comparison takes about 50
+The before and after of a step are compared only for a text, or a table, of up to 16 MiB. The comparison takes 50 to 100
 times the size of the text in memory, so a larger one is not compared: a step that changes it is located at the `file`.
-A 16 MiB log peaks near 0.8 GB of memory with a report, and the same copy without `--report-file`, or with
+With a report, a 16 MiB sparse log peaks near 0.8 GB of memory, a 15 MiB CSV near 1.13 GB, and 16 MiB of
+punctuation-dense text with an email on every line near 1.66 GB. The same copy without `--report-file`, or with
 `--report-format text`, compares nothing and takes what a copy without reports takes.
 
 ## Source and destinations
@@ -1410,8 +1411,9 @@ The fingerprint is a SHA-256 hash of the rule, the path and the masked value, fo
 findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
 every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
 shows at most 5,000 results of a run, the most severe first, and rejects a file with more than 25,000 results in a run.
-The SARIF report of `cp` and of `scan` keeps the first 5,000 results by severity, rule and path, and says in a
-notification of the run how many it left out. The JSON report always lists all of them.
+The SARIF report of `cp` and of `scan` keeps 5,000 results: the most severe first, and within a severity
+the first result of every rule before the second of any, so a rule with few results is not crowded out by one with
+many. It says in a notification of the run how many it left out. The JSON report always lists all of them.
 
 GitHub tells the analyses of one tool apart by the `category` of the upload, and an upload replaces the earlier one with
 the same `category`. `scan` and `cp` write the same tool, so a workflow that uploads both sets a different `category`

@@ -206,6 +206,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
 - the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6.8 s per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8.1 s, and its numbers are used;
+- the `gcp-vertex-ai` and `aws-bedrock` rows predate the list of labels that the LLM redacters now offer the model, so they were measured with the earlier detection prompt;
 - Presidio is the analyzer image 2.2.366 from `ghcr.io/data-privacy-stack`, run as a container on the same machine;
 - no file failed, was blocked or was unsupported in any cell used here.
 
