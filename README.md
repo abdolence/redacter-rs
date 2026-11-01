@@ -746,72 +746,37 @@ tool.
 
 ### Local or cloud: quality versus performance
 
-The three local redacters run entirely on your machine, so nothing leaves it, nothing is billed and nothing needs
-credentials. The price is detection quality: curated rules only find what has a shape (emails, phones, cards,
-IBANs, keys, national ids with checksums); a small named-entity model only finds persons, organisations and
-locations in the ten languages it was trained on; a zero-shot span model (`local-gliner`) reads context well
-enough to close most of that gap, at several times the latency and over a gigabyte of memory. A cloud DLP
-service knows hundreds of info types, and an LLM reasons over the whole document, so both can still find more
-in the hardest cases, at the cost of latency, money, and sending the document out.
+The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials. The
+cloud services and LLMs are billed for what they read, and they receive the content of the files. The table gives the
+recall of each redacter on four datasets, the share of the sensitive values that it found, and the time per file on
+`public`. A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
 
-Pros of local redaction:
-
-- Privacy by construction: works air-gapped, no account, no per-request cost, no rate limits.
-- Speed: rules run in microseconds; the NER model needs about 100 ms per 512 tokens on a desktop CPU;
-  GLiNER is slower, under a second per file, but still local and free.
-- Determinism: the same input always gives the same output, which makes results easy to test and audit.
-- A useful pre-pass: `-d local-rules -d local-ner -d gcp-dlp` (or `-d local-gliner` in place of `local-ner`)
-  removes the obvious PII and secrets before anything is sent.
-
-Cons of local redaction:
-
-- Narrower coverage without `local-gliner`: `local-rules` alone has no free-form addresses or document-level
-  reasoning, and only redacts dates of birth, passport and licence numbers next to a context keyword.
-- Model quality: the 66M-parameter NER model misses names it has never seen, needs context to tag a single
-  word, and reports organisations for product names; GLiNER can mistake a plain date for a date of birth by
-  shape alone, and more labels bring more of that kind of false positive.
-- Resource cost: `local-gliner`'s model is a ~1.17 GB download and needs about 1.5 GB of memory while running,
-  against `local-ner`'s 132 MB and 232 MB.
-- Locale-bound rules: national formats differ; expect to enable, disable or add rules for your documents.
-
-Measured on the corpus under `test-fixtures/bench-dlp/` (eight fixture documents including a contextual note
-written so its PII needs context rather than shape to find, about 3.7 KB of text; local rows measured at
-commit `e9b325d`, Intel i7-10700K, one warm-up then the median of three runs; per-file figures include
-process start and model load, since the harness invokes the binary once per file). The cloud rows are kept
-from an earlier run on a 7-file corpus (commit `3c3491e`, before the contextual file was added, 41 PII / 7
-entities / 25 keep) and were not re-run against the current corpus, so they are not directly comparable to
-the PII/kept counts below:
-
-| Redacter | Whole corpus | Per file (median) | PII removed | Cities and organisations removed | Non-PII kept |
+| Redacter | Fixtures | Secrets | Public | Images | Per file on public |
 |---|---|---|---|---|---|
-| `local-rules` | 52 ms | 49 ms | 28 / 48 | 0 / 8 | 31 / 31 |
-| `local-ner` | 441 ms | 152 ms | 17 / 48 | 8 / 8 | 27 / 31 |
-| `local-rules` + `local-ner` | 466 ms | 205 ms | 43 / 48 | 8 / 8 | 27 / 31 |
-| `local-gliner` | 2.8 s | 834 ms | 48 / 48 | 1 / 8 | 28 / 31 |
-| `local-rules` + `local-gliner` | 2.7 s | 878 ms | 48 / 48 | 1 / 8 | 27 / 31 |
-| `gcp-dlp` (7-file corpus) | 710 ms | 266 ms | 40 / 41 | 4 / 7 | 25 / 25 |
-| `gcp-vertex-ai` (Gemini, 7-file corpus) | 68.9 s | 6.0 s | 41 / 41 | 1 / 7 | 24 / 25 |
+| `local-rules` | 54% | 88% | 24% | 62% | 0 ms |
+| `local-ner` | 23% | 0% | 23% | 19% | 39 ms |
+| `local-gliner` | 100% | 2% | 55% | 88% | 441 ms |
+| `local-rules+local-ner` | 77% | 88% | 46% | 94% | 38 ms |
+| `local-rules+local-gliner` | 100% | 88% | 57% | 88% | 466 ms |
+| `presidio` | 69% | 7% | 66% | 69% | 12 ms |
+| `gcp-dlp` | 85% | 41% | 49% | 94% | 72 ms |
+| `aws-comprehend` | 98% | 56% | 80% | 94% | 84 ms |
+| `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 161 ms |
+| `gcp-vertex-ai` | 98% | 100% | 86% | 100% | 9062 ms |
+| `aws-bedrock` | 98% | 93% | 87% | 94% | 583 ms |
 
-`local-rules` still leaves behind the person names and free-form street addresses that have no shape to
-match; `local-rules+local-ner` closes most of that gap but, with no notion of context, still misses the
-contextual file's lower-case name, medical condition, keyword-less date of birth and two handles (43/48).
-`local-gliner` reaches 48/48 with its default 14-label PII list on its own -- every PII string in the
-corpus, including all of the contextual file's and the digit-only phone numbers in `customers.csv` --
-and chained after `local-rules` also stays at 48/48, since `local-rules` already covers the same
-structured PII on its own. Since `organization` is off by default, `local-gliner` redacts only the one
-`entities` string embedded in a free-form address (1/8) rather than `local-ner`'s 8/8; entity coverage is
-available via `--local-gliner-labels` but costs the false positives that come with it. The keep losses
-beyond `local-rules`' clean 31/31 are the known over-redaction cases: `local-ner` and the `local-ner`
-chain tag "Apple" and "The Support Desk" as organisations; `local-gliner` and its chain tag the word "email"
-in a sentence about contact preferences as an email address, and mistake the invoice date
-`14 March 1985` in `dates-en.txt` for a date of birth by shape alone, the same false positive noted in the
-[Local GLiNER redacter](#local-gliner-redacter) section.
-The corpus holds no secrets, so the table measures personal information only.
-Run `cargo test --release --test bench_dlp -- --ignored --nocapture` (see
-`test-fixtures/bench-dlp/README.md`) to reproduce the table on your own machine and documents.
+Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
+secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
+and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
+models, so compare it between redacters, not with another dataset. `gemini-llm` and `open-ai-llm` were not measured.
 
-In short: use the local redacters when the data must not leave the machine or when you need a fast, cheap
-first pass; use a cloud provider, ideally after the local pass, when coverage matters more than latency and cost.
+For secrets, `local-rules` found 88% at 1 ms per file, and `gcp-vertex-ai` found all of them. For personal information
+in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
+and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
+find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
+
+Precision, recall per category, speed on every dataset, what each redacter sends out, the limits of the measurement and
+the commands to reproduce it are in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 
 ## Multiple redacters
 
