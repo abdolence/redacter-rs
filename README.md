@@ -229,19 +229,17 @@ Options:
           Additional GCP DLP user defined stored info types for redaction
 
       --categories <CATEGORIES>
-          Data categories to look for, comma separated, or only exclusions with a leading ! to look for every category but those, such as --categories '!other' (quote it: bash and zsh expand an unquoted ! in an interactive shell). scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category
+          Data categories to look for, comma separated, or only exclusions with a leading ! to look for every category but those, such as --categories '!other' (use single quotes: an interactive bash or zsh expands a ! as history, in double quotes too). scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category
           
           [possible values: person, contact, address, location, organization, id-number, financial, date-of-birth, secrets, network, other]
 
       --llm-image-mode <LLM_IMAGE_MODE>
-          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images
+          How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images. Default is 'auto'
 
           Possible values:
           - auto:   Edit the image with the model, verify the edit with the coordinate pass, and fall back to coordinates entirely when the model cannot edit images
           - native: Always edit the image with the model, failing when it cannot
           - coords: Always ask the model where the sensitive data is and black it out locally
-          
-          [default: auto]
 
       --gcp-region <GCP_REGION>
           GCP location for Vertex AI. Default is 'global'; 'us' and 'eu' multi-regions and regional locations such as 'us-central1' are accepted
@@ -402,7 +400,7 @@ nothing, and the output is the same as without the option.
 redacter scan . -d local-rules --categories '!other'
 ```
 
-Quote an exclusion: interactive bash and zsh expand an unquoted `!` as history.
+Quote an exclusion in single quotes: an interactive bash or zsh expands a `!` as history, in double quotes too.
 
 #### What `other` holds
 
@@ -419,7 +417,7 @@ redacters put there:
 | UUIDs | `UUID` of `presidio` |
 | Every user rule | `--local-rule` and `--local-rules-file` |
 | Info types the user adds | `--gcp-dlp-stored-info-type`, and a `--gcp-dlp-built-in-info-type` that is not a default |
-| Anything a model could not classify | `sensitive_data` of the LLM redacters, a label added with `--local-gliner-labels`, `ALL` and the types later added of `aws-comprehend`, the regex filters of `aws-bedrock-guardrails` and an entity that a custom recogniser of `presidio` adds |
+| Anything a model could not classify | `sensitive_data` of the LLM redacters, a label added with `--local-gliner-labels` that names no organisation or place, `ALL` and the types later added of `aws-comprehend`, the regex filters of `aws-bedrock-guardrails` and an entity that a custom recogniser of `presidio` adds |
 
 `--categories secrets` therefore skips the custom rules of the user, since they are `other`. Add `other` to keep them, as in
 `--categories secrets,other`.
@@ -462,8 +460,8 @@ text OCR reads goes through the text path above, and the words found are blacked
 The categories meet the options of a redacter as an intersection: a detector runs when its option selects it and its
 category is chosen.
 
-- A default list is narrowed without a message: the rule groups when `--local-rules` is absent, the entities of
-  `--local-ner-entities`, the default `--local-gliner-labels` and the 28 default info types of GCP DLP.
+- A default list is narrowed without a message: the rule groups when `--local-rules` is absent, the default entities
+  when `--local-ner-entities` is absent, the default `--local-gliner-labels` and the 28 default info types of GCP DLP.
 - A value named on the command line is checked, and one outside the chosen categories is refused before any file is
   read. This covers `--local-rules`, `--local-ner-entities`, `--local-gliner-labels`, `--gcp-dlp-built-in-info-type`,
   `--gcp-dlp-stored-info-type`, `--local-rule` and `--local-rules-file`. `--local-rules-disable` only removes groups,
@@ -482,14 +480,24 @@ Error: local-ner finds nothing in the chosen categories: secrets
 ```
 
 A redacter finds nothing when no rule group, entity, label or info type of it is in the chosen categories. This is
-checked for `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `gcp-dlp` and `aws-comprehend`, which has
-no entity type for `date-of-birth`. The `LOCATION` info type of `gcp-dlp` is `address`, so `gcp-dlp` has no info type
-for `location`. Presidio and Guardrails are configured on their server or in AWS, so they run and may find nothing:
-Presidio has no recogniser for `secrets`. The LLM redacters can find any category.
+checked for the local redacters, `gcp-dlp` and `aws-comprehend`. Each has nothing for these categories:
+
+- `local-rules`: `person`, `location`, `organization`, and `other` unless a rule of your own is given;
+- `local-ner`: every category but `person`, `organization` and `location`;
+- `local-gliner`: `location`, `organization` and `secrets`, unless a label for it is added with
+  `--local-gliner-labels`, see [GLiNER](#local-gliner-redacter);
+- `local-credential-ml`: every category but `secrets`;
+- `gcp-dlp`: `location` and `organization`. Its `LOCATION` info type, "a physical address or location", is placed in
+  `address`, so a city it finds is masked under `address`, and `'!location'` does not keep it;
+- `aws-comprehend`: `location`, `organization` and `date-of-birth`.
+
+Presidio and Guardrails are configured on their server or in AWS, so they run and may find nothing: Presidio has no
+recogniser for `secrets`. The LLM redacters can find any category.
 
 `cp` fails a file when an LLM redacter or Guardrails names a value in the chosen categories that the tool cannot place
-in the text, and when an LLM redacter answers with a type that is none of the kinds the tool knows. The file is
-reported as an error and is not copied, since copying it would leave the value in place. A type that is a known kind of
+in the text, and when an LLM redacter answers with a type that is none of the kinds the tool knows, or with
+`sensitive_data` while `other` is not chosen. The file is reported as an error and is not copied, since copying it
+would leave the value in place. A type that is a known kind of
 a category that is not chosen, such as `person_name` when persons are not chosen, is out of scope, and the value is
 dropped. A value outside the chosen categories that cannot be placed is ignored, and does not make a file unconfirmed
 in `scan`.
@@ -818,7 +826,8 @@ redacter cp -d local-rules --local-rule 'employee-id=\bEMP-[0-9]{6}\b' --local-r
 ```
 
 A rule has exactly one of `regex` or `dictionary`. Dictionary words match as whole words and are
-case-insensitive unless `case_insensitive` is `false`. Rule names must be unique. User-defined rules
+case-insensitive unless `case_insensitive` is `false`. Rule names must be unique, and may not be the name of a
+built-in rule, whether its group is enabled or not, see [the rules](docs/local-rules.md). User-defined rules
 always run: they are not one of the switchable groups, so `--local-rules-disable custom` does not
 suppress them; drop the `--local-rule` and `--local-rules-file` options instead.
 
@@ -953,7 +962,9 @@ number, date of birth, passport number, national id number, credit card number, 
 username, medical condition, postal code, license plate number. `organization` is deliberately not in
 the default list: measured against this model, it tags team and desk names such as "Marketing team" and
 "The Support Desk" as organisations, which is over-redaction for a label most callers do not want on by
-default; add it with `--local-gliner-labels` when you do. `--local-gliner-min-score` is the model
+default; add it with `--local-gliner-labels` when you do. Under `--categories`, an added label of `organization`,
+`organisation`, `company` or `employer` is in the `organization` category, and one of `location`, `city`, `country` or
+`place` is in `location`; any other added label is in `other`. `--local-gliner-min-score` is the model
 confidence a span needs to be redacted, between 0 and 1 (default 0.5); lower values redact more. Scores
 are well separated in practice, so lowering the threshold rarely changes the result.
 
@@ -1332,7 +1343,7 @@ For example:
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
-`scan` can look for some kinds of data only, such as credentials, with `--categories`, see
+`scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
 
 `scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and an inline

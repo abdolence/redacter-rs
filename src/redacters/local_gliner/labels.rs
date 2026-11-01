@@ -30,13 +30,24 @@ pub fn default_labels() -> Vec<String> {
         .collect()
 }
 
+/// Labels a user may add that name an organisation, which no default label does.
+const ORGANIZATION_LABELS: [&str; 4] = ["organization", "organisation", "company", "employer"];
+
+/// Labels a user may add that name a place, which no default label does.
+const LOCATION_LABELS: [&str; 4] = ["location", "city", "country", "place"];
+
 /// The category of a finding the model labelled `label`, ignoring case: that of the default
-/// label of the name, `other` for a label the user added.
+/// label of the name, `organization` or `location` for a label the user added that is one of
+/// [`ORGANIZATION_LABELS`] or [`LOCATION_LABELS`], `other` for any other label the user added.
 pub fn label_category(label: &str) -> Category {
+    let named = |names: &[&str]| names.iter().any(|name| name.eq_ignore_ascii_case(label));
     DEFAULT_LABELS
         .iter()
         .find(|(default, _)| default.eq_ignore_ascii_case(label))
-        .map_or(Category::Other, |(_, category)| *category)
+        .map(|(_, category)| *category)
+        .or_else(|| named(&ORGANIZATION_LABELS).then_some(Category::Organization))
+        .or_else(|| named(&LOCATION_LABELS).then_some(Category::Location))
+        .unwrap_or(Category::Other)
 }
 
 /// Splits `labels` into batches of at most `max_types`, the model's limit on how many entity
@@ -67,7 +78,17 @@ mod tests {
     #[test]
     fn a_label_is_placed_ignoring_case_and_a_label_the_user_added_is_other() {
         assert_eq!(label_category("Phone Number"), Category::Contact);
-        assert_eq!(label_category("employer"), Category::Other);
+        assert_eq!(label_category("tax code"), Category::Other);
+    }
+
+    #[test]
+    fn a_label_the_user_added_that_names_an_organisation_or_a_place_is_placed_there() {
+        for label in ["Organization", "organisation", "company", "employer"] {
+            assert_eq!(label_category(label), Category::Organization, "{label}");
+        }
+        for label in ["location", "City", "country", "place"] {
+            assert_eq!(label_category(label), Category::Location, "{label}");
+        }
     }
 
     #[test]

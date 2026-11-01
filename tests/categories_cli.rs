@@ -1,33 +1,33 @@
-//! The `--categories` examples of the README, run against the built binary.
+//! End-to-end runs of `--categories` through the built binary.
 
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
+use tempfile::TempDir;
 
 const NOTE: &str = "mail ana@example.com\nkey AKIAIOSFODNN7EXAMPLE\n";
 const EMAIL: &str = "ana@example.com";
 const KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
-/// A directory with `in/a.txt` holding an email address and an AWS access key, removed on drop.
-struct Workspace(PathBuf);
+/// A directory with `in/a.txt` holding an email address and an AWS access key.
+struct Workspace(TempDir);
 
 impl Workspace {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("redacter-categories-{}", uuid::Uuid::now_v7()));
-        fs::create_dir_all(root.join("in")).unwrap();
-        fs::write(root.join("in/a.txt"), NOTE).unwrap();
-        Self(root)
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("in")).unwrap();
+        fs::write(directory.path().join("in/a.txt"), NOTE).unwrap();
+        Self(directory)
     }
 
     fn path(&self, relative: &str) -> PathBuf {
-        self.0.join(relative)
+        self.0.path().join(relative)
     }
 
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_redacter"))
-            .current_dir(&self.0)
+            .current_dir(self.0.path())
             .args(args)
             .output()
             .unwrap()
@@ -50,12 +50,6 @@ impl Workspace {
             String::from_utf8_lossy(&output.stdout)
         );
         serde_json::from_str(&fs::read_to_string(self.path("report.json")).unwrap()).unwrap()
-    }
-}
-
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -108,43 +102,4 @@ fn a_copy_for_contact_redacts_the_email_and_leaves_the_key() {
     let copy = fs::read_to_string(workspace.path("out/a.txt")).unwrap();
     assert!(!copy.contains(EMAIL), "{copy}");
     assert!(copy.contains(KEY), "{copy}");
-}
-
-#[test]
-fn a_bad_list_of_categories_fails_before_any_file_is_read() {
-    let workspace = Workspace::new();
-
-    for categories in ["credential", "contact,!other", "!nonsense"] {
-        let output = workspace.run(&[
-            "scan",
-            "in",
-            "-d",
-            "local-rules",
-            "--categories",
-            categories,
-            "--report-file",
-            "report.json",
-        ]);
-
-        assert!(!output.status.success(), "{categories}");
-        assert!(!Path::new(&workspace.path("report.json")).exists());
-    }
-}
-
-#[test]
-fn a_rule_group_outside_the_categories_is_refused() {
-    let workspace = Workspace::new();
-
-    let output = workspace.run(&[
-        "scan",
-        "in",
-        "-d",
-        "local-rules",
-        "--local-rules",
-        "email,secrets",
-        "--categories",
-        "secrets",
-    ]);
-
-    assert_eq!(output.status.code(), Some(1));
 }

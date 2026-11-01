@@ -417,7 +417,7 @@ pub struct RedacterArgs {
         long,
         value_parser = CategoriesParser,
         requires = "redact",
-        help = "Data categories to look for, comma separated, or only exclusions with a leading ! to look for every category but those, such as --categories '!other' (quote it: bash and zsh expand an unquoted ! in an interactive shell). scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category"
+        help = "Data categories to look for, comma separated, or only exclusions with a leading ! to look for every category but those, such as --categories '!other' (use single quotes: an interactive bash or zsh expands a ! as history, in double quotes too). scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category"
     )]
     pub categories: Option<BTreeSet<Category>>,
 
@@ -794,6 +794,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             self.check_options_with_categories()?;
         }
         let categories = categories.as_ref();
+        let image_mode = self.llm_image_mode.unwrap_or_default();
         let mut provider_options =
             Vec::with_capacity(self.redact.as_ref().map(Vec::len).unwrap_or(0));
         for options in self.redact.iter().flatten().copied() {
@@ -850,7 +851,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         })?,
                         gemini_model: self.gemini_model.clone(),
                         gemini_image_model: self.gemini_image_model.clone(),
-                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        image_mode,
                         categories: categories.cloned(),
                     },
                 )),
@@ -864,7 +865,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         })?,
                         model: self.open_ai_model.clone(),
                         image_model: self.open_ai_image_model.clone(),
-                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        image_mode,
                         categories: categories.cloned(),
                     },
                 )),
@@ -879,7 +880,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         gcp_region: self.gcp_region.clone().unwrap_or_else(|| {
                             GcpRegion::new(DEFAULT_GCP_VERTEX_AI_REGION.to_string())
                         }),
-                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        image_mode,
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
@@ -890,7 +891,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     crate::redacters::AwsBedrockRedacterOptions {
                         region: self.aws_region.clone().map(aws_config::Region::new),
                         text_model: self.aws_bedrock_text_model.clone(),
-                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        image_mode,
                         categories: categories.cloned(),
                     },
                 )),
@@ -1778,6 +1779,26 @@ mod tests {
                     ..
                 }
             ));
+        }
+
+        #[cfg(feature = "local-gliner")]
+        #[test]
+        fn a_gliner_label_naming_an_organisation_can_be_asked_for_by_its_category() {
+            let options = options_of(&[
+                "-d",
+                "local-gliner",
+                "--local-gliner-labels",
+                "organization",
+                "--categories",
+                "organization",
+            ])
+            .unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalGliner(options)) => {
+                    assert_eq!(options.labels, ["organization"])
+                }
+                other => panic!("expected local gliner options, got {other:?}"),
+            }
         }
 
         #[cfg(feature = "local-credential-ml")]

@@ -116,6 +116,11 @@ pub struct OutputStyles {
 }
 
 impl OutputStyles {
+    /// The closing part of a status line that states the categories the run was limited to.
+    pub fn categories_suffix(&self, categories: &Categories) -> String {
+        format!(" · Categories: {}", self.highlighted.apply_to(categories))
+    }
+
     pub fn new() -> Self {
         Self {
             filename: Style::new().bold().white(),
@@ -552,10 +557,7 @@ pub fn format_capabilities_line(capabilities: &Capabilities, styles: &OutputStyl
         sampling
     );
     if let Some(categories) = &capabilities.categories {
-        line.push_str(&format!(
-            " · Categories: {}",
-            styles.highlighted.apply_to(categories)
-        ));
+        line.push_str(&styles.categories_suffix(categories));
     }
     line
 }
@@ -599,10 +601,7 @@ pub fn format_summary_line(
         .as_str(),
     );
     if let Some(categories) = categories {
-        line.push_str(&format!(
-            " · Categories: {}",
-            styles.highlighted.apply_to(categories)
-        ));
+        line.push_str(&styles.categories_suffix(categories));
     }
     line
 }
