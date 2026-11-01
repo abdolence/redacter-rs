@@ -102,7 +102,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.10"
 pdfium-render = { version = "0.9", default-features = false, features = [
-    "pdfium_7881",
+    "pdfium_8125",
     "thread_safe",
     "image_025",
 ], optional = true }
