@@ -2,10 +2,97 @@
 
 use crate::args::RedacterType;
 use crate::redacters::{Category, Detections};
+use clap::builder::{PossibleValue, TypedValueParser};
 use clap::ValueEnum;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fmt::Display;
+
+/// The categories a `--categories` list resolves to. A list is either only names, or only
+/// `!name` exclusions, which mean every category except those, including categories added in
+/// later releases.
+fn parse_categories(list: &str) -> Result<BTreeSet<Category>, CategoriesListError> {
+    let mut named = BTreeSet::new();
+    let mut excluded = BTreeSet::new();
+    for entry in list.split(',') {
+        let (set, name) = match entry.strip_prefix('!') {
+            Some(name) => (&mut excluded, name),
+            None => (&mut named, entry),
+        };
+        let category =
+            Category::from_str(name, false).map_err(|_| CategoriesListError::Unknown {
+                entry: entry.to_string(),
+            })?;
+        set.insert(category);
+    }
+    if excluded.is_empty() {
+        Ok(named)
+    } else if !named.is_empty() {
+        Err(CategoriesListError::Mixed)
+    } else if excluded.len() == Category::value_variants().len() {
+        Err(CategoriesListError::ExcludesEverything)
+    } else {
+        Ok(Category::value_variants()
+            .iter()
+            .copied()
+            .filter(|category| !excluded.contains(category))
+            .collect())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CategoriesListError {
+    #[error("{entry:?} is not a category{}", names_hint())]
+    Unknown { entry: String },
+    #[error("a list of categories is either names or exclusions with a leading !, not both")]
+    Mixed,
+    #[error("the exclusions leave no category to look for")]
+    ExcludesEverything,
+}
+
+fn names_hint() -> String {
+    let names = Category::value_variants()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    format!(
+        " (expected {}, each optionally prefixed with !)",
+        names.join(", ")
+    )
+}
+
+/// Reads `--categories` as the set of categories it resolves to, and lists the category names as
+/// the possible values of the option.
+#[derive(Clone)]
+pub struct CategoriesParser;
+
+impl TypedValueParser for CategoriesParser {
+    type Value = BTreeSet<Category>;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let invalid = |message: String| {
+            cmd.clone()
+                .error(clap::error::ErrorKind::ValueValidation, message)
+        };
+        let list = value
+            .to_str()
+            .ok_or_else(|| invalid("the categories are not valid UTF-8".to_string()))?;
+        parse_categories(list).map_err(|error| invalid(error.to_string()))
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(
+            Category::value_variants()
+                .iter()
+                .filter_map(ValueEnum::to_possible_value),
+        ))
+    }
+}
 
 /// The categories `--categories` chose: at least one, never all of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,10 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn secrets_is_credential_and_prints_as_credential() {
-        let parsed = Category::from_str("secrets", true).unwrap();
-        assert_eq!(parsed, Category::Credential);
-        assert_eq!(parsed.to_string(), "credential");
+    fn a_category_prints_in_reports_as_the_name_the_command_line_takes() {
+        for category in Category::value_variants() {
+            let name = category.to_string();
+            assert_eq!(Category::from_str(&name, false).unwrap(), *category);
+            assert_eq!(
+                serde_json::to_value(category).unwrap(),
+                serde_json::json!(name)
+            );
+        }
+        assert_eq!(Category::Secrets.to_string(), "secrets");
+        assert_eq!(Category::Organization.to_string(), "organization");
     }
 
     #[test]
@@ -121,22 +215,22 @@ mod tests {
             Categories::limiting(Category::value_variants().iter().copied()),
             None
         );
-        assert!(Categories::limiting([Category::Credential]).is_some());
+        assert!(Categories::limiting([Category::Secrets]).is_some());
     }
 
     #[test]
     fn the_chosen_categories_print_in_the_order_of_the_enum() {
-        let categories = chosen(&[Category::Credential, Category::Contact]);
-        assert_eq!(categories.to_string(), "contact, credential");
+        let categories = chosen(&[Category::Secrets, Category::Contact]);
+        assert_eq!(categories.to_string(), "contact, secrets");
     }
 
     #[test]
     fn check_fails_on_the_first_value_outside_with_its_category() {
-        let categories = chosen(&[Category::Credential]);
+        let categories = chosen(&[Category::Secrets]);
         let error = categories
             .check("--local-rules", &["secrets", "email", "phone"], |name| {
                 if *name == "secrets" {
-                    Category::Credential
+                    Category::Secrets
                 } else {
                     Category::Contact
                 }
@@ -154,10 +248,10 @@ mod tests {
 
     #[test]
     fn filter_keeps_only_the_defaults_in_the_chosen_categories() {
-        let categories = chosen(&[Category::Credential, Category::Network]);
+        let categories = chosen(&[Category::Secrets, Category::Network]);
         let kept = categories.filter(
             [
-                ("password", Category::Credential),
+                ("password", Category::Secrets),
                 ("name", Category::Person),
                 ("ip", Category::Network),
             ],
@@ -187,7 +281,7 @@ mod tests {
             .collect();
         detections.retain_categories(
             RedacterType::LocalRules,
-            &chosen(&[Category::Credential, Category::Other]),
+            &chosen(&[Category::Secrets, Category::Other]),
         );
         assert_eq!(
             detections.unlocated,

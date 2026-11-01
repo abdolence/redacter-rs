@@ -1327,7 +1327,7 @@ mod tests {
 
     /// The redacter here is built with every group, which `args` does not do under
     /// `--categories`, so only a `redact_in` that leaves the narrowing to the redacter and
-    /// delegates to `redact` redacts the email address under `credential` as `redact` does.
+    /// delegates to `redact` redacts the email address under `secrets` as `redact` does.
     #[tokio::test]
     async fn redact_in_delegates_to_redact_for_a_redacter_that_narrows_itself() {
         let term = console::Term::stdout();
@@ -1343,10 +1343,10 @@ mod tests {
             .await
             .unwrap(),
         );
-        let credential = Categories::limiting([Category::Credential]).unwrap();
+        let secrets = Categories::limiting([Category::Secrets]).unwrap();
 
         let in_scope = redacter
-            .redact_in(text_item(NOTE), Some(&credential))
+            .redact_in(text_item(NOTE), Some(&secrets))
             .await
             .unwrap();
         let today = redacter.redact(text_item(NOTE)).await.unwrap();

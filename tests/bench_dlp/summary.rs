@@ -317,9 +317,9 @@ Each cell is recall / precision / time per file. Precision is only reported wher
 
 8 files, 4 sensitive values or boxes.
 
-| Provider | Whole run | Per file | Recall | Precision | person | contact | address | id-number | financial | date-of-birth | credential | network | other | Keep hit | Failed/blocked/unsupported |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| local-rules | 1 min 2 s | 1.3 s | 67% | 75% | - | 3/4 | - | - | - | - | - | - | 1/2 | 0/3 | 0/1/2 |
+| Provider | Whole run | Per file | Recall | Precision | person | contact | address | location | organization | id-number | financial | date-of-birth | secrets | network | other | Keep hit | Failed/blocked/unsupported |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| local-rules | 1 min 2 s | 1.3 s | 67% | 75% | - | 3/4 | - | - | - | - | - | - | - | - | 1/2 | 0/3 | 0/1/2 |
 
 Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 
@@ -327,9 +327,9 @@ Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 
 200 files, 40 sensitive values or boxes.
 
-| Provider | Whole run | Per file | Recall | person | contact | address | id-number | financial | date-of-birth | credential | network | other | Failed/blocked/unsupported |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| local-rules | 1 min 2 s | 1.3 s | 71% | - | 9/12 | - | - | - | - | - | - | 1/2 | 0/1/2 |
+| Provider | Whole run | Per file | Recall | person | contact | address | location | organization | id-number | financial | date-of-birth | secrets | network | other | Failed/blocked/unsupported |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| local-rules | 1 min 2 s | 1.3 s | 71% | - | 9/12 | - | - | - | - | - | - | - | - | 1/2 | 0/1/2 |
 
 Failed: gcp-dlp (exit 1: --gcp-project-id is required).
 ";

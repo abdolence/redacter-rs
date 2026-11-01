@@ -52,7 +52,7 @@ impl DetectionLabel {
             RedacterType::LocalNer => Category::Other,
             #[cfg(not(feature = "local-gliner"))]
             RedacterType::LocalGliner => Category::Other,
-            RedacterType::LocalCredentialMl => Category::Credential,
+            RedacterType::LocalCredentialMl => Category::Secrets,
             RedacterType::GcpDlp => GcpDlpRedacter::info_type_category(label),
             RedacterType::AwsComprehend => AwsComprehendRedacter::entity_category(label),
             RedacterType::Presidio => PresidioRedacter::entity_category(label),

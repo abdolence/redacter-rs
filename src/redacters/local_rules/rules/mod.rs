@@ -41,7 +41,7 @@ impl RuleGroup {
             RuleGroup::Email | RuleGroup::Phone => Category::Contact,
             RuleGroup::PaymentCard | RuleGroup::Iban => Category::Financial,
             RuleGroup::Network => Category::Network,
-            RuleGroup::Url | RuleGroup::Secrets => Category::Credential,
+            RuleGroup::Url | RuleGroup::Secrets => Category::Secrets,
             RuleGroup::UsIdentifiers | RuleGroup::EuIdentifiers | RuleGroup::WorldIdentifiers => {
                 Category::IdNumber
             }
@@ -473,10 +473,7 @@ mod tests {
                 spec.name
             );
         }
-        assert_eq!(
-            RuleSet::category_of("generic-api-key"),
-            Category::Credential
-        );
+        assert_eq!(RuleSet::category_of("generic-api-key"), Category::Secrets);
         assert_eq!(RuleSet::category_of("employee-number"), Category::Other);
     }
 

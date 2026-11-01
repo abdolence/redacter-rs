@@ -8,7 +8,7 @@ use crate::redacters::LocalCredentialMlRedacterOptions;
 use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{
     AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, AwsComprehendRedacter,
-    Categories, CategoriesError, Category, GcpDlpRedacter, GcpDlpRedacterOptions,
+    Categories, CategoriesError, CategoriesParser, Category, GcpDlpRedacter, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
     RedacterProviderOptions, RuleGroup, Score, UserRule,
@@ -415,12 +415,11 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        value_enum,
-        value_delimiter = ',',
+        value_parser = CategoriesParser,
         requires = "redact",
-        help = "Data categories to look for, comma separated; secrets is accepted for credential. scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category"
+        help = "Data categories to look for, comma separated, or only exclusions with a leading ! to look for every category but those, such as --categories '!other' (quote it: bash and zsh expand an unquoted ! in an interactive shell). scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category"
     )]
-    pub categories: Option<Vec<Category>>,
+    pub categories: Option<BTreeSet<Category>>,
 
     #[arg(
         long,
@@ -789,7 +788,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
     fn try_into(self) -> Result<RedacterOptions, Self::Error> {
         let categories = self
             .categories
-            .as_deref()
+            .as_ref()
             .and_then(|chosen| Categories::limiting(chosen.iter().copied()));
         if categories.is_some() {
             self.check_options_with_categories()?;
@@ -950,7 +949,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 }),
                 #[cfg(feature = "local-credential-ml")]
                 RedacterType::LocalCredentialMl => {
-                    if let Some(categories) = categories.filter(|c| !c.contains(Category::Credential)) {
+                    if let Some(categories) = categories.filter(|c| !c.contains(Category::Secrets)) {
                         return Err(CategoriesError::NothingToFind {
                             redacter: options,
                             categories: categories.clone(),
@@ -1446,20 +1445,106 @@ mod tests {
         }
 
         #[test]
-        fn categories_are_comma_separated_and_secrets_names_credential() {
+        fn categories_are_comma_separated() {
             let options =
                 options_of(&["-d", "local-rules", "--categories", "secrets,contact"]).unwrap();
             assert_eq!(
                 options.base_options.categories,
-                Categories::limiting([Category::Credential, Category::Contact])
+                Categories::limiting([Category::Secrets, Category::Contact])
             );
+        }
+
+        fn all_but(excluded: &[Category]) -> Option<Categories> {
+            use clap::ValueEnum;
+            Categories::limiting(
+                Category::value_variants()
+                    .iter()
+                    .copied()
+                    .filter(|category| !excluded.contains(category)),
+            )
+        }
+
+        fn categories_of(value: &str) -> Option<Categories> {
+            options_of(&["-d", "local-rules", "--categories", value])
+                .unwrap_or_else(|err| panic!("{value}: {err}"))
+                .base_options
+                .categories
+        }
+
+        fn refused(value: &str) -> bool {
+            TestCli::try_parse_from(["redacter", "-d", "local-rules", "--categories", value])
+                .is_err()
+        }
+
+        #[test]
+        fn credential_is_no_longer_a_category() {
+            assert!(refused("credential"));
+            assert!(refused("contact,credential"));
+        }
+
+        #[test]
+        fn a_name_listed_twice_is_listed_once() {
+            assert_eq!(
+                categories_of("contact,contact"),
+                Categories::limiting([Category::Contact])
+            );
+        }
+
+        #[test]
+        fn a_list_of_exclusions_means_every_category_but_those() {
+            assert_eq!(categories_of("!other"), all_but(&[Category::Other]));
+            assert_eq!(
+                categories_of("!other,!network,!other"),
+                all_but(&[Category::Other, Category::Network])
+            );
+        }
+
+        #[test]
+        fn an_exclusion_leaves_in_every_category_the_enum_has() {
+            use clap::ValueEnum;
+            let kept = categories_of("!other").expect("an exclusion limits the run");
+            for category in Category::value_variants() {
+                assert_eq!(kept.contains(*category), *category != Category::Other);
+            }
+        }
+
+        #[test]
+        fn names_and_exclusions_cannot_be_mixed() {
+            assert!(refused("contact,!other"));
+            assert!(refused("!other,contact"));
+        }
+
+        #[test]
+        fn an_unknown_name_or_an_empty_entry_is_refused() {
+            for value in [
+                "nonsense",
+                "!nonsense",
+                "contact,",
+                ",contact",
+                "!",
+                "",
+                "all",
+            ] {
+                assert!(refused(value), "{value:?}");
+            }
+        }
+
+        #[test]
+        fn excluding_every_category_is_refused() {
+            use clap::ValueEnum;
+            let everything = Category::value_variants()
+                .iter()
+                .map(|category| format!("!{category}"))
+                .collect::<Vec<_>>();
+            assert!(refused(&everything.join(",")));
+            assert!(!refused(&everything[1..].join(",")));
         }
 
         #[test]
         fn categories_need_a_redacter() {
             for args in [
-                &["redacter", "cp", "/a", "/b", "--categories", "credential"][..],
-                &["redacter", "scan", "/a", "--categories", "credential"],
+                &["redacter", "cp", "/a", "/b", "--categories", "secrets"][..],
+                &["redacter", "scan", "/a", "--categories", "secrets"],
             ] {
                 let err = CliArgs::try_parse_from(args).unwrap_err();
                 assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
@@ -1469,7 +1554,7 @@ mod tests {
         #[test]
         fn local_rules_groups_narrow_to_the_chosen_categories() {
             assert_eq!(
-                local_rules_of(&["--categories", "credential"]).groups,
+                local_rules_of(&["--categories", "secrets"]).groups,
                 BTreeSet::from([RuleGroup::Url, RuleGroup::Secrets])
             );
             assert_eq!(
@@ -1486,7 +1571,7 @@ mod tests {
                 "--local-rules",
                 "email,secrets",
                 "--categories",
-                "credential",
+                "secrets",
             ]);
             assert!(matches!(
                 error,
@@ -1501,13 +1586,8 @@ mod tests {
         #[test]
         fn a_user_rule_is_other() {
             let rule = ["--local-rule", "employee=EMP[0-9]+"];
-            let error = error_of(
-                &[
-                    &["-d", "local-rules", "--categories", "credential"],
-                    &rule[..],
-                ]
-                .concat(),
-            );
+            let error =
+                error_of(&[&["-d", "local-rules", "--categories", "secrets"], &rule[..]].concat());
             assert!(matches!(
                 error,
                 CategoriesError::ValueOutside {
@@ -1516,8 +1596,7 @@ mod tests {
                     category: Category::Other,
                 } if value == "employee"
             ));
-            let options =
-                local_rules_of(&[&["--categories", "credential,other"], &rule[..]].concat());
+            let options = local_rules_of(&[&["--categories", "secrets,other"], &rule[..]].concat());
             assert_eq!(options.user_rules.len(), 1);
         }
 
@@ -1550,6 +1629,9 @@ mod tests {
             let narrowed = dlp_of(&["--categories", "network"]).unwrap();
             assert_eq!(narrowed.built_in_info_types, ["IP_ADDRESS"]);
 
+            let places = dlp_of(&["--categories", "location"]).unwrap();
+            assert_eq!(places.built_in_info_types, ["LOCATION"]);
+
             let every = dlp_of(&[]).unwrap();
             assert_eq!(
                 every.built_in_info_types,
@@ -1561,7 +1643,7 @@ mod tests {
         fn dlp_info_types_the_user_added_outside_the_categories_are_refused() {
             let built_in = dlp_of(&[
                 "--categories",
-                "credential",
+                "secrets",
                 "--gcp-dlp-built-in-info-type",
                 "EMAIL_ADDRESS",
             ])
@@ -1576,7 +1658,7 @@ mod tests {
             ));
             let stored = dlp_of(&[
                 "--categories",
-                "credential",
+                "secrets",
                 "--gcp-dlp-stored-info-type",
                 "employee",
             ])
@@ -1609,7 +1691,7 @@ mod tests {
                     option,
                     value,
                     "--categories",
-                    "credential",
+                    "secrets",
                 ]);
                 assert!(
                     matches!(error, CategoriesError::NoEffect { option: refused } if refused == option),
@@ -1654,11 +1736,21 @@ mod tests {
                 error,
                 CategoriesError::ValueOutside {
                     option: "--local-ner-entities",
-                    category: Category::Other,
+                    category: Category::Organization,
                     ..
                 }
             ));
-            let nothing = error_of(&["-d", "local-ner", "--categories", "credential"]);
+            let places = options_of(&["-d", "local-ner", "--categories", "location"]).unwrap();
+            match places.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalNer(options)) => {
+                    assert_eq!(
+                        options.entities,
+                        BTreeSet::from([crate::redacters::Entity::Loc])
+                    )
+                }
+                other => panic!("expected local ner options, got {other:?}"),
+            }
+            let nothing = error_of(&["-d", "local-ner", "--categories", "secrets"]);
             assert!(matches!(
                 nothing,
                 CategoriesError::NothingToFind {
@@ -1678,7 +1770,7 @@ mod tests {
                 }
                 other => panic!("expected local gliner options, got {other:?}"),
             }
-            let nothing = error_of(&["-d", "local-gliner", "--categories", "credential"]);
+            let nothing = error_of(&["-d", "local-gliner", "--categories", "secrets"]);
             assert!(matches!(
                 nothing,
                 CategoriesError::NothingToFind {
@@ -1690,7 +1782,7 @@ mod tests {
 
         #[cfg(feature = "local-credential-ml")]
         #[test]
-        fn local_credential_ml_needs_the_credential_category() {
+        fn local_credential_ml_needs_the_secrets_category() {
             let error = error_of(&["-d", "local-credential-ml", "--categories", "contact"]);
             assert!(matches!(
                 error,

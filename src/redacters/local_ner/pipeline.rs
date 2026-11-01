@@ -29,7 +29,8 @@ impl Entity {
     pub fn category(self) -> Category {
         match self {
             Entity::Per => Category::Person,
-            Entity::Org | Entity::Loc => Category::Other,
+            Entity::Org => Category::Organization,
+            Entity::Loc => Category::Location,
         }
     }
 
@@ -394,8 +395,8 @@ mod tests {
     #[test]
     fn a_person_is_a_person_and_places_and_organisations_are_other() {
         assert_eq!(Entity::label_category("per"), Category::Person);
-        assert_eq!(Entity::label_category("org"), Category::Other);
-        assert_eq!(Entity::label_category("loc"), Category::Other);
+        assert_eq!(Entity::label_category("org"), Category::Organization);
+        assert_eq!(Entity::label_category("loc"), Category::Location);
         assert_eq!(Entity::label_category("misc"), Category::Other);
     }
 

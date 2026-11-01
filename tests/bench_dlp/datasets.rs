@@ -192,7 +192,7 @@ impl SecretsCorpus {
                     let value = parts.concat();
                     content = content.replace(&placeholder, &value);
                     truth.sensitive.push(Sensitive {
-                        category: Category::Credential,
+                        category: Category::Secrets,
                         value: Target::Text(value),
                     });
                 }
@@ -257,7 +257,7 @@ fn nemotron_category(label: &str) -> Option<Category> {
             Some(Category::Financial)
         }
         "date_of_birth" => Some(Category::DateOfBirth),
-        "password" | "api_key" | "http_cookie" | "pin" => Some(Category::Credential),
+        "password" | "api_key" | "http_cookie" | "pin" => Some(Category::Secrets),
         "ipv4" | "ipv6" | "url" | "mac_address" => Some(Category::Network),
         _ => Some(Category::Other),
     }
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(
             truth.sensitive,
             vec![Sensitive {
-                category: Category::Credential,
+                category: Category::Secrets,
                 value: Target::Text("abcd".to_string())
             }]
         );

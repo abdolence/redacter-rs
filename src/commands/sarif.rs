@@ -655,10 +655,10 @@ mod tests {
         };
 
         assert!(run_of(None).get("properties").is_none());
-        let chosen = Categories::limiting([Category::Credential, Category::Contact]);
+        let chosen = Categories::limiting([Category::Secrets, Category::Contact]);
         assert_eq!(
             run_of(chosen.as_ref())["properties"],
-            json!({"categories": ["contact", "credential"]})
+            json!({"categories": ["contact", "secrets"]})
         );
     }
 

@@ -15,13 +15,12 @@ pub enum Category {
     Person,
     Contact,
     Address,
+    Location,
+    Organization,
     IdNumber,
     Financial,
     DateOfBirth,
-    /// `secrets` is accepted on the command line for the user's word and the name of the
-    /// local-rules group that finds credentials; everything printed says `credential`.
-    #[value(alias = "secrets")]
-    Credential,
+    Secrets,
     Network,
     Other,
 }
@@ -33,6 +32,8 @@ impl Category {
             Self::Person => "names of people and user names",
             Self::Contact => "email addresses, phone and fax numbers",
             Self::Address => "street addresses, postcodes and geographic coordinates",
+            Self::Location => "cities, regions, countries and other named places that are not street addresses",
+            Self::Organization => "companies, institutions and employers",
             Self::IdNumber => {
                 "national, tax, passport, driving licence, health, customer, employee, vehicle and device identifiers"
             }
@@ -40,12 +41,12 @@ impl Category {
                 "payment card numbers and their security codes, bank account and routing numbers, IBAN and SWIFT codes"
             }
             Self::DateOfBirth => "dates of birth",
-            Self::Credential => {
+            Self::Secrets => {
                 "passwords, PINs, API keys, access tokens, private keys, session cookies and other secrets"
             }
             Self::Network => "IP addresses, MAC addresses and URLs",
             Self::Other => {
-                "any other personal or sensitive information, such as organisations, places, other dates, ages, genders and medical details"
+                "any other personal or sensitive information, such as other dates, ages, genders and medical details"
             }
         }
     }

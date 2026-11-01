@@ -116,7 +116,7 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
             GuardrailPiiEntityType::AwsAccessKey
             | GuardrailPiiEntityType::AwsSecretKey
             | GuardrailPiiEntityType::Password
-            | GuardrailPiiEntityType::Pin => Category::Credential,
+            | GuardrailPiiEntityType::Pin => Category::Secrets,
             GuardrailPiiEntityType::IpAddress
             | GuardrailPiiEntityType::MacAddress
             | GuardrailPiiEntityType::Url => Category::Network,

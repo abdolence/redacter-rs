@@ -1280,11 +1280,11 @@ mod tests {
             .get("categories")
             .is_none());
 
-        result.categories = Categories::limiting([Category::Credential, Category::Contact]);
+        result.categories = Categories::limiting([Category::Secrets, Category::Contact]);
 
         assert_eq!(
             serde_json::to_value(&result).unwrap()["categories"],
-            serde_json::json!(["contact", "credential"])
+            serde_json::json!(["contact", "secrets"])
         );
     }
 
@@ -1295,13 +1295,13 @@ mod tests {
         let unlimited = format_scan_summary(&result, &styles);
         assert!(!unlimited.contains("Categories"), "{unlimited}");
 
-        result.categories = Categories::limiting([Category::Credential]);
+        result.categories = Categories::limiting([Category::Secrets]);
 
         assert_eq!(
             format_scan_summary(&result, &styles),
-            format!("{unlimited} · Categories: credential")
+            format!("{unlimited} · Categories: secrets")
         );
-        assert!(result.to_text().contains("Categories: credential"));
+        assert!(result.to_text().contains("Categories: secrets"));
     }
 
     #[test]

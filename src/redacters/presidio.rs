@@ -76,7 +76,7 @@ impl<'a> PresidioRedacter<'a> {
         ("URL", Category::Network),
         ("DATE_TIME", Category::Other),
         ("NRP", Category::Other),
-        ("LOCATION", Category::Other),
+        ("LOCATION", Category::Location),
         ("UUID", Category::Other),
         ("MEDICAL_BIOLOGICAL_ATTRIBUTE", Category::Other),
         ("MEDICAL_BIOLOGICAL_STRUCTURE", Category::Other),
@@ -501,7 +501,7 @@ mod tests {
     async fn images_are_never_sent_to_the_image_endpoint_when_categories_limit_the_search() {
         let term = Term::stdout();
         let reporter: AppReporter = AppReporter::from(&term);
-        let categories = Categories::limiting([Category::Credential]);
+        let categories = Categories::limiting([Category::Secrets]);
         let redacter = redacter_limited_to(&reporter, categories).await;
         let file = |media_type: mime::Mime| FileSystemRef {
             relative_path: "file".into(),
@@ -626,7 +626,7 @@ mod tests {
         );
         assert_eq!(
             PresidioRedacter::entity_category("LOCATION"),
-            Category::Other
+            Category::Location
         );
         assert_eq!(
             PresidioRedacter::entity_category("EMPLOYEE_BADGE"),

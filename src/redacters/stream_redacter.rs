@@ -1662,7 +1662,7 @@ mod tests {
             .await
             .unwrap();
         let mut options = base_options();
-        options.categories = Categories::limiting([Category::Credential]);
+        options.categories = Categories::limiting([Category::Secrets]);
         let credentials = detect_with(&options, &converters, &redacters, &file, text)
             .await
             .unwrap();

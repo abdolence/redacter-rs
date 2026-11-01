@@ -62,9 +62,9 @@ impl ReportedFinding {
         }
     }
 
-    /// Whether the finding is a credential: a password, a key or a token.
+    /// Whether the finding is in the secrets category: a password, a key or a token.
     pub(super) fn is_secret(&self) -> bool {
-        self.label.category(self.redacter) == Category::Credential
+        self.label.category(self.redacter) == Category::Secrets
     }
 }
 

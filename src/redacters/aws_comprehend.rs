@@ -55,7 +55,7 @@ impl<'a> AwsComprehendRedacter<'a> {
             PiiEntityType::Password
             | PiiEntityType::Pin
             | PiiEntityType::AwsAccessKey
-            | PiiEntityType::AwsSecretKey => Category::Credential,
+            | PiiEntityType::AwsSecretKey => Category::Secrets,
             PiiEntityType::IpAddress | PiiEntityType::MacAddress | PiiEntityType::Url => {
                 Category::Network
             }
@@ -368,7 +368,7 @@ mod tests {
     fn an_entity_type_is_placed_by_what_it_holds() {
         assert_eq!(
             AwsComprehendRedacter::entity_category("PASSWORD"),
-            Category::Credential
+            Category::Secrets
         );
         assert_eq!(
             AwsComprehendRedacter::entity_category("CREDIT_DEBIT_NUMBER"),

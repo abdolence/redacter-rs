@@ -121,24 +121,32 @@ const MODEL_LABELS: [(&str, Category); 15] = [
     ("bank_account_number", Category::Financial),
     ("ip_address", Category::Network),
     ("username", Category::Person),
-    ("password", Category::Credential),
-    ("api_key", Category::Credential),
-    ("access_token", Category::Credential),
-    ("private_key", Category::Credential),
-    ("secret", Category::Credential),
+    ("password", Category::Secrets),
+    ("api_key", Category::Secrets),
+    ("access_token", Category::Secrets),
+    ("private_key", Category::Secrets),
+    ("secret", Category::Secrets),
 ];
 
+/// What the type `named` in a model's answer makes of a finding.
+enum NamedKind {
+    /// The finding's label.
+    Label(DetectionLabel),
+    /// A kind a limited prompt did not offer, because its category is not chosen.
+    OutOfScope,
+    /// A kind no name of the tool stands for, so its category is unknown.
+    Unknown,
+}
+
 /// The label for the type `named` in a model's answer: under a prompt limited to `kind_names`
-/// only one of those names, else `None`; otherwise one of [`MODEL_LABELS`], or the unclassified
-/// label.
-fn model_label(named: &str, kind_names: Option<&[String]>) -> Option<DetectionLabel> {
+/// only one of those names; otherwise one of [`MODEL_LABELS`], or the unclassified label.
+fn model_label(named: &str, kind_names: Option<&[String]>) -> NamedKind {
     let named = named.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     match kind_names {
-        Some(names) => names
-            .iter()
-            .find(|name| **name == named)
-            .map(DetectionLabel::new),
-        None => Some(
+        Some(names) if names.contains(&named) => NamedKind::Label(DetectionLabel::new(named)),
+        Some(_) if kind_category(&named).is_some() => NamedKind::OutOfScope,
+        Some(_) => NamedKind::Unknown,
+        None => NamedKind::Label(
             MODEL_LABELS
                 .iter()
                 .find(|(label, _)| *label == named)
@@ -147,6 +155,21 @@ fn model_label(named: &str, kind_names: Option<&[String]>) -> Option<DetectionLa
                 }),
         ),
     }
+}
+
+/// The category of a kind the tool names, whether a label of [`MODEL_LABELS`] or the name of a
+/// category.
+fn kind_category(kind: &str) -> Option<Category> {
+    MODEL_LABELS
+        .iter()
+        .find(|(label, _)| *label == kind)
+        .map(|(_, category)| *category)
+        .or_else(|| {
+            Category::value_variants()
+                .iter()
+                .copied()
+                .find(|category| catch_all_name(*category) == kind)
+        })
 }
 
 /// The name a limited prompt offers for a kind of `category` that no label of its own fits:
@@ -222,17 +245,7 @@ impl LlmTextFinding {
     /// The category of a finding labelled `label`: that of the kind of data the model named,
     /// or the category a limited prompt named, `other` for the unclassified label.
     pub fn label_category(label: &str) -> Category {
-        MODEL_LABELS
-            .iter()
-            .find(|(kind, _)| *kind == label)
-            .map(|(_, category)| *category)
-            .or_else(|| {
-                Category::value_variants()
-                    .iter()
-                    .copied()
-                    .find(|category| catch_all_name(*category) == label)
-            })
-            .unwrap_or(Category::Other)
+        kind_category(label).unwrap_or(Category::Other)
     }
 
     /// Every occurrence in `text` of what the model's JSON array `answer` found. A value that
@@ -248,9 +261,10 @@ impl LlmTextFinding {
     }
 
     /// Every occurrence in `text` of the values in `findings`. Under a prompt limited to
-    /// `kind_names`, a finding whose type is not one of them cannot be placed in a category:
-    /// it is [`Detections::unlocated`], labelled with the first of the names so that it stays
-    /// in the chosen categories, and never dropped.
+    /// `kind_names`, a finding whose type is a known kind that the prompt did not offer is out
+    /// of scope and dropped. A finding whose type is no known kind cannot be placed in a
+    /// category: it is [`Detections::unlocated`], labelled with the first of the names so that
+    /// it stays in the chosen categories, and never dropped.
     pub fn locate(
         text: &str,
         findings: Vec<Self>,
@@ -260,11 +274,11 @@ impl LlmTextFinding {
         let mut off_list = BTreeSet::new();
         for finding in findings {
             match model_label(&finding.label, kind_names) {
-                Some(label) => values.push((finding.text, label)),
-                None if !finding.text.is_empty() => {
+                NamedKind::Label(label) => values.push((finding.text, label)),
+                NamedKind::Unknown if !finding.text.is_empty() => {
                     off_list.insert(finding.text);
                 }
-                None => {}
+                NamedKind::Unknown | NamedKind::OutOfScope => {}
             }
         }
         let mut detections = Detection::locate_values(text, &values)?;
@@ -454,7 +468,7 @@ mod tests {
 
     #[test]
     fn a_limited_prompt_offers_the_names_of_the_chosen_categories_and_their_own_names() {
-        let categories = only(&[Category::Credential, Category::Network, Category::IdNumber]);
+        let categories = only(&[Category::Secrets, Category::Network, Category::IdNumber]);
 
         let prompt = TextDetectionPrompt::new("text", Some(&categories));
 
@@ -470,7 +484,7 @@ mod tests {
                 "private_key",
                 "secret",
                 "id_number",
-                "credential",
+                "secrets",
                 "network",
             ]
         );
@@ -481,9 +495,7 @@ mod tests {
         }
         assert!(!prompt.instruction.contains("person_name"));
         assert!(!prompt.instruction.contains("sensitive_data"));
-        assert!(prompt
-            .instruction
-            .contains(Category::Credential.description()));
+        assert!(prompt.instruction.contains(Category::Secrets.description()));
         assert!(!prompt.instruction.contains(Category::Person.description()));
     }
 
@@ -530,10 +542,9 @@ mod tests {
     }
 
     #[test]
-    fn a_limited_answer_with_a_type_outside_the_names_is_an_unplaceable_value_in_scope() {
+    fn a_limited_answer_with_an_unknown_type_is_an_unplaceable_value_in_scope() {
         let answer = r#"[
             {"text":"00:1A:2B:3C:4D:5E","type":"mac_address"},
-            {"text":"gateway","type":"person_name"},
             {"text":"10.20.30.40","type":"ip_address"}
         ]"#;
         let categories = only(&[Category::Network]);
@@ -547,7 +558,33 @@ mod tests {
         detections.retain_categories(RedacterType::GeminiLlm, &categories);
 
         assert_eq!(detections.found.len(), 1);
-        assert_eq!(detections.unlocated.len(), 2);
+        assert_eq!(detections.unlocated.len(), 1);
+    }
+
+    #[test]
+    fn a_limited_answer_with_a_known_type_of_an_unchosen_category_is_out_of_scope() {
+        let answer = r#"[
+            {"text":"gateway","type":"person_name"},
+            {"text":"MAC","type":"location"},
+            {"text":"10.20.30.40","type":"sensitive_data"},
+            {"text":"00:1A:2B:3C:4D:5E","type":"network"}
+        ]"#;
+        let categories = only(&[Category::Network]);
+
+        let mut detections = LlmTextFinding::detections_from_answer(
+            answer,
+            NETWORK_NOTE,
+            Some(&kind_names(&categories)),
+        )
+        .unwrap();
+        detections.retain_categories(RedacterType::GeminiLlm, &categories);
+
+        assert_eq!(detections.found.len(), 1);
+        assert!(
+            detections.unlocated.is_empty(),
+            "{:?}",
+            detections.unlocated
+        );
     }
 
     #[test]
@@ -568,7 +605,7 @@ mod tests {
             media_type: Some(media_type),
             file_size: None,
         };
-        let categories = only(&[Category::Credential]);
+        let categories = only(&[Category::Secrets]);
 
         let support = |media_type: Mime, categories: Option<&Categories>| {
             llm_support(&file(media_type), categories)
