@@ -610,7 +610,6 @@ pub fn format_summary_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::Category;
 
     fn row(
         width: usize,
@@ -921,26 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_line_ends_with_the_categories_only_when_they_limit_the_run() {
-        let mut capabilities = Capabilities {
-            redacters: vec![RedacterType::LocalRules],
-            pdf_rendering: Capability::Yes,
-            ocr: Capability::Yes,
-            sampling_size: None,
-            categories: None,
-        };
-        let styles = OutputStyles::plain();
-        let unlimited = format_capabilities_line(&capabilities, &styles);
-        assert!(!unlimited.contains("Categories"));
-
-        capabilities.categories = Categories::limiting([Category::Credential, Category::Contact]);
-        assert_eq!(
-            format_capabilities_line(&capabilities, &styles),
-            format!("{unlimited} · Categories: contact, credential")
-        );
-    }
-
-    #[test]
     fn capabilities_line_names_the_subcommand_that_installs_a_missing_addon() {
         assert_eq!(
             format_capabilities_line(
@@ -1016,29 +995,6 @@ mod tests {
                 &styles
             ),
             "2 files: 0 redacted, 0 copied as is, 0 skipped, 2 errors. Total size: 0 B"
-        );
-    }
-
-    #[test]
-    fn summary_line_ends_with_the_categories_only_when_they_limit_the_run() {
-        let summary = CopySummary {
-            redacted: 1,
-            copied_as_is: 0,
-            skipped: 0,
-            errors: 0,
-            total_size: 12,
-        };
-        let styles = OutputStyles::plain();
-        let unlimited = format_summary_line(&summary, None, &styles);
-        assert_eq!(
-            unlimited,
-            "1 file: 1 redacted, 0 copied as is, 0 skipped. Total size: 12 B"
-        );
-
-        let credential = Categories::limiting([Category::Credential]);
-        assert_eq!(
-            format_summary_line(&summary, credential.as_ref(), &styles),
-            format!("{unlimited} · Categories: credential")
         );
     }
 

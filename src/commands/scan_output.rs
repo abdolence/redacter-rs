@@ -400,18 +400,12 @@ impl ScanCommandResult {
                 .max()
                 .unwrap_or(0),
         );
-        let mut lines: Vec<String> = self
-            .categories
-            .iter()
-            .map(|categories| format!("Categories: {categories}"))
-            .collect();
-        lines.push(format_legend(&SCAN_LEGEND, &styles));
+        let mut lines = vec![format_legend(&SCAN_LEGEND, &styles)];
         for file in &self.files {
             lines.extend(format_file_lines(file, layout, &styles));
         }
         lines.push(String::new());
-        // The categories already head this report, so its summary leaves them out.
-        lines.push(format_scan_summary(self, None, &styles));
+        lines.push(format_scan_summary(self, &styles));
         lines.join("\n") + "\n"
     }
 }
@@ -482,11 +476,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
 }
 
 /// The closing summary: the file counts, the findings by label, and the size of the files.
-pub fn format_scan_summary(
-    result: &ScanCommandResult,
-    categories: Option<&Categories>,
-    styles: &OutputStyles,
-) -> String {
+pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) -> String {
     let total = result.files_scanned
         + result.files_skipped
         + result.files_ignored
@@ -565,7 +555,7 @@ pub fn format_scan_summary(
         ". Total size: {}",
         styles.highlighted.apply_to(HumanBytes(total_size as u64))
     ));
-    if let Some(categories) = categories {
+    if let Some(categories) = &result.categories {
         line.push_str(&format!(
             " · Categories: {}",
             styles.highlighted.apply_to(categories)
@@ -889,7 +879,7 @@ mod tests {
         let text = result.to_text();
         assert!(!text.contains('\u{1b}'), "{text}");
         assert_eq!(text.lines().count(), 5, "{text}");
-        let summary = format_scan_summary(&result, None, &OutputStyles::plain());
+        let summary = format_scan_summary(&result, &OutputStyles::plain());
         assert!(summary.contains("ssn\\n\\u{1b}[31mred 1"), "{summary}");
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
@@ -1283,39 +1273,35 @@ mod tests {
     }
 
     #[test]
-    fn the_json_and_text_reports_state_the_categories_only_when_they_limit_the_run() {
+    fn the_json_report_states_the_categories_only_when_they_limit_the_run() {
         let mut result = sample_result();
-        let unlimited_json = serde_json::to_value(&result).unwrap();
-        let unlimited_text = result.to_text();
-        assert!(unlimited_json.get("categories").is_none());
-        assert!(!unlimited_text.contains("Categories:"));
+        assert!(serde_json::to_value(&result)
+            .unwrap()
+            .get("categories")
+            .is_none());
 
         result.categories = Categories::limiting([Category::Credential, Category::Contact]);
-        let json = serde_json::to_value(&result).unwrap();
+
         assert_eq!(
-            json["categories"],
+            serde_json::to_value(&result).unwrap()["categories"],
             serde_json::json!(["contact", "credential"])
-        );
-        let text = result.to_text();
-        assert_eq!(text.lines().next(), Some("Categories: contact, credential"));
-        assert_eq!(
-            text.strip_prefix("Categories: contact, credential\n"),
-            Some(unlimited_text.as_str())
         );
     }
 
     #[test]
     fn the_summary_line_ends_with_the_categories_only_when_they_limit_the_run() {
-        let result = sample_result();
+        let mut result = sample_result();
         let styles = OutputStyles::plain();
-        let unlimited = format_scan_summary(&result, None, &styles);
+        let unlimited = format_scan_summary(&result, &styles);
         assert!(!unlimited.contains("Categories"), "{unlimited}");
 
-        let credential = Categories::limiting([Category::Credential]);
+        result.categories = Categories::limiting([Category::Credential]);
+
         assert_eq!(
-            format_scan_summary(&result, credential.as_ref(), &styles),
+            format_scan_summary(&result, &styles),
             format!("{unlimited} · Categories: credential")
         );
+        assert!(result.to_text().contains("Categories: credential"));
     }
 
     #[test]
@@ -1342,7 +1328,7 @@ mod tests {
         result.files_ignored = 3;
 
         assert_eq!(
-            format_scan_summary(&result, None, &OutputStyles::plain()),
+            format_scan_summary(&result, &OutputStyles::plain()),
             "4 files: 1 with findings, 0 clean, 0 skipped, 0 unsupported, 3 ignored. \
              1 finding (2 ignored): email 1. Total size: 0 B"
         );

@@ -420,7 +420,7 @@ the option.
 | `aws-comprehend` | Filtered | Detected, filtered and masked by the tool; one `X` for each character of the value | OCR, then as for text |
 | `presidio` | Filtered | The same as `aws-comprehend` | OCR, then as for text; the image endpoint is not used |
 | `aws-bedrock-guardrails` | Filtered | The same, with the type of the guardrail or the name of its regex in braces, such as `{EMAIL}`, in place of the value | OCR, then as for text |
-| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | Narrowed and filtered: the prompt asks only for the types of the chosen categories | Detected with that prompt, filtered and masked as for `aws-comprehend`; the model does not rewrite the text | OCR, then as for text; the model does not read the image |
+| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | Narrowed and filtered: the prompt asks only for the types of the chosen categories, and for each chosen category by its own name, such as `network`, for the kinds that have no type of their own | Detected with that prompt, filtered and masked as for `aws-comprehend`; the model does not rewrite the text | OCR, then as for text; the model does not read the image |
 
 The category of a model's finding is the model's judgment, as the finding is, and a value can land in the wrong one.
 GLiNER given fewer labels can also settle on slightly different spans for the labels that remain.
@@ -467,16 +467,17 @@ no entity type for `date-of-birth`. Presidio and Guardrails are configured on th
 may find nothing: Presidio has no recogniser for `credential`. The LLM redacters can find any category.
 
 `cp` fails a file when an LLM redacter or Guardrails names a value in the chosen categories that the tool cannot place
-in the text. The file is reported as an error and is not copied, since copying it would leave the value in place. A value
-outside the chosen categories that cannot be placed is ignored, and does not make a file unconfirmed in `scan`.
+in the text, and when an LLM redacter answers with a type other than the ones the prompt offered. The file is reported
+as an error and is not copied, since copying it would leave the value in place. A value outside the chosen categories
+that cannot be placed is ignored, and does not make a file unconfirmed in `scan`.
 
 #### Categories in the reports
 
 With `--categories` the reports state the categories, and without it they have no such field or line. The
 [JSON report](#json-report) of `scan` and the [copy report](#copy-report) have `categories`, the
-[SARIF report](#sarif-report) has it in the properties of the run, and the [text report](#text-report) starts with a
-`Categories:` line. The terminal shows the categories at the end of the line that lists the redacters and converters
-and at the end of the closing summary line. A finding in the `credential` category is High severity in the
+[SARIF report](#sarif-report) has it in the properties of the run, and the [text report](#text-report) states it in the
+closing summary line of `scan` and in a first line of `cp`. The terminal shows the categories at the end of the line
+that lists the redacters and converters and at the end of the closing summary line. A finding in the `credential` category is High severity in the
 [OCSF report](#ocsf-report).
 
 #### Examples of limiting to categories
@@ -1518,9 +1519,8 @@ Fields are only ever added to the report, never renamed or removed.
 ### Text report
 
 `--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
-enough for the longest path, so no path is shortened. With `--categories` the first line is `Categories: contact,
-credential`, and the terminal shows them at the end of the line that lists the redacters and converters. The text report
-of `cp` has the same first line.
+enough for the longest path, so no path is shortened. With `--categories` the summary line of `scan` ends with
+`· Categories: contact, credential`. The text report of `cp` starts with the line `Categories: contact, credential`.
 
 ### SARIF report
 

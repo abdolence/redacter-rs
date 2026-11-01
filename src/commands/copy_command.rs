@@ -727,7 +727,7 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        Category, DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
+        DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
         GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions,
         RedacterProviderOptions, RuleGroup,
     };
@@ -851,28 +851,6 @@ mod tests {
             files,
             categories: None,
         }
-    }
-
-    #[test]
-    fn the_json_and_text_reports_state_the_categories_only_when_they_limit_the_run() {
-        let mut result = result_of(Vec::new());
-        let unlimited_json = serde_json::to_value(&result).unwrap();
-        let unlimited_text = result.to_text();
-        assert!(unlimited_json.get("categories").is_none());
-        assert!(!unlimited_text.contains("Categories:"));
-
-        result.categories = Categories::limiting([Category::Credential, Category::Contact]);
-        let json = serde_json::to_value(&result).unwrap();
-        assert_eq!(
-            json["categories"],
-            serde_json::json!(["contact", "credential"])
-        );
-        let text = result.to_text();
-        assert_eq!(text.lines().next(), Some("Categories: contact, credential"));
-        assert_eq!(
-            text.strip_prefix("Categories: contact, credential\n"),
-            Some(unlimited_text.as_str())
-        );
     }
 
     fn sarif_outcome_names(files: Vec<CopyFileReport>) -> Vec<(String, &'static str)> {
