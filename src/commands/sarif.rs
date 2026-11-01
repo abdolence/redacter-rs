@@ -9,13 +9,15 @@
 //! finding has an exact place in a text. SARIF ends up in GitHub's UI and API, so a value is
 //! always masked here, whatever the caller passes.
 
+use crate::commands::artifact_locator::{
+    encoded_path, file_uri, lexically_normal, local_file, ArtifactLocator, LocatorBase,
+};
 use crate::commands::copy_output::escaped;
 use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 const SARIF_SCHEMA: &str =
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
@@ -28,24 +30,6 @@ const MAX_RESULTS: usize = 5_000;
 
 /// The base GitHub resolves a relative `uri` against: the root of the checkout.
 const SOURCE_ROOT_ID: &str = "%SRCROOT%";
-
-/// Characters that cannot appear in a URI path segment as they are.
-const PATH_SEGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'[')
-    .add(b'\\')
-    .add(b']')
-    .add(b'^')
-    .add(b'`')
-    .add(b'{')
-    .add(b'|')
-    .add(b'}');
 
 impl ReportedFinding {
     fn rule_id(&self) -> RuleId {
@@ -122,69 +106,11 @@ impl Place {
     }
 }
 
-/// Where the files of a source are, as GitHub can link them.
-///
-/// A local path is relative to the working directory with the base `%SRCROOT%`, which is the
-/// checkout root when the command runs in a workflow. A path outside the working directory, and
-/// a file of a remote source, are written as a full URI.
-#[derive(Debug, Clone)]
-pub struct ArtifactLocator {
-    base: LocatorBase,
-}
-
-#[derive(Debug, Clone)]
-enum LocatorBase {
-    Local {
-        source: PathBuf,
-        is_dir: bool,
-        working_dir: PathBuf,
-    },
-    Remote {
-        /// Without a trailing slash.
-        source: String,
-        /// Whether the paths of the files are relative to the source. The path of the one
-        /// object of a `gs://` or `s3://` source is its file name only, and the source names it.
-        joins_paths: bool,
-    },
-}
-
+/// The locations a SARIF log gives: GitHub links a local file relative to the working
+/// directory with the base `%SRCROOT%`, which is the checkout root when the command runs in a
+/// workflow. A path outside the working directory, and a file of a remote source, are written
+/// as a full URI.
 impl ArtifactLocator {
-    /// `source` is the argument the user gave. A local directory is told as the local file
-    /// system tells it: a trailing `/` or a directory on disk.
-    pub fn new(source: &str, working_dir: &Path) -> Self {
-        let base = match source.strip_prefix("file://") {
-            Some(path) => Some(path),
-            None if !source.contains("://") => Some(source),
-            None => None,
-        };
-        Self {
-            base: match base {
-                Some(path) => LocatorBase::Local {
-                    is_dir: path.ends_with('/') || Path::new(path).is_dir(),
-                    source: PathBuf::from(path),
-                    working_dir: working_dir.to_path_buf(),
-                },
-                None => LocatorBase::Remote {
-                    joins_paths: source.starts_with("zip://") || source.ends_with('/'),
-                    source: source.trim_end_matches('/').to_string(),
-                },
-            },
-        }
-    }
-
-    /// The URI of a file that names it whatever the working directory is: a `file:` URI for a
-    /// local file, the URI of the source for a remote one.
-    pub(super) fn full_uri(&self, path: &str) -> String {
-        match &self.base {
-            LocatorBase::Local {
-                source,
-                is_dir,
-                working_dir,
-            } => file_uri(working_dir, &local_file(source, *is_dir, path)),
-            LocatorBase::Remote { .. } => self.locate(path).uri,
-        }
-    }
-
     fn locate(&self, path: &str) -> ArtifactLocation {
         match &self.base {
             LocatorBase::Local {
@@ -209,63 +135,12 @@ impl ArtifactLocator {
                     },
                 }
             }
-            LocatorBase::Remote {
-                source,
-                joins_paths,
-            } => ArtifactLocation {
-                uri: if *joins_paths {
-                    format!("{source}/{}", encoded_path(Path::new(path)))
-                } else {
-                    source.clone()
-                },
+            LocatorBase::Remote { .. } => ArtifactLocation {
+                uri: self.full_uri(path),
                 uri_base_id: None,
             },
         }
     }
-}
-
-fn local_file(source: &Path, is_dir: bool, path: &str) -> PathBuf {
-    if is_dir {
-        source.join(path)
-    } else {
-        source.to_path_buf()
-    }
-}
-
-/// The `file:` URI of `path`, which may be relative to `working_dir`.
-fn file_uri(working_dir: &Path, path: &Path) -> String {
-    format!(
-        "file:///{}",
-        encoded_path(&lexically_normal(&working_dir.join(path)))
-    )
-}
-
-fn lexically_normal(path: &Path) -> PathBuf {
-    let mut normal = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir if normal.file_name().is_some() => {
-                normal.pop();
-            }
-            other => normal.push(other),
-        }
-    }
-    normal
-}
-
-fn encoded_path(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(segment) => {
-                Some(utf8_percent_encode(&segment.to_string_lossy(), PATH_SEGMENT).to_string())
-            }
-            Component::ParentDir => Some("..".to_string()),
-            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_string()),
-            Component::RootDir | Component::CurDir => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 /// The identifier of a rule: `<redacter>/<label>`, or the rule of unconfirmed files.
@@ -726,8 +601,6 @@ mod tests {
             column,
             end_line: line,
             end_column,
-            byte_start: 0,
-            byte_end: 0,
         })
     }
 
@@ -736,6 +609,7 @@ mod tests {
             RedacterType::LocalRules,
             DetectionLabel::new("email"),
             None,
+            DetectionLocation::File,
             place,
             value,
         )
@@ -775,6 +649,7 @@ mod tests {
                 RedacterType::LocalNer,
                 DetectionLabel::new("per"),
                 Some(Score::from_static(0.75)),
+                DetectionLocation::File,
                 text_at(3, 15, 37),
                 "john.smith@example.com",
             )]),
@@ -866,15 +741,7 @@ mod tests {
 
     #[test]
     fn a_table_cell_has_no_region_and_the_message_names_the_cell() {
-        let finding = email(
-            Some(Place::TableCell {
-                row: 3,
-                column: 2,
-                byte_start: 0,
-                byte_end: 6,
-            }),
-            "a@b.io",
-        );
+        let finding = email(Some(Place::TableCell { row: 3, column: 2 }), "a@b.io");
 
         let result = &results(&[artifact("people.csv", FileOutcome::Findings(vec![finding]))])[0];
 
@@ -992,6 +859,7 @@ mod tests {
                         RedacterType::LocalNer,
                         DetectionLabel::new("per"),
                         None,
+                        DetectionLocation::File,
                         text_at(1, 1, 2),
                         "x",
                     )
@@ -1044,6 +912,7 @@ mod tests {
                     RedacterType::LocalRules,
                     DetectionLabel::new("github-token"),
                     None,
+                    DetectionLocation::File,
                     text_at(1, 1, 2),
                     "y",
                 )]),
@@ -1167,6 +1036,7 @@ mod tests {
                 RedacterType::LocalNer,
                 DetectionLabel::new(label),
                 None,
+                DetectionLocation::File,
                 text_at(1, 1, 2),
                 "x",
             )

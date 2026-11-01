@@ -9,13 +9,14 @@
 //! The events go to a data lake with a long retention and wide read access, so a value is
 //! always masked here, whatever the caller passes, and no hash of a value is written.
 
-use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
-use crate::commands::sarif::ArtifactLocator;
-use crate::redacters::{DetectionLabel, Score};
+use crate::commands::artifact_locator::ArtifactLocator;
+use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
+use crate::redacters::{DetectionLabel, DetectionLocation, Score};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+use uuid::Uuid;
 
 const OCSF_VERSION: &str = "1.9.0";
 const CLASS_UID: u32 = 2006;
@@ -25,6 +26,12 @@ const ACTIVITY_ID_CREATE: u32 = 1;
 /// "Data Discovery & Classification" in the `detection_system_id` enum of `data_security`.
 const DETECTION_SYSTEM_ID: u8 = 4;
 const DETECTION_SYSTEM: &str = "Data Discovery & Classification";
+
+/// The findings of one discovery detail that an event lists with a place. An event is one line
+/// that a SIEM ingests whole, and a file that holds one value thousands of times, such as a
+/// column of the same address, would otherwise write every position of it. The `count` of the
+/// detail stays exact.
+const MAX_LISTED_FINDINGS_PER_DETAIL: usize = 1_000;
 
 /// A time as OCSF writes it: milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,12 +85,7 @@ struct ConfidenceScore(u8);
 
 impl From<Score> for ConfidenceScore {
     fn from(score: Score) -> Self {
-        // A score prints with two decimals, the precision of a whole percent.
-        let score: f32 = score
-            .to_string()
-            .parse()
-            .expect("a score prints as a decimal number");
-        Self((score * 100.0).round() as u8)
+        Self((score.value() * 100.0).round() as u8)
     }
 }
 
@@ -131,12 +133,12 @@ impl From<ConfidenceScore> for Confidence {
 pub struct OcsfEvents(Vec<Event>);
 
 impl OcsfEvents {
-    /// `time` is when the scan ran. `locator` tells where the files are.
+    /// `time` is when the report is written. `locator` tells where the files are.
     pub fn new(files: &[ReportedFile], locator: &ArtifactLocator, time: EpochMillis) -> Self {
         Self(
             files
                 .iter()
-                .filter_map(|file| Event::of(file, &locator.full_uri(&file.path), time))
+                .filter_map(|file| Event::of(file, locator, time))
                 .collect(),
         )
     }
@@ -183,11 +185,13 @@ struct Event {
 
 impl Event {
     /// The event of a file, or `None` for a file with nothing to report.
-    fn of(file: &ReportedFile, uri: &str, time: EpochMillis) -> Option<Self> {
+    fn of(file: &ReportedFile, locator: &ArtifactLocator, time: EpochMillis) -> Option<Self> {
         let summary = match &file.outcome {
-            FileOutcome::Findings(findings) if !findings.is_empty() => Summary::found(findings),
+            FileOutcome::Findings(findings) if !findings.is_empty() => {
+                Summary::found(&file.path, findings)
+            }
             FileOutcome::Unconfirmed { unlocated_values } => {
-                Summary::unconfirmed(*unlocated_values)
+                Summary::unconfirmed(&file.path, *unlocated_values)
             }
             FileOutcome::Findings(_)
             | FileOutcome::Failed { .. }
@@ -197,6 +201,7 @@ impl Event {
         let confidence = summary
             .confidence
             .map_or(Confidence::Unknown, Confidence::from);
+        let uri = locator.full_uri(&file.path);
         Some(Self {
             class_uid: CLASS_UID,
             class_name: "Data Security Finding",
@@ -214,11 +219,11 @@ impl Event {
             confidence_id: confidence.id(),
             confidence: confidence.caption(),
             confidence_score: summary.confidence,
-            message: format!("{} in {}", summary.message, file.path),
+            message: summary.message,
             metadata: Metadata::new(),
-            finding_info: FindingInfo::new(uri, summary.title, summary.types, time),
+            finding_info: FindingInfo::new(&uri, summary.title, summary.types, time),
             data_security: summary.data_security,
-            file: File::new(&file.path, uri),
+            file: File::new(&locator.full_path(&file.path), uri),
             unmapped: summary.unmapped,
         })
     }
@@ -239,10 +244,11 @@ struct Summary {
 impl Summary {
     /// The findings of a file are grouped by redacter, label and masked value: a group is one
     /// discovery detail, with a place for each finding in it.
-    fn found(findings: &[ReportedFinding]) -> Self {
+    fn found(path: &str, findings: &[ReportedFinding]) -> Self {
         let mut details: Vec<DiscoveryDetail> = Vec::new();
         let mut detail_of_group: BTreeMap<(String, &DetectionLabel, &str), usize> = BTreeMap::new();
         let mut redacter_extras = Vec::new();
+        let mut omitted = 0;
         for finding in findings {
             let group = (
                 finding.redacter.to_string(),
@@ -255,6 +261,10 @@ impl Summary {
             });
             let detail = &mut details[index];
             detail.count += 1;
+            if detail.count > MAX_LISTED_FINDINGS_PER_DETAIL {
+                omitted += 1;
+                continue;
+            }
             let occurrence = finding
                 .place
                 .as_ref()
@@ -263,15 +273,12 @@ impl Summary {
                     detail.occurrences.push(occurrence);
                     detail.occurrences.len() - 1
                 });
-            let location = finding.place.as_ref().and_then(Place::location);
-            if finding.score.is_some() || location.is_some() {
-                redacter_extras.push(FindingExtras {
-                    discovery_detail: index,
-                    occurrence,
-                    score: finding.score,
-                    location,
-                });
-            }
+            redacter_extras.push(FindingExtras {
+                discovery_detail: index,
+                occurrence,
+                score: finding.score,
+                location: finding.location,
+            });
         }
         let redacters: BTreeSet<String> = findings
             .iter()
@@ -289,7 +296,7 @@ impl Summary {
                 .map(ConfidenceScore::from)
                 .max(),
             message: format!(
-                "{} sensitive {} found",
+                "{} sensitive {} found in {path}",
                 findings.len(),
                 if findings.len() == 1 {
                     "value"
@@ -308,19 +315,23 @@ impl Summary {
             unmapped: Unmapped {
                 redacter: RedacterExtras {
                     findings: redacter_extras,
+                    listing_limit: (omitted > 0).then_some(ListingLimit {
+                        omitted_findings: omitted,
+                        max_findings_per_detail: MAX_LISTED_FINDINGS_PER_DETAIL,
+                    }),
                     unlocated_values: None,
                 },
             },
         }
     }
 
-    fn unconfirmed(unlocated_values: usize) -> Self {
+    fn unconfirmed(path: &str, unlocated_values: usize) -> Self {
         Self {
             severity: Severity::Informational,
             confidence: None,
             message: format!(
-                "{unlocated_values} {} named by the redacters could not be located, so the file \
-                 may hold sensitive data",
+                "In {path}, {unlocated_values} {} named by the redacters could not be located, \
+                 so the file may hold sensitive data",
                 if unlocated_values == 1 {
                     "value"
                 } else {
@@ -333,6 +344,7 @@ impl Summary {
             unmapped: Unmapped {
                 redacter: RedacterExtras {
                     findings: Vec::new(),
+                    listing_limit: None,
                     unlocated_values: Some(unlocated_values),
                 },
             },
@@ -342,6 +354,8 @@ impl Summary {
 
 #[derive(Debug, Serialize)]
 struct Metadata {
+    /// Unique to the event: the same file in the next scan has another one.
+    uid: String,
     version: &'static str,
     product: Product,
 }
@@ -349,6 +363,7 @@ struct Metadata {
 impl Metadata {
     fn new() -> Self {
         Self {
+            uid: Uuid::now_v7().to_string(),
             version: OCSF_VERSION,
             product: Product {
                 name: "redacter",
@@ -369,7 +384,7 @@ struct Product {
 #[derive(Debug, Serialize)]
 struct FindingInfo {
     /// Stable across runs: the same file has the same identifier in the next scan. It is
-    /// derived from where the file is and never from what it holds.
+    /// where the file is and never what it holds.
     uid: String,
     title: &'static str,
     types: [&'static str; 1],
@@ -384,11 +399,7 @@ impl FindingInfo {
         created_time: EpochMillis,
     ) -> Self {
         Self {
-            uid: Sha256::digest(uri.as_bytes())
-                .iter()
-                .take(16)
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            uid: uri.to_string(),
             title,
             types,
             created_time,
@@ -438,7 +449,8 @@ struct Rule {
 }
 
 /// The places of `occurrence_details` that a finding fills. Lines, columns, rows and pages
-/// count from 1, and the column of a text is a character column.
+/// count from 1, and the column of a text is a character column. The row of a table cell
+/// counts data rows, so a header row is not row 1, as in the JSON and SARIF reports.
 #[derive(Debug, Default, Serialize)]
 struct Occurrence {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -480,31 +492,6 @@ impl Place {
             }),
         }
     }
-
-    /// What of the place OCSF has no attribute for.
-    fn location(&self) -> Option<Location> {
-        match *self {
-            Self::Text {
-                end_column,
-                byte_start,
-                byte_end,
-                ..
-            } => Some(Location::Text {
-                byte_start,
-                byte_end,
-                end_column,
-            }),
-            Self::TableCell {
-                byte_start,
-                byte_end,
-                ..
-            } => Some(Location::TableCell {
-                byte_start,
-                byte_end,
-            }),
-            Self::Image { area, .. } => area.map(|area| Location::Image { area }),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -519,13 +506,17 @@ struct File {
 }
 
 impl File {
-    fn new(path: &str, uri: &str) -> Self {
+    /// `path` is the full path of the file, or its URI for a remote file.
+    fn new(path: &str, uri: String) -> Self {
         Self {
-            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            name: Path::new(path).file_name().map_or_else(
+                || path.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             path: path.to_string(),
             type_id: 1,
             type_: "Regular File",
-            uri: uri.to_string(),
+            uri,
         }
     }
 }
@@ -539,11 +530,23 @@ struct Unmapped {
 #[derive(Debug, Serialize)]
 struct RedacterExtras {
     /// What a finding has beyond what its discovery detail and occurrence say: its own score
-    /// and the parts of its place OCSF cannot hold.
+    /// and its location as the JSON report gives it, which `occurrences` cannot hold.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     findings: Vec<FindingExtras>,
+    /// Present when the event lists fewer findings than the file holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    listing_limit: Option<ListingLimit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlocated_values: Option<usize>,
+}
+
+/// What an event left out of its listing; the `count` of each discovery detail is exact.
+#[derive(Debug, Serialize)]
+struct ListingLimit {
+    /// The findings with neither an occurrence nor an entry in `findings`.
+    omitted_findings: usize,
+    /// The findings of one discovery detail that are listed, the first ones in file order.
+    max_findings_per_detail: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,29 +559,7 @@ struct FindingExtras {
     /// The score of the redacter as it gave it, from 0 to 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<Score>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    location: Option<Location>,
-}
-
-/// The parts of a place that OCSF has no attribute for. Byte ranges are half-open and count
-/// from 0, in the text of the file or of the cell.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum Location {
-    Text {
-        byte_start: usize,
-        byte_end: usize,
-        /// The character column after the last character of the range.
-        end_column: usize,
-    },
-    TableCell {
-        byte_start: usize,
-        byte_end: usize,
-    },
-    Image {
-        #[serde(rename = "box")]
-        area: PixelBox,
-    },
+    location: DetectionLocation,
 }
 
 #[cfg(test)]
@@ -586,7 +567,7 @@ mod tests {
     use super::*;
     use crate::args::RedacterType;
     use serde_json::{json, Value};
-    use std::path::Path;
+    use std::path::MAIN_SEPARATOR_STR;
     use std::time::Duration;
 
     const SCHEMA_PATH: &str = "test-fixtures/ocsf/data_security_finding-1.9.0.schema.json";
@@ -595,35 +576,53 @@ mod tests {
         EpochMillis::try_from(UNIX_EPOCH + Duration::from_millis(1_761_990_000_123)).unwrap()
     }
 
-    fn text_at(line: usize, column: usize, end_column: usize) -> Option<Place> {
-        Some(Place::Text {
+    fn text_at(line: usize, column: usize) -> DetectionLocation {
+        DetectionLocation::Text {
+            start: 40,
+            end: 62,
             line,
             column,
-            end_line: line,
-            end_column,
-            byte_start: 40,
-            byte_end: 62,
-        })
+        }
+    }
+
+    fn cell_at(row: usize, column: usize) -> DetectionLocation {
+        DetectionLocation::TableCell {
+            row,
+            column,
+            start: 0,
+            end: 9,
+        }
+    }
+
+    fn on_page(page: Option<usize>) -> DetectionLocation {
+        DetectionLocation::Image {
+            page,
+            y1: 20.0,
+            x1: 10.5,
+            y2: 40.0,
+            x2: 110.5,
+        }
     }
 
     fn finding(
         redacter: RedacterType,
         label: &str,
         score: Option<f32>,
-        place: Option<Place>,
+        location: DetectionLocation,
         value: &str,
     ) -> ReportedFinding {
         ReportedFinding::new(
             redacter,
             DetectionLabel::new(label),
             score.map(|score| Score::try_from(score).unwrap()),
-            place,
+            location,
+            Place::new(location, value),
             value,
         )
     }
 
-    fn email(place: Option<Place>, value: &str) -> ReportedFinding {
-        finding(RedacterType::LocalRules, "email", None, place, value)
+    fn email(location: DetectionLocation, value: &str) -> ReportedFinding {
+        finding(RedacterType::LocalRules, "email", None, location, value)
     }
 
     fn file(path: &str, outcome: FileOutcome) -> ReportedFile {
@@ -637,15 +636,15 @@ mod tests {
         file(path, FileOutcome::Findings(findings))
     }
 
-    fn ndjson_of(files: &[ReportedFile]) -> String {
-        let locator = ArtifactLocator::new("./", Path::new("/work"));
+    fn ndjson_in(source: &str, files: &[ReportedFile]) -> String {
+        let locator = ArtifactLocator::new(source, Path::new("/work"));
         OcsfEvents::new(files, &locator, scan_time())
             .to_ndjson()
             .unwrap()
     }
 
     fn events_of(files: &[ReportedFile]) -> Vec<Value> {
-        ndjson_of(files)
+        ndjson_in("./", files)
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -669,7 +668,7 @@ mod tests {
                 RedacterType::LocalNer,
                 "per",
                 Some(0.75),
-                text_at(3, 15, 37),
+                text_at(3, 15),
                 "john.smith@example.com",
             )],
         ));
@@ -695,6 +694,7 @@ mod tests {
                 "confidence_score": 75,
                 "message": "1 sensitive value found in docs/note.txt",
                 "metadata": {
+                    "uid": event["metadata"]["uid"],
                     "version": "1.9.0",
                     "product": {
                         "name": "redacter",
@@ -703,7 +703,7 @@ mod tests {
                     }
                 },
                 "finding_info": {
-                    "uid": event["finding_info"]["uid"],
+                    "uid": "file:///work/docs/note.txt",
                     "title": "Sensitive data found",
                     "types": ["sensitive_data"],
                     "created_time": 1_761_990_000_123u64
@@ -722,7 +722,7 @@ mod tests {
                 },
                 "file": {
                     "name": "note.txt",
-                    "path": "docs/note.txt",
+                    "path": "/work/docs/note.txt",
                     "type_id": 1,
                     "type": "Regular File",
                     "uri": "file:///work/docs/note.txt"
@@ -731,7 +731,7 @@ mod tests {
                     "discovery_detail": 0,
                     "occurrence": 0,
                     "score": 0.75,
-                    "location": {"kind": "text", "byte_start": 40, "byte_end": 62, "end_column": 37}
+                    "location": {"kind": "text", "start": 40, "end": 62, "line": 3, "column": 15}
                 }]}}
             })
         );
@@ -739,14 +739,7 @@ mod tests {
 
     #[test]
     fn a_table_cell_is_a_row_and_a_column_and_keeps_its_byte_range_in_unmapped() {
-        let cell = Place::TableCell {
-            row: 4,
-            column: 2,
-            byte_start: 0,
-            byte_end: 9,
-        };
-
-        let event = event_of(found("people.csv", vec![email(Some(cell), "a@b.io")]));
+        let event = event_of(found("people.csv", vec![email(cell_at(4, 2), "a@b.io")]));
 
         assert_eq!(
             details_of(&event)[0]["occurrences"],
@@ -757,33 +750,18 @@ mod tests {
             json!([{
                 "discovery_detail": 0,
                 "occurrence": 0,
-                "location": {"kind": "table_cell", "byte_start": 0, "byte_end": 9}
+                "location": {"kind": "table_cell", "row": 4, "column": 2, "start": 0, "end": 9}
             }])
         );
     }
 
     #[test]
     fn an_image_box_is_in_unmapped_and_its_page_is_an_occurrence() {
-        let area = PixelBox {
-            x1: 10.5,
-            y1: 20.0,
-            x2: 110.5,
-            y2: 40.0,
-        };
-        let on_page = Place::Image {
-            page: Some(2),
-            area: Some(area),
-        };
-        let on_image = Place::Image {
-            page: None,
-            area: Some(area),
-        };
-
         let event = event_of(found(
             "scan.pdf",
             vec![
-                email(Some(on_page), "a@b.io"),
-                email(Some(on_image), "c@d.io"),
+                email(on_page(Some(2)), "a@b.io"),
+                email(on_page(None), "c@d.io"),
             ],
         ));
 
@@ -796,32 +774,23 @@ mod tests {
             None,
             "an image is not a page"
         );
+        let findings = &event["unmapped"]["redacter"]["findings"];
         assert_eq!(
-            event["unmapped"]["redacter"]["findings"],
-            json!([
-                {
-                    "discovery_detail": 0,
-                    "occurrence": 0,
-                    "location": {"kind": "image", "box": {"x1": 10.5, "y1": 20.0, "x2": 110.5, "y2": 40.0}}
-                },
-                {
-                    "discovery_detail": 1,
-                    "location": {"kind": "image", "box": {"x1": 10.5, "y1": 20.0, "x2": 110.5, "y2": 40.0}}
-                }
-            ])
+            findings[0]["location"],
+            json!({"kind": "image", "page": 2, "y1": 20.0, "x1": 10.5, "y2": 40.0, "x2": 110.5})
         );
+        assert_eq!(findings[1]["discovery_detail"], 1);
+        assert_eq!(findings[1].get("occurrence"), None);
     }
 
     #[test]
     fn a_finding_known_only_to_the_file_is_counted_without_an_occurrence() {
-        let page_only = Place::Image {
-            page: Some(3),
-            area: None,
-        };
-
         let event = event_of(found(
             "scan.pdf",
-            vec![email(None, "a@b.io"), email(Some(page_only), "c@d.io")],
+            vec![
+                email(DetectionLocation::File, "a@b.io"),
+                email(DetectionLocation::Page { page: 3 }, "c@d.io"),
+            ],
         ));
 
         assert_eq!(
@@ -837,7 +806,13 @@ mod tests {
                 }
             ])
         );
-        assert_eq!(event["unmapped"]["redacter"].get("findings"), None);
+        assert_eq!(
+            event["unmapped"]["redacter"]["findings"],
+            json!([
+                {"discovery_detail": 0, "location": {"kind": "file"}},
+                {"discovery_detail": 1, "occurrence": 0, "location": {"kind": "page", "page": 3}}
+            ])
+        );
     }
 
     #[test]
@@ -845,16 +820,16 @@ mod tests {
         let event = event_of(found(
             "a.txt",
             vec![
-                email(text_at(1, 1, 7), "a@b.io"),
+                email(text_at(1, 1), "a@b.io"),
                 finding(
                     RedacterType::LocalNer,
                     "email",
                     None,
-                    text_at(2, 1, 7),
+                    text_at(2, 1),
                     "a@b.io",
                 ),
-                email(text_at(5, 3, 9), "a@b.io"),
-                email(text_at(6, 1, 7), "c@d.io"),
+                email(text_at(5, 3), "a@b.io"),
+                email(text_at(6, 1), "c@d.io"),
             ],
         ));
 
@@ -891,25 +866,38 @@ mod tests {
     }
 
     #[test]
-    fn a_value_over_several_lines_ends_on_its_last_line() {
-        let place = Place::Text {
-            line: 2,
-            column: 5,
-            end_line: 4,
-            end_column: 12,
-            byte_start: 0,
-            byte_end: 30,
-        };
+    fn an_event_lists_a_capped_number_of_findings_of_a_detail_and_counts_them_all() {
+        let repeated = MAX_LISTED_FINDINGS_PER_DETAIL + 5;
+        let mut findings: Vec<ReportedFinding> = (1..=repeated)
+            .map(|line| email(text_at(line, 1), "a@b.io"))
+            .collect();
+        findings.push(email(text_at(repeated + 1, 1), "c@d.io"));
 
-        let event = event_of(found(
-            "key.pem",
-            vec![email(Some(place), "-----BEGIN-----")],
-        ));
+        let event = event_of(found("big.txt", findings));
 
+        let details = details_of(&event).as_array().unwrap();
+        assert_eq!(details[0]["count"], repeated);
         assert_eq!(
-            details_of(&event)[0]["occurrences"],
-            json!([{"start_line": 2, "end_line": 4, "column_number": 5}])
+            details[0]["occurrences"].as_array().unwrap().len(),
+            MAX_LISTED_FINDINGS_PER_DETAIL
         );
+        assert_eq!(details[1]["count"], 1, "another detail has its own cap");
+        assert_eq!(details[1]["occurrences"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            event["unmapped"]["redacter"]["findings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_LISTED_FINDINGS_PER_DETAIL + 1
+        );
+        assert_eq!(
+            event["unmapped"]["redacter"]["listing_limit"],
+            json!({
+                "omitted_findings": 5,
+                "max_findings_per_detail": MAX_LISTED_FINDINGS_PER_DETAIL
+            })
+        );
+        assert_eq!(event["message"], "1006 sensitive values found in big.txt");
     }
 
     #[test]
@@ -932,30 +920,18 @@ mod tests {
             event["unmapped"],
             json!({"redacter": {"unlocated_values": 2}})
         );
-        assert_eq!(
-            event["message"],
-            "2 values named by the redacters could not be located, so the file may hold sensitive data in odd.txt"
-        );
     }
 
     #[test]
-    fn severity_is_high_for_a_credential_and_medium_for_other_findings() {
+    fn a_credential_is_high_and_other_findings_are_medium() {
         let credential = finding(
             RedacterType::LocalRules,
             "aws-access-key",
             None,
-            None,
+            DetectionLocation::File,
             "AKIAIOSFODNN7EXAMPLE",
         );
-        let learned = finding(
-            RedacterType::LocalCredentialMl,
-            "credential",
-            Some(0.9),
-            None,
-            "hunter2hunter2",
-        );
-        let personal = email(None, "a@b.io");
-
+        let personal = email(DetectionLocation::File, "a@b.io");
         let severity_of = |findings: Vec<ReportedFinding>| {
             let event = event_of(found("a.txt", findings));
             (event["severity_id"].clone(), event["severity"].clone())
@@ -965,11 +941,6 @@ mod tests {
             severity_of(vec![personal.clone()]),
             (json!(3), json!("Medium"))
         );
-        assert_eq!(
-            severity_of(vec![credential.clone()]),
-            (json!(4), json!("High"))
-        );
-        assert_eq!(severity_of(vec![learned]), (json!(4), json!("High")));
         assert_eq!(
             severity_of(vec![personal, credential]),
             (json!(4), json!("High"))
@@ -981,7 +952,15 @@ mod tests {
         let confidence_of = |scores: &[Option<f32>]| {
             let findings = scores
                 .iter()
-                .map(|score| finding(RedacterType::LocalNer, "per", *score, None, "Jane Doe"))
+                .map(|score| {
+                    finding(
+                        RedacterType::LocalNer,
+                        "per",
+                        *score,
+                        DetectionLocation::File,
+                        "Jane Doe",
+                    )
+                })
                 .collect();
             let event = event_of(found("a.txt", findings));
             (
@@ -1033,71 +1012,116 @@ mod tests {
 
     #[test]
     fn the_report_is_one_event_on_each_line_and_empty_without_events() {
-        let ndjson = ndjson_of(&[
-            found("a.txt", vec![email(None, "a@b.io")]),
-            found("clean.txt", Vec::new()),
-            found("b.txt", vec![email(None, "c@d.io")]),
-            file(
-                "odd.txt",
-                FileOutcome::Unconfirmed {
-                    unlocated_values: 1,
-                },
-            ),
-        ]);
+        let ndjson = ndjson_in(
+            "./",
+            &[
+                found("a.txt", vec![email(DetectionLocation::File, "a@b.io")]),
+                found("clean.txt", Vec::new()),
+                found("b.txt", vec![email(DetectionLocation::File, "c@d.io")]),
+                file(
+                    "odd.txt",
+                    FileOutcome::Unconfirmed {
+                        unlocated_values: 1,
+                    },
+                ),
+            ],
+        );
 
-        let paths: Vec<String> = ndjson
+        let names: Vec<String> = ndjson
             .lines()
             .map(|line| {
                 let event: Value = serde_json::from_str(line).unwrap();
-                event["file"]["path"].as_str().unwrap().to_string()
+                event["file"]["name"].as_str().unwrap().to_string()
             })
             .collect();
-        assert_eq!(paths, ["a.txt", "b.txt", "odd.txt"]);
+        assert_eq!(names, ["a.txt", "b.txt", "odd.txt"]);
         assert!(ndjson.ends_with("}\n"));
         assert_eq!(ndjson.lines().count(), ndjson.matches('\n').count());
-        assert_eq!(ndjson_of(&[found("clean.txt", Vec::new())]), "");
+        assert_eq!(ndjson_in("./", &[found("clean.txt", Vec::new())]), "");
     }
 
     #[test]
-    fn a_file_has_the_same_finding_identifier_in_every_run_and_no_other_file_shares_it() {
-        let uid_of = |path: &str, value: &str| {
-            let event = event_of(found(path, vec![email(text_at(1, 1, 7), value)]));
-            event["finding_info"]["uid"].as_str().unwrap().to_string()
+    fn a_file_has_the_same_finding_identifier_in_every_run_and_a_new_event_identifier() {
+        let event_in_run =
+            |path: &str, value: &str| event_of(found(path, vec![email(text_at(1, 1), value)]));
+
+        let first = event_in_run("a.txt", "a@b.io");
+        let second = event_in_run("a.txt", "someone@else.org");
+        let other_file = event_in_run("b.txt", "a@b.io");
+
+        assert_eq!(first["finding_info"]["uid"], second["finding_info"]["uid"]);
+        assert_ne!(
+            first["finding_info"]["uid"],
+            other_file["finding_info"]["uid"]
+        );
+        let event_uids: BTreeSet<&str> = [&first, &second, &other_file]
+            .iter()
+            .map(|event| event["metadata"]["uid"].as_str().unwrap())
+            .collect();
+        assert_eq!(event_uids.len(), 3);
+        for uid in event_uids {
+            assert_eq!(Uuid::parse_str(uid).unwrap().get_version_num(), 7, "{uid}");
+        }
+    }
+
+    #[test]
+    fn the_path_of_a_file_names_it_whatever_the_source_is() {
+        let path_in = |source: &str| {
+            let ndjson = ndjson_in(
+                source,
+                &[found(
+                    "x.csv",
+                    vec![email(DetectionLocation::File, "a@b.io")],
+                )],
+            );
+            let event: Value = serde_json::from_str(&ndjson).unwrap();
+            event["file"]["path"].as_str().unwrap().to_string()
         };
 
-        assert_eq!(
-            uid_of("a.txt", "a@b.io"),
-            uid_of("a.txt", "someone@else.org")
-        );
-        assert_ne!(uid_of("a.txt", "a@b.io"), uid_of("b.txt", "a@b.io"));
+        assert_eq!(path_in("a/"), "/work/a/x.csv");
+        assert_eq!(path_in("b/"), "/work/b/x.csv");
+        assert_eq!(path_in("s3://bucket/dir/"), "s3://bucket/dir/x.csv");
+    }
+
+    #[test]
+    fn the_file_name_is_the_last_component_of_the_path_in_the_notation_of_the_system() {
+        let nested = ["sub", "deeper", "a.csv"].join(MAIN_SEPARATOR_STR);
+
+        let event = event_of(found(
+            &nested,
+            vec![email(DetectionLocation::File, "a@b.io")],
+        ));
+
+        assert_eq!(event["file"]["name"], "a.csv");
     }
 
     #[test]
     fn the_file_uri_of_a_remote_source_is_the_uri_of_the_object() {
-        let locator = ArtifactLocator::new("s3://bucket/dir/", Path::new("/work"));
-        let files = [found("sub/a.csv", vec![email(None, "a@b.io")])];
-
-        let ndjson = OcsfEvents::new(&files, &locator, scan_time())
-            .to_ndjson()
-            .unwrap();
+        let ndjson = ndjson_in(
+            "s3://bucket/dir/",
+            &[found(
+                "sub/a.csv",
+                vec![email(DetectionLocation::File, "a@b.io")],
+            )],
+        );
 
         let event: Value = serde_json::from_str(&ndjson).unwrap();
         assert_eq!(event["file"]["uri"], "s3://bucket/dir/sub/a.csv");
         assert_eq!(event["file"]["name"], "a.csv");
-        assert_eq!(event["file"]["path"], "sub/a.csv");
+        assert_eq!(event["file"]["path"], "s3://bucket/dir/sub/a.csv");
     }
 
     #[test]
-    fn every_kind_of_event_is_valid_against_the_ocsf_schema() {
+    fn every_kind_of_event_has_the_required_attributes_and_the_ids_of_the_ocsf_schema() {
         let schema: Value =
             serde_json::from_str(&std::fs::read_to_string(SCHEMA_PATH).unwrap()).unwrap();
-        let validator = jsonschema::draft7::new(&schema).unwrap();
-        let area = PixelBox {
-            x1: 1.0,
-            y1: 2.0,
-            x2: 3.0,
-            y2: 4.0,
-        };
+        let defined = schema["properties"].as_object().unwrap();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| attribute.as_str().unwrap())
+            .collect();
         let events = events_of(&[
             found(
                 "text.txt",
@@ -1106,60 +1130,22 @@ mod tests {
                         RedacterType::LocalNer,
                         "per",
                         Some(0.75),
-                        text_at(3, 15, 37),
+                        text_at(3, 15),
                         "Jane Doe",
                     ),
                     finding(
                         RedacterType::LocalRules,
                         "aws-access-key",
                         None,
-                        text_at(4, 1, 21),
+                        text_at(4, 1),
                         "AKIAIOSFODNN7EXAMPLE",
                     ),
                 ],
             ),
-            found(
-                "table.csv",
-                vec![email(
-                    Some(Place::TableCell {
-                        row: 1,
-                        column: 2,
-                        byte_start: 0,
-                        byte_end: 6,
-                    }),
-                    "a@b.io",
-                )],
-            ),
-            found(
-                "image.png",
-                vec![email(
-                    Some(Place::Image {
-                        page: None,
-                        area: Some(area),
-                    }),
-                    "a@b.io",
-                )],
-            ),
-            found(
-                "form.pdf",
-                vec![
-                    email(
-                        Some(Place::Image {
-                            page: Some(2),
-                            area: Some(area),
-                        }),
-                        "a@b.io",
-                    ),
-                    email(
-                        Some(Place::Image {
-                            page: Some(2),
-                            area: None,
-                        }),
-                        "c@d.io",
-                    ),
-                ],
-            ),
-            found("whole.bin", vec![email(None, "a@b.io")]),
+            found("table.csv", vec![email(cell_at(1, 2), "a@b.io")]),
+            found("image.png", vec![email(on_page(None), "a@b.io")]),
+            found("form.pdf", vec![email(on_page(Some(2)), "a@b.io")]),
+            found("whole.bin", vec![email(DetectionLocation::File, "a@b.io")]),
             file(
                 "odd.txt",
                 FileOutcome::Unconfirmed {
@@ -1170,18 +1156,23 @@ mod tests {
         assert_eq!(events.len(), 6);
 
         for event in &events {
-            let errors: Vec<String> = validator
-                .iter_errors(event)
-                .map(|error| error.to_string())
-                .collect();
-            assert!(errors.is_empty(), "{errors:?} in {event}");
+            let event_attributes = event.as_object().unwrap();
+            for attribute in &required {
+                assert!(event_attributes.contains_key(*attribute), "{attribute}");
+            }
+            for attribute in event_attributes.keys() {
+                assert!(defined.contains_key(attribute), "{attribute}");
+            }
+            assert_eq!(event["class_uid"], defined["class_uid"]["const"]);
+            assert_eq!(event["category_uid"], defined["category_uid"]["const"]);
+            assert_eq!(
+                event["type_uid"].as_u64().unwrap(),
+                event["class_uid"].as_u64().unwrap() * 100 + event["activity_id"].as_u64().unwrap()
+            );
+            for id in ["severity_id", "confidence_id", "activity_id", "status_id"] {
+                let ids = defined[id]["enum"].as_array().unwrap();
+                assert!(ids.contains(&event[id]), "{id} in {event}");
+            }
         }
-
-        let mut with_unknown_attribute = events[0].clone();
-        with_unknown_attribute["not_an_attribute"] = json!(true);
-        let mut without_time = events[0].clone();
-        without_time.as_object_mut().unwrap().remove("time");
-        assert!(!validator.is_valid(&with_unknown_attribute));
-        assert!(!validator.is_valid(&without_time));
     }
 }

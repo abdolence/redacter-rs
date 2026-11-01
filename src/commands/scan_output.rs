@@ -81,8 +81,8 @@ pub struct FindingReport {
     score: Option<Score>,
     location: DetectionLocation,
     value: String,
-    /// Where the finding is for a SARIF report, which also needs where a range ends. Not part of
-    /// the JSON report. `None` when the location is the file as a whole.
+    /// Where the finding is for the SARIF and OCSF reports, which also need where a range ends.
+    /// Not part of the JSON report. `None` when the location is the file as a whole.
     #[serde(skip)]
     place: Option<Place>,
 }
@@ -102,12 +102,14 @@ impl FindingReport {
         }
     }
 
-    /// The finding for a SARIF report, which masks the value whatever the report holds.
+    /// The finding for the SARIF and OCSF reports, which mask the value whatever the report
+    /// holds.
     pub(super) fn reported_finding(&self) -> ReportedFinding {
         ReportedFinding::new(
             self.redacter,
             self.label.clone(),
             self.score,
+            self.location,
             self.place,
             &self.value,
         )
@@ -206,7 +208,7 @@ impl ScanFileReport {
         self.findings.is_empty() && self.unlocated_values > 0
     }
 
-    /// The file for a SARIF report, or `None` for a file left out on request.
+    /// The file for the SARIF and OCSF reports, or `None` for a file left out on request.
     fn reported_file(&self) -> Option<ReportedFile> {
         let reason = self.reason.clone().unwrap_or_default();
         let outcome = match self.status {
@@ -354,7 +356,7 @@ impl ScanCommandResult {
         self.files.push(file);
     }
 
-    /// The files of the scan for a SARIF report.
+    /// The files of the scan for the SARIF and OCSF reports.
     pub fn reported_files(&self) -> Vec<ReportedFile> {
         self.files
             .iter()
@@ -555,9 +557,10 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::artifact_locator::ArtifactLocator;
     use crate::commands::copy_output::NotRedactedReason;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
-    use crate::commands::sarif::{ArtifactLocator, SarifLog};
+    use crate::commands::sarif::SarifLog;
     use clap::ValueEnum;
     use std::path::Path;
 

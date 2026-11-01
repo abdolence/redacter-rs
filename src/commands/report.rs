@@ -1,9 +1,10 @@
 //! The report file `cp` and `scan` write beside their terminal output.
 
 use crate::args::{ReportArgs, ReportFormat};
+use crate::commands::artifact_locator::ArtifactLocator;
 use crate::commands::findings::ReportedFile;
 use crate::commands::ocsf::{EpochMillis, OcsfEvents};
-use crate::commands::sarif::{ArtifactLocator, SarifLog};
+use crate::commands::sarif::SarifLog;
 use crate::AppResult;
 use console::{Style, Term};
 use serde::Serialize;

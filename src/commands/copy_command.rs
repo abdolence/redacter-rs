@@ -111,8 +111,8 @@ impl CopyFileReport {
         }
     }
 
-    /// The file for a SARIF report, or `None` for a file the size limit or the name filter
-    /// left out.
+    /// The file for the SARIF and OCSF reports, or `None` for a file the size limit or the name
+    /// filter left out.
     fn reported_file(&self) -> Option<ReportedFile> {
         let outcome = match &self.outcome {
             CopyFileOutcome::Redacted { .. } => FileOutcome::Findings(
@@ -148,7 +148,7 @@ fn not_redacted_outcome(reason: NotRedactedReason) -> FileOutcome {
 }
 
 impl CopyCommandResult {
-    /// The files of the copy for a SARIF report.
+    /// The files of the copy for the SARIF and OCSF reports.
     pub fn reported_files(&self) -> Vec<ReportedFile> {
         self.files
             .iter()
@@ -700,8 +700,9 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "pdf-render", feature = "ocr"))]
     use crate::addon_store::Addon;
+    use crate::commands::artifact_locator::ArtifactLocator;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
-    use crate::commands::sarif::{ArtifactLocator, SarifLog};
+    use crate::commands::sarif::SarifLog;
     use crate::common_types::{GcpProjectId, GcpRegion};
     use crate::redacters::test_support::{
         initialize_crypto, pdfium_test_lock, TEST_DOCUMENTS_DIR, TEST_DOCUMENT_NAMES,
@@ -1036,7 +1037,10 @@ mod tests {
         .to_ndjson()?;
         let event: serde_json::Value = serde_json::from_str(&ndjson)?;
         assert_eq!(ndjson.lines().count(), 1);
-        assert_eq!(event["file"]["path"], "note.txt");
+        assert_eq!(
+            event["file"]["path"],
+            format!("{}/note.txt", source.path().display())
+        );
         assert_eq!(
             event["data_security"]["discovery_details"][0]["occurrences"],
             serde_json::json!([{"start_line": 2, "end_line": 2, "column_number": 8}])

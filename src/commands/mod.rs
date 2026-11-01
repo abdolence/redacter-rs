@@ -1,3 +1,5 @@
+mod artifact_locator;
+
 mod copy_command;
 pub use copy_command::*;
 
