@@ -106,8 +106,8 @@ impl CredentialExtractor {
 ///
 /// A word is split at each redaction marker an earlier redacter placed, and the marker is
 /// never a candidate: cutting it would leave a stray bracket. What stands beside it
-/// (`deploy@[REDACTED]:Tr0ub4dor&3`) still is one, and so is a `key=` only when it is not
-/// the key of the marker's own assignment (`api_key=[REDACTED]`).
+/// (`deploy@[REDACTED]:Tr0ub4dor&3`) still can be, apart from the key of an assignment
+/// whose value is the marker (`api_key=[REDACTED]`).
 fn credential_like_words(line: &str) -> Vec<Range<usize>> {
     words(line)
         .flat_map(|word| pieces_around_markers(line, word))
