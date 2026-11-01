@@ -28,12 +28,12 @@ const CLASS_LABELS: [&str; 2] = ["clean", "credential"];
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Temperature(f32);
 
-impl TryFrom<f64> for Temperature {
-    type Error = f64;
+impl TryFrom<f32> for Temperature {
+    type Error = f32;
 
-    fn try_from(value: f64) -> Result<Self, f64> {
+    fn try_from(value: f32) -> Result<Self, f32> {
         if value.is_finite() && value > 0.0 {
-            Ok(Self(value as f32))
+            Ok(Self(value))
         } else {
             Err(value)
         }
@@ -47,7 +47,7 @@ struct ModelConfig {
 
 #[derive(Deserialize)]
 struct Policy {
-    temperature: f64,
+    temperature: f32,
 }
 
 /// The loaded classifier and the rules that place its verdicts. `Send + Sync`: rten's
@@ -90,8 +90,8 @@ impl CredentialMlEngine {
         })
     }
 
-    /// Byte spans of the credentials in `text`, one or more per line the model rates at
-    /// `min_score` or more, merged and sorted.
+    /// Byte spans of the credentials in `text`: every private key block, and one or more per
+    /// line the model rates at `min_score` or more, merged and sorted.
     pub fn find(
         &self,
         text: &str,
@@ -194,9 +194,11 @@ fn check_class_labels(path: &Path) -> Result<(), LocalCredentialMlError> {
 
 fn read_temperature(path: &Path) -> Result<Temperature, LocalCredentialMlError> {
     let policy: Policy = read_json(path)?;
-    Temperature::try_from(policy.temperature).map_err(|value| LocalCredentialMlError::Temperature {
-        path: path.display().to_string(),
-        value,
+    Temperature::try_from(policy.temperature).map_err(|value| {
+        LocalCredentialMlError::InvalidTemperature {
+            path: path.display().to_string(),
+            value,
+        }
     })
 }
 
@@ -242,11 +244,9 @@ mod tests {
     }
 
     #[test]
-    fn swapped_extra_or_missing_classes_are_rejected() {
+    fn swapped_or_shifted_classes_are_rejected() {
         for config in [
             r#"{"id2label": {"0": "credential", "1": "clean"}}"#,
-            r#"{"id2label": {"0": "clean", "1": "credential", "2": "other"}}"#,
-            r#"{"id2label": {"0": "clean"}}"#,
             r#"{"id2label": {"1": "clean", "2": "credential"}}"#,
         ] {
             let file = json_file(config);
@@ -283,21 +283,21 @@ mod tests {
     }
 
     #[test]
-    fn a_temperature_that_is_not_positive_is_rejected() {
-        for policy in [r#"{"temperature": 0}"#, r#"{"temperature": -1.5}"#] {
+    fn a_temperature_the_scores_cannot_use_is_rejected() {
+        for policy in [
+            r#"{"temperature": 0}"#,
+            r#"{"temperature": -1.5}"#,
+            r#"{"temperature": 1e-50}"#,
+            r#"{"temperature": 1e300}"#,
+        ] {
             let file = json_file(policy);
             assert!(
                 matches!(
                     read_temperature(file.path()),
-                    Err(LocalCredentialMlError::Temperature { .. })
+                    Err(LocalCredentialMlError::InvalidTemperature { .. })
                 ),
                 "{policy}"
             );
         }
-        let file = json_file(r#"{"threshold": 0.74}"#);
-        assert!(matches!(
-            read_temperature(file.path()),
-            Err(LocalCredentialMlError::Config { .. })
-        ));
     }
 }

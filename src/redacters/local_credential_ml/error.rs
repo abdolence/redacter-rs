@@ -15,7 +15,7 @@ pub enum LocalCredentialMlError {
     #[error("{path} maps the classes to `{actual}`, expected `0: clean, 1: credential`")]
     ClassLabels { path: String, actual: String },
     #[error("{path} gives the temperature {value}, which is not a positive number")]
-    Temperature { path: String, value: f64 },
+    InvalidTemperature { path: String, value: f32 },
     #[error("cannot load tokenizer {path}: {reason}")]
     TokenizerLoad { path: String, reason: String },
     #[error("model graph has no node named `{name}`")]

@@ -33,13 +33,13 @@ where
     Ok(shift_into_cell(scored, prefix.len()))
 }
 
-/// Redacts every table cell that `find_in_cell(column, cell)` reports a finding in, leaving
+/// Redacts every table cell that `find_in(column, cell)` reports a finding in, leaving
 /// the rest byte for byte, and counts the findings. The closure decides which cells reach
 /// the model, so a provider that can rule out cells (a name model skips a cell with no
-/// letter) wraps `find_in_cell` instead of passing it directly.
+/// letter) wraps [`find_in_cell`] instead of passing it directly.
 pub fn redact_rows<F, E>(
     rows: Vec<Vec<String>>,
-    mut find_in_cell: F,
+    mut find_in: F,
 ) -> Result<(Vec<Vec<String>>, usize), E>
 where
     F: FnMut(usize, &str) -> Result<Vec<Finding>, E>,
@@ -49,7 +49,7 @@ where
     for row in rows {
         let mut redacted_row = Vec::with_capacity(row.len());
         for (column, cell) in row.into_iter().enumerate() {
-            let in_cell = find_in_cell(column, &cell)?;
+            let in_cell = find_in(column, &cell)?;
             if in_cell.is_empty() {
                 redacted_row.push(cell);
                 continue;
