@@ -478,6 +478,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_filter_naming_a_subdirectory_scans_its_nested_files() {
+        let dir = tempfile::TempDir::with_prefix("scan_nested_filter").unwrap();
+        for file in ["a/notes.txt", "b/notes.txt", "top.txt"] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "mail a@b.io").unwrap();
+        }
+
+        let result = command_scan(
+            &silent_term(),
+            &format!("{}/", dir.path().display()),
+            ScanCommandOptions::new(
+                Some(globset::Glob::new("a/*").unwrap()),
+                None,
+                None,
+                Vec::new(),
+                AddonStoreOptions::default(),
+                None,
+                ValueDisplay::Masked,
+            ),
+            email_rules(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((result.files_scanned, result.findings), (1, 1));
+    }
+
+    #[tokio::test]
     async fn no_ignore_scans_every_file_of_the_source() {
         let dir = source_with_mock_files();
 

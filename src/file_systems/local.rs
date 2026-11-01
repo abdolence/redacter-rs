@@ -113,13 +113,18 @@ impl<'a> FileSystemConnection<'a> for LocalFileSystem<'a> {
 
         let file = tokio::fs::File::open(&file_path).await?;
         let stream = tokio_util::io::ReaderStream::new(file).map_err(AppError::from);
-        let relative_file_path = file_path
-            .file_name()
-            .ok_or_else(|| AppError::SystemError {
-                message: "Filename is empty".to_string(),
-            })?
-            .to_string_lossy()
-            .to_string();
+        // The name filter matches this path against the paths listings report, which are
+        // relative to the source root, so a directory source keeps the listed path.
+        let relative_file_path = match file_ref.filter(|_| self.is_dir) {
+            Some(listed) => listed.relative_path.value().clone(),
+            None => file_path
+                .file_name()
+                .ok_or_else(|| AppError::SystemError {
+                    message: "Filename is empty".to_string(),
+                })?
+                .to_string_lossy()
+                .to_string(),
+        };
         let file_metadata = tokio::fs::metadata(&file_path).await?;
         let file_ref = FileSystemRef {
             relative_path: relative_file_path.into(),
