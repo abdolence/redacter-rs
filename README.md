@@ -597,8 +597,8 @@ more time. The same copy of a 366 MB log with 5.2 million findings peaks near 42
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
 the redactions are kept in memory until it is written.
 
-A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. Nothing of it
-is left at a local or zip destination, see below.
+A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is
+not written to a local destination and is left out of a zip archive, see below.
 
 ## Source and destinations
 
@@ -610,10 +610,12 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 - Zip archive: `zip://tmp/archive.zip`
 - Clipboard: `clipboard://`
 
-A copy that fails leaves no partial output at a local or zip destination. A local file is written to a temporary file
-beside the destination and renamed into place once complete, so a file it would have replaced stays intact. In a zip
-archive, a file that fails is left out and the entries written before it stay; the archive is deleted when writing it
-fails or the copy stops with an error.
+A copy that fails leaves no partial file at a local destination. A local file is written to a temporary file beside
+the destination and renamed into place once complete, so a file it would have replaced stays intact. In a zip archive,
+a file that fails is left out of the entries and the other entries stay. The compressed bytes it had written before the
+failure stay in the archive as unused space, up to the compressed size of what was written. They are the redacted
+output, or the content of the file where it is copied unredacted. The archive is deleted when no file was written to
+it, when writing it fails or when the copy stops with an error.
 
 S3 uploads over 8 MiB use multipart upload, so memory holds about one part rather than the whole file. An upload that is
 killed, or whose `AbortMultipartUpload` request fails, leaves its stored parts billed until they are aborted. Add an
