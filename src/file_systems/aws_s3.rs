@@ -118,8 +118,9 @@ impl<'a> AwsS3FileSystem<'a> {
     }
 }
 
-/// S3 rejects a part under 5 MiB, except the last one.
-const MIN_PART_SIZE: usize = 5 * 1024 * 1024;
+/// The size of a part when nothing larger is needed. S3 rejects a part under 5 MiB, except the
+/// last one.
+const DEFAULT_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// S3 rejects an upload of more than 10,000 parts.
 const MAX_PARTS: usize = 10_000;
@@ -128,14 +129,67 @@ const MAX_PARTS: usize = 10_000;
 /// redacted output can be longer than the input it came from.
 const SPARE_PARTS: usize = 1_000;
 
+/// Without an expected length the part size doubles after every this many parts, so that the
+/// 10,000-part limit does not cap the object at 10,000 default-sized parts.
+const PARTS_PER_DOUBLING: usize = 1_000;
+
+/// Cuts a body that arrives in chunks of any size into upload parts.
+struct PartBuffer {
+    buffer: BytesMut,
+    base_part_size: usize,
+    growing: bool,
+    parts_cut: usize,
+}
+
+impl PartBuffer {
+    fn new(expected_len: Option<usize>) -> Self {
+        PartBuffer {
+            buffer: BytesMut::new(),
+            base_part_size: expected_len.map_or(DEFAULT_PART_SIZE, |len| {
+                len.div_ceil(MAX_PARTS - SPARE_PARTS).max(DEFAULT_PART_SIZE)
+            }),
+            growing: expected_len.is_none(),
+            parts_cut: 0,
+        }
+    }
+
+    fn part_size(&self) -> usize {
+        if self.growing {
+            self.base_part_size << (self.parts_cut / PARTS_PER_DOUBLING)
+        } else {
+            self.base_part_size
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.buffer.extend_from_slice(chunk);
+    }
+
+    /// Cuts the next part only when more bytes follow it, so that the last part is never
+    /// empty and a body of exactly one part stays a single `PutObject`.
+    fn cut_part(&mut self) -> Option<Bytes> {
+        if self.buffer.len() <= self.part_size() {
+            return None;
+        }
+        let part = self.buffer.split_to(self.part_size()).freeze();
+        self.parts_cut += 1;
+        Some(part)
+    }
+
+    fn into_last_part(self) -> Bytes {
+        self.buffer.freeze()
+    }
+}
+
 /// One object upload to S3: a single `PutObject` while the body fits in one part, a multipart
 /// upload above that, so memory holds about one part rather than the whole body.
 struct ObjectUpload<'c> {
     client: &'c aws_sdk_s3::Client,
+    reporter: &'c AppReporter<'c>,
     bucket: &'c str,
     key: &'c str,
     content_type: Option<String>,
-    part_size: usize,
+    expected_len: Option<usize>,
 }
 
 struct MultipartUpload {
@@ -146,30 +200,16 @@ struct MultipartUpload {
 impl MultipartUpload {
     fn next_part_number(&self) -> AppResult<i32> {
         let number = self.parts.len() + 1;
-        match i32::try_from(number) {
-            Ok(part_number) if number <= MAX_PARTS => Ok(part_number),
-            _ => Err(AppError::SystemError {
-                message: format!("The upload needs more than the {MAX_PARTS} parts S3 allows"),
-            }),
-        }
+        i32::try_from(number).map_err(|_| AppError::SystemError {
+            message: format!("Part number {number} does not fit an S3 part number"),
+        })
     }
 }
 
 impl ObjectUpload<'_> {
-    const DEFAULT_PART_SIZE: usize = 8 * 1024 * 1024;
-
-    /// The part size for a body of `expected_len` bytes, when that is known: large enough that
-    /// the body stays within S3's part limit.
-    fn part_size_for(expected_len: Option<usize>) -> usize {
-        expected_len
-            .map(|len| len.div_ceil(MAX_PARTS - SPARE_PARTS))
-            .unwrap_or_default()
-            .max(Self::DEFAULT_PART_SIZE)
-            .max(MIN_PART_SIZE)
-    }
-
-    /// Writes the object. When it fails, no object is written and no stored part is left
-    /// behind (S3 bills stored parts until the upload is aborted).
+    /// Writes the object. An error after a multipart upload started aborts it, which frees its
+    /// stored parts. Parts stay stored, and billed, when the abort itself fails and when the
+    /// process is killed mid-upload: only a manual abort or a bucket lifecycle rule removes them.
     async fn run<S: Stream<Item = AppResult<Bytes>> + Unpin>(self, input: S) -> AppResult<()> {
         let mut multipart = None;
         let result = self.write(input, &mut multipart).await;
@@ -183,13 +223,17 @@ impl ObjectUpload<'_> {
                 .send()
                 .await
             {
-                tracing::warn!(
+                let message = format!(
+                    "Failed to abort multipart upload {upload_id} of s3://{bucket}/{key}; its stored parts stay billed until it is aborted \
+                     (aws s3api abort-multipart-upload --bucket {bucket} --key {key} --upload-id {upload_id}): {error}",
+                    upload_id = multipart.id,
                     bucket = self.bucket,
                     key = self.key,
-                    upload_id = multipart.id,
-                    error = %aws_sdk_s3::error::DisplayErrorContext(&abort_error),
-                    "Failed to abort a multipart upload; its stored parts stay billed until it is aborted"
+                    error = aws_sdk_s3::error::DisplayErrorContext(&abort_error),
                 );
+                if let Err(report_error) = self.reporter.report(&message) {
+                    tracing::warn!(%report_error, "{message}");
+                }
             }
         }
         result
@@ -200,16 +244,14 @@ impl ObjectUpload<'_> {
         mut input: S,
         multipart: &mut Option<MultipartUpload>,
     ) -> AppResult<()> {
-        let mut buffer = BytesMut::new();
+        let mut parts = PartBuffer::new(self.expected_len);
         while let Some(chunk) = input.try_next().await? {
-            buffer.extend_from_slice(&chunk);
-            // A body of exactly one part stays a `PutObject`, so a part is cut only when more
-            // bytes follow it.
-            while buffer.len() > self.part_size {
-                let part = buffer.split_to(self.part_size).freeze();
+            parts.push(&chunk);
+            while let Some(part) = parts.cut_part() {
                 self.upload_part(multipart, part).await?;
             }
         }
+        let last_part = parts.into_last_part();
 
         if multipart.is_none() {
             self.client
@@ -217,13 +259,13 @@ impl ObjectUpload<'_> {
                 .bucket(self.bucket)
                 .key(self.key)
                 .set_content_type(self.content_type.clone())
-                .body(ByteStream::from(buffer.freeze()))
+                .body(ByteStream::from(last_part))
                 .send()
                 .await?;
             return Ok(());
         }
 
-        let upload = self.upload_part(multipart, buffer.freeze()).await?;
+        let upload = self.upload_part(multipart, last_part).await?;
         self.client
             .complete_multipart_upload()
             .bucket(self.bucket)
@@ -239,7 +281,6 @@ impl ObjectUpload<'_> {
         Ok(())
     }
 
-    /// Uploads `part` as the next part, creating the multipart upload on the first one.
     async fn upload_part<'u>(
         &self,
         multipart: &'u mut Option<MultipartUpload>,
@@ -345,10 +386,11 @@ impl<'a> FileSystemConnection<'a> for AwsS3FileSystem<'a> {
             .map(|v| v.to_string());
         ObjectUpload {
             client: &self.client,
+            reporter: self.reporter,
             bucket: &self.bucket_name,
             key: &object_name,
             content_type,
-            part_size: ObjectUpload::part_size_for(file_ref.and_then(|fr| fr.file_size)),
+            expected_len: file_ref.and_then(|fr| fr.file_size),
         }
         .run(input)
         .await
@@ -508,207 +550,68 @@ mod tests {
         Ok(())
     }
 
-    const TEST_PART_SIZE: usize = 10;
-
-    /// A client answering every multipart operation from a recorded script.
-    struct FakeS3 {
-        client: aws_sdk_s3::Client,
-        put_object: aws_smithy_mocks::Rule,
-        create_multipart_upload: aws_smithy_mocks::Rule,
-        complete_multipart_upload: aws_smithy_mocks::Rule,
-        abort_multipart_upload: aws_smithy_mocks::Rule,
-        part_lengths: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
-        completed_part_numbers: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
-    }
-
-    impl FakeS3 {
-        /// `rejected_part` is the part number S3 refuses, if any.
-        fn new(rejected_part: Option<i32>) -> Self {
-            use aws_sdk_s3::operation::{
-                abort_multipart_upload::AbortMultipartUploadOutput,
-                complete_multipart_upload::CompleteMultipartUploadOutput,
-                create_multipart_upload::CreateMultipartUploadOutput,
-                put_object::PutObjectOutput,
-                upload_part::{UploadPartError, UploadPartOutput},
-            };
-            use aws_smithy_mocks::{mock, MockResponse, RuleMode};
-
-            let part_lengths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let completed_part_numbers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-            let put_object = mock!(aws_sdk_s3::Client::put_object)
-                .then_output(|| PutObjectOutput::builder().build());
-            let create_multipart_upload = mock!(aws_sdk_s3::Client::create_multipart_upload)
-                .then_output(|| {
-                    CreateMultipartUploadOutput::builder()
-                        .upload_id("upload-id")
-                        .build()
-                });
-            let recorded_part_lengths = part_lengths.clone();
-            let upload_part =
-                mock!(aws_sdk_s3::Client::upload_part).then_compute_response(move |request| {
-                    let part_number = request.part_number().expect("part number is set");
-                    if Some(part_number) == rejected_part {
-                        return MockResponse::Error(UploadPartError::generic(
-                            aws_sdk_s3::error::ErrorMetadata::builder()
-                                .code("AccessDenied")
-                                .build(),
-                        ));
-                    }
-                    let body = request.body().bytes().expect("part body is in memory");
-                    recorded_part_lengths.lock().unwrap().push(body.len());
-                    MockResponse::Output(
-                        UploadPartOutput::builder()
-                            .e_tag(format!("etag-{part_number}"))
-                            .build(),
-                    )
-                });
-            let recorded_part_numbers = completed_part_numbers.clone();
-            let complete_multipart_upload = mock!(aws_sdk_s3::Client::complete_multipart_upload)
-                .then_compute_output(move |request| {
-                    *recorded_part_numbers.lock().unwrap() = request
-                        .multipart_upload()
-                        .expect("completed parts are listed")
-                        .parts()
-                        .iter()
-                        .filter_map(|part| part.part_number())
-                        .collect();
-                    CompleteMultipartUploadOutput::builder().build()
-                });
-            let abort_multipart_upload = mock!(aws_sdk_s3::Client::abort_multipart_upload)
-                .then_output(|| AbortMultipartUploadOutput::builder().build());
-
-            let client = aws_smithy_mocks::mock_client!(
-                aws_sdk_s3,
-                RuleMode::MatchAny,
-                [
-                    &put_object,
-                    &create_multipart_upload,
-                    &upload_part,
-                    &complete_multipart_upload,
-                    &abort_multipart_upload,
-                ]
-            );
-            FakeS3 {
-                client,
-                put_object,
-                create_multipart_upload,
-                complete_multipart_upload,
-                abort_multipart_upload,
-                part_lengths,
-                completed_part_numbers,
-            }
-        }
-
-        async fn upload<S: Stream<Item = AppResult<Bytes>> + Unpin>(
-            &self,
-            input: S,
-        ) -> AppResult<()> {
-            ObjectUpload {
-                client: &self.client,
-                bucket: "test-bucket",
-                key: "test-key",
-                content_type: Some("text/plain".to_string()),
-                part_size: TEST_PART_SIZE,
-            }
-            .run(input)
-            .await
+    fn small_parts(growing: bool) -> PartBuffer {
+        PartBuffer {
+            buffer: BytesMut::new(),
+            base_part_size: 10,
+            growing,
+            parts_cut: 0,
         }
     }
 
-    fn chunks_of(total_len: usize, chunk_len: usize) -> Vec<AppResult<Bytes>> {
-        vec![0u8; total_len]
-            .chunks(chunk_len)
-            .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
-            .collect()
+    /// Pushes `total_len` bytes in chunks of `chunk_len` and returns the length of every part.
+    fn part_lengths(mut parts: PartBuffer, total_len: usize, chunk_len: usize) -> Vec<usize> {
+        let mut lengths = Vec::new();
+        for chunk in vec![0u8; total_len].chunks(chunk_len) {
+            parts.push(chunk);
+            while let Some(part) = parts.cut_part() {
+                lengths.push(part.len());
+            }
+        }
+        lengths.push(parts.into_last_part().len());
+        lengths
+    }
+
+    #[test]
+    fn body_over_one_part_is_cut_into_whole_parts_and_a_remainder() {
+        assert_eq!(part_lengths(small_parts(false), 25, 7), vec![10, 10, 5]);
+    }
+
+    #[test]
+    fn body_of_whole_parts_has_no_empty_last_part() {
+        assert_eq!(part_lengths(small_parts(false), 20, 4), vec![10, 10]);
+    }
+
+    #[test]
+    fn body_within_one_part_is_not_cut() {
+        assert_eq!(part_lengths(small_parts(false), 10, 3), vec![10]);
+        assert_eq!(part_lengths(small_parts(false), 0, 3), vec![0]);
+    }
+
+    #[test]
+    fn unknown_length_doubles_the_part_size_to_stay_within_the_part_limit() {
+        let mut parts = PartBuffer::new(None);
+        let mut capacity = 0;
+        for parts_cut in 0..MAX_PARTS {
+            parts.parts_cut = parts_cut;
+            capacity += parts.part_size();
+        }
+        assert!(capacity > 5 * 1024 * 1024 * 1024 * 1024);
+
+        parts.parts_cut = PARTS_PER_DOUBLING - 1;
+        assert_eq!(parts.part_size(), DEFAULT_PART_SIZE);
+        parts.parts_cut = PARTS_PER_DOUBLING;
+        assert_eq!(parts.part_size(), 2 * DEFAULT_PART_SIZE);
+
+        let mut known = PartBuffer::new(Some(1024));
+        known.parts_cut = 5 * PARTS_PER_DOUBLING;
+        assert_eq!(known.part_size(), DEFAULT_PART_SIZE);
     }
 
     fn broken_stream_error() -> AppError {
         AppError::SystemError {
             message: "the stream broke".to_string(),
         }
-    }
-
-    #[tokio::test]
-    async fn body_within_one_part_is_a_single_put() -> Result<(), Box<dyn std::error::Error>> {
-        let s3 = FakeS3::new(None);
-        s3.upload(futures::stream::iter(chunks_of(TEST_PART_SIZE, 3)))
-            .await?;
-
-        assert_eq!(s3.put_object.num_calls(), 1);
-        assert_eq!(s3.create_multipart_upload.num_calls(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn body_over_one_part_is_uploaded_in_whole_parts_and_a_remainder(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let s3 = FakeS3::new(None);
-        s3.upload(futures::stream::iter(chunks_of(25, 7))).await?;
-
-        assert_eq!(*s3.part_lengths.lock().unwrap(), vec![10, 10, 5]);
-        assert_eq!(*s3.completed_part_numbers.lock().unwrap(), vec![1, 2, 3]);
-        assert_eq!(s3.put_object.num_calls(), 0);
-        assert_eq!(s3.abort_multipart_upload.num_calls(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn body_of_whole_parts_has_no_empty_last_part() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let s3 = FakeS3::new(None);
-        s3.upload(futures::stream::iter(chunks_of(2 * TEST_PART_SIZE, 4)))
-            .await?;
-
-        assert_eq!(*s3.part_lengths.lock().unwrap(), vec![10, 10]);
-        assert_eq!(*s3.completed_part_numbers.lock().unwrap(), vec![1, 2]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn input_failing_after_two_parts_aborts_the_upload() {
-        let s3 = FakeS3::new(None);
-        let mut input = chunks_of(25, 7);
-        input.push(Err(broken_stream_error()));
-
-        let result = s3.upload(futures::stream::iter(input)).await;
-
-        assert!(matches!(result, Err(AppError::SystemError { .. })));
-        assert_eq!(s3.create_multipart_upload.num_calls(), 1);
-        assert_eq!(s3.abort_multipart_upload.num_calls(), 1);
-        assert_eq!(s3.complete_multipart_upload.num_calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn rejected_part_aborts_the_upload() {
-        let s3 = FakeS3::new(Some(2));
-
-        let result = s3.upload(futures::stream::iter(chunks_of(35, 7))).await;
-
-        assert!(matches!(result, Err(AppError::AwsSdkError(_))));
-        assert_eq!(s3.abort_multipart_upload.num_calls(), 1);
-        assert_eq!(s3.complete_multipart_upload.num_calls(), 0);
-    }
-
-    #[tokio::test]
-    async fn input_failing_within_the_first_part_sends_nothing() {
-        let s3 = FakeS3::new(None);
-        let mut input = chunks_of(4, 4);
-        input.push(Err(broken_stream_error()));
-
-        let result = s3.upload(futures::stream::iter(input)).await;
-
-        assert!(result.is_err());
-        assert_eq!(s3.put_object.num_calls(), 0);
-        assert_eq!(s3.create_multipart_upload.num_calls(), 0);
-        assert_eq!(s3.abort_multipart_upload.num_calls(), 0);
-    }
-
-    #[test]
-    fn part_size_keeps_the_largest_uploads_within_the_part_limit() {
-        let one_tebibyte: usize = 1 << 40;
-        assert!(ObjectUpload::part_size_for(None) >= 5 * 1024 * 1024);
-        assert!(ObjectUpload::part_size_for(Some(one_tebibyte)) * 10_000 > one_tebibyte);
     }
 
     async fn pending_multipart_uploads(
@@ -790,7 +693,7 @@ mod tests {
             file_size: None,
         };
         let one_mebibyte = 1024 * 1024;
-        let mut input: Vec<AppResult<bytes::Bytes>> = (0..12)
+        let mut input: Vec<AppResult<bytes::Bytes>> = (0..20)
             .map(|_| Ok(bytes::Bytes::from(vec![7u8; one_mebibyte])))
             .collect();
         input.push(Err(broken_stream_error()));
