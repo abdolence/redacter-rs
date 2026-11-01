@@ -1003,9 +1003,18 @@ redacter cp gs://my-bucket-name/sensitive-files/ zip://tmp/sensitive-files.zip
 ```
 
 A zip archive as a source is read in place, nothing is extracted. Files are listed from the archive index, so
-`-f` and `-m` apply before anything is decompressed, and each file is decompressed when it is copied or scanned.
-Entries with a path outside the archive, symbolic links, encrypted entries and repeated names are skipped, and
-every skipped entry is reported.
+`-f`, `-m` and `-n` apply before anything is decompressed, and each file is decompressed when it is copied or scanned.
+An absolute entry name such as `/docs/a.txt` is read as `docs/a.txt`.
+
+These entries are skipped, and each one is reported with its reason:
+
+- entries with a path that leaves the archive or is not valid;
+- symbolic links;
+- encrypted entries;
+- entries with the same path as an earlier entry, once `./` is removed.
+
+When the archive lists the same raw name more than once, only the last entry with that name is read. The earlier ones
+are neither listed nor counted as skipped, and a warning says so.
 
 Filter files by name:
 
