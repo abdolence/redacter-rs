@@ -1006,7 +1006,8 @@ A zip archive as a source is read in place, nothing is extracted. Files are list
 `-f`, `-m` and `-n` apply before anything is decompressed, and each file is decompressed when it is copied or scanned.
 An absolute entry name such as `/docs/a.txt` is read as `docs/a.txt`.
 
-These entries are skipped, and each one is reported with its reason:
+These entries are skipped and reported with their reason, up to the last file the listing reaches (`-n` stops it
+early). An entry that the ignore file ignores is counted as ignored, not reported:
 
 - entries with a path that leaves the archive or is not valid;
 - symbolic links;
