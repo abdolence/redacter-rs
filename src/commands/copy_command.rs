@@ -1,15 +1,17 @@
 use crate::addon_store::{AddonStore, AddonStoreOptions};
+use crate::args::RedacterType;
 use crate::commands::copy_output::{
     format_capabilities_line, format_file_row, format_legend, format_summary_line, Capabilities,
     CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, RowLayout, SkipReason,
     COPY_LEGEND,
 };
+use crate::commands::scan_output::{FindingReport, ValueDisplay};
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
+    Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -22,11 +24,72 @@ use serde::Serialize;
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+/// What `cp` reports. Fields are only ever added, so a consumer of the JSON report can rely
+/// on every one here.
 #[derive(Debug, Clone, Serialize)]
 pub struct CopyCommandResult {
     pub files_copied: usize,
     pub files_redacted: usize,
     pub files_skipped: usize,
+    /// Every file the copy met, in the order it met them. Files the listing left out by size or
+    /// name are only counted in `files_skipped`.
+    pub files: Vec<CopyFileReport>,
+}
+
+/// One file of the copy, as the JSON report lists it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CopyFileReport {
+    path: String,
+    mime_type: Option<String>,
+    status: CopyFileStatus,
+    reason: Option<String>,
+    /// What the redacters replaced, in the order a reader meets it, values always masked.
+    redactions: Vec<FindingReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CopyFileStatus {
+    Redacted,
+    Copied,
+    CopiedUnredacted,
+    Skipped,
+    Failed,
+}
+
+impl CopyFileReport {
+    pub fn new(
+        file_ref: &FileSystemRef,
+        outcome: &CopyFileOutcome,
+        redactions: &[(RedacterType, Detection)],
+    ) -> Self {
+        let (status, reason) = match outcome {
+            CopyFileOutcome::Redacted { .. } => (CopyFileStatus::Redacted, None),
+            CopyFileOutcome::Copied => (CopyFileStatus::Copied, None),
+            CopyFileOutcome::CopiedUnredacted { reason } => (
+                CopyFileStatus::CopiedUnredacted,
+                Some(reason.detail().to_string()),
+            ),
+            CopyFileOutcome::Skipped { reason } => {
+                (CopyFileStatus::Skipped, Some(reason.detail().to_string()))
+            }
+            CopyFileOutcome::Error { message } => (CopyFileStatus::Failed, Some(message.clone())),
+        };
+        let mut redactions: Vec<FindingReport> = redactions
+            .iter()
+            .map(|(redacter, detection)| {
+                FindingReport::new(*redacter, detection, ValueDisplay::Masked)
+            })
+            .collect();
+        FindingReport::sort_by_location(&mut redactions);
+        Self {
+            path: file_ref.relative_path.value().clone(),
+            mime_type: file_ref.media_type.as_ref().map(ToString::to_string),
+            status,
+            reason,
+            redactions,
+        }
+    }
 }
 
 impl CopyCommandResult {
@@ -73,6 +136,7 @@ struct TransferReport {
     result: TransferFileResult,
     outcome: CopyFileOutcome,
     file_size: Option<usize>,
+    file: CopyFileReport,
 }
 
 pub async fn command_copy(
@@ -178,6 +242,7 @@ pub async fn command_copy(
         let mut total_files_copied = 0;
         let mut total_files_redacted = 0;
         let mut total_files_skipped = listing.skipped;
+        let mut files = Vec::with_capacity(files_found);
         summary.skipped = listing.skipped;
         summary.total_size = files_total_size as u64;
         for source_file in source_files {
@@ -203,11 +268,13 @@ pub async fn command_copy(
                 TransferFileResult::Skipped => total_files_skipped += 1,
             }
             summary.count(&report.outcome);
+            files.push(report.file);
         }
         Ok(CopyCommandResult {
             files_copied: total_files_copied,
             files_redacted: total_files_redacted,
             files_skipped: total_files_skipped,
+            files,
         })
     } else {
         bar.println(format_legend(&COPY_LEGEND, &styles));
@@ -226,22 +293,16 @@ pub async fn command_copy(
         .await?;
         summary.count(&report.outcome);
         summary.total_size = report.file_size.unwrap_or(0) as u64;
-        Ok(match report.result {
-            TransferFileResult::Copied => CopyCommandResult {
-                files_copied: 1,
-                files_redacted: 0,
-                files_skipped: 0,
-            },
-            TransferFileResult::RedactedAndCopied => CopyCommandResult {
-                files_copied: 1,
-                files_redacted: 1,
-                files_skipped: 0,
-            },
-            TransferFileResult::Skipped => CopyCommandResult {
-                files_copied: 0,
-                files_redacted: 0,
-                files_skipped: 1,
-            },
+        let (files_copied, files_redacted, files_skipped) = match report.result {
+            TransferFileResult::Copied => (1, 0, 0),
+            TransferFileResult::RedactedAndCopied => (1, 1, 0),
+            TransferFileResult::Skipped => (0, 0, 1),
+        };
+        Ok(CopyCommandResult {
+            files_copied,
+            files_redacted,
+            files_skipped,
+            files: vec![report.file],
         })
     };
 
@@ -311,6 +372,24 @@ enum TransferFileResult {
     Skipped,
 }
 
+/// What redacting and uploading one file produced.
+struct UploadResult {
+    result: TransferFileResult,
+    outcome: CopyFileOutcome,
+    /// What the redacters replaced, placed in the file as it was read.
+    redactions: Vec<(RedacterType, Detection)>,
+}
+
+impl UploadResult {
+    fn without_redactions(result: TransferFileResult, outcome: CopyFileOutcome) -> Self {
+        Self {
+            result,
+            outcome,
+            redactions: Vec::new(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transfer_and_redact_file<
     'a,
@@ -342,6 +421,7 @@ async fn transfer_and_redact_file<
         bar.inc(1);
         return Ok(TransferReport {
             result: TransferFileResult::Skipped,
+            file: CopyFileReport::new(&base_file_ref, &outcome, &[]),
             outcome,
             file_size: base_file_ref.file_size,
         });
@@ -359,7 +439,11 @@ async fn transfer_and_redact_file<
         destination = %destination_fs.resolve(Some(&dest_file_ref)).file_path,
         "processing a file"
     );
-    let (transfer_result, outcome) = if let Some(ref redacter_with_options) = redacter {
+    let UploadResult {
+        result: transfer_result,
+        outcome,
+        redactions,
+    } = if let Some(ref redacter_with_options) = redacter {
         redact_upload_file::<SFS, DFS, _>(
             bar,
             destination_fs,
@@ -376,12 +460,13 @@ async fn transfer_and_redact_file<
         destination_fs
             .upload(source_reader, Some(&dest_file_ref))
             .await?;
-        (TransferFileResult::Copied, CopyFileOutcome::Copied)
+        UploadResult::without_redactions(TransferFileResult::Copied, CopyFileOutcome::Copied)
     };
     print_file_row(term, bar, file_ref, &outcome, styles);
     bar.inc(1);
     Ok(TransferReport {
         result: transfer_result,
+        file: CopyFileReport::new(file_ref, &outcome, &redactions),
         outcome,
         file_size: file_ref.file_size,
     })
@@ -428,7 +513,7 @@ async fn redact_upload_file<
     redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
     redacter_throttler: &mut Option<RedacterThrottler>,
-) -> AppResult<(TransferFileResult, CopyFileOutcome)> {
+) -> AppResult<UploadResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters);
 
@@ -469,6 +554,7 @@ async fn redact_upload_file<
                     .upload(redacted_result.stream, Some(dest_file_ref))
                     .await?;
                 let summary = redacted_result.summary;
+                let redactions = redacted_result.redactions;
                 let outcome = if !summary.applied.is_empty() {
                     CopyFileOutcome::Redacted {
                         redacters: summary.applied,
@@ -479,13 +565,18 @@ async fn redact_upload_file<
                         reason: not_redacted_reason(summary.blocked),
                     }
                 };
-                if redacted_result.number_of_redactions > 0 {
-                    Ok((TransferFileResult::RedactedAndCopied, outcome))
+                let result = if redacted_result.number_of_redactions > 0 {
+                    TransferFileResult::RedactedAndCopied
                 } else {
-                    Ok((TransferFileResult::Copied, outcome))
-                }
+                    TransferFileResult::Copied
+                };
+                Ok(UploadResult {
+                    result,
+                    outcome,
+                    redactions,
+                })
             }
-            Ok(redacted_result) => Ok((
+            Ok(redacted_result) => Ok(UploadResult::without_redactions(
                 TransferFileResult::Skipped,
                 CopyFileOutcome::Skipped {
                     reason: SkipReason::NotRedacted(not_redacted_reason(
@@ -495,7 +586,7 @@ async fn redact_upload_file<
             )),
             Err(ref error) => {
                 tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
-                Ok((
+                Ok(UploadResult::without_redactions(
                     TransferFileResult::Skipped,
                     CopyFileOutcome::Error {
                         message: error.to_string(),
@@ -507,14 +598,14 @@ async fn redact_upload_file<
         destination_fs
             .upload(source_reader, Some(dest_file_ref))
             .await?;
-        Ok((
+        Ok(UploadResult::without_redactions(
             TransferFileResult::Copied,
             CopyFileOutcome::CopiedUnredacted {
                 reason: plan_blocked_reason(redact_plan.blocked),
             },
         ))
     } else {
-        Ok((
+        Ok(UploadResult::without_redactions(
             TransferFileResult::Skipped,
             CopyFileOutcome::Skipped {
                 reason: SkipReason::NotRedacted(plan_blocked_reason(redact_plan.blocked)),
@@ -552,8 +643,9 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        GcpDlpRedacterOptions, GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter,
-        LocalRulesRedacterOptions, RedacterProviderOptions, RuleGroup,
+        DetectionLabel, DetectionLocation, GcpDlpRedacterOptions, GcpVertexAiRedacterOptions,
+        LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions, RedacterProviderOptions,
+        RuleGroup,
     };
     use tempfile::TempDir;
 
@@ -574,6 +666,166 @@ mod tests {
                 limit_dlp_requests: None,
             },
         }
+    }
+
+    fn report_file_ref() -> FileSystemRef {
+        FileSystemRef {
+            relative_path: "notes/note.txt".into(),
+            media_type: Some(mime::TEXT_PLAIN),
+            file_size: Some(10),
+        }
+    }
+
+    fn text_detection(value: &str, start: usize, line: usize) -> Detection {
+        Detection {
+            label: DetectionLabel::new("email"),
+            location: DetectionLocation::Text {
+                start,
+                end: start + value.len(),
+                line,
+                column: 1,
+            },
+            score: None,
+            value: value.to_string(),
+        }
+    }
+
+    fn report_json(outcome: &CopyFileOutcome) -> serde_json::Value {
+        serde_json::to_value(CopyFileReport::new(&report_file_ref(), outcome, &[])).unwrap()
+    }
+
+    #[test]
+    fn a_file_report_takes_its_status_and_reason_from_the_outcome() {
+        let outcomes = [
+            (
+                CopyFileOutcome::Redacted {
+                    redacters: vec![RedacterType::LocalRules],
+                    conversion: None,
+                },
+                "redacted",
+                None,
+            ),
+            (CopyFileOutcome::Copied, "copied", None),
+            (
+                CopyFileOutcome::CopiedUnredacted {
+                    reason: NotRedactedReason::TypeNotSupported,
+                },
+                "copied_unredacted",
+                Some("type not supported"),
+            ),
+            (
+                CopyFileOutcome::Skipped {
+                    reason: SkipReason::OverSizeLimit,
+                },
+                "skipped",
+                Some("over size limit"),
+            ),
+            (
+                CopyFileOutcome::Skipped {
+                    reason: SkipReason::NotRedacted(NotRedactedReason::OcrUnavailable),
+                },
+                "skipped",
+                Some("ocr unavailable"),
+            ),
+            (
+                CopyFileOutcome::Error {
+                    message: "the service refused".to_string(),
+                },
+                "failed",
+                Some("the service refused"),
+            ),
+        ];
+        for (outcome, status, reason) in outcomes {
+            let json = report_json(&outcome);
+            assert_eq!(json["status"], status, "{outcome:?}");
+            assert_eq!(json["reason"], serde_json::json!(reason), "{outcome:?}");
+            assert_eq!(json["path"], "notes/note.txt");
+            assert_eq!(json["mime_type"], "text/plain");
+        }
+    }
+
+    #[test]
+    fn a_file_report_lists_its_redactions_in_reading_order_with_masked_values() {
+        let outcome = CopyFileOutcome::Redacted {
+            redacters: vec![RedacterType::LocalRules],
+            conversion: None,
+        };
+        let redactions = [
+            (
+                RedacterType::LocalRules,
+                text_detection(SAMPLE_PHONE, 45, 3),
+            ),
+            (
+                RedacterType::LocalRules,
+                text_detection(SAMPLE_EMAIL, 14, 2),
+            ),
+        ];
+
+        let report = CopyFileReport::new(&report_file_ref(), &outcome, &redactions);
+        let json = serde_json::to_value(&report).unwrap();
+
+        let listed = json["redactions"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0]["location"]["line"], 2);
+        assert_eq!(listed[1]["location"]["line"], 3);
+        assert_eq!(listed[0]["redacter"], "local-rules");
+        assert_eq!(listed[0]["label"], "email");
+        assert_eq!(listed[0]["value"], "j********************m");
+        let serialized = json.to_string();
+        assert!(!serialized.contains(SAMPLE_EMAIL));
+        assert!(!serialized.contains(SAMPLE_PHONE));
+    }
+
+    #[tokio::test]
+    async fn the_copy_report_lists_each_file_with_its_redactions_beside_the_counters(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let source = TempDir::with_prefix("copy_command_tests_report_source")?;
+        std::fs::write(
+            source.path().join("note.txt"),
+            format!("Customer note\nEmail: {SAMPLE_EMAIL}\n"),
+        )?;
+        std::fs::write(source.path().join("plain.txt"), "nothing to find here\n")?;
+        let destination = TempDir::with_prefix("copy_command_tests_report_destination")?;
+
+        let result = command_copy(
+            &Term::stdout(),
+            &format!("{}/", source.path().display()),
+            &destination.path().to_string_lossy(),
+            CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
+            Some(base_redacter_options(RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: vec![],
+                },
+            ))),
+        )
+        .await?;
+        let json = serde_json::to_value(&result)?;
+
+        assert_eq!(json["files_copied"], 2);
+        assert_eq!(json["files_redacted"], 2);
+        assert_eq!(json["files_skipped"], 0);
+        let mut files = json["files"].as_array().unwrap().clone();
+        files.sort_by_key(|file| file["path"].as_str().unwrap().to_string());
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "note.txt");
+        assert_eq!(files[0]["status"], "redacted");
+        let redactions = files[0]["redactions"].as_array().unwrap();
+        assert_eq!(redactions.len(), 1);
+        assert_eq!(redactions[0]["redacter"], "local-rules");
+        assert_eq!(redactions[0]["label"], "email");
+        assert_eq!(redactions[0]["location"]["kind"], "text");
+        assert_eq!(redactions[0]["location"]["line"], 2);
+        assert_eq!(redactions[0]["location"]["column"], 8);
+        assert_eq!(redactions[0]["value"], "j********************m");
+        assert_eq!(files[1]["path"], "plain.txt");
+        assert_eq!(files[1]["status"], "redacted");
+        assert_eq!(files[1]["redactions"], serde_json::json!([]));
+        assert!(!json.to_string().contains(SAMPLE_EMAIL));
+        Ok(())
     }
 
     #[tokio::test]

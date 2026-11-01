@@ -102,6 +102,16 @@ impl FindingReport {
         }
     }
 
+    /// Orders findings as a reader meets them; findings at the same place keep the order they
+    /// are given in.
+    pub(super) fn sort_by_location(findings: &mut [FindingReport]) {
+        findings.sort_by(|a, b| {
+            a.location
+                .partial_cmp(&b.location)
+                .unwrap_or(Ordering::Equal)
+        });
+    }
+
     /// The value for a terminal or a text report, see [`escaped`].
     fn escaped_value(&self) -> String {
         escaped(&self.value)
@@ -145,11 +155,7 @@ impl ScanFileReport {
         mut findings: Vec<FindingReport>,
         unlocated_values: usize,
     ) -> Self {
-        findings.sort_by(|a, b| {
-            a.location
-                .partial_cmp(&b.location)
-                .unwrap_or(Ordering::Equal)
-        });
+        FindingReport::sort_by_location(&mut findings);
         Self {
             unlocated_values,
             ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)

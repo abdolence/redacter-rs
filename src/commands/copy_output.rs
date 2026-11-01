@@ -242,7 +242,7 @@ impl CopyFileOutcome {
 }
 
 impl NotRedactedReason {
-    fn detail(&self) -> &'static str {
+    pub(crate) fn detail(&self) -> &'static str {
         match self {
             NotRedactedReason::TypeNotSupported => "type not supported",
             NotRedactedReason::NoRedacterApplied => "no redacter applied",

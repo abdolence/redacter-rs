@@ -60,10 +60,6 @@ pub struct RedactStreamResult {
     pub summary: RedactionSummary,
     /// What each redacter replaced, placed in the file as it was read, in plan order and in the
     /// order a reader meets it within a redacter. Empty when no redacter changed the file.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller reads the records yet")
-    )]
     pub redactions: Vec<(RedacterType, Detection)>,
     pub stream: ContentStream,
 }
