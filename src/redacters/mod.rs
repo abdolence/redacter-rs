@@ -68,6 +68,8 @@ mod text_changes;
 mod text_pieces;
 pub(crate) use text_pieces::*;
 
+pub(crate) mod piece_redaction;
+
 mod open_ai_llm;
 pub use open_ai_llm::*;
 
@@ -823,11 +825,23 @@ pub enum TextMask {
     Label,
 }
 
+impl TextMask {
+    /// What replaces `original`, a value `label` names.
+    pub(crate) fn replacement(self, label: &impl Display, original: &str) -> String {
+        match self {
+            Self::Token => text_spans::REDACTED.to_string(),
+            Self::EveryCharacter => original.chars().map(|_| 'X').collect(),
+            Self::Label => format!("{{{label}}}"),
+        }
+    }
+}
+
 /// How a redacter reads a text longer than one call takes, in pieces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextPieceLimits {
     /// The most text, in bytes, one `detect` call is given: a piece with its context on each
-    /// side. A window is never longer, so this can be the provider's hard request limit.
+    /// side, as the file is read. A step after the first in a chain reads the same part with the
+    /// masks of the steps before it, which can be longer.
     pub max_request_bytes: usize,
     /// How much text, in bytes, the redacter needs on each side of a piece to find what it
     /// would find there in the whole text. A value no longer than twice this is found whichever
