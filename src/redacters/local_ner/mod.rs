@@ -12,7 +12,8 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::{self, redact_rows, Finding};
+use crate::redacters::text_spans::table_cells::{self, redact_rows};
+use crate::redacters::text_spans::Finding;
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Score,
@@ -62,7 +63,7 @@ where
     if !cell.chars().any(char::is_alphabetic) {
         return Ok(Vec::new());
     }
-    text_spans::find_in_cell(headers, column, cell, find_in)
+    table_cells::find_in_cell(headers, column, cell, find_in)
 }
 
 /// Offline NER redacter. The engine is loaded once per run and shared through an `Arc`, so

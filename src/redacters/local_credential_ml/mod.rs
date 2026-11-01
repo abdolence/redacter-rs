@@ -11,7 +11,8 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::{apply_redaction, find_in_cell, redact_rows, REDACTED};
+use crate::redacters::text_spans::table_cells::{find_in_cell, redact_rows};
+use crate::redacters::text_spans::{apply_redaction, REDACTED};
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Score,

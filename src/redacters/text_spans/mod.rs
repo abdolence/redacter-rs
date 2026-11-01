@@ -8,13 +8,7 @@ pub const REDACTED: &str = "[REDACTED]";
     feature = "local-gliner",
     feature = "local-credential-ml"
 ))]
-mod table_cells;
-#[cfg(any(
-    feature = "local-ner",
-    feature = "local-gliner",
-    feature = "local-credential-ml"
-))]
-pub use table_cells::{find_in_cell, redact_rows};
+pub mod table_cells;
 
 /// Name of the rule that produced a finding, e.g. `email` or a user's `employee-id`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
