@@ -65,14 +65,19 @@ impl ListFilesResult {
         ignored: 0,
     };
 
-    /// The files of `found` that `file_matcher` keeps, with the counts of those it skipped and
-    /// of those it ignored.
+    /// The first `limit` files of `found` that `file_matcher` keeps, with the counts of those it
+    /// skipped and of those it ignored before the limit was reached. Files past that point are in
+    /// no count, as in a local listing that stops walking.
     pub fn matching(
         found: impl IntoIterator<Item = FileSystemRef>,
         file_matcher: Option<&FileMatcher>,
+        limit: Option<usize>,
     ) -> Self {
+        let limit = limit.unwrap_or(usize::MAX);
+        let mut found = found.into_iter();
         let mut result = Self::EMPTY;
-        for file_ref in found {
+        while result.files.len() < limit {
+            let Some(file_ref) = found.next() else { break };
             result.add(file_ref, file_matcher);
         }
         result
@@ -282,5 +287,42 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
             DetectFileSystem::Local(fs) => fs.local_directory(),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_of_size(name: &str, size: usize) -> FileSystemRef {
+        FileSystemRef {
+            relative_path: RelativeFilePath(name.to_string()),
+            media_type: None,
+            file_size: Some(size),
+        }
+    }
+
+    #[test]
+    fn matching_stops_at_the_limit_and_counts_only_what_it_passed() {
+        let matcher = FileMatcher::new(None, Some(10));
+        let found = [
+            file_of_size("big-before.txt", 100),
+            file_of_size("a.txt", 1),
+            file_of_size("b.txt", 1),
+            file_of_size("big-after.txt", 100),
+            file_of_size("c.txt", 1),
+        ];
+
+        let listing = ListFilesResult::matching(found, Some(&matcher), Some(2));
+
+        assert_eq!(
+            listing
+                .files
+                .iter()
+                .map(|file| file.relative_path.value().as_str())
+                .collect::<Vec<_>>(),
+            ["a.txt", "b.txt"]
+        );
+        assert_eq!((listing.skipped, listing.ignored), (1, 0));
     }
 }

@@ -124,12 +124,8 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
                 .filter(|object| !object.name.ends_with('/'))
                 .map(|object| self.to_file_system_ref(object)),
             *file_matcher,
+            max_files_limit,
         );
-        let limit = max_files_limit.unwrap_or(usize::MAX);
-        if listing.files.len() > limit {
-            listing.skipped += listing.files.len() - limit;
-            listing.files.truncate(limit);
-        }
 
         if !list.next_page_token.is_empty() {
             let new_max_files_limit =

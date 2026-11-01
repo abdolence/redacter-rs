@@ -87,10 +87,8 @@ impl<'a> AwsS3FileSystem<'a> {
                             })
                         }),
                     *file_matcher,
+                    max_files_limit,
                 );
-                listing
-                    .files
-                    .truncate(max_files_limit.unwrap_or(usize::MAX));
 
                 if list_resp
                     .next_continuation_token
