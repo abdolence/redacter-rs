@@ -301,6 +301,19 @@ impl<'a> FileSystemConnection<'a> for DetectFileSystem<'a> {
     }
 }
 
+/// A stream that yields some content and then fails, as a redacter does when it breaks
+/// halfway through a file.
+#[cfg(test)]
+fn stream_failing_after_first_chunk(
+) -> impl Stream<Item = AppResult<Bytes>> + Send + Sync + Unpin + 'static {
+    futures::stream::iter(vec![
+        Ok(Bytes::from_static(b"first half of the content")),
+        Err(AppError::SystemError {
+            message: "the stream broke".to_string(),
+        }),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

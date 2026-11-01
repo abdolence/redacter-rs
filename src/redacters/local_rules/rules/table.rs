@@ -972,10 +972,9 @@ const RULES: &[RuleSpec] = &[
         // `\b` alone lets the postcode shape match inside an identifier such as
         // `SKU-SW1A1AA-2024` (`-` is not a word character, so `\b` sits right there); the
         // regex crate has no lookaround, so the surrounding non-identifier character is
-        // matched and consumed instead, and only group 1 is the finding. This means two
-        // postcodes separated by exactly one space will not both match (the shared space
-        // can only be one match's trailing context or the other's leading context, not
-        // both); two characters of separation (`, `) are enough for both to match.
+        // matched and consumed instead, and only group 1 is the finding. The scan resumes at
+        // the end of group 1, so the consumed character is still there as the next match's
+        // leading context.
         pattern: r"(?:^|[^\w/_-])(GIR ?0AA|[A-PR-UWYZ](?:[0-9]{1,2}|[A-HK-Y][0-9]{1,2}|[0-9][A-HJKPSTUW]|[A-HK-Y][0-9][ABEHMNPRVWXY]) ?[0-9][ABD-HJLNP-UW-Z]{2})(?:[^\w/_-]|$)",
     },
     RuleSpec {
@@ -990,7 +989,7 @@ const RULES: &[RuleSpec] = &[
         description: "Irish Eircode: a routing key and a four-character unique identifier",
         example: Example::Synthetic("D02 X285"),
         // See `uk-postcode` for why the surrounding character is matched instead of using
-        // lookaround, and its limitation for two identifiers separated by a single space.
+        // lookaround.
         pattern: r"(?:^|[^\w/_-])((?:D6W|[AC-FHKNPRTV-Y]\d{2}) ?[AC-FHKNPRTV-Y0-9]{4})(?:[^\w/_-]|$)",
     },
     RuleSpec {
@@ -1006,7 +1005,7 @@ const RULES: &[RuleSpec] = &[
             "https://en.wikipedia.org/wiki/Postal_codes_in_Canada",
         ),
         // See `uk-postcode` for why the surrounding character is matched instead of using
-        // lookaround, and its limitation for two identifiers separated by a single space.
+        // lookaround.
         pattern: r"(?:^|[^\w/_-])([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d)(?:[^\w/_-]|$)",
     },
     RuleSpec {
@@ -1457,16 +1456,50 @@ mod tests {
             ("London SW1A 1AA.", "London [REDACTED]."),
             ("Dublin D02 X285,", "Dublin [REDACTED],"),
             ("Toronto M5V 3L9", "Toronto [REDACTED]"),
-            // Two postcodes separated by two characters (", ") both match: the first
-            // match's trailing context consumes the comma, leaving the space free as the
-            // second match's own leading context. Two postcodes separated by a single
-            // space would not both match, since the shared space can only serve as
-            // trailing context for the first or leading context for the second, not both;
-            // this is a known limitation of the no-lookaround boundary trick.
             ("SW1A 1AA, EC1A 1BB", "[REDACTED], [REDACTED]"),
         ] {
             assert_redacts(input, expected);
         }
+    }
+
+    #[test]
+    fn consecutive_postcodes_are_all_redacted_whatever_separates_them() {
+        let lists: [(&str, [&str; 5]); 3] = [
+            (
+                "uk-postcode",
+                ["SW1A 1AA", "EC1A 1BB", "M1 1AE", "B33 8TH", "CR2 6XH"],
+            ),
+            (
+                "irish-eircode",
+                ["D02 X285", "A65 F4E2", "T12 H2K3", "V94 E8Y7", "H91 CF34"],
+            ),
+            (
+                "canadian-postal-code",
+                ["K1A 0B1", "M5V 3L9", "V6B 1A1", "H3Z 2Y7", "T2P 1J9"],
+            ),
+        ];
+        for (rule, postcodes) in lists {
+            for separator in ["\n", "\r\n", " ", ", "] {
+                let input = postcodes.join(separator);
+                let expected = ["[REDACTED]"; 5].join(separator);
+                assert_eq!(
+                    all_rules().redact(&input).0,
+                    expected,
+                    "{rule} separated by {separator:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_keyword_identifiers_are_all_redacted() {
+        let input = "SIN: 046 454 286\nSIN: 046 454 286\nSIN: 046 454 286";
+        assert_redacts(input, "SIN: [REDACTED]\nSIN: [REDACTED]\nSIN: [REDACTED]");
+        let input = "Driving licence: MORGA657054SM9IJ\nDriving licence: MORGA657054SM9IJ";
+        assert_redacts(
+            input,
+            "Driving licence: [REDACTED]\nDriving licence: [REDACTED]",
+        );
     }
 
     #[test]

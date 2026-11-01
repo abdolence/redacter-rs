@@ -4,7 +4,7 @@ use super::validators::Validator;
 use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
 use crate::redacters::Category;
 use clap::ValueEnum;
-use regex::{Regex, RegexBuilder};
+use regex::{Match, Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fmt::Display;
 
@@ -91,6 +91,13 @@ impl Display for RuleGroup {
     }
 }
 
+/// Whether `name` is a built-in rule that finds a credential: a password, a key or a token.
+pub fn is_credential_rule(name: &str) -> bool {
+    builtin_rules()
+        .iter()
+        .any(|spec| spec.name == name && spec.finds_credential())
+}
+
 /// One built-in rule as declared in the table. `capture_group` 0 redacts the whole match;
 /// a higher number redacts only that group (used where the pattern needs context such as
 /// the word "passport" that must survive). `validator` carries the name of the check for the
@@ -113,6 +120,13 @@ pub struct RuleSpec {
     pub description: &'static str,
     #[cfg_attr(not(test), allow(dead_code))]
     pub example: Example,
+}
+
+impl RuleSpec {
+    /// Whether the rule finds a password, a key or a token.
+    fn finds_credential(&self) -> bool {
+        self.group == RuleGroup::Secrets || self.name == URL_CREDENTIALS_RULE
+    }
 }
 
 /// A value the rule redacts, for the reference and for the self-test of the table.
@@ -145,6 +159,40 @@ struct CompiledRule {
     /// any) are not word characters. Used for dictionary rules, whose alternatives may
     /// start or end with punctuation (`#tag`, `C++`) that `\b` cannot anchor on.
     whole_word: bool,
+}
+
+impl CompiledRule {
+    /// The non-empty text each match of the rule captured in its capture group.
+    ///
+    /// The search resumes at the end of the captured text, not at the end of the whole
+    /// match, because a pattern may consume context around its value (the separator before
+    /// and after a postcode) that the next value needs as its own. A match with an empty
+    /// capture, such as one of a user pattern like `a*`, yields nothing and the search moves
+    /// on by one character.
+    fn values<'t>(&'t self, text: &'t str) -> impl Iterator<Item = Match<'t>> + 't {
+        let mut from = 0;
+        std::iter::from_fn(move || {
+            while from <= text.len() {
+                let captures = self.regex.captures_at(text, from)?;
+                let whole = captures.get(0)?;
+                let value = captures
+                    .get(self.capture_group)
+                    .filter(|value| !value.is_empty());
+                from = match value {
+                    Some(value) => value.end(),
+                    None if whole.is_empty() => text[whole.end()..]
+                        .chars()
+                        .next()
+                        .map_or(text.len() + 1, |next| whole.end() + next.len_utf8()),
+                    None => whole.end(),
+                };
+                if value.is_some() {
+                    return value;
+                }
+            }
+            None
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -238,7 +286,7 @@ impl RuleSet {
     pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
             |spec| {
-                (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
+                spec.finds_credential()
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
                     && spec.name != GENERIC_API_KEY_RULE
             },
@@ -329,16 +377,7 @@ impl RuleSet {
     pub fn find(&self, text: &str) -> Vec<Finding> {
         let mut findings = Vec::new();
         for rule in &self.rules {
-            for captures in rule.regex.captures_iter(text) {
-                let Some(matched) = captures.get(rule.capture_group) else {
-                    continue;
-                };
-                // A pattern that can match the empty string (a user rule such as `a*`) yields
-                // one zero-length match per position; redacting those inserts the token
-                // between every character of the input.
-                if matched.is_empty() {
-                    continue;
-                }
+            for matched in rule.values(text) {
                 if rule
                     .validator
                     .is_some_and(|validate| !validate(matched.as_str()))
@@ -810,6 +849,22 @@ mod tests {
         assert_untouched("password = \"changeme please\"");
         assert_untouched("password = \"${DB_PASSWORD_1}\"");
         assert_untouched("password = \"[REDACTED]\"");
+    }
+
+    #[test]
+    fn adjacent_secret_assignments_are_each_redacted() {
+        assert_redacts(
+            "password=Sup3rS3cret1\npassword=An0therS3cret2\npassword=Th1rdS3cret3",
+            "password=[REDACTED]\npassword=[REDACTED]\npassword=[REDACTED]",
+        );
+        assert_redacts(
+            r#"password = "Sup3rS3cret1" password = "An0therS3cret2""#,
+            r#"password = "[REDACTED]" password = "[REDACTED]""#,
+        );
+        assert_redacts(
+            "Authorization: Bearer abc.def.ghi\nAuthorization: Bearer jkl.mno.pqr",
+            "Authorization: Bearer [REDACTED]\nAuthorization: Bearer [REDACTED]",
+        );
     }
 
     #[test]

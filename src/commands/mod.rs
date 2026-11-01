@@ -1,9 +1,15 @@
+mod artifact_locator;
+
 mod copy_command;
 pub use copy_command::*;
 
 mod copy_output;
 
 mod report;
+
+mod findings;
+
+mod ocsf;
 
 mod sarif;
 

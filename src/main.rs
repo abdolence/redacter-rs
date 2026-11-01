@@ -133,7 +133,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                     term,
                     &copy_result,
                     &copy_result.to_text(),
-                    || copy_result.sarif_artifacts(),
+                    || copy_result.reported_files(),
                     &source,
                 )
                 .await?;
@@ -173,7 +173,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                     term,
                     &scan_result,
                     &scan_result.to_text(),
-                    || scan_result.sarif_artifacts(),
+                    || scan_result.reported_files(),
                     &source,
                 )
                 .await?;
