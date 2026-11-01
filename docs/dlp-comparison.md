@@ -36,13 +36,13 @@ Each cell is recall / precision / time per file. Time per file is described unde
 
 | Redacter | Fixtures | Secrets | Public | Images |
 |---|---|---|---|---|
-| `local-rules` | 54% / 100% / 60 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
+| `local-rules` | 54% / 100% / 51 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
 | `local-ner` | 23% / 69% / 40 ms | 0% / 0% / 18 ms | 23% / - / 39 ms | 19% / 100% / 334 ms |
 | `local-gliner` | 100% / 94% / 443 ms | 2% / 33% / 146 ms | 55% / - / 441 ms | 88% / 100% / 658 ms |
-| `local-rules+local-ner` | 77% / 89% / 53 ms | 93% / 97% / 24 ms | 46% / - / 46 ms | 94% / 100% / 352 ms |
-| `local-rules+local-gliner` | 100% / 95% / 520 ms | 93% / 95% / 166 ms | 57% / - / 449 ms | 88% / 100% / 634 ms |
+| `local-rules+local-ner` | 77% / 89% / 43 ms | 93% / 97% / 25 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
+| `local-rules+local-gliner` | 100% / 95% / 435 ms | 93% / 95% / 177 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
 | `local-credential-ml` | 0% / - / 77 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 389 ms |
-| `local-rules+local-credential-ml` | 54% / 100% / 37 ms | 95% / 100% / 14 ms | 25% / - / 29 ms | 62% / 100% / 340 ms |
+| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 95% / 100% / 15 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
 | `presidio` | 69% / 56% / 18 ms | 7% / 21% / 6 ms | 66% / - / 12 ms | 69% / 92% / 312 ms |
 | `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
 | `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
@@ -92,7 +92,7 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 | `gcp-vertex-ai` | 100% | 95% | 41/41 | 1/19 |
 | `aws-bedrock` | 93% | 59% | 38/41 | 11/19 |
 
-- `local-rules` found 93% (38 of 41) with no false alarm and no keep string hit. The two values it found beyond the 36 of the first run are the Google OAuth client secret and the `SECRET_KEY_BASE` hex value, both found by the `generic-api-key` rule ported from gitleaks; The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
+- `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
 - `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
 
 ## Public
@@ -148,13 +148,13 @@ The whole run over the 200 files of `public`, in milliseconds:
 
 | Redacter | Whole run on public |
 |---|---|
-| `local-rules` | 68 ms |
+| `local-rules` | 62 ms |
 | `local-ner` | 7878 ms |
 | `local-gliner` | 88352 ms |
-| `local-rules+local-ner` | 9363 ms |
-| `local-rules+local-gliner` | 89875 ms |
+| `local-rules+local-ner` | 7797 ms |
+| `local-rules+local-gliner` | 93374 ms |
 | `local-credential-ml` | 5738 ms |
-| `local-rules+local-credential-ml` | 5869 ms |
+| `local-rules+local-credential-ml` | 5771 ms |
 | `presidio` | 2568 ms |
 | `gcp-dlp` | 14526 ms |
 | `aws-comprehend` | 16962 ms |
@@ -189,8 +189,8 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 - the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. Every word of a flagged line with a digit or one of the symbols `!@#%^&*+=?~` is redacted, and no dataset here is built to test what that takes along;
 - `fixtures` has 8 files and `images` has 2 files and 16 boxes, so a difference of a few points is a few values;
 - each cell is one run, and an LLM redacter can answer differently for the same files: the re-run of the `gcp-vertex-ai` cell for `fixtures` differed in precision and in keep hits, see [How the numbers were measured](#how-the-numbers-were-measured);
-- the `local-rules` time on `fixtures` (487 ms for the run, 60 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (37 ms) on the same files;
-- the `local-credential-ml` time on `fixtures` (616 ms for the run, 77 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (37 ms) on the same files;
+- the `local-rules` time on `fixtures` (412 ms for the run, 51 ms per file) is from the first scan of the first run. It is higher than the times of `local-ner` (40 ms) and `local-rules+local-ner` (43 ms) on the same files;
+- the `local-credential-ml` time on `fixtures` (616 ms for the run, 77 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (30 ms) on the same files;
 - every redacter ran with its default configuration: the default label lists and rules of the local redacters, Presidio's default recognizers, and the default model of the LLM redacters (`publishers/google/models/gemini-3.8-flash` on Vertex AI, Amazon Nova 2 Lite on Bedrock). A tuned configuration, such as more labels for `local-gliner`, a custom info type list for `gcp-dlp` or your own `local-rules` rules, changes the numbers;
 - `aws-bedrock-guardrails` ran with a [guardrail](../README.md#aws-bedrock-guardrails) that has all 31 built-in PII types set to anonymise;
 - times are from one machine and one network;
@@ -200,7 +200,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 - commit `2390a25` of this repository, release build;
 - the `local-credential-ml` rows come from a later run, in the same way: commit `c71f738`, release build, the same machine, on 2026-11-01;
-- the `local-rules` rows, the rows that chain `local-rules` and the `local-credential-ml` rows at the threshold 0.50 come from a run after the gitleaks rules were added: commit `eeefac5`, release build, the same machine, on 2026-11-01, over `fixtures`, `secrets` and `public`. `images` was not run again, because the `ocr` addon was not available on the machine, so the `images` column is from the first run. The `local-credential-ml` rows alone were run again and gave the same recall;
+- the `secrets` cells of the local redacters and their chains come from a run on commit `19874f5` (the `generic-api-key` rule), in the same way;
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
 - the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6785 ms per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8073 ms, and its numbers are used;
@@ -260,14 +260,5 @@ cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
 The figures at the threshold 0.50 add `BENCH_DLP_SCAN_ARGS="--local-credential-ml-min-score 0.5"` and `BENCH_DLP_DATASETS=secrets`.
-
-The `local-rules` rows and the rows that chain them are run 5, on commit `eeefac5`:
-
-```sh
-BENCH_DLP_DATASETS=fixtures,secrets,public \
-BENCH_DLP_PROVIDERS="local-rules,local-rules+local-ner,local-rules+local-gliner,local-rules+local-credential-ml" \
-BENCH_DLP_OUT=run-5 \
-cargo test --release --test bench_dlp -- --ignored --nocapture
-```
 
 Each run writes `summary.md` and `results.json` to its `BENCH_DLP_OUT` directory.
