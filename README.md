@@ -341,7 +341,7 @@ Options:
           Write the report to this file
 
       --report-format <REPORT_FORMAT>
-          Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (values are always masked in both). Requires --report-file. Default is 'json'
+          Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (SARIF and OCSF reports always hold masked values). Requires --report-file. Default is 'json'
           
           [default: json]
           [possible values: json, text, sarif, ocsf]
@@ -1457,21 +1457,28 @@ Framework, a vendor-neutral schema for security events. Use it to send the findi
 The file is NDJSON, newline-delimited JSON: one JSON object on each line and no enclosing array, so a log shipper can
 read it line by line. Every line is an event of the class Data Security Finding (`class_uid` 2006, `type_uid` 200601),
 one for each file that has findings or is unconfirmed. A run without such a file writes an empty file. A clean,
-skipped, unsupported, blocked or failed file has no event: the [JSON report](#json-report) and the exit code tell about
+skipped, unsupported, blocked or failed file has no event: the [JSON report](#json-report) and the exit code report
 them.
 
 | OCSF | What `scan` and `cp` write |
 |---|---|
 | `metadata` | `version` `1.9.0` and the `product`: `redacter`, its version and the repository URL |
 | `time`, `finding_info.created_time` | When the report was written, in milliseconds since the Unix epoch |
-| `finding_info.uid` | A hash of the URI of the file, so a file has the same `uid` in every run; the value is not part of it |
-| `file` | `name`, `path` relative to the source and the full `uri`, a `file:///` URI for a local file |
+| `finding_info.uid` | The URI of the file, so a file has the same `uid` in every run; the value is not part of it |
+| `metadata.uid` | A UUID version 7 that is new for every event, so the events of two runs never share it |
+| `file` | `name`, the full `path` (the URI for a file of a remote source) and the full `uri`, a `file:///` URI for a local file |
 | `data_security.discovery_details` | One entry for each redacter, label and masked value in the file: `type` is the label, `rule.name` the redacter, `value` the masked value, `count` the number of findings |
 | text finding | An `occurrences` entry with `start_line`, `end_line` and `column_number`, counted from 1 |
-| table cell | An `occurrences` entry with `row_number` and `column_number`, the header row not counted |
+| table cell | An `occurrences` entry with `row_number` and `column_number`. The row counts data rows, so with a header row the first data row is 1 and the row in a spreadsheet is one more, as in the JSON and SARIF reports |
 | image or PDF page | An `occurrences` entry with `page_number` when there is a page |
-| `unmapped.redacter.findings` | What OCSF has no attribute for: the byte range and end column of a text finding, the byte range of a table cell, the box in pixels of an image, and the score as the redacter gave it |
+| `unmapped.redacter.findings` | One entry for each listed finding: its `discovery_detail`, the index in `discovery_details`, its `occurrence`, the index in the `occurrences` of that detail (left out when the finding has none), its `location` as the [JSON report](#json-report) gives it (byte offsets, the box in pixels of an image), and the `score` as the redacter gave it |
+| `unmapped.redacter.listing_limit` | Present when an event lists fewer findings than the file holds: `omitted_findings` and `max_findings_per_detail` |
 | unconfirmed file | An event with the severity Informational, no `data_security`, and `unmapped.redacter.unlocated_values` |
+
+An event lists the first 1000 findings of each discovery detail, in the order of the file, with their `occurrences` and
+`unmapped.redacter.findings` entries. The `count` of a detail is always exact, and `unmapped.redacter.listing_limit`
+says how many findings the event leaves out and what the limit is. A file that holds one value thousands of times then
+writes an event of bounded size.
 
 The values are masked as in the other reports, and `--show-values` does not apply: an OCSF report is stored with a long
 retention and read by many. There is no hash of a value in it.
@@ -1484,7 +1491,7 @@ The severity and the confidence of an event come from its findings:
 | `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
 | `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
 
-Amazon Security Lake currently accepts custom sources in OCSF 1.3 or earlier only, as Parquet files, so this report is
+Amazon Security Lake accepts custom sources in OCSF 1.3 or earlier only, as Parquet files, so this report is
 not accepted there as it is.
 
 ### Detection per redacter

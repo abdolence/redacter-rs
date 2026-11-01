@@ -200,7 +200,7 @@ pub struct ReportArgs {
         value_enum,
         default_value = "json",
         requires = "report_file",
-        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (values are always masked in both). Requires --report-file. Default is 'json'"
+        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (SARIF and OCSF reports always hold masked values). Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
 }
