@@ -8,7 +8,7 @@ use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, Ru
 use crate::redacters::Entity;
 use crate::redacters::{
     AwsBedrockGuardrailsRedacter, AwsComprehendRedacter, Category, GcpDlpRedacter, LlmTextFinding,
-    PresidioRedacter, RuleSet, TextMask,
+    PresidioRedacter, RuleSet, TextMask, TextPosition,
 };
 use crate::AppResult;
 use serde::Serialize;
@@ -227,6 +227,30 @@ impl DetectionLocation {
             Self::Image { .. } | Self::Page { .. } | Self::File => None,
         }
     }
+
+    /// The location as it sits in the file, when it was found in a window of the file that
+    /// starts at `window`. Only a text location moves: its offsets and line by the window's, and
+    /// its column on the first line, which the window may start inside of.
+    pub(crate) fn in_file(self, window: TextPosition) -> Self {
+        match self {
+            Self::Text {
+                start,
+                end,
+                line,
+                column,
+            } => Self::Text {
+                start: start + window.offset,
+                end: end + window.offset,
+                line: line + window.lines_before,
+                column: if line == 1 {
+                    column + window.columns_before
+                } else {
+                    column
+                },
+            },
+            other => other,
+        }
+    }
 }
 
 /// How a report shows a location: `line:column` in a text, `row:column` of a table cell,
@@ -295,6 +319,9 @@ pub struct TextLines<'a> {
     /// The offset and column of the last detection. Detections come mostly in order, so counting
     /// from it keeps a long line, such as minified JSON, from being counted again for each one.
     last_column: Cell<(usize, usize)>,
+    /// The bytes of `text` in which [`ALLOW_MARKER`] counts: the whole lines of a window that
+    /// starts or ends inside a line.
+    marker_span: Range<usize>,
 }
 
 impl<'a> TextLines<'a> {
@@ -305,7 +332,16 @@ impl<'a> TextLines<'a> {
                 .chain(text.match_indices('\n').map(|(newline, _)| newline + 1))
                 .collect(),
             last_column: Cell::new((0, 1)),
+            marker_span: 0..text.len(),
         }
+    }
+
+    /// Counts [`ALLOW_MARKER`] only inside `span`, the part of `text` made of whole lines, when
+    /// `text` is a window of a longer one. A marker on a line cut by the window may sit inside a
+    /// value the window cannot see whole, and would then set aside the findings beside it.
+    pub fn with_marker_span(mut self, span: Range<usize>) -> Self {
+        self.marker_span = span;
+        self
     }
 
     /// Whether [`ALLOW_MARKER`] stands, clear of every range of `findings`, on a line that
@@ -318,7 +354,9 @@ impl<'a> TextLines<'a> {
             .get(last_line + 1)
             .copied()
             .unwrap_or(self.text.len());
-        has_marker_clear_of(self.text, self.line_starts[first_line]..to, findings)
+        let from = self.line_starts[first_line].max(self.marker_span.start);
+        let to = to.min(self.marker_span.end);
+        from < to && has_marker_clear_of(self.text, from..to, findings)
     }
 
     /// The 0-based index of the line `offset` is on.
