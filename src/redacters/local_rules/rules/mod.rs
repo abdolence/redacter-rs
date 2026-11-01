@@ -7,9 +7,6 @@ use regex::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fmt::Display;
 
-mod gitleaks;
-#[cfg(test)]
-mod noseyparker;
 mod table;
 use table::builtin_rules;
 
@@ -136,7 +133,6 @@ struct CompiledRule {
 #[derive(Debug)]
 pub struct RuleSet {
     rules: Vec<CompiledRule>,
-    gitleaks: Option<gitleaks::GitleaksRules>,
 }
 
 /// Upper bound on the compiled size of one regex, built-in or user-supplied.
@@ -170,7 +166,7 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
 }
 
 /// How closely a built-in rule insists on a value that looks like a credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Strictness {
     /// The rule as declared, validators included.
     Strict,
@@ -195,31 +191,31 @@ pub const PRIVATE_KEY_BLOCK_RULE: &str = "private-key-block";
 /// The built-in rule that matches the `user:password` of a URL.
 pub const URL_CREDENTIALS_RULE: &str = "url-credentials";
 
+/// The built-in rule ported from gitleaks that matches a high-entropy value after a key name. It
+/// is not run on a line judged to hold a credential: without its value checks it matches the key
+/// name itself (`key="ClearTextPassword"` in `<add key="ClearTextPassword" value="...">`).
+pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
+
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
-        Self::from_builtin(
-            |spec| groups.contains(&spec.group),
-            groups.contains(&RuleGroup::Secrets),
-            Strictness::Strict,
-        )
+        Self::from_builtin(|spec| groups.contains(&spec.group), Strictness::Strict)
     }
 
     /// The rules that find the value of a credential on one line, for a caller that already
     /// has evidence that the line holds one: every `Secrets` rule and `url-credentials`, apart
-    /// from the multi-line private key block. Value validators, the minimum length of a
-    /// quoted value, and the entropy floors and allowlists of the gitleaks rules are off, so a
-    /// short or plain value written as `password: abc` or `password = "abc"` is found on such
-    /// a line; on an unjudged line they are what keep these rules from redacting prose and
-    /// code.
+    /// from the multi-line private key block and `generic-api-key`. Value validators and the minimum length of a
+    /// quoted value are off, so a short or plain value written as `password: abc` or
+    /// `password = "abc"` is found on such a line; on an unjudged line they are what keep
+    /// these rules from redacting prose and code.
     #[cfg(feature = "local-credential-ml")]
     pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
             |spec| {
                 (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
+                    && spec.name != GENERIC_API_KEY_RULE
             },
-            true,
             Strictness::Lenient,
         )
     }
@@ -229,15 +225,12 @@ impl RuleSet {
     pub fn private_key_block_rule() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
             |spec| spec.name == PRIVATE_KEY_BLOCK_RULE,
-            false,
             Strictness::Strict,
         )
     }
 
-    /// The hand-written rules `keep` selects, then the gitleaks rules when `with_gitleaks`.
     fn from_builtin(
         keep: impl Fn(&RuleSpec) -> bool,
-        with_gitleaks: bool,
         strictness: Strictness,
     ) -> Result<Self, LocalRulesError> {
         let mut rules = Vec::new();
@@ -258,16 +251,11 @@ impl RuleSet {
                 whole_word: false,
             });
         }
-        let gitleaks = if with_gitleaks {
-            Some(gitleaks::GitleaksRules::new(strictness)?)
-        } else {
-            None
-        };
-        Ok(Self { rules, gitleaks })
+        Ok(Self { rules })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.gitleaks.is_none()
+        self.rules.is_empty()
     }
 
     /// Built-in rules of the enabled groups followed by the user's rules. Names must be
@@ -277,12 +265,7 @@ impl RuleSet {
         user_rules: &[UserRule],
     ) -> Result<Self, LocalRulesError> {
         let mut set = Self::new(groups)?;
-        let mut names: BTreeSet<RuleName> = set
-            .rules
-            .iter()
-            .map(|r| r.name.clone())
-            .chain(set.gitleaks.iter().flat_map(|rules| rules.names().cloned()))
-            .collect();
+        let mut names: BTreeSet<RuleName> = set.rules.iter().map(|r| r.name.clone()).collect();
         for rule in user_rules {
             if !names.insert(rule.name.clone()) {
                 return Err(LocalRulesError::DuplicateRule {
@@ -346,9 +329,6 @@ impl RuleSet {
                     score: None,
                 });
             }
-        }
-        if let Some(gitleaks) = &self.gitleaks {
-            gitleaks.find_into(text, &mut findings);
         }
         merge_findings(findings)
     }
@@ -435,6 +415,20 @@ mod tests {
         assert_eq!(
             RuleSet::credential_line_rules().unwrap().find(line).len(),
             1
+        );
+    }
+
+    #[cfg(feature = "local-credential-ml")]
+    #[test]
+    fn credential_line_rules_leave_out_the_generic_api_key_rule() {
+        let line = r#"<add key="ClearTextPassword" value="x">"#;
+        assert_eq!(
+            RuleSet::new(&RuleGroup::all()).unwrap().find(line),
+            Vec::new()
+        );
+        assert_eq!(
+            RuleSet::credential_line_rules().unwrap().find(line),
+            Vec::new()
         );
     }
 
@@ -750,6 +744,12 @@ mod tests {
             "SG.{}.{}-",
             "abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
         );
+        let google_oauth_client = format!("GOCSPX-{}", "x7Kq2mP9vL4tR8wZ3nB6yH1cD5fG");
+        let secret_key_base = format!(
+            "{}{}",
+            "9f3a7c1e5b8d2046a1c9e7f30b5d8a24", "c6e1f9037ab4d85e2c07f1936ab5d48e"
+        );
+
         let discord = format!(
             "{}.{}.{}",
             "MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"
@@ -877,6 +877,15 @@ mod tests {
             (format!("HF {huggingface} end"), "HF [REDACTED] end"),
             (format!("key {sendgrid} end"), "key [REDACTED] end"),
             (format!("key {discord} end"), "key [REDACTED] end"),
+            // A high-entropy value after a key name no hand-written rule knows.
+            (
+                format!("google_auth = \"{google_oauth_client}\""),
+                r#"google_auth = "[REDACTED]""#,
+            ),
+            (
+                format!("SECRET_KEY_BASE={secret_key_base}"),
+                "SECRET_KEY_BASE=[REDACTED]",
+            ),
         ];
 
         let kept = [
@@ -893,6 +902,11 @@ mod tests {
             "password: {required: true, minLength: 8}",
             r#"println!("password={}", password)"#,
             r#"println!("token={token}")"#,
+            // `generic-api-key` keeps a value at the entropy floor, one with a stopword and one of
+            // letters only.
+            r#"creds = "q7m3v9t2hkpshkps""#,
+            r#"auth_value = "x9Kq2proc7Zw4mT""#,
+            r#"api_token = "ReallyLongLettersOnlyValue""#,
         ];
         let mut mismatches: Vec<String> = redacted
             .iter()
@@ -959,58 +973,6 @@ mod tests {
         assert_untouched("MTk4NjIyNDgzNDcxOTI1MjQ4.Cl2FMQ.short");
         assert_untouched("hf_hub_download(repo_id)");
         assert_untouched(&format!("hf_{}", "abcdefghijklmnopqrstuvwxyzABC"));
-    }
-
-    #[test]
-    fn gitleaks_rules_redact_vendors_without_a_hand_written_rule() {
-        let adobe = format!("p8e-{}", "k3Jd9sLw0QzX7vNb2RtY5uMa8CeF1gHi");
-        assert_redacts(
-            &format!("client secret {adobe} end"),
-            "client secret [REDACTED] end",
-        );
-        let adafruit = format!("adafruit_key={}", "k3Jd9sLw0QzX7vNb2RtY5uMa8CeF1gHi");
-        assert_redacts(&adafruit, "adafruit_key=[REDACTED]");
-    }
-
-    #[test]
-    fn gitleaks_rules_follow_the_secrets_group() {
-        let adobe = format!("p8e-{}", "k3Jd9sLw0QzX7vNb2RtY5uMa8CeF1gHi");
-        let without_secrets = RuleSet::new(&BTreeSet::from([RuleGroup::Email])).unwrap();
-        assert_eq!(without_secrets.find(&adobe), Vec::new());
-    }
-
-    #[test]
-    fn a_gitleaks_secret_under_its_entropy_floor_is_kept() {
-        assert_untouched(&format!("client secret p8e-{} end", "ab".repeat(16)));
-    }
-
-    #[test]
-    fn a_gitleaks_allowlist_keeps_the_documentation_example_key() {
-        assert_untouched("key ABIAIOSFODNN7EXAMPLE end");
-        assert_redacts("key ABIAIOSFODNN7EXAMPLF end", "key [REDACTED] end");
-    }
-
-    #[cfg(feature = "local-credential-ml")]
-    #[test]
-    fn a_gitleaks_secret_under_its_entropy_floor_is_found_on_a_line_judged_to_hold_a_credential() {
-        let line = format!("client secret p8e-{} end", "ab".repeat(16));
-        assert_eq!(RuleSet::new(&RuleGroup::all()).unwrap().find(&line), []);
-        assert_eq!(
-            RuleSet::credential_line_rules().unwrap().find(&line).len(),
-            1
-        );
-    }
-
-    #[test]
-    fn gitleaks_rule_names_differ_from_the_hand_written_ones() {
-        let hand_written: BTreeSet<&str> = builtin_rules().iter().map(|rule| rule.name).collect();
-        let repeated: Vec<String> = gitleaks::GitleaksRules::new(Strictness::Strict)
-            .unwrap()
-            .names()
-            .map(ToString::to_string)
-            .filter(|name| hand_written.contains(name.as_str()))
-            .collect();
-        assert_eq!(repeated, Vec::<String>::new());
     }
 
     #[test]
@@ -1251,7 +1213,6 @@ mod tests {
 /// table. Test-only: the file is regenerated on purpose and checked in.
 #[cfg(test)]
 mod reference {
-    use super::gitleaks;
     use super::table::builtin_rules;
     use super::{Example, RuleGroup, RuleSpec};
     use clap::ValueEnum;
@@ -1282,49 +1243,6 @@ mod reference {
         }
     }
 
-    /// Joins code spans for a table cell.
-    fn code_list(items: &[&str]) -> String {
-        items
-            .iter()
-            .map(|item| code_span(item))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn render_gitleaks_rules(out: &mut String) {
-        let commit = gitleaks::source_commit();
-        write!(
-            out,
-            "\n### Rules ported from gitleaks\n\n\
-             The rules below are the default rules of [gitleaks](https://github.com/gitleaks/gitleaks) \
-             at commit `{commit}`, MIT licence, Copyright (c) 2019 Zachary Rice. A rule runs only on \
-             text that holds one of its keywords, in any case. A secret is redacted when its Shannon \
-             entropy, in bits per character, reaches the entropy column, and no allowlist of the file \
-             or of the rule matches it. The descriptions are the ones gitleaks gives. A rule that \
-             a hand-written rule above already matches is not ported. Generated by \
-             `cargo test gitleaks_table_regenerate -- --ignored`.\n\n\
-             | Rule | Description | Entropy | Keywords |\n|---|---|---|---|\n"
-        )
-        .unwrap();
-        for rule in gitleaks::ported_rules() {
-            let entropy = rule
-                .entropy
-                .map_or_else(|| "no".to_string(), |floor| floor.to_string());
-            writeln!(
-                out,
-                "| `{}` | {} | {entropy} | {} |",
-                rule.id,
-                cell(rule.description),
-                code_list(rule.keywords)
-            )
-            .unwrap();
-        }
-        out.push_str("\n### Gitleaks rules not ported\n\n");
-        for (id, reason) in gitleaks::not_ported_rules() {
-            writeln!(out, "- `{id}`: {reason};").unwrap();
-        }
-    }
-
     fn render_rules_reference() -> String {
         let rules = builtin_rules();
         let mut out = String::from("# Local rules reference\n\n");
@@ -1338,19 +1256,22 @@ mod reference {
              vendor documentation. `redacter scan -d local-rules` reports the same matches \
              instead of redacting them, labelled with the rule name from the first column of \
              the tables below. Generated from the rule table by \
-             `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n",
+             `cargo test rules_reference_regenerate -- --ignored`; do not edit by hand.\n\n\
+             The pattern and the stopword list of `generic-api-key` are taken from the rule of the \
+             same name in [gitleaks](https://github.com/gitleaks/gitleaks), MIT licence, Copyright \
+             (c) 2019 Zachary Rice. The licence text is in \
+             `src/redacters/local_rules/validators/gitleaks.LICENSE`.\n\n",
         );
         out.push_str("| Group | Rules | Purpose |\n|---|---|---|\n");
         for group in RuleGroup::value_variants() {
             let count = if *group == RuleGroup::Custom {
                 "user-defined".to_string()
             } else {
-                let ported = if *group == RuleGroup::Secrets {
-                    gitleaks::ported_rules().len()
-                } else {
-                    0
-                };
-                (rules.iter().filter(|rule| rule.group == *group).count() + ported).to_string()
+                rules
+                    .iter()
+                    .filter(|rule| rule.group == *group)
+                    .count()
+                    .to_string()
             };
             writeln!(out, "| `{group}` | {count} | {} |", group.purpose()).unwrap();
         }
@@ -1379,9 +1300,6 @@ mod reference {
                     example(&rule.example)
                 )
                 .unwrap();
-            }
-            if *group == RuleGroup::Secrets {
-                render_gitleaks_rules(&mut out);
             }
         }
         out
