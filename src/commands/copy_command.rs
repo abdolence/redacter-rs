@@ -37,9 +37,8 @@ pub struct CopyCommandResult {
     pub files: Vec<CopyFileReport>,
 }
 
-/// One file of the copy, as the JSON report lists it: its `path`, `mime_type`, `status`,
-/// `reason` and `redactions`. What the redacters replaced is in the order a reader meets it,
-/// values always masked.
+/// One file of the copy, as the JSON report lists it. The redactions come in the order a reader
+/// meets them, and their values are always masked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CopyFileReport {
     path: String,
@@ -139,7 +138,6 @@ impl CopyFileReport {
     }
 }
 
-/// A file that left the copy unredacted, as a SARIF report tells it.
 fn not_redacted_outcome(reason: NotRedactedReason) -> ArtifactOutcome {
     let detail = reason.detail().to_string();
     if reason.needs_converter() {

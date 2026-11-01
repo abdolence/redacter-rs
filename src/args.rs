@@ -206,8 +206,6 @@ pub struct ReportArgs {
 }
 
 impl ReportArgs {
-    /// Whether the report is one that lists the redactions of a `cp`: the JSON and the SARIF
-    /// report do, the text report does not.
     pub fn lists_redactions(&self) -> bool {
         self.report_file.is_some() && self.report_format != ReportFormat::Text
     }

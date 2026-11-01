@@ -22,10 +22,7 @@ pub(crate) struct StreamRedactions {
     recording: bool,
     text: Option<TextChain>,
     cells: BTreeMap<CellPosition, TextChain>,
-    /// Set once a step of the text was reported as a whole because it was too large to compare.
     text_placed_as_whole: bool,
-    /// Set once a step of the table was reported as a whole, because its cells no longer pair
-    /// up with the original's or it was too large to compare.
     table_placed_as_whole: bool,
     /// The pixel size of each image as first seen, by PDF page; `None` is an image file.
     image_sizes: BTreeMap<Option<usize>, ImageSize>,
@@ -45,7 +42,6 @@ struct ImageSize {
 }
 
 impl StreamRedactions {
-    /// Records nothing when `recording` is off: a step is then plainly the redacter's call.
     pub(crate) fn new(recording: bool) -> Self {
         Self {
             recording,
@@ -56,10 +52,6 @@ impl StreamRedactions {
             image_sizes: BTreeMap::new(),
             records: Vec::new(),
         }
-    }
-
-    pub(crate) fn is_recording(&self) -> bool {
-        self.recording
     }
 
     /// Runs `redacter` on `item` and records what it changed, as part of `page` of a PDF when

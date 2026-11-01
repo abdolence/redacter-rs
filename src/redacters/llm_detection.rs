@@ -93,9 +93,6 @@ const MODEL_LABELS: [&str; 15] = [
     "secret",
 ];
 
-/// The label for the kind a model named: that kind when it is one of [`MODEL_LABELS`], read
-/// without case and with underscores for spaces and hyphens, and the unclassified label
-/// otherwise.
 fn model_label(named: &str) -> DetectionLabel {
     let named = named.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     MODEL_LABELS

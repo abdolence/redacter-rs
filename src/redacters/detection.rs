@@ -265,7 +265,6 @@ impl<'a> TextLines<'a> {
         self.line_starts.partition_point(|&start| start <= offset) - 1
     }
 
-    /// The 1-based column of `offset`, a character boundary on the line starting at `line_start`.
     fn column_of(&self, line_start: usize, offset: usize) -> usize {
         let (from, column) = match self.last_column.get() {
             (last, column) if (line_start..=offset).contains(&last) => (last, column),

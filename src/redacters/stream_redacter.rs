@@ -976,7 +976,7 @@ impl<'a> StreamRedacter<'a> {
                                 let to_redact = words_to_redact(&original_words, &content);
                                 let records = redacters
                                     .last()
-                                    .filter(|_| steps.is_recording())
+                                    .filter(|_| self.redacter_base_options.list_redactions)
                                     .map_or_else(Vec::new, |last| {
                                         ocr_text.drawn_records(
                                             steps.into_records(),
