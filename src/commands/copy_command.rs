@@ -707,9 +707,9 @@ mod tests {
         TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
     use crate::redacters::{
-        DetectionLabel, DetectionLocation, GcpDlpRedacterOptions, GcpVertexAiRedacterOptions,
-        LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions, RedacterProviderOptions,
-        RuleGroup,
+        DetectionLabel, DetectionLocation, GcpDlpRedacter, GcpDlpRedacterOptions,
+        GcpVertexAiRedacterOptions, LlmImageMode, LocalRulesRedacter, LocalRulesRedacterOptions,
+        RedacterProviderOptions, RuleGroup,
     };
     use tempfile::TempDir;
 
@@ -728,6 +728,7 @@ mod tests {
                 csv_delimiter: None,
                 sampling_size: None,
                 limit_dlp_requests: None,
+                categories: None,
                 list_redactions: true,
             },
         }
@@ -1417,7 +1418,7 @@ mod tests {
         let redacter_options =
             base_redacter_options(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             }));
 
@@ -1488,6 +1489,7 @@ mod tests {
                     text_model: None,
                     image_model: None,
                     block_none_harmful: false,
+                    categories: None,
                 },
             ))
         };

@@ -6,8 +6,9 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
-    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, Categories, Category, CharOffsets, Detection, DetectionLabel, Detections,
+    RedactSupport, Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -16,6 +17,12 @@ use crate::AppResult;
 pub struct PresidioRedacterOptions {
     pub text_analyze_url: Option<Url>,
     pub image_redact_url: Option<Url>,
+    /// The categories to look for; every category when `None`.
+    #[expect(
+        dead_code,
+        reason = "read once the redacter narrows its detection by category"
+    )]
+    pub categories: Option<Categories>,
 }
 
 #[derive(Clone)]
@@ -56,7 +63,6 @@ impl<'a> PresidioRedacter<'a> {
     }
 
     /// The entities of the supported-entities list of Presidio, by what they hold.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     const ENTITY_CATEGORIES: &'static [(&'static str, Category)] = &[
         ("PERSON", Category::Person),
         ("EMAIL_ADDRESS", Category::Contact),
@@ -161,7 +167,6 @@ impl<'a> PresidioRedacter<'a> {
 
     /// The category of a finding of the entity type `name`: that of the supported entity of
     /// the name, `other` for the entity of a custom recogniser.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn entity_category(name: &str) -> Category {
         Self::ENTITY_CATEGORIES
             .iter()
@@ -442,6 +447,7 @@ mod tests {
         let reporter: AppReporter = AppReporter::from(&term);
         let redacter = PresidioRedacter::new(
             PresidioRedacterOptions {
+                categories: None,
                 text_analyze_url: Some(Url::parse("http://localhost:5002/analyze").unwrap()),
                 image_redact_url: Some(Url::parse("http://localhost:5003/redact").unwrap()),
             },
@@ -501,6 +507,7 @@ mod tests {
 
         let redacter = PresidioRedacter::new(
             PresidioRedacterOptions {
+                categories: None,
                 text_analyze_url: Some(test_analyze_url),
                 image_redact_url: None,
             },
@@ -541,6 +548,7 @@ mod tests {
         };
         let redacter = PresidioRedacter::new(
             PresidioRedacterOptions {
+                categories: None,
                 text_analyze_url: Some(test_analyze_url),
                 image_redact_url: None,
             },

@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     prepare_image_for_llm, redact_image_with_mode, retrying_once, text_redaction_instruction,
-    Detections, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
+    Categories, Detections, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
     NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacted, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
     NATIVE_IMAGE_REDACTION_PROMPT,
@@ -25,6 +25,12 @@ pub struct GcpVertexAiRedacterOptions {
     pub text_model: Option<GcpVertexAiModelName>,
     pub image_model: Option<GcpVertexAiModelName>,
     pub block_none_harmful: bool,
+    /// The categories to look for; every category when `None`.
+    #[expect(
+        dead_code,
+        reason = "read once the redacter narrows its detection by category"
+    )]
+    pub categories: Option<Categories>,
 }
 
 #[derive(Debug, Clone, ValueStruct)]
@@ -689,6 +695,7 @@ mod tests {
 
         let redacter = GcpVertexAiRedacter::new(
             GcpVertexAiRedacterOptions {
+                categories: None,
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gcp_region: GcpRegion::new(test_gcp_region),
                 image_mode: LlmImageMode::Auto,
@@ -726,6 +733,7 @@ mod tests {
         let input = test_image_item();
         let redacter = GcpVertexAiRedacter::new(
             GcpVertexAiRedacterOptions {
+                categories: None,
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gcp_region: GcpRegion::new(test_gcp_region),
                 image_mode,
@@ -771,6 +779,7 @@ mod tests {
             std::env::var("TEST_GCP_REGION").unwrap_or_else(|_| "global".to_string());
         Ok(GcpVertexAiRedacter::new(
             GcpVertexAiRedacterOptions {
+                categories: None,
                 project_id: GcpProjectId::new(test_gcp_project_id),
                 gcp_region: GcpRegion::new(test_gcp_region),
                 image_mode: LlmImageMode::Auto,

@@ -84,6 +84,8 @@ pub enum CategoriesError {
     },
     #[error("{option} has no effect with --categories, which reads images with OCR")]
     NoEffect { option: &'static str },
+    #[error("{redacter} cannot limit cp to the chosen categories, only scan can")]
+    CopyUnsupported { redacter: RedacterType },
     #[error("{redacter} named {values} value(s) it could not place in the text, so they cannot be redacted")]
     Unlocated {
         redacter: RedacterType,
@@ -92,11 +94,13 @@ pub enum CategoriesError {
 }
 
 impl Detections {
-    /// Drops the findings whose label `redacter` places outside `categories`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    /// Drops the findings and the unlocated values whose label `redacter` places outside
+    /// `categories`.
     pub fn retain_categories(&mut self, redacter: RedacterType, categories: &Categories) {
         self.found
             .retain(|detection| categories.contains(detection.label.category(redacter)));
+        self.unlocated
+            .retain(|label| categories.contains(label.category(redacter)));
     }
 }
 
@@ -171,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn retain_categories_drops_the_findings_outside() {
+    fn retain_categories_drops_the_findings_and_unlocated_values_outside() {
         let found = ["email", "secret-assignment", "employee-number"]
             .into_iter()
             .map(|label| Detection {
@@ -182,9 +186,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut detections = Detections::from(found);
+        detections.unlocated = ["email", "secret-assignment"]
+            .into_iter()
+            .map(DetectionLabel::new)
+            .collect();
         detections.retain_categories(
             RedacterType::LocalRules,
             &chosen(&[Category::Credential, Category::Other]),
+        );
+        assert_eq!(
+            detections.unlocated,
+            [DetectionLabel::new("secret-assignment")]
         );
         assert_eq!(
             detections

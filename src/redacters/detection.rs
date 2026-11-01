@@ -37,7 +37,6 @@ impl DetectionLabel {
 
     /// The category of a finding `redacter` labelled with this label. A label the redacter's
     /// map does not know is `other`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn category(&self, redacter: RedacterType) -> Category {
         let label = self.0.as_str();
         match redacter {
@@ -141,17 +140,17 @@ pub struct Detection {
 #[derive(Debug, Default)]
 pub struct Detections {
     pub found: Vec<Detection>,
-    /// How many values the provider named without being able to place them in the item, such
-    /// as a value a model reformatted. Only the count is kept, since the values are the
+    /// The label of each value the provider named without being able to place it in the item,
+    /// such as a value a model reformatted. Only the labels are kept, since the values are the
     /// sensitive data. A file with unlocated values may hold findings that `found` lacks.
-    pub unlocated: usize,
+    pub unlocated: Vec<DetectionLabel>,
 }
 
 impl From<Vec<Detection>> for Detections {
     fn from(found: Vec<Detection>) -> Self {
         Self {
             found,
-            unlocated: 0,
+            unlocated: Vec::new(),
         }
     }
 }
@@ -432,7 +431,7 @@ impl Detection {
     pub fn locate_values(text: &str, values: &[(String, DetectionLabel)]) -> AppResult<Detections> {
         let mut seen = HashSet::new();
         let mut occurrences = Vec::new();
-        let mut unlocated = 0;
+        let mut unlocated = Vec::new();
         let folded_text = FoldedText::new(text);
         for (value, label) in values {
             if value.is_empty() || !seen.insert((value, label)) {
@@ -440,7 +439,7 @@ impl Detection {
             }
             let ranges = folded_text.occurrences_of(value);
             if ranges.is_empty() {
-                unlocated += 1;
+                unlocated.push(label.clone());
             }
             occurrences.extend(ranges.into_iter().map(|range| (range, label)));
         }
@@ -952,7 +951,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(located(&detections.found), vec![(4..7, "Ana")]);
-        assert_eq!(detections.unlocated, 2);
+        assert_eq!(detections.unlocated, vec![DetectionLabel::new("PERSON"); 2]);
     }
 
     #[test]

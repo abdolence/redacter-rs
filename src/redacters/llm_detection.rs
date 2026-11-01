@@ -138,7 +138,6 @@ pub struct LlmTextFinding {
 impl LlmTextFinding {
     /// The category of a finding labelled `label`: that of the kind of data the model named,
     /// `other` for the unclassified label.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn label_category(label: &str) -> Category {
         MODEL_LABELS
             .iter()

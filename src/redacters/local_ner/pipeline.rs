@@ -26,7 +26,6 @@ impl Entity {
     }
 
     /// The category of what the entity marks.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn category(self) -> Category {
         match self {
             Entity::Per => Category::Person,
@@ -36,7 +35,6 @@ impl Entity {
 
     /// The category of a finding named `label`, as [`Entity::as_str`] spells it; `other` for
     /// any other name.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn label_category(label: &str) -> Category {
         Entity::value_variants()
             .iter()

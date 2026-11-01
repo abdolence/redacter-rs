@@ -123,6 +123,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             let mut redacter_options: Option<RedacterOptions> =
                 redacter_args.map(|args| args.try_into()).transpose()?;
             if let Some(redacter_options) = &mut redacter_options {
+                redacter_options.check_copy_within_categories()?;
                 redacter_options.base_options.list_redactions = report.lists_redactions();
             }
             let copy_result =

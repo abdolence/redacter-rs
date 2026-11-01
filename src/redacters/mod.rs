@@ -588,6 +588,8 @@ pub struct RedacterBaseOptions {
     pub csv_delimiter: Option<u8>,
     pub sampling_size: Option<usize>,
     pub limit_dlp_requests: Option<DlpRequestLimit>,
+    /// The categories `scan` reports and `cp` redacts; every category when `None`.
+    pub categories: Option<Categories>,
     /// Record where each redaction sits in the file, for a report that lists them. Recording
     /// keeps the content of every step and compares it with the next, so a copy that writes no
     /// such report leaves it off.
@@ -632,6 +634,41 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::LocalGliner(_) => RedacterType::LocalGliner,
             #[cfg(feature = "local-credential-ml")]
             RedacterProviderOptions::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
+        }
+    }
+}
+
+impl RedacterType {
+    /// Whether the chosen categories narrow the redacter's own request, so that its redaction
+    /// leaves the other categories alone: the local redacters and GCP DLP. The others redact
+    /// everything they detect.
+    pub fn narrows_itself(self) -> bool {
+        matches!(
+            self,
+            RedacterType::GcpDlp
+                | RedacterType::LocalRules
+                | RedacterType::LocalNer
+                | RedacterType::LocalGliner
+                | RedacterType::LocalCredentialMl
+        )
+    }
+}
+
+impl RedacterOptions {
+    /// Fails when `cp` is limited to categories and a redacter would redact data outside
+    /// them.
+    pub fn check_copy_within_categories(&self) -> Result<(), CategoriesError> {
+        if self.base_options.categories.is_none() {
+            return Ok(());
+        }
+        match self
+            .provider_options
+            .iter()
+            .map(RedacterProviderOptions::redacter_type)
+            .find(|redacter| !redacter.narrows_itself())
+        {
+            Some(redacter) => Err(CategoriesError::CopyUnsupported { redacter }),
+            None => Ok(()),
         }
     }
 }
@@ -1183,6 +1220,7 @@ mod tests {
                 presidio::PresidioRedacterOptions {
                     text_analyze_url: Some(unreachable),
                     image_redact_url: None,
+                    categories: None,
                 },
                 reporter,
             )

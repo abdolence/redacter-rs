@@ -6,9 +6,9 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Detection, DetectionLocation,
-    RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent,
-    Redacters, StreamRedactions, TextLines,
+    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
+    DetectionLocation, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters, StreamRedactions, TextLines,
 };
 use crate::AppResult;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -512,6 +512,7 @@ impl<'a> StreamRedacter<'a> {
             });
         };
         let redacters = &plan.supported_redacters;
+        let categories = self.redacter_base_options.categories.as_ref();
         let mut result = DetectStreamResult::default();
         match &item.content {
             RedacterDataItemContent::Pdf { data } if plan.apply_pdf_image_converter => {
@@ -537,6 +538,7 @@ impl<'a> StreamRedacter<'a> {
                                 page,
                                 self.ocr()?,
                                 file_ref,
+                                categories,
                             )
                             .await?,
                         );
@@ -552,7 +554,9 @@ impl<'a> StreamRedacter<'a> {
                             },
                             file_ref: file_ref.clone(),
                         };
-                        result.absorb(Self::detect_all(redacters, &page_item, page).await?);
+                        result.absorb(
+                            Self::detect_all(redacters, &page_item, page, categories).await?,
+                        );
                     }
                 }
             }
@@ -560,14 +564,20 @@ impl<'a> StreamRedacter<'a> {
                 match ImageFormat::from_mime_type(mime_type) {
                     Some(format) => {
                         let image = image::load_from_memory_with_format(data, format)?;
-                        result =
-                            Self::detect_with_ocr(redacters, &image, None, self.ocr()?, file_ref)
-                                .await?;
+                        result = Self::detect_with_ocr(
+                            redacters,
+                            &image,
+                            None,
+                            self.ocr()?,
+                            file_ref,
+                            categories,
+                        )
+                        .await?;
                     }
                     None => result.blocked = Some(RedactionBlocked::OcrImageFormatNotSupported),
                 }
             }
-            _ => result = Self::detect_all(redacters, &item, None).await?,
+            _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
         result.set_aside_ignored(&item.content);
         Ok(result)
@@ -582,11 +592,14 @@ impl<'a> StreamRedacter<'a> {
             })
     }
 
-    /// What each of `redacters` finds in `item`, every image location placed on `page`.
+    /// What each of `redacters` finds in `item` within `categories`, every image location placed
+    /// on `page`. A redacter that narrows its own request finds nothing outside them already;
+    /// for the others this is what limits the findings.
     async fn detect_all(
         redacters: &[&Redacters<'a>],
         item: &RedacterDataItem,
         page: Option<usize>,
+        categories: Option<&Categories>,
     ) -> AppResult<DetectStreamResult> {
         let mut result = DetectStreamResult::default();
         for redacter in redacters {
@@ -595,8 +608,11 @@ impl<'a> StreamRedacter<'a> {
                 file = %item.file_ref.relative_path.value(),
                 "detecting"
             );
-            let detected = redacter.detect(item).await?;
-            result.unlocated += detected.unlocated;
+            let mut detected = redacter.detect(item).await?;
+            if let Some(categories) = categories {
+                detected.retain_categories(redacter.redacter_type(), categories);
+            }
+            result.unlocated += detected.unlocated.len();
             for mut detection in detected.found {
                 if let DetectionLocation::Image {
                     page: ref mut image_page,
@@ -622,13 +638,14 @@ impl<'a> StreamRedacter<'a> {
         page: Option<usize>,
         ocr: &dyn Ocr,
         file_ref: &FileSystemRef,
+        categories: Option<&Categories>,
     ) -> AppResult<DetectStreamResult> {
         let ocr_text = OcrText::from(ocr.image_to_text(image.clone())?.as_slice());
         let item = RedacterDataItem {
             content: RedacterDataItemContent::Value(ocr_text.text.clone()),
             file_ref: file_ref.clone(),
         };
-        let detected = Self::detect_all(redacters, &item, page).await?;
+        let detected = Self::detect_all(redacters, &item, page, categories).await?;
         let mut result = DetectStreamResult {
             unlocated: detected.unlocated,
             ..DetectStreamResult::default()
@@ -1192,7 +1209,7 @@ impl OcrText {
 mod tests {
     use super::*;
     use crate::redacters::{
-        parse_inline_rule, DetectionLabel, LocalRulesRedacter, LocalRulesRedacterOptions,
+        parse_inline_rule, Category, DetectionLabel, LocalRulesRedacter, LocalRulesRedacterOptions,
         RuleGroup, UserRule,
     };
     use crate::reporter::AppReporter;
@@ -1330,6 +1347,7 @@ mod tests {
             csv_delimiter: None,
             sampling_size: None,
             limit_dlp_requests: None,
+            categories: None,
             list_redactions: true,
         }
     }
@@ -1589,8 +1607,17 @@ mod tests {
         file_ref: &FileSystemRef,
         data: bytes::Bytes,
     ) -> AppResult<DetectStreamResult> {
-        let options = base_options();
-        let stream_redacter = StreamRedacter::new(&options, converters);
+        detect_with(&base_options(), converters, redacters, file_ref, data).await
+    }
+
+    async fn detect_with(
+        options: &RedacterBaseOptions,
+        converters: &FileConverters<'_>,
+        redacters: &[Redacters<'static>],
+        file_ref: &FileSystemRef,
+        data: bytes::Bytes,
+    ) -> AppResult<DetectStreamResult> {
+        let stream_redacter = StreamRedacter::new(options, converters);
         let plan = stream_redacter
             .create_detect_plan(redacters, file_ref)
             .await?;
@@ -1601,6 +1628,33 @@ mod tests {
         stream_redacter
             .detect_stream(futures::stream::iter(vec![Ok(data)]), &plan, file_ref)
             .await
+    }
+
+    #[tokio::test]
+    async fn detection_reports_only_the_findings_in_the_chosen_categories() {
+        let converters = FileConverters::new();
+        let redacters = vec![Redacters::LocalRules(any_local_rules().await)];
+        let text = bytes::Bytes::from("DB_PASSWORD=hunter2-Secret\nADMIN_EMAIL=ops@example.com\n");
+        let file = file_ref("app.env", mime::TEXT_PLAIN);
+
+        let everything = detect(&converters, &redacters, &file, text.clone())
+            .await
+            .unwrap();
+        let mut options = base_options();
+        options.categories = Categories::limiting([Category::Credential]);
+        let credentials = detect_with(&options, &converters, &redacters, &file, text)
+            .await
+            .unwrap();
+
+        let values = |result: &DetectStreamResult| {
+            result
+                .detections
+                .iter()
+                .map(|(_, detection)| detection.value.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&everything), ["hunter2-Secret", "ops@example.com"]);
+        assert_eq!(values(&credentials), ["hunter2-Secret"]);
     }
 
     fn located(result: &DetectStreamResult) -> Vec<(DetectionLocation, &str)> {

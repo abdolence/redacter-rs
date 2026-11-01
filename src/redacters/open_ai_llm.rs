@@ -9,9 +9,9 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     classify_http_native_failure, parse_answer, prepare_image_for_llm, redact_image_with_mode,
-    sensitive_data_examples, text_redaction_instruction, Detections, ImageBoxes, LlmImageMode,
-    LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
+    sensitive_data_examples, text_redaction_instruction, Categories, Detections, ImageBoxes,
+    LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport,
+    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
     NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
@@ -29,6 +29,12 @@ pub struct OpenAiLlmRedacterOptions {
     pub model: Option<OpenAiModelName>,
     pub image_model: Option<OpenAiModelName>,
     pub image_mode: LlmImageMode,
+    /// The categories to look for; every category when `None`.
+    #[expect(
+        dead_code,
+        reason = "read once the redacter narrows its detection by category"
+    )]
+    pub categories: Option<Categories>,
 }
 
 #[derive(Clone)]
@@ -636,6 +642,7 @@ mod tests {
 
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -681,6 +688,7 @@ mod tests {
         let input = test_image_item();
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -771,6 +779,7 @@ mod tests {
         };
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,
@@ -798,6 +807,7 @@ mod tests {
         };
         let redacter = OpenAiLlmRedacter::new(
             OpenAiLlmRedacterOptions {
+                categories: None,
                 api_key: test_api_key.into(),
                 model: None,
                 image_model: None,

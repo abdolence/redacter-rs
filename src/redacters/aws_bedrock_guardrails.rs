@@ -90,7 +90,6 @@ fn interpret_guardrail_output(
 impl<'a> AwsBedrockGuardrailsRedacter<'a> {
     /// The category of a finding labelled `name`: the PII entity type of the name, `other` for
     /// any other name, such as a regex filter's, or a type this version of the SDK does not know.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn label_category(name: &str) -> Category {
         match GuardrailPiiEntityType::from(name) {
             GuardrailPiiEntityType::Name | GuardrailPiiEntityType::Username => Category::Person,

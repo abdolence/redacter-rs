@@ -32,7 +32,6 @@ pub fn default_labels() -> Vec<String> {
 
 /// The category of a finding the model labelled `label`, ignoring case: that of the default
 /// label of the name, `other` for a label the user added.
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
 pub fn label_category(label: &str) -> Category {
     DEFAULT_LABELS
         .iter()

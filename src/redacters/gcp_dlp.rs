@@ -28,7 +28,9 @@ pub struct GcpDlpRedacter<'a> {
 #[derive(Debug, Clone)]
 pub struct GcpDlpRedacterOptions {
     pub project_id: GcpProjectId,
-    pub user_defined_built_in_info_types: Vec<String>,
+    /// The built-in info types to look for: the defaults the chosen categories leave, and those
+    /// the user added.
+    pub built_in_info_types: Vec<String>,
     pub user_defined_stored_info_types: Vec<String>,
 }
 
@@ -66,7 +68,14 @@ impl<'a> GcpDlpRedacter<'a> {
 
     /// The category of a finding of the info type `name`: that of the default info type of
     /// the name, `other` for any other, which the user added.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
+    /// The names of the info types looked for when the user chooses none.
+    pub fn default_info_types() -> Vec<String> {
+        Self::INFO_TYPES
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect()
+    }
+
     pub fn info_type_category(name: &str) -> Category {
         Self::INFO_TYPES
             .iter()
@@ -364,20 +373,11 @@ impl<'a> GcpDlpRedacter<'a> {
     }
 
     fn create_built_in_info_types(&self) -> HashSet<&str> {
-        [
-            Self::INFO_TYPES
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<Vec<&str>>(),
-            self.gcp_dlp_options
-                .user_defined_built_in_info_types
-                .iter()
-                .map(|v| v.as_str())
-                .collect(),
-        ]
-        .concat()
-        .into_iter()
-        .collect()
+        self.gcp_dlp_options
+            .built_in_info_types
+            .iter()
+            .map(|name| name.as_str())
+            .collect()
     }
 
     fn check_supported_image_type(mime_type: &Mime) -> bool {
@@ -1052,7 +1052,7 @@ mod tests {
         let redacter = GcpDlpRedacter::new(
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             },
             &reporter,
@@ -1077,7 +1077,7 @@ mod tests {
         GcpDlpRedacter::new(
             GcpDlpRedacterOptions {
                 project_id: GcpProjectId::new(test_gcp_project_id),
-                user_defined_built_in_info_types: vec![],
+                built_in_info_types: GcpDlpRedacter::default_info_types(),
                 user_defined_stored_info_types: vec![],
             },
             reporter,

@@ -36,7 +36,6 @@ impl RuleGroup {
     }
 
     /// The category of what the group finds.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn category(self) -> Category {
         match self {
             RuleGroup::Email | RuleGroup::Phone => Category::Contact,
@@ -217,7 +216,6 @@ pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
 impl RuleSet {
     /// The category of a finding named `rule`: that of the group of the built-in rule of the
     /// name, `other` for any other name, which is a user-defined rule.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn category_of(rule: &str) -> Category {
         builtin_rules()
             .iter()

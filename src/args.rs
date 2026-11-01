@@ -7,7 +7,8 @@ use crate::redacters::LocalCredentialMlRedacterOptions;
 #[cfg(feature = "local-gliner")]
 use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{
-    AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, GcpDlpRedacterOptions,
+    AwsBedrockGuardrailId, AwsBedrockGuardrailVersion, AwsBedrockModelName, AwsComprehendRedacter,
+    Categories, CategoriesError, Category, GcpDlpRedacter, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
     RedacterProviderOptions, RuleGroup, Score, UserRule,
@@ -15,6 +16,7 @@ use crate::redacters::{
 #[cfg(feature = "local-ner")]
 use crate::redacters::{Entity, LocalNerRedacterOptions};
 use clap::*;
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::path::PathBuf;
 use url::Url;
@@ -411,10 +413,18 @@ pub struct RedacterArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "auto",
-        help = "How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images"
+        value_delimiter = ',',
+        requires = "redact",
+        help = "Data categories to look for, comma separated; secrets is accepted for credential. scan reports only findings in these categories. cp redacts only data in these categories and copies everything else as it is. Presidio and the LLM redacters then read images and PDF pages with OCR. Default is every category"
     )]
-    pub llm_image_mode: LlmImageMode,
+    pub categories: Option<Vec<Category>>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "How LLM redacters redact images: 'native' lets the model edit the image, 'coords' asks the model for coordinates and blacks them out locally, 'auto' edits natively then verifies the edit with the coordinate pass, falling back to coordinates entirely when the model cannot edit images. Default is 'auto'"
+    )]
+    pub llm_image_mode: Option<LlmImageMode>,
 
     #[arg(
         long,
@@ -595,37 +605,221 @@ pub struct RedacterArgs {
     pub local_credential_ml_min_score: Score,
 }
 
+impl RedacterArgs {
+    /// Options that steer how Presidio and the LLM redacters redact images do nothing under
+    /// `--categories`, which has them read images with OCR instead.
+    fn check_options_with_categories(&self) -> Result<(), CategoriesError> {
+        let typed = [
+            ("--llm-image-mode", self.llm_image_mode.is_some()),
+            (
+                "--presidio-image-redact-url",
+                self.presidio_image_redact_url.is_some(),
+            ),
+            ("--gemini-image-model", self.gemini_image_model.is_some()),
+            ("--open-ai-image-model", self.open_ai_image_model.is_some()),
+            (
+                "--gcp-vertex-ai-image-model",
+                self.gcp_vertex_ai_image_model.is_some(),
+            ),
+        ];
+        match typed.into_iter().find(|(_, is_typed)| *is_typed) {
+            Some((option, _)) => Err(CategoriesError::NoEffect { option }),
+            None => Ok(()),
+        }
+    }
+
+    fn gcp_dlp_options(
+        &self,
+        project_id: &GcpProjectId,
+        categories: Option<&Categories>,
+    ) -> Result<GcpDlpRedacterOptions, AppError> {
+        let extra_built_in = self
+            .gcp_dlp_built_in_info_type
+            .as_deref()
+            .unwrap_or_default();
+        let stored = self.gcp_dlp_stored_info_type.as_deref().unwrap_or_default();
+        let mut built_in_info_types: Vec<String> = match categories {
+            Some(categories) => {
+                categories.check("--gcp-dlp-built-in-info-type", extra_built_in, |name| {
+                    GcpDlpRedacter::info_type_category(name)
+                })?;
+                categories.check("--gcp-dlp-stored-info-type", stored, |_| Category::Other)?;
+                categories
+                    .filter(GcpDlpRedacter::INFO_TYPES, |(_, category)| *category)
+                    .into_iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect()
+            }
+            None => GcpDlpRedacter::default_info_types(),
+        };
+        built_in_info_types.extend(extra_built_in.iter().cloned());
+        if let Some(categories) = categories {
+            if built_in_info_types.is_empty() && stored.is_empty() {
+                return Err(CategoriesError::NothingToFind {
+                    redacter: RedacterType::GcpDlp,
+                    categories: categories.clone(),
+                }
+                .into());
+            }
+        }
+        Ok(GcpDlpRedacterOptions {
+            project_id: project_id.clone(),
+            built_in_info_types,
+            user_defined_stored_info_types: stored.to_vec(),
+        })
+    }
+
+    fn local_rules_options(
+        &self,
+        categories: Option<&Categories>,
+    ) -> Result<LocalRulesRedacterOptions, AppError> {
+        let mut inline_rules: Vec<UserRule> = Vec::new();
+        for inline in self.local_rule.iter().flatten() {
+            inline_rules.push(crate::redacters::parse_inline_rule(inline)?);
+        }
+        let mut file_rules: Vec<UserRule> = Vec::new();
+        for path in self.local_rules_file.iter().flatten() {
+            file_rules.extend(crate::redacters::load_rules_file(path)?);
+        }
+        let mut groups: BTreeSet<RuleGroup> = match (&self.local_rules, categories) {
+            (Some(enabled), Some(categories)) => {
+                categories.check("--local-rules", enabled, |group| group.category())?;
+                enabled.iter().copied().collect()
+            }
+            (Some(enabled), None) => enabled.iter().copied().collect(),
+            (None, Some(categories)) => categories
+                .filter(RuleGroup::all(), |group| group.category())
+                .into_iter()
+                .collect(),
+            (None, None) => RuleGroup::all(),
+        };
+        if let Some(categories) = categories {
+            let inline_names: Vec<_> = inline_rules.iter().map(|rule| &rule.name).collect();
+            let file_names: Vec<_> = file_rules.iter().map(|rule| &rule.name).collect();
+            categories.check("--local-rule", &inline_names, |_| Category::Other)?;
+            categories.check("--local-rules-file", &file_names, |_| Category::Other)?;
+            let finds_nothing = groups.iter().all(|group| *group == RuleGroup::Custom)
+                && inline_rules.is_empty()
+                && file_rules.is_empty();
+            if finds_nothing {
+                return Err(CategoriesError::NothingToFind {
+                    redacter: RedacterType::LocalRules,
+                    categories: categories.clone(),
+                }
+                .into());
+            }
+        }
+        for group in self.local_rules_disable.iter().flatten() {
+            groups.remove(group);
+        }
+        let user_rules = inline_rules.into_iter().chain(file_rules).collect();
+        Ok(LocalRulesRedacterOptions { groups, user_rules })
+    }
+
+    #[cfg(feature = "local-ner")]
+    fn local_ner_entities(
+        &self,
+        categories: Option<&Categories>,
+    ) -> Result<BTreeSet<Entity>, AppError> {
+        let entities: BTreeSet<Entity> = match (&self.local_ner_entities, categories) {
+            (Some(named), Some(categories)) => {
+                let names: Vec<&str> = named.iter().map(|entity| entity.as_str()).collect();
+                categories.check("--local-ner-entities", &names, |name| {
+                    Entity::label_category(name)
+                })?;
+                named.iter().copied().collect()
+            }
+            (Some(named), None) => named.iter().copied().collect(),
+            (None, Some(categories)) => categories
+                .filter(Entity::all(), |entity| entity.category())
+                .into_iter()
+                .collect(),
+            (None, None) => Entity::all(),
+        };
+        match categories {
+            Some(categories) if entities.is_empty() => Err(CategoriesError::NothingToFind {
+                redacter: RedacterType::LocalNer,
+                categories: categories.clone(),
+            }
+            .into()),
+            _ => Ok(entities),
+        }
+    }
+
+    #[cfg(feature = "local-gliner")]
+    fn local_gliner_labels(
+        &self,
+        categories: Option<&Categories>,
+    ) -> Result<Vec<String>, AppError> {
+        use crate::redacters::local_gliner::labels::{
+            default_labels, label_category, DEFAULT_LABELS,
+        };
+        let labels: Vec<String> = match (&self.local_gliner_labels, categories) {
+            (Some(named), Some(categories)) => {
+                categories.check("--local-gliner-labels", named, |label| {
+                    label_category(label)
+                })?;
+                named.clone()
+            }
+            (Some(named), None) => named.clone(),
+            (None, Some(categories)) => categories
+                .filter(DEFAULT_LABELS, |(_, category)| *category)
+                .into_iter()
+                .map(|(label, _)| label.to_string())
+                .collect(),
+            (None, None) => default_labels(),
+        };
+        match categories {
+            Some(categories) if labels.is_empty() => Err(CategoriesError::NothingToFind {
+                redacter: RedacterType::LocalGliner,
+                categories: categories.clone(),
+            }
+            .into()),
+            _ => Ok(labels),
+        }
+    }
+}
+
 impl TryInto<RedacterOptions> for RedacterArgs {
     type Error = AppError;
 
     fn try_into(self) -> Result<RedacterOptions, Self::Error> {
+        let categories = self
+            .categories
+            .as_deref()
+            .and_then(|chosen| Categories::limiting(chosen.iter().copied()));
+        if categories.is_some() {
+            self.check_options_with_categories()?;
+        }
+        let categories = categories.as_ref();
         let mut provider_options =
             Vec::with_capacity(self.redact.as_ref().map(Vec::len).unwrap_or(0));
-        for options in self.redact.unwrap_or_default() {
+        for options in self.redact.iter().flatten().copied() {
             let redacter_options = match options {
                 RedacterType::GcpDlp => match self.gcp_project_id {
-                    Some(ref project_id) => {
-                        Ok(RedacterProviderOptions::GcpDlp(GcpDlpRedacterOptions {
-                            project_id: project_id.clone(),
-                            user_defined_built_in_info_types: self
-                                .gcp_dlp_built_in_info_type
-                                .clone()
-                                .unwrap_or_default(),
-                            user_defined_stored_info_types: self
-                                .gcp_dlp_stored_info_type
-                                .clone()
-                                .unwrap_or_default(),
-                        }))
-                    }
+                    Some(ref project_id) => self
+                        .gcp_dlp_options(project_id, categories)
+                        .map(RedacterProviderOptions::GcpDlp),
                     None => Err(AppError::RedacterConfigError {
                         message: "GCP project id is required for GCP DLP redacter".to_string(),
                     }),
                 },
-                RedacterType::AwsComprehend => Ok(RedacterProviderOptions::AwsComprehend(
-                    crate::redacters::AwsComprehendRedacterOptions {
-                        region: self.aws_region.clone().map(aws_config::Region::new),
-                    },
-                )),
+                RedacterType::AwsComprehend => {
+                    if let Some(categories) = categories {
+                        if !AwsComprehendRedacter::finds_any_of(categories) {
+                            return Err(CategoriesError::NothingToFind {
+                                redacter: options,
+                                categories: categories.clone(),
+                            }
+                            .into());
+                        }
+                    }
+                    Ok(RedacterProviderOptions::AwsComprehend(
+                        crate::redacters::AwsComprehendRedacterOptions {
+                            region: self.aws_region.clone().map(aws_config::Region::new),
+                        },
+                    ))
+                }
                 RedacterType::Presidio => {
                     if self.presidio_text_analyze_url.is_none()
                         && self.presidio_image_redact_url.is_none()
@@ -640,6 +834,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         crate::redacters::PresidioRedacterOptions {
                             text_analyze_url: self.presidio_text_analyze_url.clone(),
                             image_redact_url: self.presidio_image_redact_url.clone(),
+                            categories: categories.cloned(),
                         },
                     ))
                 }
@@ -653,7 +848,8 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         })?,
                         gemini_model: self.gemini_model.clone(),
                         gemini_image_model: self.gemini_image_model.clone(),
-                        image_mode: self.llm_image_mode,
+                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        categories: categories.cloned(),
                     },
                 )),
                 RedacterType::OpenAiLlm => Ok(RedacterProviderOptions::OpenAiLlm(
@@ -666,7 +862,8 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         })?,
                         model: self.open_ai_model.clone(),
                         image_model: self.open_ai_image_model.clone(),
-                        image_mode: self.llm_image_mode,
+                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        categories: categories.cloned(),
                     },
                 )),
                 RedacterType::GcpVertexAi => Ok(RedacterProviderOptions::GcpVertexAi(
@@ -680,17 +877,19 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         gcp_region: self.gcp_region.clone().unwrap_or_else(|| {
                             GcpRegion::new(DEFAULT_GCP_VERTEX_AI_REGION.to_string())
                         }),
-                        image_mode: self.llm_image_mode,
+                        image_mode: self.llm_image_mode.unwrap_or_default(),
                         text_model: self.gcp_vertex_ai_text_model.clone(),
                         image_model: self.gcp_vertex_ai_image_model.clone(),
                         block_none_harmful: self.gcp_vertex_ai_block_none_harmful,
+                        categories: categories.cloned(),
                     },
                 )),
                 RedacterType::AwsBedrock => Ok(RedacterProviderOptions::AwsBedrock(
                     crate::redacters::AwsBedrockRedacterOptions {
                         region: self.aws_region.clone().map(aws_config::Region::new),
                         text_model: self.aws_bedrock_text_model.clone(),
-                        image_mode: self.llm_image_mode,
+                        image_mode: self.llm_image_mode.unwrap_or_default(),
+                        categories: categories.cloned(),
                     },
                 )),
                 RedacterType::AwsBedrockGuardrails => {
@@ -715,31 +914,12 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         },
                     ))
                 }
-                RedacterType::LocalRules => {
-                    let mut groups = match &self.local_rules {
-                        Some(enabled) => enabled.iter().copied().collect(),
-                        None => RuleGroup::all(),
-                    };
-                    for group in self.local_rules_disable.iter().flatten() {
-                        groups.remove(group);
-                    }
-                    let mut user_rules: Vec<UserRule> = Vec::new();
-                    for inline in self.local_rule.iter().flatten() {
-                        user_rules.push(crate::redacters::parse_inline_rule(inline)?);
-                    }
-                    for path in self.local_rules_file.iter().flatten() {
-                        user_rules.extend(crate::redacters::load_rules_file(path)?);
-                    }
-                    Ok(RedacterProviderOptions::LocalRules(
-                        LocalRulesRedacterOptions { groups, user_rules },
-                    ))
-                }
+                RedacterType::LocalRules => self
+                    .local_rules_options(categories)
+                    .map(RedacterProviderOptions::LocalRules),
                 #[cfg(feature = "local-ner")]
                 RedacterType::LocalNer => {
-                    let entities = match &self.local_ner_entities {
-                        Some(list) => list.iter().copied().collect(),
-                        None => Entity::all(),
-                    };
+                    let entities = self.local_ner_entities(categories)?;
                     LocalNerRedacterOptions::validated(entities, self.local_ner_min_score)
                         .map(RedacterProviderOptions::LocalNer)
                         .map_err(|err| AppError::RedacterConfigError {
@@ -753,10 +933,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 }),
                 #[cfg(feature = "local-gliner")]
                 RedacterType::LocalGliner => {
-                    let labels = match &self.local_gliner_labels {
-                        Some(list) => list.clone(),
-                        None => crate::redacters::local_gliner::labels::default_labels(),
-                    };
+                    let labels = self.local_gliner_labels(categories)?;
                     LocalGlinerRedacterOptions::validated(labels, self.local_gliner_min_score)
                         .map(RedacterProviderOptions::LocalGliner)
                         .map_err(|err| AppError::RedacterConfigError {
@@ -769,11 +946,20 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         .to_string(),
                 }),
                 #[cfg(feature = "local-credential-ml")]
-                RedacterType::LocalCredentialMl => Ok(RedacterProviderOptions::LocalCredentialMl(
-                    LocalCredentialMlRedacterOptions {
-                        min_score: self.local_credential_ml_min_score,
-                    },
-                )),
+                RedacterType::LocalCredentialMl => {
+                    if let Some(categories) = categories.filter(|c| !c.contains(Category::Credential)) {
+                        return Err(CategoriesError::NothingToFind {
+                            redacter: options,
+                            categories: categories.clone(),
+                        }
+                        .into());
+                    }
+                    Ok(RedacterProviderOptions::LocalCredentialMl(
+                        LocalCredentialMlRedacterOptions {
+                            min_score: self.local_credential_ml_min_score,
+                        },
+                    ))
+                }
                 #[cfg(not(feature = "local-credential-ml"))]
                 RedacterType::LocalCredentialMl => Err(AppError::RedacterConfigError {
                     message: "local-credential-ml is not available in this build (compiled without the local-credential-ml feature)"
@@ -790,6 +976,7 @@ impl TryInto<RedacterOptions> for RedacterArgs {
             csv_delimiter: self.csv_delimiter.map(|c| c as u8),
             sampling_size: self.sampling_size,
             limit_dlp_requests: self.limit_dlp_requests,
+            categories: categories.cloned(),
             list_redactions: false,
         };
         Ok(RedacterOptions {
@@ -1219,6 +1406,309 @@ mod tests {
             let err =
                 local_gliner_options(&["--local-gliner-labels", "person,email,"]).unwrap_err();
             assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+        }
+    }
+
+    mod categories {
+        use super::*;
+        use crate::redacters::{Categories, CategoriesError, Category};
+
+        fn options_of(args: &[&str]) -> Result<RedacterOptions, AppError> {
+            let cli = TestCli::try_parse_from([&["redacter"], args].concat())
+                .unwrap_or_else(|err| panic!("{err}"));
+            cli.redacter.try_into()
+        }
+
+        fn error_of(args: &[&str]) -> CategoriesError {
+            match options_of(args).unwrap_err() {
+                AppError::Categories(error) => error,
+                other => panic!("expected a categories error, got {other:?}"),
+            }
+        }
+
+        fn local_rules_of(args: &[&str]) -> LocalRulesRedacterOptions {
+            let options = options_of(&[&["-d", "local-rules"], args].concat()).unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalRules(options)) => options,
+                other => panic!("expected local rules options, got {other:?}"),
+            }
+        }
+
+        fn dlp_of(args: &[&str]) -> Result<GcpDlpRedacterOptions, AppError> {
+            let options =
+                options_of(&[&["-d", "gcp-dlp", "--gcp-project-id", "project"], args].concat())?;
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::GcpDlp(options)) => Ok(options),
+                other => panic!("expected GCP DLP options, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn categories_are_comma_separated_and_secrets_names_credential() {
+            let options =
+                options_of(&["-d", "local-rules", "--categories", "secrets,contact"]).unwrap();
+            assert_eq!(
+                options.base_options.categories,
+                Categories::limiting([Category::Credential, Category::Contact])
+            );
+        }
+
+        #[test]
+        fn choosing_every_category_limits_nothing() {
+            let every = Category::value_variants()
+                .iter()
+                .map(|category| category.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let options = options_of(&["-d", "local-rules", "--categories", &every]).unwrap();
+            assert_eq!(options.base_options.categories, None);
+        }
+
+        #[test]
+        fn categories_need_a_redacter() {
+            for args in [
+                &["redacter", "cp", "/a", "/b", "--categories", "credential"][..],
+                &["redacter", "scan", "/a", "--categories", "credential"],
+            ] {
+                let err = CliArgs::try_parse_from(args).unwrap_err();
+                assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+            }
+        }
+
+        #[test]
+        fn local_rules_groups_narrow_to_the_chosen_categories() {
+            assert_eq!(
+                local_rules_of(&["--categories", "credential"]).groups,
+                BTreeSet::from([RuleGroup::Url, RuleGroup::Secrets])
+            );
+            assert_eq!(
+                local_rules_of(&["--categories", "contact,other"]).groups,
+                BTreeSet::from([RuleGroup::Email, RuleGroup::Phone, RuleGroup::Custom])
+            );
+        }
+
+        #[test]
+        fn a_named_group_outside_the_categories_is_refused() {
+            let error = error_of(&[
+                "-d",
+                "local-rules",
+                "--local-rules",
+                "email,secrets",
+                "--categories",
+                "credential",
+            ]);
+            assert!(matches!(
+                error,
+                CategoriesError::ValueOutside {
+                    option: "--local-rules",
+                    ref value,
+                    category: Category::Contact,
+                } if value == "email"
+            ));
+        }
+
+        #[test]
+        fn a_user_rule_is_other() {
+            let rule = ["--local-rule", "employee=EMP[0-9]+"];
+            let error = error_of(
+                &[
+                    &["-d", "local-rules", "--categories", "credential"],
+                    &rule[..],
+                ]
+                .concat(),
+            );
+            assert!(matches!(
+                error,
+                CategoriesError::ValueOutside {
+                    option: "--local-rule",
+                    ref value,
+                    category: Category::Other,
+                } if value == "employee"
+            ));
+            let options =
+                local_rules_of(&[&["--categories", "credential,other"], &rule[..]].concat());
+            assert_eq!(options.user_rules.len(), 1);
+        }
+
+        #[test]
+        fn local_rules_with_only_user_rules_left_out_finds_nothing() {
+            let error = error_of(&["-d", "local-rules", "--categories", "other"]);
+            assert!(matches!(
+                error,
+                CategoriesError::NothingToFind {
+                    redacter: RedacterType::LocalRules,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn comprehend_without_an_entity_in_the_categories_finds_nothing() {
+            let error = error_of(&["-d", "aws-comprehend", "--categories", "date-of-birth"]);
+            assert!(matches!(
+                error,
+                CategoriesError::NothingToFind {
+                    redacter: RedacterType::AwsComprehend,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn dlp_info_types_narrow_to_the_chosen_categories() {
+            let narrowed = dlp_of(&["--categories", "network"]).unwrap();
+            assert_eq!(narrowed.built_in_info_types, ["IP_ADDRESS"]);
+
+            let every = dlp_of(&[]).unwrap();
+            assert_eq!(
+                every.built_in_info_types,
+                GcpDlpRedacter::default_info_types()
+            );
+        }
+
+        #[test]
+        fn dlp_info_types_the_user_added_outside_the_categories_are_refused() {
+            let built_in = dlp_of(&[
+                "--categories",
+                "credential",
+                "--gcp-dlp-built-in-info-type",
+                "EMAIL_ADDRESS",
+            ])
+            .unwrap_err();
+            assert!(matches!(
+                built_in,
+                AppError::Categories(CategoriesError::ValueOutside {
+                    option: "--gcp-dlp-built-in-info-type",
+                    category: Category::Contact,
+                    ..
+                })
+            ));
+            let stored = dlp_of(&[
+                "--categories",
+                "credential",
+                "--gcp-dlp-stored-info-type",
+                "employee",
+            ])
+            .unwrap_err();
+            assert!(matches!(
+                stored,
+                AppError::Categories(CategoriesError::ValueOutside {
+                    option: "--gcp-dlp-stored-info-type",
+                    category: Category::Other,
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn an_image_option_has_no_effect_under_categories() {
+            for (option, value) in [
+                ("--llm-image-mode", "native"),
+                ("--gemini-image-model", "models/image"),
+                (
+                    "--presidio-image-redact-url",
+                    "http://localhost:5003/redact",
+                ),
+            ] {
+                let error = error_of(&[
+                    "-d",
+                    "presidio",
+                    "--presidio-text-analyze-url",
+                    "http://localhost:5002/analyze",
+                    option,
+                    value,
+                    "--categories",
+                    "credential",
+                ]);
+                assert!(
+                    matches!(error, CategoriesError::NoEffect { option: refused } if refused == option),
+                    "{option}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_llm_image_mode_is_auto_unless_typed() {
+            let options = options_of(&["-d", "gemini-llm", "--gcp-project-id", "project"]).unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::GeminiLlm(options)) => {
+                    assert_eq!(options.image_mode, LlmImageMode::Auto)
+                }
+                other => panic!("expected Gemini options, got {other:?}"),
+            }
+        }
+
+        #[cfg(feature = "local-ner")]
+        #[test]
+        fn local_ner_entities_narrow_and_a_named_one_outside_is_refused() {
+            let options = options_of(&["-d", "local-ner", "--categories", "person"]).unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalNer(options)) => {
+                    assert_eq!(
+                        options.entities,
+                        BTreeSet::from([crate::redacters::Entity::Per])
+                    )
+                }
+                other => panic!("expected local ner options, got {other:?}"),
+            }
+            let error = error_of(&[
+                "-d",
+                "local-ner",
+                "--local-ner-entities",
+                "org",
+                "--categories",
+                "person",
+            ]);
+            assert!(matches!(
+                error,
+                CategoriesError::ValueOutside {
+                    option: "--local-ner-entities",
+                    category: Category::Other,
+                    ..
+                }
+            ));
+            let nothing = error_of(&["-d", "local-ner", "--categories", "credential"]);
+            assert!(matches!(
+                nothing,
+                CategoriesError::NothingToFind {
+                    redacter: RedacterType::LocalNer,
+                    ..
+                }
+            ));
+        }
+
+        #[cfg(feature = "local-gliner")]
+        #[test]
+        fn local_gliner_labels_narrow_and_none_in_the_categories_finds_nothing() {
+            let options = options_of(&["-d", "local-gliner", "--categories", "network"]).unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalGliner(options)) => {
+                    assert_eq!(options.labels, ["ip address"])
+                }
+                other => panic!("expected local gliner options, got {other:?}"),
+            }
+            let nothing = error_of(&["-d", "local-gliner", "--categories", "credential"]);
+            assert!(matches!(
+                nothing,
+                CategoriesError::NothingToFind {
+                    redacter: RedacterType::LocalGliner,
+                    ..
+                }
+            ));
+        }
+
+        #[cfg(feature = "local-credential-ml")]
+        #[test]
+        fn local_credential_ml_needs_the_credential_category() {
+            let error = error_of(&["-d", "local-credential-ml", "--categories", "contact"]);
+            assert!(matches!(
+                error,
+                CategoriesError::NothingToFind {
+                    redacter: RedacterType::LocalCredentialMl,
+                    ..
+                }
+            ));
+            assert!(options_of(&["-d", "local-credential-ml", "--categories", "secrets"]).is_ok());
         }
     }
 

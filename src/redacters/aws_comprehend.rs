@@ -2,8 +2,9 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    mask_detections, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
-    Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    mask_detections, Categories, Category, CharOffsets, Detection, DetectionLabel, Detections,
+    RedactSupport, Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    TextLines,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -25,7 +26,6 @@ pub struct AwsComprehendRedacter<'a> {
 impl<'a> AwsComprehendRedacter<'a> {
     /// The category of a finding of the PII entity type `name`, other for a type this
     /// version of the SDK does not know.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired in with --categories"))]
     pub fn entity_category(name: &str) -> Category {
         match PiiEntityType::from(name) {
             PiiEntityType::Name | PiiEntityType::Username => Category::Person,
@@ -63,6 +63,13 @@ impl<'a> AwsComprehendRedacter<'a> {
             PiiEntityType::Age | PiiEntityType::DateTime | PiiEntityType::All => Category::Other,
             _ => Category::Other,
         }
+    }
+
+    /// Whether Comprehend has a PII entity type in any of `categories`.
+    pub fn finds_any_of(categories: &Categories) -> bool {
+        PiiEntityType::values()
+            .iter()
+            .any(|name| categories.contains(Self::entity_category(name)))
     }
 
     pub async fn new(
