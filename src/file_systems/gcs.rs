@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use gcloud_sdk::google::storage::v2::storage_client::StorageClient;
 use gcloud_sdk::google::storage::v2::{
     write_object_request, ChecksummedData, GetObjectRequest, ListObjectsRequest, Object,
-    ReadObjectRequest, WriteObjectRequest, WriteObjectSpec,
+    ObjectChecksums, ReadObjectRequest, ReadObjectResponse, WriteObjectRequest, WriteObjectSpec,
 };
 use gcloud_sdk::prost::bytes;
 use gcloud_sdk::prost::bytes::{Bytes, BytesMut};
@@ -18,7 +18,9 @@ use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use rvstruct::ValueStruct;
 use std::collections::VecDeque;
 use std::default::Default;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{ready, Context, Poll};
 
 const GCS_GRPC_ENDPOINT: &str = "https://storage.googleapis.com";
 
@@ -146,11 +148,14 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
 
 /// Splits an arbitrary sequence of byte chunks into `WriteObject` messages with
 /// 256 KiB-aligned payloads, cumulative write offsets, and a `WriteObjectSpec`
-/// carried by the first message of the stream.
+/// carried by the first message of the stream. Every message carries the CRC32C
+/// of its payload and the closing one the CRC32C of the whole object, so the
+/// server rejects data that was damaged on the way.
 struct WriteObjectChunker {
     first_message: Option<write_object_request::FirstMessage>,
     buffer: BytesMut,
     write_offset: i64,
+    object_crc32c: u32,
 }
 
 impl WriteObjectChunker {
@@ -159,12 +164,15 @@ impl WriteObjectChunker {
             first_message: Some(write_object_request::FirstMessage::WriteObjectSpec(spec)),
             buffer: BytesMut::new(),
             write_offset: 0,
+            object_crc32c: 0,
         }
     }
 
     fn message(&mut self, content: Vec<u8>, finish_write: bool) -> WriteObjectRequest {
         let write_offset = self.write_offset;
         self.write_offset = write_offset.saturating_add(content.len() as i64);
+        let message_crc32c = crc32c::crc32c(&content);
+        self.object_crc32c = crc32c::crc32c_append(self.object_crc32c, &content);
         WriteObjectRequest {
             write_offset,
             finish_write,
@@ -172,9 +180,13 @@ impl WriteObjectChunker {
             data: Some(write_object_request::Data::ChecksummedData(
                 ChecksummedData {
                     content,
-                    crc32c: None,
+                    crc32c: Some(message_crc32c),
                 },
             )),
+            object_checksums: finish_write.then(|| ObjectChecksums {
+                crc32c: Some(self.object_crc32c),
+                md5_hash: Vec::new(),
+            }),
             ..WriteObjectRequest::default()
         }
     }
@@ -234,6 +246,119 @@ where
     })
 }
 
+/// Checks the CRC32C digests the server sends with a `ReadObject` stream: every
+/// message that carries one is verified as it arrives, and the whole-object
+/// digest, which the server may send on any message, is verified once the
+/// stream ends.
+struct ReadObjectVerifier {
+    object: String,
+    bytes_read: u64,
+    computed_object_crc32c: u32,
+    expected_object_crc32c: Option<u32>,
+}
+
+impl ReadObjectVerifier {
+    fn new(object: String) -> Self {
+        Self {
+            object,
+            bytes_read: 0,
+            computed_object_crc32c: 0,
+            expected_object_crc32c: None,
+        }
+    }
+
+    /// Returns the message payload once it has passed its own CRC32C check.
+    fn accept(&mut self, response: ReadObjectResponse) -> AppResult<Bytes> {
+        if let Some(expected) = response
+            .object_checksums
+            .and_then(|checksums| checksums.crc32c)
+        {
+            self.expected_object_crc32c = Some(expected);
+        }
+        let Some(data) = response.checksummed_data else {
+            return Ok(Bytes::new());
+        };
+        let message_crc32c = crc32c::crc32c(&data.content);
+        if let Some(expected) = data.crc32c.filter(|expected| *expected != message_crc32c) {
+            return Err(AppError::GoogleCloudMessageChecksumMismatch {
+                object: self.object.clone(),
+                offset: self.bytes_read,
+                expected,
+                computed: message_crc32c,
+            });
+        }
+        self.bytes_read = self.bytes_read.saturating_add(data.content.len() as u64);
+        self.computed_object_crc32c =
+            crc32c::crc32c_append(self.computed_object_crc32c, &data.content);
+        Ok(Bytes::from(data.content))
+    }
+
+    /// Compares the whole-object digest with the bytes seen, when the server
+    /// provided one.
+    fn finish(self) -> AppResult<()> {
+        match self.expected_object_crc32c {
+            Some(expected) if expected != self.computed_object_crc32c => {
+                Err(AppError::GoogleCloudObjectChecksumMismatch {
+                    object: self.object,
+                    expected,
+                    computed: self.computed_object_crc32c,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Turns the `ReadObject` response stream into the payload stream, failing it
+/// with a checksum error instead of ending normally when the data does not
+/// match what the server digested. The stream ends after its first error.
+struct VerifiedReadStream<S> {
+    responses: S,
+    verifier: Option<ReadObjectVerifier>,
+}
+
+impl<S> VerifiedReadStream<S> {
+    fn new(responses: S, object: String) -> Self {
+        Self {
+            responses,
+            verifier: Some(ReadObjectVerifier::new(object)),
+        }
+    }
+}
+
+impl<S> Stream for VerifiedReadStream<S>
+where
+    S: Stream<Item = Result<ReadObjectResponse, tonic::Status>> + Unpin,
+{
+    type Item = AppResult<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let Some(verifier) = this.verifier.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match ready!(Pin::new(&mut this.responses).poll_next(cx)) {
+            Some(Ok(response)) => match verifier.accept(response) {
+                Ok(payload) => Poll::Ready(Some(Ok(payload))),
+                Err(err) => {
+                    this.verifier = None;
+                    Poll::Ready(Some(Err(err)))
+                }
+            },
+            Some(Err(status)) => {
+                this.verifier = None;
+                Poll::Ready(Some(Err(status.into())))
+            }
+            None => Poll::Ready(
+                this.verifier
+                    .take()
+                    .and_then(|verifier| verifier.finish().err())
+                    .map(Err),
+            ),
+        }
+    }
+}
+
 impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
     async fn download(
         &mut self,
@@ -281,7 +406,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
             .get()
             .read_object(self.request(ReadObjectRequest {
                 bucket: self.bucket_resource_name.clone(),
-                object: object_name,
+                object: object_name.clone(),
                 ..ReadObjectRequest::default()
             }))
             .await?
@@ -289,16 +414,7 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
 
         Ok((
             found_file_ref,
-            Box::new(read_stream.map(|response| {
-                response
-                    .map(|response| {
-                        response
-                            .checksummed_data
-                            .map(|data| Bytes::from(data.content))
-                            .unwrap_or_default()
-                    })
-                    .map_err(AppError::from)
-            })),
+            Box::new(VerifiedReadStream::new(read_stream, object_name)),
         ))
     }
 
@@ -397,6 +513,7 @@ mod tests {
     use super::*;
     use crate::reporter::AppReporter;
     use futures::TryStreamExt;
+    use gcloud_sdk::google::storage::v2::DeleteObjectRequest;
 
     /// The gRPC transport needs a process-level rustls provider, which the
     /// binary installs in `main` and the test harness does not.
@@ -548,6 +665,208 @@ mod tests {
         assert!(matches!(*parked, Some(AppError::SystemError { .. })));
     }
 
+    fn message_checksum(request: &WriteObjectRequest) -> Option<u32> {
+        match request.data {
+            Some(write_object_request::Data::ChecksummedData(ref data)) => data.crc32c,
+            None => None,
+        }
+    }
+
+    /// The standard CRC32C check value: the checksum of the ASCII digits "123456789".
+    const CRC32C_OF_DIGITS: u32 = 0xE306_9283;
+
+    #[tokio::test]
+    async fn write_object_chunker_matches_the_crc32c_check_value() {
+        let requests: Vec<WriteObjectRequest> = write_object_requests(
+            futures::stream::iter(vec![Ok(Bytes::from_static(b"123456789"))]),
+            test_write_object_spec(),
+            Arc::new(Mutex::new(None)),
+        )
+        .collect()
+        .await;
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(message_checksum(&requests[0]), Some(CRC32C_OF_DIGITS));
+        assert_eq!(
+            requests[0]
+                .object_checksums
+                .as_ref()
+                .and_then(|checksums| checksums.crc32c),
+            Some(CRC32C_OF_DIGITS)
+        );
+    }
+
+    #[tokio::test]
+    async fn write_object_chunker_checksums_every_message() {
+        let (_, requests) =
+            chunk_input(&[1, WRITE_OBJECT_CHUNK_SIZE * 3 + 17, WRITE_OBJECT_CHUNK_SIZE]).await;
+
+        assert!(requests.len() > 2);
+        for (index, request) in requests.iter().enumerate() {
+            assert_eq!(
+                message_checksum(request),
+                Some(crc32c::crc32c(message_content(request))),
+                "message {index} checksum"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn write_object_chunker_sends_the_object_checksum_on_the_last_message_only() {
+        let (expected, requests) = chunk_input(&[
+            1,
+            WRITE_OBJECT_CHUNK_SIZE - 1,
+            WRITE_OBJECT_CHUNK_SIZE * 2 + 17,
+            5,
+        ])
+        .await;
+
+        let Some((last, earlier)) = requests.split_last() else {
+            panic!("the chunker must always emit a final message");
+        };
+        assert!(!earlier.is_empty());
+        assert!(
+            earlier
+                .iter()
+                .all(|request| request.object_checksums.is_none()),
+            "only the closing message may carry the object checksums"
+        );
+        assert_eq!(
+            last.object_checksums,
+            Some(ObjectChecksums {
+                crc32c: Some(crc32c::crc32c(&expected)),
+                md5_hash: Vec::new(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn write_object_chunker_checksums_an_empty_object() {
+        let (_, requests) = chunk_input(&[]).await;
+
+        assert_eq!(message_checksum(&requests[0]), Some(0));
+        assert_eq!(
+            requests[0]
+                .object_checksums
+                .as_ref()
+                .and_then(|checksums| checksums.crc32c),
+            Some(0)
+        );
+    }
+
+    fn read_response(
+        content: &[u8],
+        message_crc32c: Option<u32>,
+        object_crc32c: Option<u32>,
+    ) -> ReadObjectResponse {
+        ReadObjectResponse {
+            checksummed_data: Some(ChecksummedData {
+                content: content.to_vec(),
+                crc32c: message_crc32c,
+            }),
+            object_checksums: object_crc32c.map(|crc32c| ObjectChecksums {
+                crc32c: Some(crc32c),
+                md5_hash: Vec::new(),
+            }),
+            ..ReadObjectResponse::default()
+        }
+    }
+
+    async fn read_verified(responses: Vec<ReadObjectResponse>) -> Vec<AppResult<Bytes>> {
+        VerifiedReadStream::new(
+            futures::stream::iter(responses.into_iter().map(Ok)),
+            "redacter/test-object.bin".to_string(),
+        )
+        .collect()
+        .await
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_passes_matching_data_through() {
+        let object_crc32c = crc32c::crc32c(b"hello, world");
+        let items = read_verified(vec![
+            read_response(
+                b"hello, ",
+                Some(crc32c::crc32c(b"hello, ")),
+                Some(object_crc32c),
+            ),
+            read_response(b"world", Some(crc32c::crc32c(b"world")), None),
+        ])
+        .await;
+
+        let payloads: Vec<Bytes> = items
+            .into_iter()
+            .collect::<AppResult<_>>()
+            .expect("matching checksums must not fail the stream");
+        assert_eq!(payloads.concat(), b"hello, world");
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_passes_unchecksummed_data_through() {
+        let items = read_verified(vec![
+            read_response(b"hello, ", None, None),
+            read_response(b"world", None, None),
+        ])
+        .await;
+
+        let payloads: Vec<Bytes> = items
+            .into_iter()
+            .collect::<AppResult<_>>()
+            .expect("a server that sends no checksums must not fail the stream");
+        assert_eq!(payloads.concat(), b"hello, world");
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_rejects_a_corrupted_message() {
+        let mut items = read_verified(vec![
+            read_response(b"hello, ", Some(crc32c::crc32c(b"hello, ")), None),
+            read_response(b"w0rld", Some(crc32c::crc32c(b"world")), None),
+            read_response(b"never read", None, None),
+        ])
+        .await;
+
+        assert_eq!(
+            items.len(),
+            2,
+            "the stream must end at the corrupted message"
+        );
+        assert!(items.remove(0).is_ok());
+        assert!(matches!(
+            items.remove(0),
+            Err(AppError::GoogleCloudMessageChecksumMismatch { offset: 7, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_rejects_a_wrong_object_checksum() {
+        let items = read_verified(vec![
+            read_response(b"hello, ", None, Some(crc32c::crc32c(b"hello, world"))),
+            read_response(b"w0rld", None, None),
+        ])
+        .await;
+
+        assert_eq!(items.len(), 3, "both payloads, then the checksum failure");
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectChecksumMismatch { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_read_stream_rejects_a_truncated_object() {
+        let items = read_verified(vec![read_response(
+            b"hello, ",
+            Some(crc32c::crc32c(b"hello, ")),
+            Some(crc32c::crc32c(b"hello, world")),
+        )])
+        .await;
+
+        assert!(matches!(
+            items.last(),
+            Some(Err(AppError::GoogleCloudObjectChecksumMismatch { .. }))
+        ));
+    }
+
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-gcp"), ignore)]
     async fn upload_download_test() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -633,6 +952,169 @@ mod tests {
 
         fs.close().await?;
 
+        Ok(())
+    }
+
+    type LiveTestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    async fn live_file_system<'a>(
+        reporter: &'a AppReporter<'a>,
+        directory: &str,
+    ) -> AppResult<GoogleCloudStorageFileSystem<'a>> {
+        install_crypto_provider();
+        let test_gcp_bucket_name =
+            std::env::var("TEST_GCS_BUCKET_NAME").expect("TEST_GCS_BUCKET_NAME required");
+        GoogleCloudStorageFileSystem::new(
+            &format!("gs://{test_gcp_bucket_name}/redacter/{directory}/"),
+            reporter,
+        )
+        .await
+    }
+
+    async fn delete_live_object(
+        fs: &GoogleCloudStorageFileSystem<'_>,
+        object: &str,
+    ) -> LiveTestResult {
+        let request = fs.request(DeleteObjectRequest {
+            bucket: fs.bucket_resource_name.clone(),
+            object: object.to_string(),
+            ..DeleteObjectRequest::default()
+        });
+        match fs.client.get().delete_object(request).await {
+            Ok(_) => Ok(()),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(()),
+            Err(status) => Err(status.into()),
+        }
+    }
+
+    async fn live_object_exists(
+        fs: &GoogleCloudStorageFileSystem<'_>,
+        object: &str,
+    ) -> Result<bool, tonic::Status> {
+        let request = fs.request(GetObjectRequest {
+            bucket: fs.bucket_resource_name.clone(),
+            object: object.to_string(),
+            ..GetObjectRequest::default()
+        });
+        match fs.client.get().get_object(request).await {
+            Ok(_) => Ok(true),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
+            Err(status) => Err(status),
+        }
+    }
+
+    /// Sends the object through `WriteObject` with `tamper` applied to every
+    /// request after it was checksummed, the way a bit flip on the wire would.
+    async fn write_tampered_object(
+        fs: &GoogleCloudStorageFileSystem<'_>,
+        object: &str,
+        content: Vec<u8>,
+        mut tamper: impl FnMut(&mut WriteObjectRequest) + Send + 'static,
+    ) -> Result<(), tonic::Status> {
+        let spec = WriteObjectSpec {
+            resource: Some(Object {
+                name: object.to_string(),
+                bucket: fs.bucket_resource_name.clone(),
+                ..Object::default()
+            }),
+            ..WriteObjectSpec::default()
+        };
+        let requests = write_object_requests(
+            futures::stream::iter(vec![Ok(Bytes::from(content))]),
+            spec,
+            Arc::new(Mutex::new(None)),
+        )
+        .map(move |mut request| {
+            tamper(&mut request);
+            request
+        });
+        fs.client
+            .get()
+            .write_object(fs.request(requests))
+            .await
+            .map(|_| ())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn multi_chunk_round_trip_keeps_the_bytes() -> LiveTestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let mut fs = live_file_system(&reporter, "test-crc32c-round-trip").await?;
+
+        let content: Vec<u8> = (0..WRITE_OBJECT_CHUNK_SIZE * 3 + 12_345)
+            .map(|index| (index as u32).wrapping_mul(2_654_435_761).to_le_bytes()[3])
+            .collect();
+        let input: Vec<AppResult<Bytes>> = content
+            .chunks(100_000)
+            .map(|piece| Ok(Bytes::copy_from_slice(piece)))
+            .collect();
+        let file_ref = FileSystemRef {
+            relative_path: "round-trip.bin".into(),
+            media_type: Some(mime::APPLICATION_OCTET_STREAM),
+            file_size: Some(content.len()),
+        };
+
+        let outcome: LiveTestResult = async {
+            fs.upload(futures::stream::iter(input), Some(&file_ref))
+                .await?;
+            let (_, down_stream) = fs.download(Some(&file_ref)).await?;
+            let downloaded: Vec<Bytes> = down_stream.try_collect().await?;
+            assert_eq!(downloaded.concat(), content);
+            Ok(())
+        }
+        .await;
+
+        let object = fs.resolve(Some(&file_ref)).file_path;
+        delete_live_object(&fs, &object).await?;
+        outcome
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn upload_with_a_wrong_object_checksum_is_rejected() -> LiveTestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let fs = live_file_system(&reporter, "test-crc32c-object-rejected").await?;
+        let object = "redacter/test-crc32c-object-rejected/object.bin";
+        delete_live_object(&fs, object).await?;
+
+        let outcome = write_tampered_object(&fs, object, b"object checksum".to_vec(), |request| {
+            if let Some(checksums) = request.object_checksums.as_mut() {
+                checksums.crc32c = checksums.crc32c.map(|crc32c| !crc32c);
+            }
+        })
+        .await;
+        let created = live_object_exists(&fs, object).await;
+
+        delete_live_object(&fs, object).await?;
+        let status = outcome.expect_err("the server must reject a wrong object checksum");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(!created?, "a rejected upload must not create the object");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn upload_with_a_wrong_message_checksum_is_rejected() -> LiveTestResult {
+        let term = console::Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let fs = live_file_system(&reporter, "test-crc32c-message-rejected").await?;
+        let object = "redacter/test-crc32c-message-rejected/object.bin";
+        delete_live_object(&fs, object).await?;
+
+        let outcome = write_tampered_object(&fs, object, b"message checksum".to_vec(), |request| {
+            if let Some(write_object_request::Data::ChecksummedData(data)) = request.data.as_mut() {
+                data.crc32c = data.crc32c.map(|crc32c| !crc32c);
+            }
+        })
+        .await;
+        let created = live_object_exists(&fs, object).await;
+
+        delete_live_object(&fs, object).await?;
+        let status = outcome.expect_err("the server must reject a wrong message checksum");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(!created?, "a rejected upload must not create the object");
         Ok(())
     }
 }

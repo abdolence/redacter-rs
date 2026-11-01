@@ -21,6 +21,25 @@ pub enum AppError {
     GoogleCloudGrpcError(#[from] gcloud_sdk::tonic::Status),
     #[error("Google Cloud invalid metadata value:\n{0}")]
     GoogleCloudInvalidMetadataValue(#[from] InvalidMetadataValue),
+    #[error(
+        "Google Cloud Storage object '{object}' failed the CRC32C check of the message at byte \
+         {offset}: expected {expected:#010x}, computed {computed:#010x}"
+    )]
+    GoogleCloudMessageChecksumMismatch {
+        object: String,
+        offset: u64,
+        expected: u32,
+        computed: u32,
+    },
+    #[error(
+        "Google Cloud Storage object '{object}' failed the whole-object CRC32C check: expected \
+         {expected:#010x}, computed {computed:#010x}"
+    )]
+    GoogleCloudObjectChecksumMismatch {
+        object: String,
+        expected: u32,
+        computed: u32,
+    },
     #[error("AWS SDK error occurred")]
     AwsSdkError(#[from] Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("AWS Bedrock error: {message}")]

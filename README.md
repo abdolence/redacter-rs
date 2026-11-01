@@ -421,6 +421,10 @@ killed, or whose `AbortMultipartUpload` request fails, leaves its stored parts b
 `AbortIncompleteMultipartUpload` lifecycle rule to the bucket to remove them. A bucket encrypted with SSE-KMS needs the
 `kms:Decrypt` permission, besides `kms:GenerateDataKey`, for uploads over one part.
 
+GCS uploads and downloads are verified with CRC32C. Cloud Storage rejects an upload whose data does not match the
+checksum sent with it, so no object is created. A download is checked against the checksum of the whole object, and a
+mismatch fails the copy with a checksum error.
+
 ## DLP and redacters
 
 ### Google Cloud Platform DLP
