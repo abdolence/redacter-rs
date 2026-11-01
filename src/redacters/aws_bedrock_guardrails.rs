@@ -11,7 +11,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     bedrock_error, Category, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -243,6 +243,10 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::AwsBedrockGuardrails
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Label
     }
 }
 

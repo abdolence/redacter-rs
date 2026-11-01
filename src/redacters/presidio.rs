@@ -253,7 +253,7 @@ impl<'a> PresidioRedacter<'a> {
         }?;
 
         let detections = self.detect_text(&text_content).await?;
-        let redacted_text_content = mask_detections(&text_content, &detections);
+        let redacted_text_content = mask_detections(&text_content, &detections, self.text_mask());
         Ok(Redacted::located(
             RedacterDataItem {
                 file_ref: input.file_ref,

@@ -3,12 +3,12 @@
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
-use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::text_spans::{Finding, RuleName, REDACTED};
 #[cfg(feature = "local-ner")]
 use crate::redacters::Entity;
 use crate::redacters::{
     AwsBedrockGuardrailsRedacter, AwsComprehendRedacter, Category, GcpDlpRedacter, LlmTextFinding,
-    PresidioRedacter, RuleSet,
+    PresidioRedacter, RuleSet, TextMask,
 };
 use crate::AppResult;
 use serde::Serialize;
@@ -561,28 +561,44 @@ impl CharOffsets {
     }
 }
 
-/// `text` with every text range of `detections` replaced by one `X` per character. Ranges
-/// may overlap or arrive in any order.
-pub(crate) fn mask_detections(text: &str, detections: &[Detection]) -> String {
-    let mut ranges: Vec<(usize, usize)> = detections
+/// `text` with every text range of `detections` replaced as `mask` says. Ranges may overlap
+/// or arrive in any order; overlapping ranges are masked as one, and `TextMask::Label` names
+/// the label of the one that starts first.
+pub(crate) fn mask_detections(text: &str, detections: &[Detection], mask: TextMask) -> String {
+    let mut ranges: Vec<(Range<usize>, &DetectionLabel)> = detections
         .iter()
         .filter_map(|detection| match detection.location {
-            DetectionLocation::Text { start, end, .. } => Some((start, end)),
+            DetectionLocation::Text { start, end, .. } if start < end => {
+                Some((start..end, &detection.label))
+            }
             _ => None,
         })
         .collect();
-    ranges.sort_unstable();
+    ranges.sort_by_key(|(range, _)| (range.start, std::cmp::Reverse(range.end)));
+    let mut merged: Vec<(Range<usize>, &DetectionLabel)> = Vec::with_capacity(ranges.len());
+    for (range, label) in ranges {
+        match merged.last_mut() {
+            Some((last, _)) if range.start < last.end => last.end = last.end.max(range.end),
+            _ => merged.push((range, label)),
+        }
+    }
 
     let mut masked = String::with_capacity(text.len());
     let mut cursor = 0;
-    for (start, end) in ranges {
-        let start = start.max(cursor);
-        if end <= start {
-            continue;
+    for (range, label) in merged {
+        masked.push_str(&text[cursor..range.start]);
+        match mask {
+            TextMask::Token => masked.push_str(REDACTED),
+            TextMask::EveryCharacter => {
+                masked.extend(text[range.clone()].chars().map(|_| 'X'));
+            }
+            TextMask::Label => {
+                masked.push('{');
+                masked.push_str(&label.0);
+                masked.push('}');
+            }
         }
-        masked.push_str(&text[cursor..start]);
-        masked.extend(text[start..end].chars().map(|_| 'X'));
-        cursor = end;
+        cursor = range.end;
     }
     masked.push_str(&text[cursor..]);
     masked
@@ -980,9 +996,40 @@ mod tests {
                 detection("Zoë Keller"),
                 detection("Keller: zoe"),
             ],
+            TextMask::EveryCharacter,
         );
 
         assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
+    }
+
+    #[test]
+    fn a_mask_writes_the_look_of_its_provider() {
+        let text = "Ana wrote to ana@example.com";
+        let lines = TextLines::new(text);
+        let detections = [
+            lines
+                .detection(0..3, DetectionLabel::new("NAME"), None)
+                .unwrap(),
+            lines
+                .detection(13..28, DetectionLabel::new("EMAIL"), None)
+                .unwrap(),
+            lines
+                .detection(17..28, DetectionLabel::new("URL"), None)
+                .unwrap(),
+        ];
+
+        assert_eq!(
+            mask_detections(text, &detections, TextMask::Token),
+            "[REDACTED] wrote to [REDACTED]"
+        );
+        assert_eq!(
+            mask_detections(text, &detections, TextMask::EveryCharacter),
+            "XXX wrote to XXXXXXXXXXXXXXX"
+        );
+        assert_eq!(
+            mask_detections(text, &detections, TextMask::Label),
+            "{NAME} wrote to {EMAIL}"
+        );
     }
 
     #[test]

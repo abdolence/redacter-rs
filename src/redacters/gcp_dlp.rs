@@ -4,7 +4,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Category, Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines, TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -445,6 +445,10 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::GcpDlp
+    }
+
+    fn text_mask(&self) -> TextMask {
+        TextMask::Token
     }
 }
 

@@ -1,7 +1,7 @@
 //! The categories `--categories` chose, and the errors of choosing them.
 
 use crate::args::RedacterType;
-use crate::redacters::{Category, Detections};
+use crate::redacters::{mask_detections, Category, Detection, Detections, TextMask};
 use clap::ValueEnum;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -84,8 +84,6 @@ pub enum CategoriesError {
     },
     #[error("{option} has no effect with --categories, which reads images with OCR")]
     NoEffect { option: &'static str },
-    #[error("{redacter} cannot limit cp to the chosen categories, only scan can")]
-    CopyUnsupported { redacter: RedacterType },
     #[error("{redacter} named {values} value(s) it could not place in the text, so they cannot be redacted")]
     Unlocated {
         redacter: RedacterType,
@@ -102,12 +100,32 @@ impl Detections {
         self.unlocated
             .retain(|label| categories.contains(label.category(redacter)));
     }
+
+    /// `text` with the findings of `redacter` in `categories` masked as `mask` says and
+    /// everything else untouched, and the findings that were masked. Fails when a value in
+    /// the categories was named but not placed in `text`, since it cannot be masked.
+    pub fn masked_within(
+        mut self,
+        text: &str,
+        redacter: RedacterType,
+        mask: TextMask,
+        categories: &Categories,
+    ) -> Result<(String, Vec<Detection>), CategoriesError> {
+        self.retain_categories(redacter, categories);
+        if !self.unlocated.is_empty() {
+            return Err(CategoriesError::Unlocated {
+                redacter,
+                values: self.unlocated.len(),
+            });
+        }
+        Ok((mask_detections(text, &self.found, mask), self.found))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::{Detection, DetectionLabel, DetectionLocation};
+    use crate::redacters::{Detection, DetectionLabel, DetectionLocation, TextLines};
 
     fn chosen(categories: &[Category]) -> Categories {
         Categories::limiting(categories.iter().copied()).unwrap()
@@ -172,6 +190,87 @@ mod tests {
             kept.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             ["password", "ip"]
         );
+    }
+
+    fn located(text: &str, value: &str, label: &str) -> Detection {
+        let start = text.find(value).unwrap();
+        TextLines::new(text)
+            .detection(start..start + value.len(), DetectionLabel::new(label), None)
+            .unwrap()
+    }
+
+    #[test]
+    fn masking_within_the_categories_leaves_the_rest_of_the_text_alone() {
+        let text = "key=hunter2-Secret mail=ops@example.com";
+        let detections = Detections::from(vec![
+            located(text, "hunter2-Secret", "password"),
+            located(text, "ops@example.com", "email_address"),
+        ]);
+
+        let (masked, replaced) = detections
+            .masked_within(
+                text,
+                RedacterType::GeminiLlm,
+                TextMask::EveryCharacter,
+                &chosen(&[Category::Credential]),
+            )
+            .unwrap();
+
+        assert_eq!(masked, "key=XXXXXXXXXXXXXX mail=ops@example.com");
+        assert_eq!(
+            replaced
+                .iter()
+                .map(|d| d.value.as_str())
+                .collect::<Vec<_>>(),
+            ["hunter2-Secret"]
+        );
+    }
+
+    #[test]
+    fn a_value_in_the_categories_that_was_not_placed_cannot_be_masked() {
+        let text = "key=hunter2-Secret";
+        let detections = Detections {
+            unlocated: vec![DetectionLabel::new("password")],
+            ..Detections::default()
+        };
+
+        let error = detections
+            .masked_within(
+                text,
+                RedacterType::GeminiLlm,
+                TextMask::EveryCharacter,
+                &chosen(&[Category::Credential]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CategoriesError::Unlocated {
+                redacter: RedacterType::GeminiLlm,
+                values: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn a_value_outside_the_categories_that_was_not_placed_is_no_error() {
+        let text = "mail=ops@example.com";
+        let detections = Detections {
+            unlocated: vec![DetectionLabel::new("email_address")],
+            ..Detections::default()
+        };
+
+        let (masked, replaced) = detections
+            .masked_within(
+                text,
+                RedacterType::GeminiLlm,
+                TextMask::EveryCharacter,
+                &chosen(&[Category::Credential]),
+            )
+            .unwrap();
+
+        assert_eq!(masked, text);
+        assert!(replaced.is_empty());
     }
 
     #[test]
