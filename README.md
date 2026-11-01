@@ -1125,6 +1125,7 @@ by `*`, so the length shows, except the first and the last character of a value 
 number or an ID can be reversed by trying every candidate.
 
 `--show-values` shows the values as found, in the terminal output and in the report file.
+The SARIF report is the exception and always holds masked values.
 Be aware that a report written with `--show-values` contains the sensitive data itself.
 
 ### Scores
@@ -1185,7 +1186,7 @@ path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish pe
 
 ### JSON report
 
-`--report-file <FILE>` writes the report to a file in JSON by default. The terminal always shows the usual output,
+`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text` or `sarif`. The terminal always shows the usual output,
 whatever the report options are; there is no mode that prints the JSON to stdout.
 
 The report is one JSON object with the counters of the run and an entry for each file:
@@ -1228,6 +1229,70 @@ Fields are only ever added to the report, never renamed or removed.
 
 `--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
 enough for the longest path, so no path is shortened.
+
+### SARIF report
+
+`--report-format sarif` writes the report as [SARIF](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+2.1.0, the format GitHub code scanning reads, so the findings show in the code scanning tab and as annotations on pull
+requests. `cp` does not write it.
+
+| SARIF | What `scan` writes |
+|---|---|
+| `tool.driver` | `redacter`, its version and the repository URL |
+| rule | One for each redacter and label found, with the `ruleId` `<redacter>/<label>`, such as `local-rules/email`, and `redacter/unconfirmed` for unconfirmed files |
+| `level` | `error` for a finding, `warning` for an unconfirmed file |
+| text finding | A `region` with `startLine`, `startColumn`, `endLine` and `endColumn`, counted from 1; `endColumn` is the column after the last character |
+| table cell | No region, since the line of a cell in its file is not known; the message gives the row and column |
+| image or PDF page | No region; the message gives the page and the box in pixels |
+| unconfirmed file | One result for the file, without a region |
+| failed, blocked and unsupported files | `invocations[0].toolExecutionNotifications` with the reason; `executionSuccessful` is `false` when a file failed or is blocked |
+| skipped files | Not reported |
+| `partialFingerprints` | `primaryLocationLineHash`, see below |
+
+Columns count characters (Unicode code points), as in the other reports, and the run says so with
+`columnKind` `unicodeCodePoints`. GitHub shows a result under the file of its location, and a pull request annotation
+needs a line in the diff, so annotations appear for text findings only.
+
+A path is relative to the working directory, with `uriBaseId` `%SRCROOT%`, which GitHub resolves against the root of the
+repository: run `scan` from the root of the checkout. A path outside the working directory is a `file:///` URI, and a
+file of a `gs://`, `s3://` or `zip://` source is a URI of that scheme.
+
+The message of a result has the label, the redacter, the score when there is one, and the masked value. SARIF always
+holds the masked value: `--show-values` does not apply to it, since the report is stored by GitHub and shown to everyone
+who can read the alerts.
+
+The fingerprint is a SHA-256 hash of the rule, the path and the masked value, followed by `:` and the number of earlier
+findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
+every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
+shows at most 5,000 results of a run, the most severe first.
+
+A workflow that uploads the findings to code scanning without failing the job:
+
+```yaml
+name: Scan for secrets
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install redacter
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Scan
+        run: >
+          redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text
+          --report-file redacter.sarif --report-format sarif --fail-on never
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: redacter.sarif
+```
 
 ### Detection per redacter
 

@@ -5,6 +5,8 @@ mod copy_output;
 
 mod report;
 
+mod sarif;
+
 mod scan_command;
 pub use scan_command::*;
 

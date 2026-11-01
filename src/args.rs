@@ -52,7 +52,10 @@ pub fn resolve_addons_dir(
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum CliCommand {
-    #[command(about = "Copy and redact files from source to destination")]
+    #[command(
+        about = "Copy and redact files from source to destination",
+        mut_arg("report_format", |arg| arg.value_parser(ReportFormat::parse_for_cp))
+    )]
     Cp {
         #[arg(
             help = "Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
@@ -127,7 +130,7 @@ pub enum CliCommand {
 
         #[arg(
             long,
-            help = "Show the matched values in the output and the report. They are masked by default"
+            help = "Show the matched values in the output and the report. They are masked by default. Does not apply to the SARIF report, which always masks them"
         )]
         show_values: bool,
 
@@ -196,7 +199,7 @@ pub struct ReportArgs {
         value_enum,
         default_value = "json",
         requires = "report_file",
-        help = "Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'"
+        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (scan only; values are always masked). Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
 }
@@ -216,6 +219,18 @@ pub enum FailOn {
 pub enum ReportFormat {
     Json,
     Text,
+    /// SARIF 2.1.0, for GitHub code scanning
+    Sarif,
+}
+
+impl ReportFormat {
+    /// Parses the value of `cp --report-format`, which cannot write a SARIF report.
+    fn parse_for_cp(value: &str) -> Result<Self, String> {
+        match <Self as ValueEnum>::from_str(value, true)? {
+            Self::Sarif => Err("sarif is only available for scan".to_string()),
+            format => Ok(format),
+        }
+    }
 }
 
 impl CliCommand {
@@ -846,6 +861,61 @@ mod tests {
 
         fn parse(args: &[&str]) -> Result<CliArgs, clap::Error> {
             CliArgs::try_parse_from([&["redacter", "scan", "test-fixtures"], args].concat())
+        }
+
+        fn report_format_of(args: &[&str]) -> Result<ReportFormat, clap::Error> {
+            let cli = CliArgs::try_parse_from(args)?;
+            match cli.command {
+                CliCommand::Scan { report, .. } | CliCommand::Cp { report, .. } => {
+                    Ok(report.report_format)
+                }
+                other => unreachable!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn sarif_is_a_report_format_of_scan_and_not_of_cp() {
+            assert_eq!(
+                report_format_of(&[
+                    "redacter",
+                    "scan",
+                    ".",
+                    "-d",
+                    "local-rules",
+                    "--report-file",
+                    "r.sarif",
+                    "--report-format",
+                    "sarif",
+                ])
+                .unwrap(),
+                ReportFormat::Sarif
+            );
+            let err = report_format_of(&[
+                "redacter",
+                "cp",
+                ".",
+                "out/",
+                "--report-file",
+                "r.sarif",
+                "--report-format",
+                "sarif",
+            ])
+            .expect_err("cp writes no SARIF report");
+            assert_eq!(err.kind(), ErrorKind::ValueValidation);
+            assert_eq!(
+                report_format_of(&[
+                    "redacter",
+                    "cp",
+                    ".",
+                    "out/",
+                    "--report-file",
+                    "r.txt",
+                    "--report-format",
+                    "text",
+                ])
+                .unwrap(),
+                ReportFormat::Text
+            );
         }
 
         #[test]
