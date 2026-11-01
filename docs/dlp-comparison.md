@@ -47,8 +47,8 @@ Each cell is recall / precision / time per file. Time per file is described unde
 | `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
 | `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
 | `aws-bedrock-guardrails` | 90% / 96% / 238 ms | 46% / 83% / 157 ms | 74% / - / 161 ms | 81% / 100% / 602 ms |
-| `gcp-vertex-ai` | 98% / 100% / 8073 ms | 100% / 95% / 8171 ms | 86% / - / 9062 ms | 100% / 100% / 16339 ms |
-| `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2109 ms |
+| `gcp-vertex-ai` | 98% / 100% / 8.1 s | 100% / 95% / 8.2 s | 86% / - / 9.1 s | 100% / 100% / 16.3 s |
+| `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2.1 s |
 
 PII documents is `fixtures` (8 files), Secrets in config and code is `secrets` (29 files), Public PII sample is `public` (200 records) and Scanned form is `images` (a PNG and a PDF of one form). See [Datasets](#datasets).
 
@@ -146,27 +146,25 @@ The truth is 16 boxes, so one box is about 6 percentage points of recall (derive
 
 Time per file, in the overview, is the wall time of one `scan` over the dataset divided by the number of files. It includes the start of the process and, for a local redacter, the load of its models. Compare the times within a dataset, not between datasets. For the cloud rows it includes the network round trip from the machine of the run.
 
-The whole run over the 200 files of `public`, in milliseconds:
+The whole run over the 200 files of `public`:
 
 | Redacter | Whole run on public PII sample |
 |---|---|
 | `local-rules` | 62 ms |
-| `local-ner` | 7878 ms |
-| `local-gliner` | 88352 ms |
-| `local-rules+local-ner` | 7797 ms |
-| `local-rules+local-gliner` | 93374 ms |
-| `local-credential-ml` | 5738 ms |
-| `local-rules+local-credential-ml` | 5771 ms |
-| `presidio` | 2568 ms |
-| `gcp-dlp` | 14526 ms |
-| `aws-comprehend` | 16962 ms |
-| `aws-bedrock-guardrails` | 32304 ms |
-| `gcp-vertex-ai` | 1812407 ms |
-| `aws-bedrock` | 116794 ms |
+| `local-ner` | 7.9 s |
+| `local-gliner` | 1 min 28 s |
+| `local-rules+local-ner` | 7.8 s |
+| `local-rules+local-gliner` | 1 min 33 s |
+| `local-credential-ml` | 5.7 s |
+| `local-rules+local-credential-ml` | 5.8 s |
+| `presidio` | 2.6 s |
+| `gcp-dlp` | 14.5 s |
+| `aws-comprehend` | 17.0 s |
+| `aws-bedrock-guardrails` | 32.3 s |
+| `gcp-vertex-ai` | 30 min 12 s |
+| `aws-bedrock` | 1 min 57 s |
 
 Public PII sample is `public`: 200 records of synthetic personal data.
-
-The whole run of `gcp-vertex-ai` over `public` was about 30 minutes (derived).
 
 ## Local or cloud
 
@@ -207,7 +205,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 - the `secrets` cells of the local redacters and their chains come from a run on commit `19874f5` (the `generic-api-key` rule), in the same way;
 - a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
 - the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
-- the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6785 ms per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8073 ms, and its numbers are used;
+- the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6.8 s per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8.1 s, and its numbers are used;
 - Presidio is the analyzer image 2.2.366 from `ghcr.io/data-privacy-stack`, run as a container on the same machine;
 - no file failed, was blocked or was unsupported in any cell used here.
 
