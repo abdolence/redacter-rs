@@ -49,7 +49,8 @@ pub(crate) mod local_credential_ml;
 #[cfg(feature = "local-credential-ml")]
 pub use local_credential_ml::{LocalCredentialMlRedacter, LocalCredentialMlRedacterOptions};
 
-/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`).
+/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`,
+/// `local-credential-ml`).
 pub(crate) mod text_spans;
 
 mod detection;

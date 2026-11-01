@@ -176,9 +176,10 @@ enum Strictness {
     Lenient,
 }
 
-/// `pattern` with the 8-character (6 in braces) minimum of the quoted `password = "..."`
-/// rules removed, which are the only built-in patterns that end a value with `{7,}` or
-/// `{6,}`. The first character of a value stays required.
+/// `pattern` with the minimum length of a quoted value removed: 8 characters for the quoted
+/// `password = "..."` rules, 7 for the braced `Pwd={...}` one. The first character of a value
+/// stays required. Every built-in pattern that ends a value with `{7,}` or `{6,}` is one of
+/// those five rules, and the rewrite touches nothing else.
 #[cfg(feature = "local-credential-ml")]
 fn without_minimum_quoted_length(pattern: &str) -> String {
     pattern.replace("{7,}", "*").replace("{6,}", "*")
@@ -186,6 +187,9 @@ fn without_minimum_quoted_length(pattern: &str) -> String {
 
 /// The built-in rule that matches a whole PEM or PGP private key block, which spans lines.
 pub const PRIVATE_KEY_BLOCK_RULE: &str = "private-key-block";
+
+/// The built-in rule that matches the `user:password` of a URL.
+pub const URL_CREDENTIALS_RULE: &str = "url-credentials";
 
 impl RuleSet {
     /// Compiles the built-in rules of the enabled groups, in declaration order.
@@ -203,7 +207,7 @@ impl RuleSet {
     pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
             |spec| {
-                (spec.group == RuleGroup::Secrets || spec.name == "url-credentials")
+                (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
             },
             Strictness::Lenient,
@@ -373,6 +377,26 @@ pub(super) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[cfg(feature = "local-credential-ml")]
+    #[test]
+    fn only_the_five_quoted_value_rules_lose_their_minimum_length() {
+        let lenient: Vec<&str> = builtin_rules()
+            .iter()
+            .filter(|spec| without_minimum_quoted_length(spec.pattern) != spec.pattern)
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(
+            lenient,
+            [
+                "secret-assignment-double-quoted",
+                "secret-assignment-single-quoted",
+                "secret-assignment-backtick-quoted",
+                "secret-assignment-escaped-double-quoted",
+                "secret-assignment-braced",
+            ]
+        );
+    }
 
     #[cfg(feature = "local-credential-ml")]
     #[test]
