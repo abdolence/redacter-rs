@@ -388,12 +388,18 @@ How exactly a redaction is located depends on the redacter and the content:
 | Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails`, `gcp-dlp` and the LLM redacters return only the new text, so the span is found by comparing the text before and after |
 | Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml` and `gcp-dlp`; other redacters read a CSV file as text |
 | Image or PDF page read with OCR | Page and box in pixels, around the words OCR blacked out | Any redacter that reads text |
-| Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode |
-| Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode |
+| Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode, or in the default `auto` mode when the native edit is not available |
+| Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode, or in the `auto` mode when the native edit succeeds |
 
 `gcp-dlp` and the LLM redacters do not name what they replaced in text, so such a redaction has the label
-`sensitive_data` and no score. A step that changes the shape of a table, or the size of an image, is located at the
-`file`, or at the `page` of a PDF.
+`sensitive_data` and no score. A step that changes the shape of a table is located at the `file`, or at the `page`
+of a PDF. So is an image step that follows a step that changed the size of the image; the step that changed the size
+still reports its boxes.
+
+The before and after of a step are compared only for a text, or a table, of up to 16 MiB. The comparison takes about 50
+times the size of the text in memory, so a larger one is not compared: a step that changes it is located at the `file`.
+A 16 MiB log peaks near 0.8 GB of memory with a report, and the same copy without `--report-file`, or with
+`--report-format text`, compares nothing and takes what a copy without reports takes.
 
 ## Source and destinations
 
@@ -1379,7 +1385,7 @@ requests. `scan` and `cp` both write it, and a redaction of `cp` is a finding he
 | `partialFingerprints` | `primaryLocationLineHash`, see below |
 
 Columns count characters (Unicode code points), as in the other reports, and the run says so with
-`columnKind` `unicodeCodePoints`. GitHub shows a result under the file of its location, and a pull request annotation
+`columnKind` `unicodeCodePoints`. GitHub does not document which unit it counts columns in. GitHub shows a result under the file of its location, and a pull request annotation
 needs a line in the diff, so annotations appear for text findings only.
 
 A path is relative to the working directory, with `uriBaseId` `%SRCROOT%`, which GitHub resolves against the root of the
@@ -1403,7 +1409,9 @@ files:
 The fingerprint is a SHA-256 hash of the rule, the path and the masked value, followed by `:` and the number of earlier
 findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
 every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
-shows at most 5,000 results of a run, the most severe first.
+shows at most 5,000 results of a run, the most severe first, and rejects a file with more than 25,000 results in a run.
+The SARIF report of `cp` and of `scan` keeps the first 5,000 results by severity, rule and path, and says in a
+notification of the run how many it left out. The JSON report always lists all of them.
 
 GitHub tells the analyses of one tool apart by the `category` of the upload, and an upload replaces the earlier one with
 the same `category`. `scan` and `cp` write the same tool, so a workflow that uploads both sets a different `category`
@@ -1454,7 +1462,7 @@ for AWS Comprehend.
 | `aws-comprehend` | The PII entity type, such as `EMAIL` | Model confidence | OCR |
 | `presidio` | The entity type, such as `EMAIL_ADDRESS` | Presidio score | OCR |
 | `aws-bedrock-guardrails` | The PII type of the guardrail, or the name of its regex | None | OCR |
-| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value | None | The coordinate pass of redaction |
+| `gemini-llm`, `open-ai-llm`, `gcp-vertex-ai`, `aws-bedrock` | The type the model names for each value, from a fixed list, see below | None | The coordinate pass of redaction |
 
 - Presidio needs `--presidio-text-analyze-url` to detect. The image redaction endpoint reports no
   locations, so images are read with OCR and the text is analysed. With only the image URL set, the files are reported
@@ -1465,6 +1473,10 @@ for AWS Comprehend.
   which covers inflected words and scripts written without spaces. An occurrence inside a longer reported one is
   dropped. Letters are compared one at a time, so `ß` and `SS` differ, while Greek `ς` and `Σ` match. Accents are not
   folded: `Müller` does not match `Muller`.
+  The type is one of `person_name`, `email_address`, `phone_number`, `postal_address`, `date_of_birth`,
+  `government_id`, `payment_card_number`, `bank_account_number`, `ip_address`, `username`, `password`, `api_key`,
+  `access_token`, `private_key` and `secret`. Any other type is reported as `sensitive_data`, since the label
+  reaches the reports and the rule id of a SARIF log, and a model could write a value in it.
   For an image they use the same coordinate pass as redaction, and one more text call per image gets the labels.
   `--llm-image-mode` has no effect on `scan`.
 - An answer that the provider filtered, cut short or left empty fails the file, in `scan` and in `cp`; it is never
