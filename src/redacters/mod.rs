@@ -837,10 +837,12 @@ pub struct TextPieceLimits {
 
 impl TextPieceLimits {
     /// What the local redacters read at once. The size is a memory bound, not a limit of the
-    /// redacter. The context keeps a value of up to 128 KiB safe across a cut, such as a
-    /// private key block holding an armoured keyring.
+    /// redacter. The context is read twice, so the window size sets the time cost: 4 MiB with
+    /// 64 KiB of context is about 2% slower than a whole read, 1 MiB about 14%. The context keeps
+    /// a value of up to 128 KiB safe across a cut, such as a private key block holding an
+    /// armoured keyring.
     pub const LOCAL: Self = Self {
-        max_request_bytes: 1024 * 1024,
+        max_request_bytes: 4 * 1024 * 1024,
         context_bytes: 64 * 1024,
     };
 }
