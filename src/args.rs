@@ -200,7 +200,7 @@ pub struct ReportArgs {
         value_enum,
         default_value = "json",
         requires = "report_file",
-        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (values are always masked). Requires --report-file. Default is 'json'"
+        help = "Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (SARIF and OCSF reports always hold masked values). Requires --report-file. Default is 'json'"
     )]
     pub report_format: ReportFormat,
 }
@@ -254,6 +254,9 @@ pub enum ReportFormat {
     Text,
     /// SARIF 2.1.0, for GitHub code scanning
     Sarif,
+    /// OCSF 1.9.0 Data Security Finding events, one JSON object per line, for SIEMs and
+    /// security data lakes
+    Ocsf,
 }
 
 impl CliCommand {
@@ -898,16 +901,15 @@ mod tests {
         }
 
         #[test]
-        fn sarif_is_a_report_format_of_scan_and_of_cp() {
+        fn sarif_and_ocsf_are_report_formats_of_scan_and_of_cp() {
             for (command, extra) in [("scan", &["-d", "local-rules"][..]), ("cp", &["out/"][..])] {
-                let mut args = vec!["redacter", command, "."];
-                args.extend_from_slice(extra);
-                args.extend(["--report-file", "r.sarif", "--report-format", "sarif"]);
-                assert_eq!(
-                    report_format_of(&args).unwrap(),
-                    ReportFormat::Sarif,
-                    "{command}"
-                );
+                for (name, format) in [("sarif", ReportFormat::Sarif), ("ocsf", ReportFormat::Ocsf)]
+                {
+                    let mut args = vec!["redacter", command, "."];
+                    args.extend_from_slice(extra);
+                    args.extend(["--report-file", "r.out", "--report-format", name]);
+                    assert_eq!(report_format_of(&args).unwrap(), format, "{command} {name}");
+                }
             }
         }
 

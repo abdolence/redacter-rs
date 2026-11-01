@@ -74,6 +74,13 @@ impl Display for RuleGroup {
     }
 }
 
+/// Whether `name` is a built-in rule that finds a credential: a password, a key or a token.
+pub fn is_credential_rule(name: &str) -> bool {
+    builtin_rules()
+        .iter()
+        .any(|spec| spec.name == name && spec.finds_credential())
+}
+
 /// One built-in rule as declared in the table. `capture_group` 0 redacts the whole match;
 /// a higher number redacts only that group (used where the pattern needs context such as
 /// the word "passport" that must survive). `validator` carries the name of the check for the
@@ -96,6 +103,13 @@ pub struct RuleSpec {
     pub description: &'static str,
     #[cfg_attr(not(test), allow(dead_code))]
     pub example: Example,
+}
+
+impl RuleSpec {
+    /// Whether the rule finds a password, a key or a token.
+    fn finds_credential(&self) -> bool {
+        self.group == RuleGroup::Secrets || self.name == URL_CREDENTIALS_RULE
+    }
 }
 
 /// A value the rule redacts, for the reference and for the self-test of the table.
@@ -246,7 +260,7 @@ impl RuleSet {
     pub fn credential_line_rules() -> Result<Self, LocalRulesError> {
         Self::from_builtin(
             |spec| {
-                (spec.group == RuleGroup::Secrets || spec.name == URL_CREDENTIALS_RULE)
+                spec.finds_credential()
                     && spec.name != PRIVATE_KEY_BLOCK_RULE
                     && spec.name != GENERIC_API_KEY_RULE
             },
