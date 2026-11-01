@@ -265,6 +265,11 @@ impl RuleSet {
             .map_or(Category::Other, |spec| spec.group.category())
     }
 
+    /// Whether `name` is the name of a built-in rule, enabled or not.
+    fn is_builtin_name(name: &str) -> bool {
+        builtin_rules().iter().any(|spec| spec.name == name)
+    }
+
     /// Compiles the built-in rules of the enabled groups, in declaration order.
     pub fn new(groups: &BTreeSet<RuleGroup>) -> Result<Self, LocalRulesError> {
         Self::from_builtin(|spec| groups.contains(&spec.group), Strictness::Strict)
@@ -326,15 +331,22 @@ impl RuleSet {
         self.rules.is_empty()
     }
 
-    /// Built-in rules of the enabled groups followed by the user's rules. Names must be
-    /// unique across both sets so reports are unambiguous.
+    /// Built-in rules of the enabled groups followed by the user's rules. A user rule may not
+    /// take the name of any built-in rule, enabled or not, nor of another user rule: a finding
+    /// is placed in a category by its rule name, and a shared name would place a user's rule
+    /// in the category of the built-in one.
     pub fn with_user_rules(
         groups: &BTreeSet<RuleGroup>,
         user_rules: &[UserRule],
     ) -> Result<Self, LocalRulesError> {
         let mut set = Self::new(groups)?;
-        let mut names: BTreeSet<RuleName> = set.rules.iter().map(|r| r.name.clone()).collect();
+        let mut names: BTreeSet<RuleName> = BTreeSet::new();
         for rule in user_rules {
+            if Self::is_builtin_name(rule.name.as_str()) {
+                return Err(LocalRulesError::BuiltinRuleName {
+                    name: rule.name.to_string(),
+                });
+            }
             if !names.insert(rule.name.clone()) {
                 return Err(LocalRulesError::DuplicateRule {
                     name: rule.name.to_string(),
@@ -1328,17 +1340,19 @@ mod tests {
     }
 
     #[test]
-    fn user_rule_named_like_a_builtin_is_rejected() {
-        let rule = UserRule {
+    fn user_rule_named_like_a_builtin_is_rejected_whether_or_not_its_group_is_enabled() {
+        let rule = || UserRule {
             name: RuleName::new("email"),
             matcher: UserMatcher::Regex("x".to_string()),
             case_insensitive: false,
         };
-        let err = RuleSet::with_user_rules(&RuleGroup::all(), &[rule]).unwrap_err();
-        assert!(
-            matches!(err, LocalRulesError::DuplicateRule { .. }),
-            "{err}"
-        );
+        for groups in [RuleGroup::all(), BTreeSet::new()] {
+            let err = RuleSet::with_user_rules(&groups, &[rule()]).unwrap_err();
+            assert!(
+                matches!(err, LocalRulesError::BuiltinRuleName { ref name } if name == "email"),
+                "{err}"
+            );
+        }
     }
 }
 
