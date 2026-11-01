@@ -442,7 +442,7 @@ impl<'a> OpenAiLlmRedacter<'a> {
             .await?
             .into_text()?;
         let findings: OpenAiLlmTextFindings = parse_answer(&answer)?;
-        LlmTextFinding::locate(text, findings.findings)
+        LlmTextFinding::locate(text, findings.findings, prompt.kind_names.as_deref())
     }
 
     /// Output format accepted by the images/edits endpoint for the given input format.

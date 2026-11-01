@@ -338,7 +338,7 @@ impl<'a> GcpVertexAiRedacter<'a> {
                 text_findings_schema(prompt.kind_names.as_deref()),
             )
             .await?;
-        LlmTextFinding::detections_from_answer(&answer, text)
+        LlmTextFinding::detections_from_answer(&answer, text, prompt.kind_names.as_deref())
     }
 
     pub async fn redact_image_file_natively(

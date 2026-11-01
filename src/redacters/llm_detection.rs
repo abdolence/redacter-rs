@@ -14,6 +14,7 @@ use clap::ValueEnum;
 use rand::RngExt;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::Range;
 
@@ -82,15 +83,18 @@ fn text_detection_instruction(separator: &str, categories: Option<&Categories>) 
             unclassified = DetectionLabel::unclassified()
         ),
         Some(categories) => format!(
-            "Find every piece of the following kinds of information in the text: \
-             {descriptions}. Return each one as an item with 'text', the value copied exactly \
-             as it appears in the input, character for character, and 'type', the kind it is, \
-             one of: {names}. Leave out every other kind of information. Return no items when \
-             there is nothing to find.",
+            "Find every piece of the following kinds of information in the text, each named \
+             before its description: {descriptions}. Return each one as an item with 'text', the \
+             value copied exactly as it appears in the input, character for character, and \
+             'type', the kind it is, one of: {names}. Use the name of the kind for a value that \
+             no more specific name fits. Leave out every other kind of information. Return no \
+             items when there is nothing to find.",
             descriptions = Category::value_variants()
                 .iter()
                 .filter(|category| categories.contains(**category))
-                .map(|category| category.description())
+                .map(|category| {
+                    format!("{}: {}", catch_all_name(*category), category.description())
+                })
                 .collect::<Vec<_>>()
                 .join("; "),
             names = kind_names(categories).join(", ")
@@ -124,29 +128,56 @@ const MODEL_LABELS: [(&str, Category); 15] = [
     ("secret", Category::Credential),
 ];
 
-fn model_label(named: &str) -> DetectionLabel {
+/// The label for the type `named` in a model's answer: under a prompt limited to `kind_names`
+/// only one of those names, else `None`; otherwise one of [`MODEL_LABELS`], or the unclassified
+/// label.
+fn model_label(named: &str, kind_names: Option<&[String]>) -> Option<DetectionLabel> {
     let named = named.trim().to_ascii_lowercase().replace([' ', '-'], "_");
-    MODEL_LABELS
-        .iter()
-        .find(|(label, _)| *label == named)
-        .map_or_else(DetectionLabel::unclassified, |(label, _)| {
-            DetectionLabel::new(*label)
-        })
+    match kind_names {
+        Some(names) => names
+            .iter()
+            .find(|name| **name == named)
+            .map(DetectionLabel::new),
+        None => Some(
+            MODEL_LABELS
+                .iter()
+                .find(|(label, _)| *label == named)
+                .map_or_else(DetectionLabel::unclassified, |(label, _)| {
+                    DetectionLabel::new(*label)
+                }),
+        ),
+    }
+}
+
+/// The name a limited prompt offers for a kind of `category` that no label of its own fits:
+/// the category's name, lower case with underscores as [`model_label`] reads every answer, or
+/// the unclassified label for `other`.
+fn catch_all_name(category: Category) -> String {
+    match category {
+        Category::Other => DetectionLabel::unclassified().to_string(),
+        _ => category.to_string().replace('-', "_"),
+    }
 }
 
 /// The names a model may give a finding in `categories`: those of [`MODEL_LABELS`] in the
-/// chosen categories, so that [`model_label`] keeps every finding in the category it was asked
-/// for, and the unclassified label when `other` is chosen. Asking for the category names
-/// themselves would have `model_label` turn every answer into the unclassified label.
+/// chosen categories, then the catch-all name of each chosen category for the kinds that have
+/// no label of their own (a MAC address, a fax number). Every name maps back to a chosen category through [`LlmTextFinding::label_category`].
 fn kind_names(categories: &Categories) -> Vec<String> {
-    let named = MODEL_LABELS
+    let labels = MODEL_LABELS
         .iter()
         .filter(|(_, category)| categories.contains(*category))
         .map(|(label, _)| (*label).to_string());
-    let unclassified = categories
-        .contains(Category::Other)
-        .then(|| DetectionLabel::unclassified().to_string());
-    named.chain(unclassified).collect()
+    let catch_alls = Category::value_variants()
+        .iter()
+        .filter(|category| categories.contains(**category))
+        .map(|category| catch_all_name(*category));
+    let mut names: Vec<String> = Vec::new();
+    for name in labels.chain(catch_alls) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// What an LLM redacter reads itself: text, and images unless `--categories` is chosen, which
@@ -189,29 +220,63 @@ pub struct LlmTextFinding {
 
 impl LlmTextFinding {
     /// The category of a finding labelled `label`: that of the kind of data the model named,
-    /// `other` for the unclassified label.
+    /// or the category a limited prompt named, `other` for the unclassified label.
     pub fn label_category(label: &str) -> Category {
         MODEL_LABELS
             .iter()
             .find(|(kind, _)| *kind == label)
-            .map_or(Category::Other, |(_, category)| *category)
+            .map(|(_, category)| *category)
+            .or_else(|| {
+                Category::value_variants()
+                    .iter()
+                    .copied()
+                    .find(|category| catch_all_name(*category) == label)
+            })
+            .unwrap_or(Category::Other)
     }
 
     /// Every occurrence in `text` of what the model's JSON array `answer` found. A value that
     /// does not occur in the text, even ignoring case, is not reported. An answer that is
     /// not a JSON array of findings is an error: reading it as "nothing found" would report
     /// a clean file.
-    pub fn detections_from_answer(answer: &str, text: &str) -> AppResult<Detections> {
-        Self::locate(text, parse_answer(answer)?)
+    pub fn detections_from_answer(
+        answer: &str,
+        text: &str,
+        kind_names: Option<&[String]>,
+    ) -> AppResult<Detections> {
+        Self::locate(text, parse_answer(answer)?, kind_names)
     }
 
-    /// Every occurrence in `text` of the values in `findings`.
-    pub fn locate(text: &str, findings: Vec<Self>) -> AppResult<Detections> {
-        let values: Vec<(String, DetectionLabel)> = findings
-            .into_iter()
-            .map(|finding| (finding.text, model_label(&finding.label)))
-            .collect();
-        Detection::locate_values(text, &values)
+    /// Every occurrence in `text` of the values in `findings`. Under a prompt limited to
+    /// `kind_names`, a finding whose type is not one of them cannot be placed in a category:
+    /// it is [`Detections::unlocated`], labelled with the first of the names so that it stays
+    /// in the chosen categories, and never dropped.
+    pub fn locate(
+        text: &str,
+        findings: Vec<Self>,
+        kind_names: Option<&[String]>,
+    ) -> AppResult<Detections> {
+        let mut values: Vec<(String, DetectionLabel)> = Vec::new();
+        let mut off_list = BTreeSet::new();
+        for finding in findings {
+            match model_label(&finding.label, kind_names) {
+                Some(label) => values.push((finding.text, label)),
+                None if !finding.text.is_empty() => {
+                    off_list.insert(finding.text);
+                }
+                None => {}
+            }
+        }
+        let mut detections = Detection::locate_values(text, &values)?;
+        let in_scope = kind_names
+            .and_then(<[String]>::first)
+            .map(DetectionLabel::new);
+        detections.unlocated.extend(
+            in_scope
+                .into_iter()
+                .flat_map(|label| off_list.iter().map(move |_| label.clone())),
+        );
+        Ok(detections)
     }
 }
 
@@ -284,14 +349,6 @@ mod tests {
     use mime::Mime;
 
     #[test]
-    fn every_kind_a_model_may_name_is_in_a_named_category() {
-        for (label, category) in MODEL_LABELS {
-            assert_eq!(LlmTextFinding::label_category(label), category, "{label}");
-            assert_ne!(category, Category::Other, "{label}");
-        }
-    }
-
-    #[test]
     fn unclassified_data_is_other() {
         assert_eq!(
             LlmTextFinding::label_category(&DetectionLabel::unclassified().to_string()),
@@ -305,7 +362,7 @@ mod tests {
         let answer =
             r#"[{"text":"a@b.com","type":"email_address"},{"text":"Åsa","type":"person_name"}]"#;
 
-        let detections = LlmTextFinding::detections_from_answer(answer, text)
+        let detections = LlmTextFinding::detections_from_answer(answer, text, None)
             .unwrap()
             .found;
 
@@ -360,7 +417,7 @@ mod tests {
             {"text":"key","type":"alice@example.com"}
         ]"#;
 
-        let detections = LlmTextFinding::detections_from_answer(answer, text)
+        let detections = LlmTextFinding::detections_from_answer(answer, text, None)
             .unwrap()
             .found;
 
@@ -396,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn a_limited_prompt_offers_only_names_that_map_back_to_the_chosen_categories() {
-        let categories = only(&[Category::Credential, Category::Contact]);
+    fn a_limited_prompt_offers_the_names_of_the_chosen_categories_and_their_own_names() {
+        let categories = only(&[Category::Credential, Category::Network, Category::IdNumber]);
 
         let prompt = TextDetectionPrompt::new("text", Some(&categories));
 
@@ -405,13 +462,16 @@ mod tests {
         assert_eq!(
             names,
             [
-                "email_address",
-                "phone_number",
+                "government_id",
+                "ip_address",
                 "password",
                 "api_key",
                 "access_token",
                 "private_key",
-                "secret"
+                "secret",
+                "id_number",
+                "credential",
+                "network",
             ]
         );
         for name in &names {
@@ -443,21 +503,62 @@ mod tests {
         }
     }
 
+    const NETWORK_NOTE: &str = "gateway MAC 00:1A:2B:3C:4D:5E at 10.20.30.40";
+
+    fn limited_to_network_names() -> Vec<String> {
+        kind_names(&only(&[Category::Network]))
+    }
+
     #[test]
-    fn a_finding_named_from_a_limited_prompt_keeps_its_chosen_category() {
-        let categories = only(&[Category::Credential]);
-        let name = kind_names(&categories).remove(0);
-        let answer = format!(r#"[{{"text":"hunter2","type":"{name}"}}]"#);
+    fn a_limited_answer_naming_a_category_is_kept_in_that_category() {
+        let answer = r#"[{"text":"00:1A:2B:3C:4D:5E","type":"network"}]"#;
 
-        let found = LlmTextFinding::detections_from_answer(&answer, "pw hunter2")
-            .unwrap()
-            .found;
+        let detections = LlmTextFinding::detections_from_answer(
+            answer,
+            NETWORK_NOTE,
+            Some(&limited_to_network_names()),
+        )
+        .unwrap();
 
-        assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].label.category(RedacterType::GeminiLlm),
-            Category::Credential
-        );
+        assert!(detections.unlocated.is_empty());
+        let categories: Vec<_> = detections
+            .found
+            .iter()
+            .map(|d| d.label.category(RedacterType::GeminiLlm))
+            .collect();
+        assert_eq!(categories, [Category::Network]);
+    }
+
+    #[test]
+    fn a_limited_answer_with_a_type_outside_the_names_is_an_unplaceable_value_in_scope() {
+        let answer = r#"[
+            {"text":"00:1A:2B:3C:4D:5E","type":"mac_address"},
+            {"text":"gateway","type":"person_name"},
+            {"text":"10.20.30.40","type":"ip_address"}
+        ]"#;
+        let categories = only(&[Category::Network]);
+
+        let mut detections = LlmTextFinding::detections_from_answer(
+            answer,
+            NETWORK_NOTE,
+            Some(&kind_names(&categories)),
+        )
+        .unwrap();
+        detections.retain_categories(RedacterType::GeminiLlm, &categories);
+
+        assert_eq!(detections.found.len(), 1);
+        assert_eq!(detections.unlocated.len(), 2);
+    }
+
+    #[test]
+    fn an_answer_to_an_unlimited_prompt_reads_every_type_as_before() {
+        let answer = r#"[{"text":"00:1A:2B:3C:4D:5E","type":"mac_address"}]"#;
+
+        let detections =
+            LlmTextFinding::detections_from_answer(answer, NETWORK_NOTE, None).unwrap();
+
+        assert!(detections.unlocated.is_empty());
+        assert_eq!(detections.found[0].label, DetectionLabel::unclassified());
     }
 
     #[test]
@@ -587,13 +688,13 @@ mod tests {
 
     #[test]
     fn an_answer_that_is_not_findings_is_an_error() {
-        assert!(LlmTextFinding::detections_from_answer("No PII found.", "text").is_err());
-        assert!(LlmTextFinding::detections_from_answer(r#"[{"text":"a"}]"#, "a").is_err());
+        assert!(LlmTextFinding::detections_from_answer("No PII found.", "text", None).is_err());
+        assert!(LlmTextFinding::detections_from_answer(r#"[{"text":"a"}]"#, "a", None).is_err());
     }
 
     #[test]
     fn an_unreadable_answer_reports_its_position_and_none_of_its_content() {
-        let error = LlmTextFinding::detections_from_answer(r#""John Smith""#, "John Smith")
+        let error = LlmTextFinding::detections_from_answer(r#""John Smith""#, "John Smith", None)
             .expect_err("a string is not an array of findings");
 
         assert!(matches!(

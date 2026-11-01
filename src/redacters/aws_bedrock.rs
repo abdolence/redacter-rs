@@ -542,7 +542,11 @@ impl<'a> AwsBedrockRedacter<'a> {
             )
             .await?
             .into_text()?;
-        LlmTextFinding::detections_from_answer(strip_json_fence(&answer), text)
+        LlmTextFinding::detections_from_answer(
+            strip_json_fence(&answer),
+            text,
+            prompt.kind_names.as_deref(),
+        )
     }
 
     /// AWS Bedrock has no active image editing model: Amazon Nova Canvas, the only inpainting
@@ -1182,6 +1186,7 @@ mod tests {
         let detections = LlmTextFinding::detections_from_answer(
             strip_json_fence(answer),
             "Mail john.smith@example.com now",
+            None,
         )
         .unwrap()
         .found;
