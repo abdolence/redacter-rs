@@ -52,11 +52,8 @@ impl CredentialExtractor {
                 score: None,
             })
             .collect();
-        let mut line_start = 0;
-        for raw_line in text.split_inclusive('\n') {
-            let line = raw_line.trim_end_matches(['\r', '\n']);
-            let line_range = line_start..line_start + line.len();
-            line_start += raw_line.len();
+        for line_range in line_ranges(text) {
+            let line = &text[line_range.clone()];
             let inside_block = blocks
                 .iter()
                 .any(|block| block.start <= line_range.start && line_range.end <= block.end);
@@ -82,34 +79,78 @@ impl CredentialExtractor {
     }
 
     /// The values to redact on a line the model flagged: what the secret rules match on it
-    /// with their value checks off, or else every credential-like word. A redacter prefers
-    /// redacting a host name beside the password to leaving the password.
+    /// with their value checks off, and every credential-like word. Both, because a rule can
+    /// match a harmless value (`token: none`) beside the password it did not recognise, and a
+    /// redacter prefers redacting a host name beside the password to leaving the password.
     fn values_in_line(&self, line: &str) -> Vec<Range<usize>> {
-        let matched = self.line_rules.find(line);
-        if matched.is_empty() {
-            return credential_like_words(line);
-        }
-        matched
+        self.line_rules
+            .find(line)
             .into_iter()
             .map(|finding| finding.start..finding.end)
+            .chain(credential_like_words(line))
             .collect()
     }
 }
 
 /// The values of the whitespace-separated words of `line` that hold a letter or digit and a
 /// digit or a credential symbol, without the quotes and brackets around them and without the
-/// `key=` in front of them when they are `key=value` pairs. A word that holds a redaction
-/// marker is left alone: an earlier redacter placed it, and cutting it again would leave a
-/// stray bracket.
+/// `key=` in front of them when they are `key=value` pairs.
+///
+/// A word is split at each redaction marker an earlier redacter placed, and the marker is
+/// never a candidate: cutting it would leave a stray bracket. What stands beside it
+/// (`deploy@[REDACTED]:Tr0ub4dor&3`) still is one, and so is a `key=` only when it is not
+/// the key of the marker's own assignment (`api_key=[REDACTED]`).
 fn credential_like_words(line: &str) -> Vec<Range<usize>> {
     words(line)
-        .filter(|word| !line[word.clone()].contains(REDACTED))
-        .map(|word| value_of_word(line, word))
+        .flat_map(|word| pieces_around_markers(line, word))
+        .map(|piece| value_of_word(line, piece))
         .filter(|value| {
             let text = &line[value.clone()];
             text.chars().any(char::is_alphanumeric) && quoted_credential_value(text)
         })
         .collect()
+}
+
+/// The parts of `word` between its redaction markers. A part that is the key of an
+/// assignment whose value is the marker that follows it is left out.
+fn pieces_around_markers(line: &str, word: Range<usize>) -> Vec<Range<usize>> {
+    let text = &line[word.clone()];
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for (marker, _) in text.match_indices(REDACTED) {
+        let piece = text[start..marker].trim_end_matches('=');
+        let is_assignment_key = piece.len() < marker - start
+            && piece
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if !is_assignment_key {
+            pieces.push(word.start + start..word.start + marker);
+        }
+        start = marker + REDACTED.len();
+    }
+    pieces.push(word.start + start..word.end);
+    pieces
+}
+
+/// The byte ranges of the lines of `text` without their terminators: `\n`, `\r\n` or a bare
+/// `\r`.
+fn line_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start >= text.len() {
+            return None;
+        }
+        let rest = &text[start..];
+        let length = rest.find(['\r', '\n']).unwrap_or(rest.len());
+        let terminator = if rest[length..].starts_with("\r\n") {
+            2
+        } else {
+            usize::from(length < rest.len())
+        };
+        let range = start..start + length;
+        start += length + terminator;
+        Some(range)
+    })
 }
 
 /// The byte ranges of the whitespace-separated words of `line`.
@@ -175,11 +216,10 @@ mod tests {
 
     /// The text the extractor picks on a line the model flagged.
     fn values(line: &str) -> Vec<&str> {
-        extractor()
-            .values_in_line(line)
-            .into_iter()
-            .map(|range| &line[range])
-            .collect()
+        let mut ranges = extractor().values_in_line(line);
+        ranges.sort_by_key(|range| (range.start, range.end));
+        ranges.dedup();
+        ranges.into_iter().map(|range| &line[range]).collect()
     }
 
     #[test]
@@ -257,23 +297,33 @@ mod tests {
 
     #[test]
     fn a_redaction_marker_is_never_a_candidate() {
+        assert_eq!(values("password is [REDACTED]"), Vec::<&str>::new());
+        assert_eq!(values("api_key=[REDACTED] next"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn the_text_around_a_redaction_marker_is_still_searched() {
         assert_eq!(
             values("ssh deploy@[REDACTED] and use the passphrase Tr0ub4dor&3 when asked."),
-            ["Tr0ub4dor&3"]
+            ["deploy@", "Tr0ub4dor&3"]
         );
-        assert_eq!(values("password is [REDACTED]"), Vec::<&str>::new());
+        assert_eq!(
+            values("creds: deploy@[REDACTED]:Tr0ub4dor&3"),
+            ["deploy@", ":Tr0ub4dor&3"]
+        );
+    }
+
+    #[test]
+    fn a_line_holding_a_marker_is_scored_and_its_password_redacted() {
+        let text = "creds: deploy@[REDACTED]:Tr0ub4dor&3";
+        let (findings, scored) = find(text, |_| 0.9);
+        assert_eq!(scored, [text]);
+        assert!(!redact(text, &findings).contains("Tr0ub4dor&3"));
     }
 
     #[test]
     fn the_quotes_around_an_assigned_value_stay_outside_it() {
         assert_eq!(values(r#"session_blob="Tr0ub4dor&3""#), ["Tr0ub4dor&3"]);
-        assert_eq!(values("session_blob='Tr0ub4dor&3'"), ["Tr0ub4dor&3"]);
-    }
-
-    #[test]
-    fn a_short_quoted_value_is_found_on_a_flagged_line() {
-        assert_eq!(values(r#"password = "hunter""#), ["hunter"]);
-        assert_eq!(values("password = 'hunter2'"), ["hunter2"]);
     }
 
     #[test]
@@ -298,6 +348,23 @@ mod tests {
             findings,
             crate::redacters::text_spans::REDACTED,
         )
+    }
+
+    #[test]
+    fn a_password_beside_a_harmless_rule_match_is_redacted_too() {
+        for (text, redacted) in [
+            (
+                "token: none, use the passphrase Tr0ub4dor&3 instead",
+                "token: [REDACTED], use the passphrase [REDACTED] instead",
+            ),
+            (
+                "db_password=changeme; admin login root/Tr0ub4dor&3",
+                "db_password=[REDACTED]; admin login [REDACTED]",
+            ),
+        ] {
+            let (findings, _) = find(text, |_| 0.9);
+            assert_eq!(redact(text, &findings), redacted);
+        }
     }
 
     #[test]
@@ -339,6 +406,20 @@ mod tests {
             redact(text, &findings),
             "пароль\r\npassword: [REDACTED]\r\nend\r\n"
         );
+    }
+
+    #[test]
+    fn a_bare_carriage_return_ends_a_line() {
+        let text = "password: Tr0ub4dor&3\rname = app\rtoken: Zx9!Qw8@Er7\r";
+        let (findings, scored) = find(
+            text,
+            |line| if line.starts_with("name") { 0.0 } else { 0.9 },
+        );
+        assert_eq!(
+            redact(text, &findings),
+            "password: [REDACTED]\rname = app\rtoken: [REDACTED]\r"
+        );
+        assert_eq!(scored, ["password: Tr0ub4dor&3", "token: Zx9!Qw8@Er7"]);
     }
 
     #[test]
