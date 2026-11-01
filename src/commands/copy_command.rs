@@ -644,7 +644,7 @@ async fn redact_upload_file<
             {
                 let (uploaded, redactions) = redacted_result
                     .output
-                    .drive(|stream| destination_fs.upload(stream, Some(dest_file_ref)))
+                    .drive(async |stream| destination_fs.upload(stream, Some(dest_file_ref)).await)
                     .await;
                 // A text read in pieces is redacted while it is uploaded. When redaction fails
                 // it ends the stream with the error, so the upload fails as well, and the
@@ -1376,7 +1376,7 @@ mod tests {
         );
         let (chunks, redactions) = result
             .output
-            .drive(|stream| stream.try_collect::<Vec<bytes::Bytes>>())
+            .drive(async |stream| stream.try_collect::<Vec<bytes::Bytes>>().await)
             .await;
         redactions?;
         Ok(chunks?.concat())
