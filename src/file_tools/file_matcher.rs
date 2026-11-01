@@ -1,4 +1,4 @@
-use crate::file_systems::{FileSystemRef, RelativeFilePath};
+use crate::file_systems::FileSystemRef;
 use crate::file_tools::IgnoreRules;
 use rvstruct::ValueStruct;
 
@@ -6,7 +6,7 @@ use rvstruct::ValueStruct;
 pub struct FileMatcher {
     pub filename_matcher: Option<globset::GlobMatcher>,
     pub max_size_limit: Option<usize>,
-    pub ignore: Option<IgnoreRules>,
+    ignore: Option<IgnoreRules>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,13 +34,6 @@ impl FileMatcher {
     /// is not matched against them.
     pub fn with_ignore(self, ignore: Option<IgnoreRules>) -> Self {
         Self { ignore, ..self }
-    }
-
-    /// Whether no file under `directory` can match, so a listing need not enter it.
-    pub fn skips_directory(&self, directory: &RelativeFilePath) -> bool {
-        self.ignore
-            .as_ref()
-            .is_some_and(|ignore| ignore.ignores_directory(directory))
     }
 
     pub fn matches(&self, file_ref: &FileSystemRef) -> FileMatcherResult {

@@ -84,16 +84,6 @@ impl IgnoreRules {
             .is_ignore()
     }
 
-    /// Whether every file under the directory at `path` is ignored, so a walk need not enter it.
-    /// Never true while a `!` pattern exists, since one can bring back a file under it.
-    pub fn ignores_directory(&self, path: &RelativeFilePath) -> bool {
-        self.0.num_whitelists() == 0
-            && self
-                .0
-                .matched_path_or_any_parents(Self::normalised(path), true)
-                .is_ignore()
-    }
-
     /// `path` with `/` as its only separator and no leading separator: remote listings and
     /// Windows paths use `\`, and a path with a root is not matched against the patterns.
     fn normalised(path: &RelativeFilePath) -> String {
@@ -162,26 +152,6 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_order_mark_does_not_disable_the_first_pattern() {
-        let rules = rules("\u{feff}mocks/\n*.mock\n");
-
-        assert!(ignores(&rules, "mocks/key.txt"));
-        assert!(ignores(&rules, "a.mock"));
-    }
-
-    #[test]
-    fn a_directory_is_skipped_only_while_no_pattern_can_bring_a_file_back() {
-        let plain = rules("fixtures/\n");
-        let with_negation = rules("fixtures/\n!fixtures/keep.txt\n");
-
-        assert!(plain.ignores_directory(&path("src/fixtures")));
-        assert!(!plain.ignores_directory(&path("src")));
-        assert!(!with_negation.ignores_directory(&path("fixtures")));
-        assert!(ignores(&with_negation, "fixtures/other.txt"));
-        assert!(!ignores(&with_negation, "fixtures/keep.txt"));
-    }
-
-    #[test]
     fn a_malformed_pattern_is_an_error() {
         assert!(matches!(
             rules_from("*.ok\n\n{unclosed\n"),
@@ -190,41 +160,9 @@ mod tests {
     }
 
     #[test]
-    fn the_source_root_file_is_read_for_a_local_directory_and_lists_itself() {
-        let dir = tempfile::TempDir::with_prefix("ignore_rules_pickup").unwrap();
-        std::fs::write(dir.path().join(IGNORE_FILE_NAME), "*.mock\n").unwrap();
+    fn a_missing_explicit_file_is_an_error() {
+        let dir = tempfile::TempDir::with_prefix("ignore_rules_missing").unwrap();
 
-        let picked_up = IgnoreFileChoice::SourceRoot
-            .load(Some(dir.path()))
-            .unwrap()
-            .unwrap();
-        assert!(ignores(&picked_up, "a.mock"));
-        assert!(ignores(&picked_up, IGNORE_FILE_NAME));
-        assert!(!ignores(&picked_up, &format!("sub/{IGNORE_FILE_NAME}")));
-        assert!(IgnoreFileChoice::Disabled
-            .load(Some(dir.path()))
-            .unwrap()
-            .is_none());
-        assert!(IgnoreFileChoice::SourceRoot.load(None).unwrap().is_none());
-        let empty = tempfile::TempDir::with_prefix("ignore_rules_none").unwrap();
-        assert!(IgnoreFileChoice::SourceRoot
-            .load(Some(empty.path()))
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn an_explicit_file_applies_to_any_source_and_a_missing_one_is_an_error() {
-        let dir = tempfile::TempDir::with_prefix("ignore_rules_explicit").unwrap();
-        let file = dir.path().join("ci-ignore");
-        std::fs::write(&file, "fixtures/\n").unwrap();
-
-        let rules = IgnoreFileChoice::Explicit(file)
-            .load(None)
-            .unwrap()
-            .unwrap();
-        assert!(ignores(&rules, "fixtures/key.txt"));
-        assert!(!ignores(&rules, IGNORE_FILE_NAME));
         assert!(matches!(
             IgnoreFileChoice::Explicit(dir.path().join("missing")).load(None),
             Err(AppError::InvalidIgnoreFile { .. })

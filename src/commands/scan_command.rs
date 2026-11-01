@@ -471,7 +471,7 @@ mod tests {
                 result.files_unsupported,
                 result.findings
             ),
-            (2, 2, 0, 1),
+            (3, 2, 0, 1),
             "the ignored files are not read, and the ignore file excludes itself"
         );
         assert_eq!(result.exit_code(FailOn::Findings), 2);

@@ -1,7 +1,5 @@
 use crate::errors::AppError;
-use crate::file_systems::{
-    AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult, RelativeFilePath,
-};
+use crate::file_systems::{AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult};
 use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -11,16 +9,21 @@ use rvstruct::ValueStruct;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 
-/// The path a local source names. In a `file://` URL a drive letter follows a slash of its own:
-/// `file:///C:/project` is `C:/project`.
+/// The path a local source names. On Windows a `file://` URL puts a slash of its own before the
+/// drive letter: `file:///C:/project` is `C:/project`. Elsewhere `/C:/project` is an absolute path.
 fn local_path(source: &str) -> String {
     let path = source.trim_start_matches("file://");
-    let has_drive_letter =
-        matches!(path.as_bytes(), [b'/', letter, b':', ..] if letter.is_ascii_alphabetic());
-    if has_drive_letter {
-        path[1..].to_string()
+    if cfg!(windows) {
+        without_slash_before_drive_letter(path).to_string()
     } else {
         path.to_string()
+    }
+}
+
+fn without_slash_before_drive_letter(path: &str) -> &str {
+    match path.as_bytes() {
+        [b'/', letter, b':', ..] if letter.is_ascii_alphabetic() => &path[1..],
+        _ => path,
     }
 }
 
@@ -62,24 +65,19 @@ impl<'a> LocalFileSystem<'a> {
         let mut listing = ListFilesResult::EMPTY;
         while let Some(entry) = entries.next_entry().await? {
             let file_type = entry.file_type().await?;
-            let relative_path = RelativeFilePath::from(
-                entry
-                    .path()
-                    .to_string_lossy()
-                    .to_string()
-                    .replace(self.root_path.as_str(), ""),
-            );
             if file_type.is_file() {
                 let file_ref = FileSystemRef {
-                    relative_path,
+                    relative_path: entry
+                        .path()
+                        .to_string_lossy()
+                        .to_string()
+                        .replace(self.root_path.as_str(), "")
+                        .into(),
                     media_type: mime_guess::from_path(entry.path()).first(),
                     file_size: Some(entry.metadata().await?.len() as usize),
                 };
                 listing.add(file_ref, *file_matcher);
             } else if file_type.is_dir() {
-                if file_matcher.is_some_and(|matcher| matcher.skips_directory(&relative_path)) {
-                    continue;
-                }
                 let new_max_files_limit =
                     max_files_limit.map(|v| v.saturating_sub(listing.files.len()));
                 let dir_files = self
@@ -204,9 +202,18 @@ mod tests {
 
     #[test]
     fn a_file_url_with_a_drive_letter_names_the_drive_path() {
-        assert_eq!(local_path("file:///C:/project/"), "C:/project/");
-        assert_eq!(local_path("file:///home/user/"), "/home/user/");
-        assert_eq!(local_path("relative/dir"), "relative/dir");
+        assert_eq!(
+            without_slash_before_drive_letter("/C:/project/"),
+            "C:/project/"
+        );
+        assert_eq!(
+            without_slash_before_drive_letter("/home/user/"),
+            "/home/user/"
+        );
+        assert_eq!(
+            without_slash_before_drive_letter("relative/dir"),
+            "relative/dir"
+        );
     }
 
     #[tokio::test]
