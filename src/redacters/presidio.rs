@@ -77,6 +77,9 @@ impl<'a> PresidioRedacter<'a> {
         ("DATE_TIME", Category::Other),
         ("NRP", Category::Other),
         ("LOCATION", Category::Location),
+        // Not in the default supported list: the analyzer ignores it, and a server configured to
+        // report it names it so.
+        ("ORGANIZATION", Category::Organization),
         ("UUID", Category::Other),
         ("MEDICAL_BIOLOGICAL_ATTRIBUTE", Category::Other),
         ("MEDICAL_BIOLOGICAL_STRUCTURE", Category::Other),
@@ -627,6 +630,10 @@ mod tests {
         assert_eq!(
             PresidioRedacter::entity_category("LOCATION"),
             Category::Location
+        );
+        assert_eq!(
+            PresidioRedacter::entity_category("ORGANIZATION"),
+            Category::Organization
         );
         assert_eq!(
             PresidioRedacter::entity_category("EMPLOYEE_BADGE"),
