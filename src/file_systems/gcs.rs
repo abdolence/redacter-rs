@@ -2,7 +2,7 @@ use crate::errors::AppError;
 use crate::file_systems::{
     AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult, RelativeFilePath,
 };
-use crate::file_tools::{FileMatcher, FileMatcherResult};
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::{Stream, StreamExt};
@@ -118,43 +118,29 @@ impl<'a> GoogleCloudStorageFileSystem<'a> {
             .await?
             .into_inner();
 
-        let all_found: Vec<FileSystemRef> = list
-            .objects
-            .into_iter()
-            .filter(|object| !object.name.ends_with('/'))
-            .map(|object| self.to_file_system_ref(object))
-            .collect();
+        let mut listing = ListFilesResult::matching(
+            list.objects
+                .into_iter()
+                .filter(|object| !object.name.ends_with('/'))
+                .map(|object| self.to_file_system_ref(object)),
+            *file_matcher,
+            max_files_limit,
+        );
 
-        let all_found_len = all_found.len();
-        let filtered_files: Vec<FileSystemRef> = all_found
-            .into_iter()
-            .filter(|file_ref| {
-                file_matcher
-                    .iter()
-                    .all(|matcher| matches!(matcher.matches(file_ref), FileMatcherResult::Matched))
-            })
-            .take(max_files_limit.unwrap_or(usize::MAX))
-            .collect();
-        let skipped = all_found_len - filtered_files.len();
-
-        let new_max_files_limit = max_files_limit.map(|v| v.saturating_sub(filtered_files.len()));
-
-        let next_list_result = if !list.next_page_token.is_empty() {
-            self.list_files_with_token(
-                prefix,
-                Some(list.next_page_token),
-                file_matcher,
-                new_max_files_limit,
-            )
-            .await?
-        } else {
-            ListFilesResult::EMPTY
-        };
-
-        Ok(ListFilesResult {
-            files: [filtered_files, next_list_result.files].concat(),
-            skipped: next_list_result.skipped + skipped,
-        })
+        if !list.next_page_token.is_empty() {
+            let new_max_files_limit =
+                max_files_limit.map(|v| v.saturating_sub(listing.files.len()));
+            listing.merge(
+                self.list_files_with_token(
+                    prefix,
+                    Some(list.next_page_token),
+                    file_matcher,
+                    new_max_files_limit,
+                )
+                .await?,
+            );
+        }
+        Ok(listing)
     }
 }
 

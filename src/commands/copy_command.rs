@@ -332,7 +332,8 @@ async fn transfer_and_redact_file<
     let skip_reason = match options.file_matcher.matches(&base_file_ref) {
         FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
         FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-        FileMatcherResult::Matched => None,
+        // Ignore rules apply to listings only; this matcher carries none.
+        FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
     };
     if let Some(reason) = skip_reason {
         let outcome = CopyFileOutcome::Skipped { reason };

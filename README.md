@@ -1090,6 +1090,9 @@ For example:
 
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
+`scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and an inline
+marker, see [Ignoring files and findings](#ignoring-files-and-findings).
+
 ```sh
 redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
 ```
@@ -1153,6 +1156,74 @@ A finding with an unspecified likelihood has no score.
 `--local-ner-min-score`, `--local-gliner-min-score` and `--local-credential-ml-min-score` work as in `cp`: a finding of
 the redacter is only reported when its score reaches them (0.5 by default, 0.74 for local-credential-ml).
 
+### Ignoring files and findings
+
+Two mechanisms keep legitimate values, such as the mock keys of a test fixture, out of a scan. Both apply to `scan`
+only. `cp` does not read an ignore file and does not look for the marker: it always redacts everything it finds.
+
+Be aware that both hide real secrets as well as mock ones, so keep the ignore file and the marked lines in code review.
+
+#### Ignore file
+
+An ignore file lists the files `scan` does not read. It uses the gitignore syntax: `#` comments, `*` and `**`
+wildcards, a trailing `/` for a directory, a leading `/` to anchor a pattern at the source root and `!` to bring back a
+file an earlier pattern ignored. Unlike git, `!` also brings back a file inside an ignored directory: with `fixtures/`
+and `!fixtures/keep.txt`, `keep.txt` is scanned. Patterns match the path of a file relative to the source root, the path
+the reports show, with `/` or `\` as the separator, so the same file works for a local directory, GCS, S3 and a zip
+archive.
+
+```
+# Mock credentials used by the tests
+test-fixtures/
+*.mock.txt
+docs/**/example-keys.md
+!docs/real/example-keys.md
+```
+
+- A local directory source uses the `.redacterignore` at its root when it has one. The file leaves itself out, so it is
+  neither scanned nor reported as unsupported, and it is counted in `files_ignored`;
+- `--ignore-file <PATH>` reads the given local file instead, for any source, including GCS and S3;
+- `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
+  marker below still applies;
+- a file named as the source itself is always scanned;
+- ignored files do not count towards `--max-files-limit`;
+- a UTF-8 byte order mark at the start of the file is dropped, as git does;
+- a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
+
+An ignored file is not read. It is counted in `files_ignored`, which is part of the file total of the summary, and has no
+entry in the `files` of the report. The other counters keep their meaning.
+
+#### Inline marker
+
+The text `redacter:allow` on a line ignores every finding that covers that line, from the line where the finding
+starts to the line where it ends. The marker is matched as a substring, so it sits in whatever comment syntax the file
+uses:
+
+```
+API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
+```
+
+A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:
+
+```
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA...
+-----END RSA PRIVATE KEY----- # redacter:allow
+```
+
+A marker inside the value of any finding does not count, and ignores nothing: `API_KEY=xyz_redacter:allow_123` is still
+reported, and so is an email on the same line. A marker on a line the finding does not cover, such as the line above it,
+does not count either.
+
+- The ignored findings are not in `findings`, in the rows or in the exit code. They are counted in `findings_ignored`,
+  so the suppression stays visible in the summary and in the JSON report;
+- the marker works for every redacter, since it acts on the location of a finding. A value an LLM redacter named
+  without being able to locate it has no line and is not ignored; it stays in `unlocated_values`;
+- in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
+  lines;
+- an image or a PDF page has no place for the marker, so the findings in them are always reported;
+- `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
+
 ### Exit codes
 
 - `0`: nothing was found, or `--fail-on never` is set;
@@ -1193,7 +1264,10 @@ The report is one JSON object with the counters of the run and an entry for each
 - `files_scanned`, `files_with_findings`, `files_unconfirmed`, `files_skipped`, `files_unsupported`, `files_blocked`
   and `files_failed`: the number of files in each state. `files_unconfirmed` counts the scanned files without findings
   that have `unlocated_values`, and is part of `files_scanned`;
+- `files_ignored`: the number of files the [ignore file](#ignoring-files-and-findings) ignored. They have no entry in
+  `files`;
 - `findings`: the number of findings, and `findings_by_label`: the same count for each label;
+- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker, not counted in `findings`;
 - `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
 
 A finding has the fields `redacter`, `label`, `score`, `location` and `value`.

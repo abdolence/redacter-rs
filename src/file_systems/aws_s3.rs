@@ -2,7 +2,7 @@ use crate::errors::AppError;
 use crate::file_systems::{
     AbsoluteFilePath, FileSystemConnection, FileSystemRef, ListFilesResult, RelativeFilePath,
 };
-use crate::file_tools::{FileMatcher, FileMatcherResult};
+use crate::file_tools::FileMatcher;
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use futures::Stream;
@@ -70,59 +70,45 @@ impl<'a> AwsS3FileSystem<'a> {
 
         match list_resp.contents {
             Some(contents) => {
-                let all_found: Vec<FileSystemRef> = contents
-                    .into_iter()
-                    .filter(|item| item.key.iter().all(|key| !key.ends_with('/')))
-                    .filter_map(|item| {
-                        item.key.map(|name| {
-                            let relative_path: RelativeFilePath =
-                                name.trim_start_matches(&self.object_name).into();
-                            let media_type = mime_guess::from_path(&name).first();
-                            FileSystemRef {
-                                relative_path,
-                                media_type,
-                                file_size: item.size.map(|v| v as usize),
-                            }
-                        })
-                    })
-                    .take(max_files_limit.unwrap_or(usize::MAX))
-                    .collect();
+                let mut listing = ListFilesResult::matching(
+                    contents
+                        .into_iter()
+                        .filter(|item| item.key.iter().all(|key| !key.ends_with('/')))
+                        .filter_map(|item| {
+                            item.key.map(|name| {
+                                let relative_path: RelativeFilePath =
+                                    name.trim_start_matches(&self.object_name).into();
+                                let media_type = mime_guess::from_path(&name).first();
+                                FileSystemRef {
+                                    relative_path,
+                                    media_type,
+                                    file_size: item.size.map(|v| v as usize),
+                                }
+                            })
+                        }),
+                    *file_matcher,
+                    max_files_limit,
+                );
 
-                let all_found_len = all_found.len();
-                let filtered_files: Vec<FileSystemRef> = all_found
-                    .into_iter()
-                    .filter(|file_ref| {
-                        file_matcher.iter().all(|matcher| {
-                            matches!(matcher.matches(file_ref), FileMatcherResult::Matched)
-                        })
-                    })
-                    .collect();
-                let skipped = all_found_len - filtered_files.len();
-
-                let new_max_files_limit =
-                    max_files_limit.map(|v| v.saturating_sub(filtered_files.len()));
-
-                let next_list_result = if list_resp
+                if list_resp
                     .next_continuation_token
                     .as_ref()
                     .iter()
                     .any(|v| !v.is_empty())
                 {
-                    self.list_files_recursively(
-                        None,
-                        list_resp.next_continuation_token,
-                        file_matcher,
-                        new_max_files_limit,
-                    )
-                    .await?
-                } else {
-                    ListFilesResult::EMPTY
-                };
-
-                Ok(ListFilesResult {
-                    files: [filtered_files, next_list_result.files].concat(),
-                    skipped: next_list_result.skipped + skipped,
-                })
+                    let new_max_files_limit =
+                        max_files_limit.map(|v| v.saturating_sub(listing.files.len()));
+                    listing.merge(
+                        self.list_files_recursively(
+                            None,
+                            list_resp.next_continuation_token,
+                            file_matcher,
+                            new_max_files_limit,
+                        )
+                        .await?,
+                    );
+                }
+                Ok(listing)
             }
             None => Ok(ListFilesResult::EMPTY),
         }

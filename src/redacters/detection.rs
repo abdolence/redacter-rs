@@ -176,6 +176,31 @@ impl Display for DetectionLocation {
     }
 }
 
+/// The text that makes a finding ignored when it stands on a line the finding covers, or in the
+/// table cell of the finding, outside every finding. It is a substring, so it sits in whatever
+/// comment syntax the file uses.
+pub const ALLOW_MARKER: &str = "redacter:allow";
+
+/// Whether [`ALLOW_MARKER`] occurs in `text[window]` clear of every range of `findings`. An
+/// occurrence that overlaps a finding is part of a value, so it cannot be used to hide that value
+/// or any other finding on the line.
+fn has_marker_clear_of(text: &str, window: Range<usize>, findings: &[Range<usize>]) -> bool {
+    text[window.clone()]
+        .match_indices(ALLOW_MARKER)
+        .any(|(at, marker)| {
+            let start = window.start + at;
+            let end = start + marker.len();
+            findings
+                .iter()
+                .all(|finding| end <= finding.start || start >= finding.end)
+        })
+}
+
+/// Whether [`ALLOW_MARKER`] occurs in `text` clear of every range of `findings`.
+pub fn has_marker_outside(text: &str, findings: &[Range<usize>]) -> bool {
+    has_marker_clear_of(text, 0..text.len(), findings)
+}
+
 /// A text with the byte offset of each line start, so many detections are placed in it without
 /// rescanning it for each one.
 pub struct TextLines<'a> {
@@ -193,6 +218,25 @@ impl<'a> TextLines<'a> {
         }
     }
 
+    /// Whether [`ALLOW_MARKER`] stands, clear of every range of `findings`, on a line that
+    /// `range` covers: from the line it starts on to the line it ends on.
+    pub fn has_marker_beside(&self, range: Range<usize>, findings: &[Range<usize>]) -> bool {
+        let first_line = self.line_of(range.start);
+        let last_line = self.line_of(range.end.saturating_sub(1).max(range.start));
+        let to = self
+            .line_starts
+            .get(last_line + 1)
+            .copied()
+            .unwrap_or(self.text.len());
+        has_marker_clear_of(self.text, self.line_starts[first_line]..to, findings)
+    }
+
+    /// The 0-based index of the line `offset` is on.
+    fn line_of(&self, offset: usize) -> usize {
+        // The first line starts at 0, so at least one line start is not after `offset`.
+        self.line_starts.partition_point(|&start| start <= offset) - 1
+    }
+
     /// The detection of `range`, with its value copied out of the text. An error when the range
     /// is not inside the text on character boundaries: a report would otherwise place it where
     /// it is not.
@@ -203,11 +247,9 @@ impl<'a> TextLines<'a> {
         score: Option<Score>,
     ) -> AppResult<Detection> {
         let value = value_at(self.text, &range)?;
-        // The first line starts at 0, so at least one line start is not after `range.start`.
-        let line = self
-            .line_starts
-            .partition_point(|&line_start| line_start <= range.start);
-        let line_start = self.line_starts[line - 1];
+        let line_index = self.line_of(range.start);
+        let line = line_index + 1;
+        let line_start = self.line_starts[line_index];
         Ok(Detection {
             label,
             location: DetectionLocation::Text {

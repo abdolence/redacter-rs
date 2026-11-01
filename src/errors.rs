@@ -84,6 +84,11 @@ pub enum AppError {
     },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
+    #[error("Invalid ignore file: {source}")]
+    InvalidIgnoreFile {
+        #[source]
+        source: ignore::Error,
+    },
     #[error("Score must be a number between 0 and 1, got `{value}`")]
     InvalidScore { value: String },
     #[error("System error: {message}")]

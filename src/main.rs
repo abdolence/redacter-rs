@@ -143,6 +143,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             show_values,
             min_score,
             fail_on,
+            ignore,
         } => {
             let options = ScanCommandOptions::new(
                 filename_filter,
@@ -156,7 +157,8 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                 } else {
                     ValueDisplay::Masked
                 },
-            );
+            )
+            .with_ignore(ignore.into());
             let scan_result =
                 command_scan(term, &source, options, redacter_args.try_into()?).await?;
             report
