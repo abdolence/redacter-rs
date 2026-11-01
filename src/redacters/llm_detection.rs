@@ -134,7 +134,8 @@ enum NamedKind {
     Label(DetectionLabel),
     /// A kind a limited prompt did not offer, because its category is not chosen.
     OutOfScope,
-    /// A kind no name of the tool stands for, so its category is unknown.
+    /// A kind no name of the tool stands for, or the unclassified one that a limited prompt
+    /// did not offer: either way the category is unknown.
     Unknown,
 }
 
@@ -144,7 +145,9 @@ fn model_label(named: &str, kind_names: Option<&[String]>) -> NamedKind {
     let named = named.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     match kind_names {
         Some(names) if names.contains(&named) => NamedKind::Label(DetectionLabel::new(named)),
-        Some(_) if kind_category(&named).is_some() => NamedKind::OutOfScope,
+        Some(_) if kind_category(&named).is_some_and(|category| category != Category::Other) => {
+            NamedKind::OutOfScope
+        }
         Some(_) => NamedKind::Unknown,
         None => NamedKind::Label(
             MODEL_LABELS
@@ -545,6 +548,7 @@ mod tests {
     fn a_limited_answer_with_an_unknown_type_is_an_unplaceable_value_in_scope() {
         let answer = r#"[
             {"text":"00:1A:2B:3C:4D:5E","type":"mac_address"},
+            {"text":"gateway","type":"sensitive_data"},
             {"text":"10.20.30.40","type":"ip_address"}
         ]"#;
         let categories = only(&[Category::Network]);
@@ -558,7 +562,7 @@ mod tests {
         detections.retain_categories(RedacterType::GeminiLlm, &categories);
 
         assert_eq!(detections.found.len(), 1);
-        assert_eq!(detections.unlocated.len(), 1);
+        assert_eq!(detections.unlocated.len(), 2);
     }
 
     #[test]
@@ -566,7 +570,6 @@ mod tests {
         let answer = r#"[
             {"text":"gateway","type":"person_name"},
             {"text":"MAC","type":"location"},
-            {"text":"10.20.30.40","type":"sensitive_data"},
             {"text":"00:1A:2B:3C:4D:5E","type":"network"}
         ]"#;
         let categories = only(&[Category::Network]);
