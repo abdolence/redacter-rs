@@ -114,7 +114,7 @@ The harness reads the addons from the place the binary does, `REDACTER_ADDONS_DI
 cache directory, and downloads nothing. Install the ones the run needs once:
 
 ```sh
-redacter addons install local-ner,local-gliner,ocr,pdf
+redacter addons install local-ner,local-gliner,local-credential-ml,ocr,pdf
 ```
 
 The default runs the local redacters over `fixtures,secrets,public`. A redacter whose addon is
