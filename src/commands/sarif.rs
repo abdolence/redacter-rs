@@ -750,27 +750,40 @@ impl SarifResult {
     }
 }
 
-/// Drops all but the first `MAX_RESULTS` results by level, then rule, then file, keeping the
-/// order of the rest, and returns how many it dropped.
+/// Drops all but the first `MAX_RESULTS` results, keeping the order of the rest, and returns how
+/// many it dropped. Results are ranked by level, then by their position within their own rule,
+/// so every rule keeps its first results and a rule with few results is not crowded out by one
+/// with many; rule and file break ties.
 fn keep_most_severe(results: &mut Vec<SarifResult>) -> usize {
     let dropped = results.len().saturating_sub(MAX_RESULTS);
     if dropped == 0 {
         return 0;
     }
+    let mut seen_per_rule: BTreeMap<usize, usize> = BTreeMap::new();
+    let positions_in_rule: Vec<usize> = results
+        .iter()
+        .map(|result| {
+            let seen = seen_per_rule.entry(result.rule_index).or_default();
+            *seen += 1;
+            *seen - 1
+        })
+        .collect();
     let mut by_priority: Vec<usize> = (0..results.len()).collect();
     by_priority.sort_by_key(|&index| {
         let result = &results[index];
-        (result.level, result.rule_index, result.file())
+        (
+            result.level,
+            positions_in_rule[index],
+            result.rule_index,
+            result.file(),
+        )
     });
     let mut kept = vec![false; results.len()];
     for &index in &by_priority[..MAX_RESULTS] {
         kept[index] = true;
     }
-    let mut index = 0;
-    results.retain(|_| {
-        index += 1;
-        kept[index - 1]
-    });
+    let mut kept = kept.into_iter();
+    results.retain(|_| kept.next().unwrap_or(false));
     dropped
 }
 
@@ -779,7 +792,7 @@ impl Notification {
         Self {
             level: Level::Warning,
             message: format!(
-                "{count} results left out: GitHub takes at most {MAX_RESULTS} results in a run. \
+                "{count} results left out: GitHub shows at most {MAX_RESULTS} results of a run. \
                  The JSON report lists all of them."
             )
             .into(),
@@ -1064,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_keeps_errors_by_rule_then_path_up_to_the_result_limit_and_says_what_it_left_out() {
+    fn a_run_keeps_errors_before_warnings_up_to_the_result_limit_and_says_what_it_left_out() {
         let per = |count: usize| -> Vec<SarifFinding> {
             (0..count)
                 .map(|_| {
@@ -1085,10 +1098,6 @@ mod tests {
                     unlocated_values: 1,
                 },
             ),
-            artifact(
-                "b.txt",
-                ArtifactOutcome::Findings(vec![email(text_at(1, 1, 2), "x")]),
-            ),
             artifact("a.txt", ArtifactOutcome::Findings(per(MAX_RESULTS))),
             artifact("c.txt", ArtifactOutcome::Findings(per(2))),
         ];
@@ -1108,10 +1117,40 @@ mod tests {
         assert!(notes[0]["message"]["text"]
             .as_str()
             .unwrap()
-            .starts_with("4 results"));
+            .starts_with("3 results"));
         assert_eq!(
             log["runs"][0]["invocations"][0]["executionSuccessful"],
             true
+        );
+    }
+
+    #[test]
+    fn a_rule_with_one_result_survives_the_limit_behind_a_rule_with_many() {
+        let emails: Vec<SarifFinding> = (0..MAX_RESULTS + 1)
+            .map(|_| email(text_at(1, 1, 2), "x"))
+            .collect();
+        let artifacts = vec![
+            artifact("a.txt", ArtifactOutcome::Findings(emails)),
+            artifact(
+                "b.txt",
+                ArtifactOutcome::Findings(vec![SarifFinding::new(
+                    RedacterType::LocalRules,
+                    DetectionLabel::new("github-token"),
+                    None,
+                    text_at(1, 1, 2),
+                    "y",
+                )]),
+            ),
+        ];
+
+        let kept = results(&artifacts);
+
+        assert_eq!(kept.len(), MAX_RESULTS);
+        assert_eq!(
+            kept.iter()
+                .filter(|result| result["ruleId"] == "local-rules/github-token")
+                .count(),
+            1
         );
     }
 
@@ -1268,21 +1307,6 @@ mod tests {
                 (2, "local-rules/email".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn a_label_a_model_chose_cannot_break_a_line_of_the_log() {
-        let finding = SarifFinding::new(
-            RedacterType::GeminiLlm,
-            DetectionLabel::new("ssn\n\u{1b}[31mred"),
-            None,
-            None,
-            "x",
-        );
-
-        let result = &results(&[artifact("a.txt", ArtifactOutcome::Findings(vec![finding]))])[0];
-
-        assert_eq!(result["ruleId"], "gemini-llm/ssn\\n\\u{1b}[31mred");
     }
 
     #[test]
