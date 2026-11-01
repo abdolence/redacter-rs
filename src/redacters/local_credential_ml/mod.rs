@@ -14,8 +14,8 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::{find_in_cell, redact_rows};
 use crate::redacters::text_spans::{apply_redaction, REDACTED};
 use crate::redacters::{
-    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Score,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -73,45 +73,49 @@ impl<'a> LocalCredentialMlRedacter<'a> {
 }
 
 impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let (content, findings) = match input.content {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
+        let (content, replaced) = match input.content {
             RedacterDataItemContent::Value(text) => {
-                let (redacted, findings) = self
+                let (redacted, replaced) = self
                     .run_blocking(move |engine, min_score| {
                         let findings = engine.find(&text, min_score)?;
-                        Ok((apply_redaction(&text, &findings, REDACTED), findings.len()))
+                        let redacted = apply_redaction(&text, &findings, REDACTED);
+                        Ok((redacted, Detection::in_text(&text, findings)?.found))
                     })
                     .await?;
-                (RedacterDataItemContent::Value(redacted), findings)
+                (RedacterDataItemContent::Value(redacted), replaced)
             }
             RedacterDataItemContent::Table { headers, rows } => {
-                let (headers, rows, findings) = self
+                let (headers, rows, replaced) = self
                     .run_blocking(move |engine, min_score| {
-                        let (rows, findings) = redact_rows(rows, |column, cell| {
+                        let (rows, replaced) = redact_rows(rows, |column, cell| {
                             find_in_cell(&headers, column, cell, &mut |text| {
-                                engine.find(text, min_score)
+                                engine.find(text, min_score).map_err(AppError::from)
                             })
                         })?;
-                        Ok((headers, rows, findings))
+                        Ok((headers, rows, replaced))
                     })
                     .await?;
-                (RedacterDataItemContent::Table { headers, rows }, findings)
+                (RedacterDataItemContent::Table { headers, rows }, replaced)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
                 return Err(AppError::unsupported_content())
             }
         };
-        if findings > 0 {
+        if !replaced.is_empty() {
             self.reporter.report_debug(format!(
                 "local-credential-ml: {} finding(s) in {}",
-                findings,
+                replaced.len(),
                 input.file_ref.relative_path.value()
             ));
         }
-        Ok(RedacterDataItem {
-            content,
-            file_ref: input.file_ref,
-        })
+        Ok(Redacted::located(
+            RedacterDataItem {
+                content,
+                file_ref: input.file_ref,
+            },
+            replaced,
+        ))
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
@@ -198,7 +202,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Value(out) = redacted.content else {
+        let RedacterDataItemContent::Value(out) = redacted.item.content else {
             panic!("text stays text");
         };
         assert_eq!(
@@ -278,7 +282,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Table { headers, rows } = redacted.content else {
+        let RedacterDataItemContent::Table { headers, rows } = redacted.item.content else {
             panic!("table stays table");
         };
         assert_eq!(headers, vec!["service", "api_key"]);

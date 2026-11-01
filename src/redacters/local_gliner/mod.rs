@@ -14,8 +14,8 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::{find_in_cell, redact_rows};
 use crate::redacters::{
-    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Score,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
+    RedacterDataItem, RedacterDataItemContent, Score,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -102,45 +102,48 @@ impl<'a> LocalGlinerRedacter<'a> {
 }
 
 impl<'a> Redacter for LocalGlinerRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let (content, findings) = match input.content {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
+        let (content, replaced) = match input.content {
             RedacterDataItemContent::Value(text) => {
-                let (redacted, findings) = self
+                let (redacted, replaced) = self
                     .run_blocking(move |engine, options| {
                         let (redacted, findings) = engine.redact_text(&text, options)?;
-                        Ok((redacted, findings.len()))
+                        Ok((redacted, Detection::in_text(&text, findings)?.found))
                     })
                     .await?;
-                (RedacterDataItemContent::Value(redacted), findings)
+                (RedacterDataItemContent::Value(redacted), replaced)
             }
             RedacterDataItemContent::Table { headers, rows } => {
-                let (headers, rows, findings) = self
+                let (headers, rows, replaced) = self
                     .run_blocking(move |engine, options| {
-                        let (rows, findings) = redact_rows(rows, |column, cell| {
+                        let (rows, replaced) = redact_rows(rows, |column, cell| {
                             find_in_cell(&headers, column, cell, &mut |text| {
-                                engine.find(text, options)
+                                engine.find(text, options).map_err(AppError::from)
                             })
                         })?;
-                        Ok((headers, rows, findings))
+                        Ok((headers, rows, replaced))
                     })
                     .await?;
-                (RedacterDataItemContent::Table { headers, rows }, findings)
+                (RedacterDataItemContent::Table { headers, rows }, replaced)
             }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
                 return Err(AppError::unsupported_content())
             }
         };
-        if findings > 0 {
+        if !replaced.is_empty() {
             self.reporter.report_debug(format!(
                 "local-gliner: {} finding(s) in {}",
-                findings,
+                replaced.len(),
                 input.file_ref.relative_path.value()
             ));
         }
-        Ok(RedacterDataItem {
-            content,
-            file_ref: input.file_ref,
-        })
+        Ok(Redacted::located(
+            RedacterDataItem {
+                content,
+                file_ref: input.file_ref,
+            },
+            replaced,
+        ))
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
@@ -252,14 +255,15 @@ mod tests {
         let rows = vec![row.iter().map(|cell| cell.to_string()).collect::<Vec<_>>()];
         let mut seen: Vec<String> = Vec::new();
         let mut replies = replies.into_iter();
-        let (rows, findings) = redact_rows(rows, |column, cell| {
+        let (rows, detections) = redact_rows(rows, |column, cell| {
             find_in_cell(&headers, column, cell, &mut |text| {
                 seen.push(text.to_string());
                 Ok::<_, LocalGlinerError>(replies.next().unwrap_or_default())
             })
+            .map_err(AppError::from)
         })
         .unwrap();
-        (rows.into_iter().next().unwrap(), seen, findings)
+        (rows.into_iter().next().unwrap(), seen, detections.len())
     }
 
     /// A detection is placed by the cell's own offsets, never by its offsets in the
@@ -313,11 +317,12 @@ mod tests {
             vec!["-7".to_string(), "Osaka".to_string(), String::new()],
         ];
         let mut seen: Vec<String> = Vec::new();
-        let (redacted, findings) = redact_rows(rows, |column, cell| {
+        let (redacted, detections) = redact_rows(rows, |column, cell| {
             find_in_cell(&headers, column, cell, &mut |text| {
                 seen.push(text.to_string());
                 Ok::<_, LocalGlinerError>(vec![finding(text.len() - 5, text.len())])
             })
+            .map_err(AppError::from)
         })
         .unwrap();
         assert_eq!(
@@ -330,7 +335,7 @@ mod tests {
                 "full_name: Osaka",
             ]
         );
-        assert_eq!(findings, 5);
+        assert_eq!(detections.len(), 5);
         assert_eq!(
             redacted,
             vec![
@@ -461,7 +466,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Value(out) = redacted.content else {
+        let RedacterDataItemContent::Value(out) = redacted.item.content else {
             panic!("text stays text");
         };
         for pii in [
@@ -533,7 +538,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Value(out) = redacted.content else {
+        let RedacterDataItemContent::Value(out) = redacted.item.content else {
             panic!("text stays text");
         };
         for pii in [
@@ -584,7 +589,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Table { headers, rows } = redacted.content else {
+        let RedacterDataItemContent::Table { headers, rows } = redacted.item.content else {
             panic!("table stays table");
         };
         assert_eq!(
@@ -638,7 +643,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let RedacterDataItemContent::Table { headers, rows } = redacted.content else {
+        let RedacterDataItemContent::Table { headers, rows } = redacted.item.content else {
             panic!("table stays table");
         };
         assert_eq!(headers, vec!["id", "full_name", "email"]);

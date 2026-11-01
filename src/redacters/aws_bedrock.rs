@@ -13,11 +13,10 @@ use crate::common_types::TextImageCoords;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_at_coords,
-    redact_image_with_mode, sensitive_data_examples, text_redaction_instruction, Detections,
-    ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError,
-    RedactSupport, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters,
-    TextDetectionPrompt,
+    normalized_box_to_image_coords, parse_answer, prepare_image_for_llm, redact_image_with_mode,
+    sensitive_data_examples, text_redaction_instruction, Detections, ImageBoxes, LlmImageMode,
+    LlmTextFinding, ModelAnswer, ModelStop, NativeImageEditError, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextDetectionPrompt,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -490,20 +489,14 @@ impl<'a> AwsBedrockRedacter<'a> {
     pub async fn redact_image_file_using_coords(
         &self,
         input: RedacterDataItem,
-    ) -> AppResult<RedacterDataItem> {
+    ) -> AppResult<Redacted> {
         let RedacterDataItemContent::Image { mime_type, data } = input.content else {
             return Err(AppError::SystemError {
                 message: "Unsupported item for image redacting".to_string(),
             });
         };
         let found = self.find_image_boxes(&mime_type, &data).await?;
-        Ok(RedacterDataItem {
-            file_ref: input.file_ref,
-            content: RedacterDataItemContent::Image {
-                mime_type: mime_type.clone(),
-                data: redact_image_at_coords(mime_type, found.image.data, found.coords, 0.25)?,
-            },
-        })
+        found.redact(mime_type, input.file_ref, 0.25)
     }
 
     /// Sends one user message to `model_id` and returns the answer with how it ended.
@@ -571,9 +564,11 @@ impl<'a> AwsBedrockRedacter<'a> {
 }
 
 impl<'a> Redacter for AwsBedrockRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
-            RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
+            RedacterDataItemContent::Value(_) => {
+                self.redact_text_file(input).await.map(Redacted::unlocated)
+            }
             RedacterDataItemContent::Image { .. } => {
                 redact_image_with_mode(
                     self.options.image_mode,
@@ -1075,7 +1070,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input).await?;
-        match redacted_item.content {
+        match redacted_item.item.content {
             RedacterDataItemContent::Value(value) => {
                 assert_eq!(value.trim(), "Hello, [REDACTED]");
             }
@@ -1106,7 +1101,7 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input.clone()).await?;
-        let output_path = check_and_save_redacted_image(&input, &redacted_item, output_name);
+        let output_path = check_and_save_redacted_image(&input, &redacted_item.item, output_name);
         term.write_line(&format!(
             "Redacted image written to {}",
             output_path.display()
@@ -1162,8 +1157,11 @@ mod tests {
         .await?;
 
         let redacted_item = redacter.redact(input.clone()).await?;
-        let output_path =
-            check_and_save_redacted_image(&input, &redacted_item, "aws-bedrock-claude-coords.png");
+        let output_path = check_and_save_redacted_image(
+            &input,
+            &redacted_item.item,
+            "aws-bedrock-claude-coords.png",
+        );
         term.write_line(&format!(
             "Redacted image written to {}",
             output_path.display()

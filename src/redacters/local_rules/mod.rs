@@ -18,8 +18,8 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
-    RedacterDataItemContent,
+    text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
+    RedacterDataItem, RedacterDataItemContent,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -55,55 +55,60 @@ impl<'a> LocalRulesRedacter<'a> {
             reporter,
         })
     }
-
-    /// Redacts one piece of text and reports nothing: the caller aggregates finding counts
-    /// across every value/cell in the item and reports once, so a table with many cells does
-    /// not log once per cell.
-    fn redact_text(&self, text: &str) -> (String, usize) {
-        let (redacted, findings) = self.rules.redact(text);
-        (redacted, findings.len())
-    }
 }
 
 impl<'a> Redacter for LocalRulesRedacter<'a> {
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<RedacterDataItem> {
-        let mut total_findings = 0usize;
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
+        let mut replaced = Vec::new();
         let content = match input.content {
             RedacterDataItemContent::Value(text) => {
-                let (redacted, findings) = self.redact_text(&text);
-                total_findings += findings;
+                let (redacted, findings) = self.rules.redact(&text);
+                replaced = Detection::in_text(&text, findings)?.found;
                 RedacterDataItemContent::Value(redacted)
             }
-            RedacterDataItemContent::Table { headers, rows } => RedacterDataItemContent::Table {
-                headers,
-                rows: rows
-                    .into_iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|cell| {
-                                let (redacted, findings) = self.redact_text(cell);
-                                total_findings += findings;
-                                redacted
-                            })
-                            .collect()
-                    })
-                    .collect(),
-            },
+            RedacterDataItemContent::Table { headers, rows } => {
+                let mut redacted_rows = Vec::with_capacity(rows.len());
+                for (row_index, row) in rows.iter().enumerate() {
+                    let mut redacted_row = Vec::with_capacity(row.len());
+                    for (column, cell) in row.iter().enumerate() {
+                        let (redacted, findings) = self.rules.redact(cell);
+                        for finding in findings {
+                            replaced.push(Detection::in_table_cell(
+                                row_index,
+                                column,
+                                cell,
+                                finding.start..finding.end,
+                                finding.rule.into(),
+                                finding.score,
+                            )?);
+                        }
+                        redacted_row.push(redacted);
+                    }
+                    redacted_rows.push(redacted_row);
+                }
+                RedacterDataItemContent::Table {
+                    headers,
+                    rows: redacted_rows,
+                }
+            }
             RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
                 return Err(AppError::unsupported_content())
             }
         };
-        if total_findings > 0 {
+        if !replaced.is_empty() {
             self.reporter.report_debug(format!(
                 "local-rules: {} finding(s) in {}",
-                total_findings,
+                replaced.len(),
                 input.file_ref.relative_path.value()
             ));
         }
-        Ok(RedacterDataItem {
-            content,
-            file_ref: input.file_ref,
-        })
+        Ok(Redacted::located(
+            RedacterDataItem {
+                content,
+                file_ref: input.file_ref,
+            },
+            replaced,
+        ))
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
@@ -177,7 +182,7 @@ mod tests {
             );
             let item = text_item(name, mime::TEXT_PLAIN, RedacterDataItemContent::Value(text));
             let redacted = redacter.redact(item).await.unwrap();
-            let RedacterDataItemContent::Value(out) = redacted.content else {
+            let RedacterDataItemContent::Value(out) = redacted.item.content else {
                 panic!("text stays text");
             };
             assert!(!out.contains(TEST_DOCUMENT_SAMPLE_EMAIL), "{name}: {out}");
@@ -197,7 +202,7 @@ mod tests {
             RedacterDataItemContent::Value(text),
         );
         let redacted = redacter(&reporter).redact(item).await.unwrap();
-        let RedacterDataItemContent::Value(out) = redacted.content else {
+        let RedacterDataItemContent::Value(out) = redacted.item.content else {
             panic!("text stays text");
         };
         serde_json::from_str::<serde_json::Value>(&out).unwrap();
@@ -219,11 +224,88 @@ mod tests {
             },
         );
         let redacted = redacter(&reporter).redact(item).await.unwrap();
-        let RedacterDataItemContent::Table { headers, rows } = redacted.content else {
+        let RedacterDataItemContent::Table { headers, rows } = redacted.item.content else {
             panic!("table stays table");
         };
         assert_eq!(headers, vec!["email", "note"]);
         assert_eq!(rows, vec![vec!["[REDACTED]", "call [REDACTED]"]]);
+    }
+
+    #[tokio::test]
+    async fn redacting_text_returns_what_detecting_it_finds() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter);
+        let item = text_item(
+            "note.txt",
+            mime::TEXT_PLAIN,
+            RedacterDataItemContent::Value("mail a@b.io or call +1 555 123 4567".to_string()),
+        );
+
+        let detected = redacter.detect(&item).await.unwrap().found;
+        let redacted = redacter.redact(item).await.unwrap();
+
+        assert_eq!(detected.len(), 2, "{detected:?}");
+        assert_eq!(redacted.replaced, Some(detected));
+        let replaced = redacted.replaced.unwrap();
+        assert_eq!(
+            replaced[0].location,
+            DetectionLocation::Text {
+                start: 5,
+                end: 11,
+                line: 1,
+                column: 6,
+            }
+        );
+        assert_eq!(replaced[0].value, "a@b.io");
+    }
+
+    #[tokio::test]
+    async fn redacting_a_table_returns_the_cells_detecting_it_finds() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let redacter = redacter(&reporter);
+        let item = text_item(
+            "customers.csv",
+            mime::TEXT_CSV,
+            RedacterDataItemContent::Table {
+                headers: vec!["email".to_string(), "note".to_string()],
+                rows: vec![
+                    vec!["x".to_string(), "nothing here".to_string()],
+                    vec!["a@b.io".to_string(), "call +1 555 123 4567".to_string()],
+                ],
+            },
+        );
+
+        let detected = redacter.detect(&item).await.unwrap().found;
+        let redacted = redacter.redact(item).await.unwrap();
+
+        assert_eq!(detected.len(), 2, "{detected:?}");
+        assert_eq!(redacted.replaced, Some(detected));
+        assert!(matches!(
+            redacted.replaced.unwrap()[0].location,
+            DetectionLocation::TableCell {
+                row: 2,
+                column: 1,
+                start: 0,
+                end: 6
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn redacting_text_with_nothing_to_redact_returns_an_empty_list() {
+        let term = Term::stdout();
+        let reporter = AppReporter::from(&term);
+        let item = text_item(
+            "note.txt",
+            mime::TEXT_PLAIN,
+            RedacterDataItemContent::Value("nothing to see".to_string()),
+        );
+
+        let redacted = redacter(&reporter).redact(item).await.unwrap();
+
+        assert_eq!(redacted.replaced, Some(Vec::new()));
     }
 
     #[tokio::test]
