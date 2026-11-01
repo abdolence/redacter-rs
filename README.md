@@ -581,16 +581,24 @@ punctuation-dense text with an email on every line near 1.66 GB. The same copy w
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
 JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a table and whole. A piece is read with 64 KiB of text on
-each side, in windows of at most 4 MiB, and the output is the same as when the file is read whole: each redacter keeps its
-mask, and a value that crosses the end of a piece is masked whole. A value of up to 128 KiB across lines, such as a private
-key block, is found wherever a piece ends, and a longer one that crosses the end of a piece can be missed. With several
-redacters, each reads the text the ones before it left, so the first reads the contexts of all of them. A line longer than a window is cut inside. A text read in pieces
-is not compared before and after, so the 16 MiB limit above does not apply to it and every redaction of a large file is
-located, in the report too. Other redacters and `--sampling-size` read the file whole. `cp -d local-rules` on a 319 MB log
-with 26 findings peaks near 77 MiB of memory, against 682 MiB in 0.21, in about 5% more time. The same copy of a 366 MB log
-with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because its allocator keeps freed memory; with
-`MallocSpaceEfficient=1` in the environment it peaks near 89 MiB. With a report, the redactions are kept in memory until it is written. A file that is not valid UTF-8 fails with the byte
-it fails at, also when that byte is far into the file, and nothing is left at a local or zip destination, see below.
+each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
+masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
+longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
+left, so the first reads the contexts of all of them. A line longer than a window is cut inside.
+
+The output is the same as when the file is read whole, with two exceptions. A rule of your own that is anchored with `^`
+or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
+finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
+
+A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
+redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole.
+`cp -d local-rules` on a 319 MB log with 26 findings peaks near 77 MiB of memory, against 682 MiB in 0.21, in about 5%
+more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
+its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 89 MiB. With a report,
+the redactions are kept in memory until it is written.
+
+A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. Nothing of it
+is left at a local or zip destination, see below.
 
 ## Source and destinations
 
