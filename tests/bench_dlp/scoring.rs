@@ -1,7 +1,7 @@
 //! Scoring of a `scan` report against a dataset's truth. Everything here is a pure function of
 //! the report and the truth, so it is unit tested without running a redacter.
 
-use crate::categories::Category;
+use crate::category::Category;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

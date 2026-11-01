@@ -15,7 +15,10 @@
 //! The unit tests of the scoring and the tables run under a plain `cargo test`. The settings
 //! are `BENCH_DLP_*` environment variables, described in `test-fixtures/bench-dlp/README.md`.
 
-mod categories;
+// The file is the binary's own, so it holds items the benchmark never calls.
+#[allow(dead_code)]
+#[path = "../../src/redacters/category.rs"]
+mod category;
 mod datasets;
 mod runner;
 mod scoring;
@@ -28,8 +31,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use summary::{DatasetResult, Measurement, Outcome, ProviderResult, Results};
 
-const DEFAULT_PROVIDERS: &str =
-    "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,local-credential-ml,local-rules+local-credential-ml";
+const DEFAULT_PROVIDERS: &str = "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,local-credential-ml,local-rules+local-credential-ml";
 const DEFAULT_DATASETS: &str = "fixtures,secrets,public";
 
 fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> Vec<T> {

@@ -18,10 +18,6 @@ pub struct PresidioRedacterOptions {
     pub text_analyze_url: Option<Url>,
     pub image_redact_url: Option<Url>,
     /// The categories to look for; every category when `None`.
-    #[expect(
-        dead_code,
-        reason = "read once the redacter narrows its detection by category"
-    )]
     pub categories: Option<Categories>,
 }
 
@@ -332,7 +328,8 @@ impl<'a> Redacter for PresidioRedacter<'a> {
             }
             Some(media_type)
                 if Redacters::is_mime_image(media_type)
-                    && self.presidio_options.image_redact_url.is_some() =>
+                    && self.presidio_options.image_redact_url.is_some()
+                    && self.presidio_options.categories.is_none() =>
             {
                 RedactSupport::Supported
             }
@@ -341,7 +338,8 @@ impl<'a> Redacter for PresidioRedacter<'a> {
     }
 
     /// Only text goes to the analyzer: the image endpoint redacts without reporting where, so
-    /// images are read with OCR and their text is analysed.
+    /// images are read with OCR and their text is analysed. Under `--categories` redaction does
+    /// the same, since the image endpoint takes no entity list and would redact every kind.
     async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
         Ok(match file_ref.media_type.as_ref() {
             Some(media_type)
@@ -375,7 +373,9 @@ mod tests {
     use console::Term;
 
     use super::*;
-    use crate::redacters::DetectionLocation;
+    use crate::common_types::TextImageCoords;
+    use crate::file_converters::{ocr::Ocr, FileConverters};
+    use crate::redacters::{DetectionLocation, RedacterBaseOptions, StreamRedacter};
 
     /// An analyzer response as the Presidio service sends it: offsets count characters.
     const ANALYZER_RESPONSE: &str = r#"[
@@ -482,6 +482,98 @@ mod tests {
                 .unwrap(),
             RedactSupport::Supported
         ));
+    }
+
+    async fn redacter_limited_to<'a>(
+        reporter: &'a AppReporter<'a>,
+        categories: Option<Categories>,
+    ) -> PresidioRedacter<'a> {
+        PresidioRedacter::new(
+            PresidioRedacterOptions {
+                categories,
+                text_analyze_url: Some(Url::parse("http://localhost:5002/analyze").unwrap()),
+                image_redact_url: Some(Url::parse("http://localhost:5003/redact").unwrap()),
+            },
+            reporter,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn images_are_never_sent_to_the_image_endpoint_when_categories_limit_the_search() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let categories = Categories::limiting([Category::Credential]);
+        let redacter = redacter_limited_to(&reporter, categories).await;
+        let file = |media_type: mime::Mime| FileSystemRef {
+            relative_path: "file".into(),
+            media_type: Some(media_type),
+            file_size: None,
+        };
+
+        assert_eq!(
+            redacter
+                .redact_support(&file(mime::IMAGE_PNG))
+                .await
+                .unwrap(),
+            RedactSupport::Unsupported
+        );
+        assert_eq!(
+            redacter
+                .redact_support(&file(mime::TEXT_PLAIN))
+                .await
+                .unwrap(),
+            RedactSupport::Supported
+        );
+    }
+
+    struct NoWords;
+
+    impl Ocr for NoWords {
+        fn image_to_text(&self, _image: image::DynamicImage) -> AppResult<Vec<TextImageCoords>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_image_is_planned_with_ocr_only_when_categories_limit_the_search() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let mut converters = FileConverters::new();
+        converters.ocr = Some(Box::new(NoWords));
+        let png = FileSystemRef {
+            relative_path: "scan.png".into(),
+            media_type: Some(mime::IMAGE_PNG),
+            file_size: None,
+        };
+        let plan_with_ocr = async |categories: Option<Categories>| {
+            let options = RedacterBaseOptions {
+                allow_unsupported_copies: false,
+                unsupported_as_text: false,
+                csv_headers_disable: false,
+                csv_delimiter: None,
+                sampling_size: None,
+                limit_dlp_requests: None,
+                categories: categories.clone(),
+                list_redactions: true,
+            };
+            let redacters = vec![Redacters::Presidio(
+                redacter_limited_to(&reporter, categories).await,
+            )];
+            let stream_redacter = StreamRedacter::new(&options, &converters);
+            let plan = stream_redacter
+                .create_redact_plan(&redacters, &png)
+                .await
+                .unwrap();
+            (plan.apply_ocr, plan.supported_redacters.len())
+        };
+
+        assert_eq!(plan_with_ocr(None).await, (false, 1));
+        assert_eq!(
+            plan_with_ocr(Categories::limiting([Category::Credential])).await,
+            (true, 1)
+        );
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use crate::commands::copy_output::{
     escaped, format_file_row, format_legend, OutputStyles, RowLayout, RowOutcome, SkipReason,
     GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
-use crate::commands::sarif::{ArtifactOutcome, Place, SarifArtifact, SarifFinding};
+use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Detection, DetectionLabel, DetectionLocation, Score};
 use console::{measure_text_width, pad_str, Alignment};
@@ -81,8 +81,8 @@ pub struct FindingReport {
     score: Option<Score>,
     location: DetectionLocation,
     value: String,
-    /// Where the finding is for a SARIF report, which also needs where a range ends. Not part of
-    /// the JSON report. `None` when the location is the file as a whole.
+    /// Where the finding is for the SARIF and OCSF reports, which also need where a range ends.
+    /// Not part of the JSON report. `None` when the location is the file as a whole.
     #[serde(skip)]
     place: Option<Place>,
 }
@@ -102,12 +102,14 @@ impl FindingReport {
         }
     }
 
-    /// The finding for a SARIF report, which masks the value whatever the report holds.
-    pub(super) fn sarif_finding(&self) -> SarifFinding {
-        SarifFinding::new(
+    /// The finding for the SARIF and OCSF reports, which mask the value whatever the report
+    /// holds.
+    pub(super) fn reported_finding(&self) -> ReportedFinding {
+        ReportedFinding::new(
             self.redacter,
             self.label.clone(),
             self.score,
+            self.location,
             self.place,
             &self.value,
         )
@@ -206,25 +208,25 @@ impl ScanFileReport {
         self.findings.is_empty() && self.unlocated_values > 0
     }
 
-    /// The file for a SARIF report, or `None` for a file left out on request.
-    fn sarif_artifact(&self) -> Option<SarifArtifact> {
+    /// The file for the SARIF and OCSF reports, or `None` for a file left out on request.
+    fn reported_file(&self) -> Option<ReportedFile> {
         let reason = self.reason.clone().unwrap_or_default();
         let outcome = match self.status {
-            ScanFileStatus::Scanned if self.is_unconfirmed() => ArtifactOutcome::Unconfirmed {
+            ScanFileStatus::Scanned if self.is_unconfirmed() => FileOutcome::Unconfirmed {
                 unlocated_values: self.unlocated_values,
             },
-            ScanFileStatus::Scanned => ArtifactOutcome::Findings(
+            ScanFileStatus::Scanned => FileOutcome::Findings(
                 self.findings
                     .iter()
-                    .map(FindingReport::sarif_finding)
+                    .map(FindingReport::reported_finding)
                     .collect(),
             ),
-            ScanFileStatus::Failed => ArtifactOutcome::Failed { reason },
-            ScanFileStatus::Blocked => ArtifactOutcome::Blocked { reason },
-            ScanFileStatus::Unsupported => ArtifactOutcome::Unsupported { reason },
+            ScanFileStatus::Failed => FileOutcome::Failed { reason },
+            ScanFileStatus::Blocked => FileOutcome::Blocked { reason },
+            ScanFileStatus::Unsupported => FileOutcome::Unsupported { reason },
             ScanFileStatus::Skipped => return None,
         };
-        Some(SarifArtifact {
+        Some(ReportedFile {
             path: self.path.clone(),
             outcome,
         })
@@ -354,11 +356,11 @@ impl ScanCommandResult {
         self.files.push(file);
     }
 
-    /// The files of the scan for a SARIF report.
-    pub fn sarif_artifacts(&self) -> Vec<SarifArtifact> {
+    /// The files of the scan for the SARIF and OCSF reports.
+    pub fn reported_files(&self) -> Vec<ReportedFile> {
         self.files
             .iter()
-            .filter_map(ScanFileReport::sarif_artifact)
+            .filter_map(ScanFileReport::reported_file)
             .collect()
     }
 
@@ -555,8 +557,10 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::artifact_locator::ArtifactLocator;
     use crate::commands::copy_output::NotRedactedReason;
-    use crate::commands::sarif::{ArtifactLocator, SarifLog};
+    use crate::commands::ocsf::{EpochMillis, OcsfEvents};
+    use crate::commands::sarif::SarifLog;
     use clap::ValueEnum;
     use std::path::Path;
 
@@ -726,10 +730,33 @@ mod tests {
         let locator = ArtifactLocator::new("./", Path::new("/work"));
 
         let sarif =
-            serde_json::to_string(&SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap();
+            serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator)).unwrap();
 
         assert!(sarif.contains("j********************m"), "{sarif}");
         assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
+    }
+
+    #[test]
+    fn the_ocsf_report_has_the_masked_value_even_when_values_are_shown() {
+        let mut result = ScanCommandResult::default();
+        result.push(ScanFileReport::scanned(
+            &file_ref("note.txt", mime::TEXT_PLAIN),
+            vec![FindingReport::new(
+                RedacterType::LocalRules,
+                &email_detection(),
+                ValueDisplay::Raw,
+            )],
+            0,
+        ));
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+        let time = EpochMillis::try_from(std::time::SystemTime::now()).unwrap();
+
+        let ndjson = OcsfEvents::new(&result.reported_files(), &locator, time)
+            .to_ndjson()
+            .unwrap();
+
+        assert!(ndjson.contains("j********************m"), "{ndjson}");
+        assert!(!ndjson.contains("john.smith@example.com"), "{ndjson}");
     }
 
     #[test]
@@ -742,16 +769,16 @@ mod tests {
         ));
 
         let outcomes: Vec<(String, &str)> = result
-            .sarif_artifacts()
+            .reported_files()
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    ArtifactOutcome::Findings(findings) if findings.is_empty() => "clean",
-                    ArtifactOutcome::Findings(_) => "findings",
-                    ArtifactOutcome::Unconfirmed { .. } => "unconfirmed",
-                    ArtifactOutcome::Failed { .. } => "failed",
-                    ArtifactOutcome::Blocked { .. } => "blocked",
-                    ArtifactOutcome::Unsupported { .. } => "unsupported",
+                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    FileOutcome::Findings(_) => "findings",
+                    FileOutcome::Unconfirmed { .. } => "unconfirmed",
+                    FileOutcome::Failed { .. } => "failed",
+                    FileOutcome::Blocked { .. } => "blocked",
+                    FileOutcome::Unsupported { .. } => "unsupported",
                 };
                 (artifact.path, outcome)
             })

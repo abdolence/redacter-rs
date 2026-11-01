@@ -4,7 +4,7 @@ mod user_rules;
 mod validators;
 
 pub use error::LocalRulesError;
-pub use rules::{RuleGroup, RuleSet};
+pub use rules::{is_credential_rule, RuleGroup, RuleSet};
 pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
 #[cfg(feature = "local-credential-ml")]
 pub(crate) use validators::quoted_credential_value;

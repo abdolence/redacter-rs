@@ -3,11 +3,11 @@ use crate::common_types::GcpProjectId;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    prepare_image_for_llm, redact_image_with_mode, retrying_once, text_redaction_instruction,
-    Categories, Detections, GeminiCandidate, ImageBoxes, LlmImageMode, LlmTextFinding, ModelAnswer,
-    NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacted, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters, TextDetectionPrompt, GEMINI_COORDS_REDACTION_PROMPT,
-    NATIVE_IMAGE_REDACTION_PROMPT,
+    llm_support, prepare_image_for_llm, redact_image_with_mode, retrying_once,
+    text_redaction_instruction, Categories, Detections, GeminiCandidate, ImageBoxes, LlmImageMode,
+    LlmTextFinding, ModelAnswer, NativeImageEditError, NormalizedPiiBox, RedactSupport, Redacted,
+    Redacter, RedacterDataItem, RedacterDataItemContent, TextDetectionPrompt,
+    GEMINI_COORDS_REDACTION_PROMPT, NATIVE_IMAGE_REDACTION_PROMPT,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -25,10 +25,6 @@ pub struct GeminiLlmRedacterOptions {
     pub gemini_image_model: Option<GeminiLlmModelName>,
     pub image_mode: LlmImageMode,
     /// The categories to look for; every category when `None`.
-    #[expect(
-        dead_code,
-        reason = "read once the redacter narrows its detection by category"
-    )]
     pub categories: Option<Categories>,
 }
 
@@ -47,6 +43,23 @@ fn schema_of(r#type: gemini_api::Type) -> gemini_api::Schema {
         r#type: r#type.into(),
         ..std::default::Default::default()
     }
+}
+
+/// Schema of the text detection answer. `kind_names`, when set, are the only values `type`
+/// may take.
+fn text_findings_schema(kind_names: Option<&[String]>) -> gemini_api::Schema {
+    let kind = match kind_names {
+        Some(names) => gemini_api::Schema {
+            format: "enum".to_string(),
+            r#enum: names.to_vec(),
+            ..schema_of(gemini_api::Type::String)
+        },
+        None => schema_of(gemini_api::Type::String),
+    };
+    findings_schema(vec![
+        ("text", schema_of(gemini_api::Type::String)),
+        ("type", kind),
+    ])
 }
 
 /// Schema of an array of objects whose listed properties are all required.
@@ -342,7 +355,7 @@ impl<'a> GeminiLlmRedacter<'a> {
     }
 
     async fn detect_in_text(&self, text: &str) -> AppResult<Detections> {
-        let prompt = TextDetectionPrompt::new(text);
+        let prompt = TextDetectionPrompt::new(text, self.gemini_llm_options.categories.as_ref());
         let answer = self
             .generate_json(
                 vec![
@@ -351,10 +364,7 @@ impl<'a> GeminiLlmRedacter<'a> {
                     text_part(prompt.text),
                     text_part(prompt.fence),
                 ],
-                findings_schema(vec![
-                    ("text", schema_of(gemini_api::Type::String)),
-                    ("type", schema_of(gemini_api::Type::String)),
-                ]),
+                text_findings_schema(prompt.kind_names.as_deref()),
             )
             .await?;
         LlmTextFinding::detections_from_answer(&answer, text)
@@ -497,11 +507,10 @@ impl<'a> Redacter for GeminiLlmRedacter<'a> {
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
-        Ok(match file_ref.media_type.as_ref() {
-            Some(media_type) if Redacters::is_mime_text(media_type) => RedactSupport::Supported,
-            Some(media_type) if Redacters::is_mime_image(media_type) => RedactSupport::Supported,
-            _ => RedactSupport::Unsupported,
-        })
+        Ok(llm_support(
+            file_ref,
+            self.gemini_llm_options.categories.as_ref(),
+        ))
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
@@ -566,6 +575,27 @@ mod tests {
             }],
             ..std::default::Default::default()
         }
+    }
+
+    fn kind_schema(schema: gemini_api::Schema) -> gemini_api::Schema {
+        let mut finding = schema.items.expect("an array of findings");
+        finding
+            .properties
+            .remove("type")
+            .expect("findings have a type")
+    }
+
+    #[test]
+    fn the_kind_of_a_finding_is_limited_to_the_names_when_categories_limit_the_search() {
+        let names = vec!["password".to_string(), "api_key".to_string()];
+
+        let limited = kind_schema(text_findings_schema(Some(&names)));
+        let unlimited = kind_schema(text_findings_schema(None));
+
+        assert_eq!(limited.r#enum, names);
+        assert_eq!(limited.format, "enum");
+        assert!(unlimited.r#enum.is_empty());
+        assert!(unlimited.format.is_empty());
     }
 
     #[test]
