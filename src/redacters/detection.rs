@@ -150,17 +150,14 @@ pub enum DetectionLocation {
         x2: f32,
     },
     /// PDF page `page`, when where on it is not known.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
     Page { page: usize },
     /// The file as a whole, when where in it is not known.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
     File,
 }
 
 impl DetectionLocation {
     /// The byte range inside the text or the table cell the location is in; `None` for the
     /// kinds that do not point into a text.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
     pub(crate) fn byte_range(&self) -> Option<Range<usize>> {
         match *self {
             Self::Text { start, end, .. } | Self::TableCell { start, end, .. } => Some(start..end),

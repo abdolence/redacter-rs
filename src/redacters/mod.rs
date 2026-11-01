@@ -57,7 +57,6 @@ pub(crate) mod text_spans;
 mod detection;
 pub use detection::*;
 
-#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
 mod text_changes;
 
 mod open_ai_llm;
@@ -76,6 +75,9 @@ mod simple_image_redacter;
 pub use simple_image_redacter::*;
 mod stream_redacter;
 pub use stream_redacter::*;
+
+mod stream_redactions;
+pub(crate) use stream_redactions::StreamRedactions;
 
 mod redacter_throttler;
 pub use redacter_throttler::*;
@@ -488,9 +490,6 @@ pub struct Redacted {
     /// only pixels. `Some(vec![])` and `None` differ: a coordinate pass that found no box still
     /// returns a re-encoded copy of the image, which only the empty list tells apart from an
     /// edit.
-    // TODO: drop this allow when the stream redacter reports `replaced`; until then only
-    // tests read it.
-    #[allow(dead_code)]
     pub replaced: Option<Vec<Detection>>,
 }
 
