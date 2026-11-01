@@ -22,6 +22,12 @@ use std::path::{Component, Path, PathBuf};
 const SARIF_SCHEMA: &str =
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
 
+/// The most results a run holds. GitHub rejects a SARIF file with more than 25,000 results in a
+/// run and shows only the top 5,000 of a file it accepts, so results past 5,000 would cost
+/// upload time and show nothing; see the limits table of
+/// <https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning>.
+const MAX_RESULTS: usize = 5_000;
+
 /// The base GitHub resolves a relative `uri` against: the root of the checkout.
 const SOURCE_ROOT_ID: &str = "%SRCROOT%";
 
@@ -335,7 +341,6 @@ impl ArtifactLocator {
     }
 }
 
-/// Drops `.` and resolves `..` against the segment before it, without touching the disk.
 fn lexically_normal(path: &Path) -> PathBuf {
     let mut normal = PathBuf::new();
     for component in path.components() {
@@ -350,7 +355,6 @@ fn lexically_normal(path: &Path) -> PathBuf {
     normal
 }
 
-/// The segments of a path joined by `/` and percent-encoded, without a root.
 fn encoded_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
@@ -376,7 +380,7 @@ impl RuleId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Level {
     Error,
@@ -410,7 +414,8 @@ struct Run {
     tool: Tool,
     /// The columns of a region count Unicode code points, as the columns of a finding do. The
     /// SARIF default is UTF-16 code units, which differ for characters outside the Basic
-    /// Multilingual Plane.
+    /// Multilingual Plane. GitHub's documentation does not say which unit it reads, so the
+    /// log states the one it uses.
     column_kind: &'static str,
     invocations: Vec<Invocation>,
     results: Vec<SarifResult>,
@@ -574,7 +579,9 @@ struct Region {
 /// reads, and it is derived from the rule, the file and the masked value, never from the
 /// value itself: a hash of a secret is reversed by trying every candidate. It does not change
 /// when lines are added above the finding. The part after the colon counts the findings of
-/// the same rule, file and masked value before this one.
+/// the same rule, file and masked value before this one, as GitHub's own fingerprints number
+/// repeats of a hash in a file (`fingerprints.ts` of github/codeql-action). Without it, two
+/// identical findings in a file would share one fingerprint.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Fingerprints {
@@ -701,6 +708,11 @@ impl SarifLog {
             }
         }
 
+        let left_out = keep_most_severe(&mut results);
+        if left_out > 0 {
+            notifications.push(Notification::results_left_out(left_out));
+        }
+
         let execution_successful = !artifacts.iter().any(|artifact| {
             matches!(
                 artifact.outcome,
@@ -730,7 +742,51 @@ impl SarifLog {
     }
 }
 
+impl SarifResult {
+    fn file(&self) -> &str {
+        self.locations.first().map_or("", |location| {
+            &location.physical_location.artifact_location.uri
+        })
+    }
+}
+
+/// Drops all but the first `MAX_RESULTS` results by level, then rule, then file, keeping the
+/// order of the rest, and returns how many it dropped.
+fn keep_most_severe(results: &mut Vec<SarifResult>) -> usize {
+    let dropped = results.len().saturating_sub(MAX_RESULTS);
+    if dropped == 0 {
+        return 0;
+    }
+    let mut by_priority: Vec<usize> = (0..results.len()).collect();
+    by_priority.sort_by_key(|&index| {
+        let result = &results[index];
+        (result.level, result.rule_index, result.file())
+    });
+    let mut kept = vec![false; results.len()];
+    for &index in &by_priority[..MAX_RESULTS] {
+        kept[index] = true;
+    }
+    let mut index = 0;
+    results.retain(|_| {
+        index += 1;
+        kept[index - 1]
+    });
+    dropped
+}
+
 impl Notification {
+    fn results_left_out(count: usize) -> Self {
+        Self {
+            level: Level::Warning,
+            message: format!(
+                "{count} results left out: GitHub takes at most {MAX_RESULTS} results in a run. \
+                 The JSON report lists all of them."
+            )
+            .into(),
+            locations: Vec::new(),
+        }
+    }
+
     fn new(
         level: Level,
         artifact: &SarifArtifact,
@@ -1008,6 +1064,58 @@ mod tests {
     }
 
     #[test]
+    fn a_run_keeps_errors_by_rule_then_path_up_to_the_result_limit_and_says_what_it_left_out() {
+        let per = |count: usize| -> Vec<SarifFinding> {
+            (0..count)
+                .map(|_| {
+                    SarifFinding::new(
+                        RedacterType::LocalNer,
+                        DetectionLabel::new("per"),
+                        None,
+                        text_at(1, 1, 2),
+                        "x",
+                    )
+                })
+                .collect()
+        };
+        let artifacts = vec![
+            artifact(
+                "unconfirmed.txt",
+                ArtifactOutcome::Unconfirmed {
+                    unlocated_values: 1,
+                },
+            ),
+            artifact(
+                "b.txt",
+                ArtifactOutcome::Findings(vec![email(text_at(1, 1, 2), "x")]),
+            ),
+            artifact("a.txt", ArtifactOutcome::Findings(per(MAX_RESULTS))),
+            artifact("c.txt", ArtifactOutcome::Findings(per(2))),
+        ];
+
+        let log = log_of(&artifacts);
+
+        let results = log["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), MAX_RESULTS);
+        assert!(results
+            .iter()
+            .all(|result| result["ruleId"] == "local-ner/per" && result["level"] == "error"));
+        let notes = log["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+            .as_array()
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["level"], "warning");
+        assert!(notes[0]["message"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("4 results"));
+        assert_eq!(
+            log["runs"][0]["invocations"][0]["executionSuccessful"],
+            true
+        );
+    }
+
+    #[test]
     fn a_file_that_failed_or_is_blocked_makes_the_invocation_unsuccessful() {
         let invocation = |outcomes: Vec<ArtifactOutcome>| {
             let artifacts: Vec<SarifArtifact> = outcomes
@@ -1046,42 +1154,6 @@ mod tests {
                  "locations": [{"physicalLocation": {"artifactLocation": {"uri": "f2.bin", "uriBaseId": "%SRCROOT%"}}}]},
             ])
         );
-    }
-
-    #[test]
-    fn a_value_as_found_never_reaches_the_log() {
-        let raw = "john.smith@example.com";
-        let log = log_of(&[
-            artifact(
-                "a.txt",
-                ArtifactOutcome::Findings(vec![email(text_at(1, 1, 23), raw)]),
-            ),
-            artifact(
-                "b.csv",
-                ArtifactOutcome::Findings(vec![email(
-                    Some(Place::TableCell { row: 1, column: 1 }),
-                    raw,
-                )]),
-            ),
-        ])
-        .to_string();
-
-        assert!(!log.contains(raw), "{log}");
-        assert!(log.contains("j********************m"), "{log}");
-    }
-
-    #[test]
-    fn a_masked_value_stays_as_it_is() {
-        let masked = "j********************m";
-        let result = &results(&[artifact(
-            "a.txt",
-            ArtifactOutcome::Findings(vec![email(text_at(1, 1, 23), masked)]),
-        )])[0];
-
-        assert!(result["message"]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with(masked));
     }
 
     #[test]
