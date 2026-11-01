@@ -588,6 +588,39 @@ mod tests {
     }
 
     #[test]
+    fn url_credentials_with_an_email_like_password_keep_the_host() {
+        assert_redacts(
+            "https://alice:jane%40corp.com@example.com/path",
+            "https://[REDACTED]@example.com/path",
+        );
+        assert_redacts(
+            "ftp://alice:s3cret@localhost/path",
+            "ftp://[REDACTED]@localhost/path",
+        );
+    }
+
+    #[test]
+    fn url_credentials_with_an_email_as_user_are_redacted_whole() {
+        assert_redacts("https://bob@corp.com:pw@host/", "https://[REDACTED]@host/");
+    }
+
+    #[test]
+    fn an_email_beside_a_url_with_credentials_is_still_found() {
+        assert_redacts(
+            "mail jane@example.com about https://alice:s3cret@example.com/path",
+            "mail [REDACTED] about https://[REDACTED]@example.com/path",
+        );
+        assert_redacts(
+            "https://alice:s3cret@example.com/path or mailto:jane@example.com",
+            "https://[REDACTED]@example.com/path or mailto:[REDACTED]",
+        );
+        assert_redacts(
+            "https://alice:s3cret@example.com/?cc=jane@example.com",
+            "https://[REDACTED]@example.com/?cc=[REDACTED]",
+        );
+    }
+
+    #[test]
     fn secrets() {
         assert_redacts("key AKIAIOSFODNN7EXAMPLE", "key [REDACTED]");
         assert_redacts("AIzaSyA1234567890abcdefghijklmnopqrstuv", "[REDACTED]");

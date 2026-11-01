@@ -57,12 +57,16 @@ const RULES: &[RuleSpec] = &[
     RuleSpec {
         name: "email",
         group: RuleGroup::Email,
-        capture_group: 0,
+        capture_group: 1,
         validator: None,
         keyword: false,
-        description: "Email address",
+        description: "Email address; not the `user:password` part of a URL",
         example: Example::Synthetic("john.smith@example.com"),
-        pattern: r"(?i)\b[a-z0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b",
+        // The first alternative is the `url-credentials` shape and has no capture group: it
+        // matches only to consume the credentials, so the `password@host` inside them cannot
+        // start an email match that overlaps the credentials and, once overlapping findings
+        // are united, pulls the host into the redaction.
+        pattern: r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@|\b([a-z0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b)",
     },
     RuleSpec {
         name: "phone-international",
@@ -156,7 +160,10 @@ const RULES: &[RuleSpec] = &[
         keyword: false,
         description: "`user:password` embedded in a URL; only the credentials are redacted",
         example: Example::Synthetic("https://alice:s3cret@example.com/path"),
-        pattern: r"\b[a-zA-Z][a-zA-Z0-9+.-]*://([^\s/@:]+:[^\s/@]+)@",
+        // The user part may hold an `@` (`bob@corp.com:pw`) and ends at the first `:`; the
+        // password ends at the next `@`. The `email` rule repeats this shape to consume it, so
+        // keep the two in step.
+        pattern: r"\b[a-zA-Z][a-zA-Z0-9+.-]*://([^\s/:]+:[^\s/@]+)@",
     },
     RuleSpec {
         name: "aws-access-key",
