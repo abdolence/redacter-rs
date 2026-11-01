@@ -104,7 +104,7 @@ pub fn command_addons_ls(term: &Term, options: &AddonStoreOptions) -> AppResult<
     Ok(())
 }
 
-const ADDON_WIDTH: usize = 14;
+const ADDON_WIDTH: usize = 20;
 const STATE_WIDTH: usize = 32;
 const SIZE_WIDTH: usize = 12;
 

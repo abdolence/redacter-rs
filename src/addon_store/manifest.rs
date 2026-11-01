@@ -17,6 +17,9 @@ pub enum Addon {
     /// The model of the local-gliner redacter.
     #[cfg(any(feature = "local-gliner", test))]
     LocalGliner,
+    /// The model of the local-credential-ml redacter.
+    #[cfg(any(feature = "local-credential-ml", test))]
+    LocalCredentialMl,
 }
 
 impl Addon {
@@ -31,6 +34,8 @@ impl Addon {
             Addon::LocalNer => Some(&NER_MULTILINGUAL_HRL),
             #[cfg(any(feature = "local-gliner", test))]
             Addon::LocalGliner => Some(&GLINER_MULTI_PII),
+            #[cfg(any(feature = "local-credential-ml", test))]
+            Addon::LocalCredentialMl => Some(&CREDENTIAL_LINE),
         }
     }
 }
@@ -102,6 +107,7 @@ static NER_MULTILINGUAL_HRL_FILES: [AddonFile; 3] = [
 #[cfg(any(
     feature = "local-ner",
     feature = "local-gliner",
+    feature = "local-credential-ml",
     feature = "pdf-render",
     test
 ))]
@@ -138,6 +144,44 @@ static GLINER_MULTI_PII_FILES: [AddonFile; 3] = [
         url: gliner_url!("gliner_config.json"),
         size: 732,
         sha256: "69e141f7fe1864e0d81ab0e542c68387d588db62393bcd93b471d54dcf0f5c16",
+    },
+];
+
+#[cfg(any(feature = "local-credential-ml", test))]
+macro_rules! credential_line_url {
+    ($path:literal) => {
+        concat!(
+            "https://github.com/abdolence/redacter-rs/releases/download/models-credential-line-1/",
+            $path
+        )
+    };
+}
+
+#[cfg(any(feature = "local-credential-ml", test))]
+static CREDENTIAL_LINE_FILES: [AddonFile; 4] = [
+    AddonFile {
+        name: "model.onnx",
+        url: credential_line_url!("model.onnx"),
+        size: 128_379_418,
+        sha256: "bd08c443d1472304624ea0b16ef8e08685a9e8fbe34ddfb9a65cfd00b6b4c47e",
+    },
+    AddonFile {
+        name: "tokenizer.json",
+        url: credential_line_url!("tokenizer.json"),
+        size: 3_583_485,
+        sha256: "218484396a9d08293b108b0e5ea31e0a1b7c801dcbed35a821deb392d2fe9bb4",
+    },
+    AddonFile {
+        name: "config.json",
+        url: credential_line_url!("config.json"),
+        size: 1_918,
+        sha256: "1fb928ec87f399096fdd444914c15a6643c9a0c4a7a7fc17c1e20f8bd61f7ea6",
+    },
+    AddonFile {
+        name: "policy.json",
+        url: credential_line_url!("policy.json"),
+        size: 754,
+        sha256: "db74709c4c08dc5d20732ec34aea723194bfa347553e97e81240f896a8de9770",
     },
 ];
 
@@ -194,6 +238,14 @@ static NER_MULTILINGUAL_HRL: AddonManifest = AddonManifest {
 static GLINER_MULTI_PII: AddonManifest = AddonManifest {
     dir_name: "gliner_multi_pii-v1",
     files: &GLINER_MULTI_PII_FILES,
+    legacy_dirs: no_legacy_dirs,
+    native_code: false,
+};
+
+#[cfg(any(feature = "local-credential-ml", test))]
+static CREDENTIAL_LINE: AddonManifest = AddonManifest {
+    dir_name: "credential-line-32m-v2",
+    files: &CREDENTIAL_LINE_FILES,
     legacy_dirs: no_legacy_dirs,
     native_code: false,
 };

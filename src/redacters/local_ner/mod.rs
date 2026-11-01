@@ -12,7 +12,8 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
+use crate::redacters::text_spans::table_cells::{self, redact_rows};
+use crate::redacters::text_spans::Finding;
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacter, RedacterDataItem,
     RedacterDataItemContent, Score,
@@ -48,10 +49,8 @@ impl LocalNerRedacterOptions {
 /// hold a name and never reaches the model: the predicate is "holds no letter", not "is a
 /// number", and the model would cost a tokenizer pass and a forward pass to find nothing.
 ///
-/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
-/// `"Madrid"`: a one-word cell gives the model no sentence, and it tags a bare city as `O` at
-/// every score floor. The prefix is scoring context only: `shift_into_cell` maps the findings
-/// back onto the cell, so no header text can reach a redacted cell or a detection.
+/// A one-word cell gives the model no sentence, and it tags a bare city as `O` at every score
+/// floor, so the cell is scored behind its column header as `"city: Madrid"`.
 fn find_in_cell<F>(
     headers: &[String],
     column: usize,
@@ -64,60 +63,7 @@ where
     if !cell.chars().any(char::is_alphabetic) {
         return Ok(Vec::new());
     }
-    // A row wider than the header list, or an empty header, leaves the cell alone.
-    let prefix = match headers.get(column) {
-        Some(header) if !header.is_empty() => format!("{header}: "),
-        _ => String::new(),
-    };
-    let scored = if prefix.is_empty() {
-        find_in(cell)?
-    } else {
-        find_in(&format!("{prefix}{cell}"))?
-    };
-    Ok(shift_into_cell(scored, prefix.len()))
-}
-
-/// Redacts every table cell that could hold a name, leaving the rest byte for byte.
-fn redact_rows<F>(
-    headers: &[String],
-    rows: Vec<Vec<String>>,
-    mut find_in: F,
-) -> Result<(Vec<Vec<String>>, usize), LocalNerError>
-where
-    F: FnMut(&str) -> Result<Vec<Finding>, LocalNerError>,
-{
-    let mut findings = 0usize;
-    let mut redacted_rows = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut redacted_row = Vec::with_capacity(row.len());
-        for (column, cell) in row.into_iter().enumerate() {
-            let in_cell = find_in_cell(headers, column, &cell, &mut find_in)?;
-            if in_cell.is_empty() {
-                redacted_row.push(cell);
-                continue;
-            }
-            findings += in_cell.len();
-            redacted_row.push(apply_redaction(&cell, &in_cell, REDACTED));
-        }
-        redacted_rows.push(redacted_row);
-    }
-    Ok((redacted_rows, findings))
-}
-
-/// Maps findings on `"{prefix}{cell}"` back onto `cell`. A finding that ends inside the
-/// prefix is the model matching the header itself and is dropped; one that crosses the
-/// boundary keeps only the part that falls in the cell. `prefix_len` is a byte length and the
-/// cell starts exactly there, so every clamped offset stays on a character boundary.
-fn shift_into_cell(findings: Vec<Finding>, prefix_len: usize) -> Vec<Finding> {
-    findings
-        .into_iter()
-        .filter(|finding| finding.end > prefix_len)
-        .map(|mut finding| {
-            finding.start = finding.start.max(prefix_len) - prefix_len;
-            finding.end -= prefix_len;
-            finding
-        })
-        .collect()
+    table_cells::find_in_cell(headers, column, cell, find_in)
 }
 
 /// Offline NER redacter. The engine is loaded once per run and shared through an `Arc`, so
@@ -183,8 +129,11 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
             RedacterDataItemContent::Table { headers, rows } => {
                 let (headers, rows, findings) = self
                     .run_blocking(move |engine, options| {
-                        let (rows, findings) =
-                            redact_rows(&headers, rows, |text| engine.find(text, options))?;
+                        let (rows, findings) = redact_rows(rows, |column, cell| {
+                            find_in_cell(&headers, column, cell, &mut |text| {
+                                engine.find(text, options)
+                            })
+                        })?;
                         Ok((headers, rows, findings))
                     })
                     .await?;
@@ -305,9 +254,11 @@ mod tests {
         let rows = vec![row.iter().map(|cell| cell.to_string()).collect::<Vec<_>>()];
         let mut seen: Vec<String> = Vec::new();
         let mut replies = replies.into_iter();
-        let (rows, findings) = redact_rows(&headers, rows, |text| {
-            seen.push(text.to_string());
-            Ok(replies.next().unwrap_or_default())
+        let (rows, findings) = redact_rows(rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                seen.push(text.to_string());
+                Ok(replies.next().unwrap_or_default())
+            })
         })
         .unwrap();
         (rows.into_iter().next().unwrap(), seen, findings)
@@ -330,9 +281,11 @@ mod tests {
             vec!["-7".to_string(), "Osaka".to_string(), String::new()],
         ];
         let mut seen: Vec<String> = Vec::new();
-        let (redacted, findings) = redact_rows(&headers, rows, |text| {
-            seen.push(text.to_string());
-            Ok(vec![finding(text.len() - 5, text.len())])
+        let (redacted, findings) = redact_rows(rows, |column, cell| {
+            find_in_cell(&headers, column, cell, &mut |text| {
+                seen.push(text.to_string());
+                Ok(vec![finding(text.len() - 5, text.len())])
+            })
         })
         .unwrap();
         assert_eq!(seen, ["full_name: Maria Garcia Lopez", "full_name: Osaka"]);

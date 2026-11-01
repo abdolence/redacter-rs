@@ -71,6 +71,12 @@ speed of every redacter.
         * text, html, csv, json files
         * images through text extraction using OCR
         * PDF files (rendering as images from OCR)
+    * Local credential ML redacter: offline detection of passwords, API keys and tokens with a
+      line classifier running on your CPU, for the secrets that `local-rules` has no pattern for.
+      No cloud account needed:
+        * text, html, csv, json files
+        * images through text extraction using OCR
+        * PDF files (rendering as images from OCR)
     * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
         * text, html, csv, json files
         * images, redacted by blacking out the coordinates the model reports
@@ -92,6 +98,7 @@ strings that carry a password. The redacters differ most on secrets.
 | `local-rules` | Emails, phone numbers, payment cards, IBANs, network addresses, national identifiers of 43 countries, postcodes and dates of birth, all by shape and checksum | Passwords and keys written as `key=value`, `key: value` or JSON fields; AWS, Google, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; JWTs; `Authorization` header values; passwords in URLs; private key blocks. A password written in prose is not found |
 | `local-ner` | People, organisations and locations | None |
 | `local-gliner` | The labels you choose, 14 PII labels by default | None with the default labels. Chain `local-rules` for secrets |
+| `local-credential-ml` | None | Lines that a model rates as holding a credential, with the value on each line redacted: a password written in a sentence, a token with no known prefix, an OAuth client secret after a label, a `.netrc` password. It rates the AWS documentation example keys and `password: value` lines with a plain value low, and `local-rules` finds those. Chain it after `local-rules` |
 | `gcp-dlp` | 13 info types, such as names, emails, phone numbers, cards, IBANs, passports and dates of birth | 15 info types: passwords, auth tokens, AWS credentials, basic auth headers, OAuth client secrets, GCP API keys, encryption keys, JWTs, HTTP cookie headers and the credential types of GCP, Azure, OpenAI and Anthropic, signed storage URLs and Tink keysets. In a test with synthetic values it found passwords, JWTs and cookie headers, and missed private key blocks and most vendor tokens |
 | `aws-comprehend` | Every Comprehend PII entity type, English text only | Passwords, AWS access keys and secret keys, PINs and usernames. It may redact only part of another token and leave the rest in place |
 | `aws-bedrock-guardrails` | The PII types the guardrail enables | Passwords, AWS keys, PINs and usernames when the guardrail enables them, plus any shape you add as a regex filter. It may redact only part of another token |
@@ -170,8 +177,8 @@ cargo install redacter
 
 ### Optional capabilities installation
 
-PDF redaction, OCR (for the DLP providers that can't read images) and the `local-ner` and `local-gliner`
-redacters need addons that are not bundled with the tool. Install the ones you need with
+PDF redaction, OCR (for the DLP providers that can't read images) and the `local-ner`, `local-gliner` and
+`local-credential-ml` redacters need addons that are not bundled with the tool. Install the ones you need with
 `redacter addons install`, see [Addons](#addons).
 
 ## Command line options
@@ -204,7 +211,7 @@ Options:
   -d, --redact <REDACT>
           List of redacters to use
           
-          [possible values: gcp-dlp, aws-comprehend, presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner, local-gliner]
+          [possible values: gcp-dlp, aws-comprehend, presidio, gemini-llm, open-ai-llm, gcp-vertex-ai, aws-bedrock, aws-bedrock-guardrails, local-rules, local-ner, local-gliner, local-credential-ml]
 
       --allow-unsupported-copies
           Allow unsupported types to be copied without redaction
@@ -321,6 +328,11 @@ Options:
           Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5
           
           [default: 0.5]
+
+      --local-credential-ml-min-score <LOCAL_CREDENTIAL_ML_MIN_SCORE>
+          Minimum model confidence for a line to be redacted by local-credential-ml, between 0 and 1. Lower values redact more. Default is 0.74, the model card's threshold
+          
+          [default: 0.74]
 
       --mime-override <MIME_OVERRIDE>
           Override media type detection using glob patterns such as 'text/plain=*.md'
@@ -743,6 +755,77 @@ by Urchade Zaratiana, trained on the Apache-2.0
 dataset; its backbone, `microsoft/mdeberta-v3-base`, is MIT licensed. The model is not bundled with the
 tool.
 
+### Local credential ML redacter
+
+The `local-credential-ml` redacter finds passwords, API keys and access tokens with a small classifier model
+running entirely on your machine. The model reads one line at a time and rates how likely the line is to hold a
+credential. The redacter replaces the credential on every line rated 0.74 or more with `[REDACTED]`. It finds
+secrets that `local-rules` has no pattern for: a password written in a sentence, a token with no known prefix, an
+OAuth client secret after a label, a `.netrc` password. Nothing leaves your computer; the only network access is
+`redacter addons install local-credential-ml`, which installs the model files described in [Addons](#addons).
+
+Like `local-rules`, an image or a PDF first goes through the OCR engine, and the recognised text is passed to the
+model as if it were a text file.
+
+```sh
+# Secrets by rules first, then the secrets the rules missed, found by the model
+redacter cp -d local-rules -d local-credential-ml tmp/source/ tmp/redacted/
+
+# Redact more aggressively
+redacter cp -d local-rules -d local-credential-ml --local-credential-ml-min-score 0.5 tmp/source/ tmp/redacted/
+```
+
+The model says that a line holds a credential and not where, so the values on a line are placed first, and the
+line is rated only when there is something to redact:
+
+- the secret rules of `local-rules` run on the line: `key=value` and `key: value` assignments, quoted values of any
+  length, vendor tokens, `Authorization` header values and passwords in URLs. Their value checks are off, since the
+  model rates the line;
+- every word of the line that holds a digit or one of the symbols `!@#%^&*+=?~` is a value too, without the quotes
+  around it and without the `key=` in front of it, unless a rule already placed a value in that word. The
+  other symbols (`-`, `.`, `/`, `:`, `_` and `$`) do not count, so `api.example.com` is left alone and
+  `correct-horse-battery-staple` is never found by this step. A word is split at a redaction marker that an
+  earlier redacter left; the marker is never a value, and the text on either side of it can be;
+- a line with no value is not rated.
+
+A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
+whatever the model rates; the lines inside a block are not rated.
+
+The key of an assignment stays in the file. In a table, a cell is rated behind its column header, as
+`password: value`, and only the cell is redacted.
+
+`--local-credential-ml-min-score` is the model confidence a line needs, between 0 and 1 (default 0.74, the
+threshold of the model card). Lower values redact more and produce more false alarms. Chain it after `local-rules`:
+`cp` applies the redacters in the order given, so the model rates the text with the values that rules found
+already replaced.
+
+On the `secrets` dataset of the benchmark (41 planted secrets, 19 strings that look like secrets and are not) the
+model alone found 25 values at 0.74 and 31 at 0.50. Chained after `local-rules`, which found 36 alone, it found
+38 and 40, with no false alarm and no keep string hit at either threshold. Each of the 25 findings at 0.74
+covered exactly the planted value. At 0.50, 29 of 30 did, and the other left the `sessionid=` of a cookie in place.
+The benchmark is in [docs/dlp-comparison.md](docs/dlp-comparison.md).
+
+Limits:
+
+- the model rates a line on its own, without the lines around it, and reads the first 128 tokens of a line;
+- it rates the AWS documentation example keys and `password: value` lines with a plain value low. `local-rules`
+  finds both, which is why it is chained;
+- every word with a digit or one of `!@#%^&*+=?~` on a flagged line is redacted, so a host name, an IP address or
+  a date next to the password is redacted too;
+- it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
+- on 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly
+  all of them test data that holds passwords and tokens;
+- the model takes 4 to 6 ms for a line, and a line with no value is not rated. A scan of Rust source of 30,036
+  non-blank lines took 32 s, and a log of 10,000 lines of 100 characters, each holding a digit, took 58 s (5.8 ms a
+  line). The process holds 190 to 210 MiB and loading takes about 60 ms. These numbers are from an Apple M6 Mac
+  mini that was running other work, with a load average of about 2.4.
+
+The model is [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) by
+Zain Dana Harper, released under the MIT licence and fine-tuned from
+[jhu-clsp/ettin-encoder-32m](https://huggingface.co/jhu-clsp/ettin-encoder-32m) (MIT, Johns Hopkins University
+Center for Language and Speech Processing). Its card reports a precision of 0.92 and a recall of 0.81 on 1,264
+human-written lines; these figures are the author's own. The model is not bundled with the tool.
+
 ### Local or cloud: quality versus performance
 
 The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials.
@@ -757,6 +840,8 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 | `local-gliner` | 100% | 2% | 55% | 88% | 441 ms |
 | `local-rules+local-ner` | 77% | 88% | 46% | 94% | 38 ms |
 | `local-rules+local-gliner` | 100% | 88% | 57% | 88% | 466 ms |
+| `local-credential-ml` | 0% | 61% | 1% | 0% | 38 ms |
+| `local-rules+local-credential-ml` | 54% | 93% | 24% | 62% | 38 ms |
 | `presidio` | 69% | 7% | 66% | 69% | 12 ms |
 | `gcp-dlp` | 85% | 41% | 49% | 94% | 72 ms |
 | `aws-comprehend` | 98% | 56% | 80% | 94% | 84 ms |
@@ -767,16 +852,16 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 Measured on commit `2390a25` on an Apple M6 Mac mini. `fixtures` is 8 text files, `secrets` 29 files with synthetic
 secrets, `public` 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0)
 and `images` a PNG and a PDF of one form. The time per file includes the start of the process and the load of the
-models. `gemini-llm` and `open-ai-llm` were not measured.
+models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. `gemini-llm` and `open-ai-llm` were not measured.
 
-For secrets, `local-rules` found 88% at 1 ms per file, and `gcp-vertex-ai` found all of them. For personal information
+For secrets, `local-rules` found 88% at 1 ms per file, `local-rules+local-credential-ml` 93%, and `gcp-vertex-ai` found all of them. For personal information
 in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
 and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
 find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
 
 The local redacters give the same output for the same input, which makes results easy to test and audit.
 `local-gliner`'s model is a ~1.17 GB download and needs about 1.5 GB of memory while running, against 132 MB and 232 MB
-for `local-ner`.
+for `local-ner`. The `local-credential-ml` model is a 126 MiB download and the process holds about 190 MiB.
 
 Precision, recall per category, speed on every dataset, what each redacter sends out, the limits of the measurement and
 the commands to reproduce it are in [docs/dlp-comparison.md](docs/dlp-comparison.md).
@@ -826,13 +911,13 @@ If the library is detected correctly it is reported in the tool output as:
 
 ## Addons
 
-The OCR engine, PDF rendering and the `local-ner` and `local-gliner` redacters need files that are not
-bundled with the tool. `redacter addons install` installs them and is the only command that downloads anything:
+The OCR engine, PDF rendering and the `local-ner`, `local-gliner` and `local-credential-ml` redacters need files
+that are not bundled with the tool. `redacter addons install` installs them and is the only command that downloads anything:
 `cp` uses what is installed.
 
 - A missing OCR or Pdfium addon turns that capability off for the run, reported for example
   as `OCR: no (redacter addons install ocr)`.
-- A missing `local-ner` or `local-gliner` addon stops the run with an error naming the command that installs it:
+- A missing `local-ner`, `local-gliner` or `local-credential-ml` addon stops the run with an error naming the command that installs it:
   a file is never copied unredacted because the redacter asked for could not start.
 
 ```sh
@@ -859,6 +944,7 @@ below:
 | `pdf`, in `pdfium-7881/` | `libpdfium.so`, `libpdfium.dylib` or `pdfium.dll`, depending on the platform | 6.3 to 7.5 MiB | [release `models-pdfium-7881`](https://github.com/abdolence/redacter-rs/releases/tag/models-pdfium-7881), from [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) `chromium/7881` (Pdfium 151.0.7881.0) | Pdfium and the libraries it bundles under their own licences, attached to the release |
 | `local-ner`, in `distilbert-base-multilingual-cased-ner-hrl/` | `model_uint8.onnx`, `tokenizer.json`, `config.json` | 131.6 MiB | [release `models-ner-hrl-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-ner-hrl-1), from [Xenova/distilbert-base-multilingual-cased-ner-hrl](https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl) (revision `c2a4dbf`) | AFL-3.0 |
 | `local-gliner`, in `gliner_multi_pii-v1/` | `model.onnx`, `tokenizer.json`, `gliner_config.json` | 1.1 GiB | [release `models-gliner-multi-pii-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-gliner-multi-pii-1), from [onnx-community/gliner_multi_pii-v1](https://huggingface.co/onnx-community/gliner_multi_pii-v1) (revision `2e0397a7`) | Apache-2.0 (model and training data); backbone `microsoft/mdeberta-v3-base` MIT |
+| `local-credential-ml`, in `credential-line-32m-v2/` | `model.onnx`, `tokenizer.json` | 125.9 MiB | [release `models-credential-line-1`](https://github.com/abdolence/redacter-rs/releases/tag/models-credential-line-1), from [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) (revision `65422b8`) | MIT; fine-tuned from `jhu-clsp/ettin-encoder-32m`, MIT |
 
 Every downloaded file is verified against a SHA-256 digest pinned in the tool before it takes its final name.
 The addons are stored under `~/.cache/redacter/addons/` on Linux, `~/Library/Caches/redacter/addons/` on macOS
@@ -1044,7 +1130,7 @@ Be aware that a report written with `--show-values` contains the sensitive data 
 ### Scores
 
 A score is the confidence of the redacter that the value is what the label says, between 0 and 1. The local-ner,
-local-gliner, AWS Comprehend, Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
+local-gliner, local-credential-ml, AWS Comprehend, Presidio and GCP DLP redacters report one. The local-rules redacter, the LLM
 redacters and AWS Bedrock Guardrails do not: their findings have an empty score in the terminal and `null` in the JSON
 report.
 
@@ -1064,8 +1150,8 @@ value is to be of the reported info type, and `scan` turns it into a fixed score
 
 A finding with an unspecified likelihood has no score.
 
-`--local-ner-min-score` and `--local-gliner-min-score` work as in `cp`: a local-ner or local-gliner finding is only
-reported when its score reaches them (0.5 by default).
+`--local-ner-min-score`, `--local-gliner-min-score` and `--local-credential-ml-min-score` work as in `cp`: a finding of
+the redacter is only reported when its score reaches them (0.5 by default, 0.74 for local-credential-ml).
 
 ### Exit codes
 
@@ -1154,6 +1240,7 @@ for AWS Comprehend.
 | `local-rules` | The rule name, such as `email` or `payment-card`, see [docs/local-rules.md](docs/local-rules.md) | None | OCR |
 | `local-ner` | `per`, `org` or `loc` | Model confidence | OCR |
 | `local-gliner` | The label from `--local-gliner-labels`, such as `person` | Model confidence | OCR |
+| `local-credential-ml` | `credential` | Model confidence in the line | OCR |
 | `gcp-dlp` | The info type, such as `EMAIL_ADDRESS` | From the likelihood, see [Scores](#scores) | Read by DLP, which reports the boxes |
 | `aws-comprehend` | The PII entity type, such as `EMAIL` | Model confidence | OCR |
 | `presidio` | The entity type, such as `EMAIL_ADDRESS` | Presidio score | OCR |
@@ -1205,7 +1292,7 @@ redacter ls gs://my-little-bucket/my-big-files/
 - Your file contents are sent to the DLP API for redaction or scanning. Make sure you trust the DLP API provider.
 - A scan report masks the values it found unless `--show-values` is set. A report written with `--show-values` contains
   the sensitive data itself, so store it as you would the files it came from.
-- The local redacters (`local-rules`, `local-ner`, `local-gliner`) send nothing anywhere. Their model
+- The local redacters (`local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`) send nothing anywhere. Their model
   files are fetched only on request, over HTTPS, and checked against SHA-256 digests pinned in the tool.
 - The accuracy of redaction depends on the DLP model, so don't rely on it as the only security measure.
 - Cloud ML detectors can match part of a token and leave the rest in place. See
@@ -1226,8 +1313,8 @@ cloud](#local-or-cloud-quality-versus-performance). The image rows measure the c
 
 For the most protection, you can use multiple DLP providers, see [Multiple redacters](#multiple-redacters).
 
-For secrets, `gcp-vertex-ai` found all 41 planted secrets, `aws-bedrock` 38 and `local-rules` 36. `aws-comprehend`,
-`aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
+For secrets, `gcp-vertex-ai` found all 41 planted secrets, `aws-bedrock` and `local-rules+local-credential-ml` 38 and `local-rules` 36. `aws-comprehend`,
+`aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, `local-credential-ml` alone 25, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
 AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS keys, PINs and usernames only.
 
 ## Licence

@@ -65,6 +65,9 @@ pub enum AppError {
     #[cfg(feature = "local-gliner")]
     #[error("Local GLiNER error: {0}")]
     LocalGlinerError(#[from] crate::redacters::local_gliner::LocalGlinerError),
+    #[cfg(feature = "local-credential-ml")]
+    #[error("Local credential ML error: {0}")]
+    LocalCredentialMlError(#[from] crate::redacters::local_credential_ml::LocalCredentialMlError),
     /// Carries the position only: a serde error names the value it could not read, and the
     /// answer is made of the scanned content.
     #[error("A model's answer is not the expected JSON (line {line}, column {column})")]

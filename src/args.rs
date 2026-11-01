@@ -1,6 +1,8 @@
 use crate::addon_store::Addon;
 use crate::common_types::{DlpRequestLimit, GcpProjectId, GcpRegion};
 use crate::errors::AppError;
+#[cfg(feature = "local-credential-ml")]
+use crate::redacters::LocalCredentialMlRedacterOptions;
 #[cfg(feature = "local-gliner")]
 use crate::redacters::LocalGlinerRedacterOptions;
 use crate::redacters::{
@@ -312,6 +314,7 @@ pub enum RedacterType {
     LocalRules,
     LocalNer,
     LocalGliner,
+    LocalCredentialMl,
 }
 
 impl Display for RedacterType {
@@ -328,6 +331,7 @@ impl Display for RedacterType {
             RedacterType::LocalRules => write!(f, "local-rules"),
             RedacterType::LocalNer => write!(f, "local-ner"),
             RedacterType::LocalGliner => write!(f, "local-gliner"),
+            RedacterType::LocalCredentialMl => write!(f, "local-credential-ml"),
         }
     }
 }
@@ -543,6 +547,14 @@ pub struct RedacterArgs {
         help = "Minimum model confidence for a span to be redacted by local-gliner, between 0 and 1. Lower values redact more. Default is 0.5"
     )]
     pub local_gliner_min_score: Score,
+
+    #[cfg(feature = "local-credential-ml")]
+    #[arg(
+        long,
+        default_value = "0.74",
+        help = "Minimum model confidence for a line to be redacted by local-credential-ml, between 0 and 1. Lower values redact more. Default is 0.74, the model card's threshold"
+    )]
+    pub local_credential_ml_min_score: Score,
 }
 
 impl TryInto<RedacterOptions> for RedacterArgs {
@@ -716,6 +728,17 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 #[cfg(not(feature = "local-gliner"))]
                 RedacterType::LocalGliner => Err(AppError::RedacterConfigError {
                     message: "local-gliner is not available in this build (compiled without the local-gliner feature)"
+                        .to_string(),
+                }),
+                #[cfg(feature = "local-credential-ml")]
+                RedacterType::LocalCredentialMl => Ok(RedacterProviderOptions::LocalCredentialMl(
+                    LocalCredentialMlRedacterOptions {
+                        min_score: self.local_credential_ml_min_score,
+                    },
+                )),
+                #[cfg(not(feature = "local-credential-ml"))]
+                RedacterType::LocalCredentialMl => Err(AppError::RedacterConfigError {
+                    message: "local-credential-ml is not available in this build (compiled without the local-credential-ml feature)"
                         .to_string(),
                 }),
             }?;
@@ -1133,6 +1156,32 @@ mod tests {
             let err =
                 local_gliner_options(&["--local-gliner-labels", "person,email,"]).unwrap_err();
             assert!(matches!(err, AppError::RedacterConfigError { .. }), "{err}");
+        }
+    }
+
+    #[cfg(feature = "local-credential-ml")]
+    mod local_credential_ml {
+        use super::*;
+        use crate::redacters::LocalCredentialMlRedacterOptions;
+
+        fn local_credential_ml_options(args: &[&str]) -> LocalCredentialMlRedacterOptions {
+            let cli = TestCli::try_parse_from(
+                [&["redacter", "-d", "local-credential-ml"], args].concat(),
+            )
+            .unwrap_or_else(|err| panic!("{err}"));
+            let options: RedacterOptions = cli.redacter.try_into().unwrap();
+            match options.provider_options.into_iter().next() {
+                Some(RedacterProviderOptions::LocalCredentialMl(options)) => options,
+                other => panic!("expected local credential ml options, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn defaults_to_the_model_cards_threshold() {
+            assert_eq!(
+                local_credential_ml_options(&[]).min_score,
+                Score::from_static(0.74)
+            );
         }
     }
 }

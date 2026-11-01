@@ -44,7 +44,13 @@ pub(crate) mod local_gliner;
 #[cfg(feature = "local-gliner")]
 pub use local_gliner::{LocalGlinerRedacter, LocalGlinerRedacterOptions};
 
-/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`).
+#[cfg(feature = "local-credential-ml")]
+pub(crate) mod local_credential_ml;
+#[cfg(feature = "local-credential-ml")]
+pub use local_credential_ml::{LocalCredentialMlRedacter, LocalCredentialMlRedacterOptions};
+
+/// Byte-span helpers shared by the local redacters (`local-rules`, `local-ner`, `local-gliner`,
+/// `local-credential-ml`).
 pub(crate) mod text_spans;
 
 mod detection;
@@ -472,6 +478,8 @@ pub enum Redacters<'a> {
     LocalNer(LocalNerRedacter<'a>),
     #[cfg(feature = "local-gliner")]
     LocalGliner(LocalGlinerRedacter<'a>),
+    #[cfg(feature = "local-credential-ml")]
+    LocalCredentialMl(LocalCredentialMlRedacter<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -506,6 +514,8 @@ pub enum RedacterProviderOptions {
     LocalNer(LocalNerRedacterOptions),
     #[cfg(feature = "local-gliner")]
     LocalGliner(LocalGlinerRedacterOptions),
+    #[cfg(feature = "local-credential-ml")]
+    LocalCredentialMl(LocalCredentialMlRedacterOptions),
 }
 
 impl RedacterProviderOptions {
@@ -525,6 +535,8 @@ impl RedacterProviderOptions {
             RedacterProviderOptions::LocalNer(_) => RedacterType::LocalNer,
             #[cfg(feature = "local-gliner")]
             RedacterProviderOptions::LocalGliner(_) => RedacterType::LocalGliner,
+            #[cfg(feature = "local-credential-ml")]
+            RedacterProviderOptions::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
         }
     }
 }
@@ -543,7 +555,11 @@ impl Display for RedacterOptions {
 
 impl<'a> Redacters<'a> {
     #[cfg_attr(
-        not(any(feature = "local-ner", feature = "local-gliner")),
+        not(any(
+            feature = "local-ner",
+            feature = "local-gliner",
+            feature = "local-credential-ml"
+        )),
         allow(unused_variables)
     )]
     pub async fn new_redacter(
@@ -589,6 +605,12 @@ impl<'a> Redacters<'a> {
             RedacterProviderOptions::LocalGliner(options) => Ok(Redacters::LocalGliner(
                 LocalGlinerRedacter::new(options, reporter, addons).await?,
             )),
+            #[cfg(feature = "local-credential-ml")]
+            RedacterProviderOptions::LocalCredentialMl(options) => {
+                Ok(Redacters::LocalCredentialMl(
+                    LocalCredentialMlRedacter::new(options, reporter, addons).await?,
+                ))
+            }
         }
     }
 
@@ -682,6 +704,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.redact(input).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.redact(input).await,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.redact(input).await,
         }
     }
 
@@ -700,6 +724,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.redact_support(file_ref).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.redact_support(file_ref).await,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.redact_support(file_ref).await,
         }
     }
 
@@ -721,6 +747,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.detect(input).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.detect(input).await,
         }
     }
 
@@ -739,6 +767,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(redacter) => redacter.detect_support(file_ref).await,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(redacter) => redacter.detect_support(file_ref).await,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.detect_support(file_ref).await,
         }
     }
 
@@ -757,6 +787,8 @@ impl<'a> Redacter for Redacters<'a> {
             Redacters::LocalNer(_) => RedacterType::LocalNer,
             #[cfg(feature = "local-gliner")]
             Redacters::LocalGliner(_) => RedacterType::LocalGliner,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(_) => RedacterType::LocalCredentialMl,
         }
     }
 }

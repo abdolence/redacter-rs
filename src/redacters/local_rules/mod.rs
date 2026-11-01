@@ -6,6 +6,8 @@ mod validators;
 pub use error::LocalRulesError;
 pub use rules::{RuleGroup, RuleSet};
 pub use user_rules::{load_rules_file, parse_inline_rule, UserRule};
+#[cfg(feature = "local-credential-ml")]
+pub(crate) use validators::quoted_credential_value;
 // Only referenced by the CLI's test suite (`args.rs`), which asserts the exact matcher a
 // parsed rule produced; production code only ever constructs `UserRule` through
 // `parse_inline_rule`/`load_rules_file` and never names `UserMatcher` itself.

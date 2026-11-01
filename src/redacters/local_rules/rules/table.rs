@@ -3,7 +3,7 @@
 //! the same span (the first declared wins).
 
 use super::super::validators;
-use super::{Example, RuleGroup, RuleSpec};
+use super::{Example, RuleGroup, RuleSpec, PRIVATE_KEY_BLOCK_RULE, URL_CREDENTIALS_RULE};
 
 pub(super) fn builtin_rules() -> &'static [RuleSpec] {
     RULES
@@ -149,7 +149,7 @@ const RULES: &[RuleSpec] = &[
         pattern: r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b",
     },
     RuleSpec {
-        name: "url-credentials",
+        name: URL_CREDENTIALS_RULE,
         group: RuleGroup::Url,
         capture_group: 1,
         validator: None,
@@ -242,7 +242,7 @@ const RULES: &[RuleSpec] = &[
         pattern: r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]+)",
     },
     RuleSpec {
-        name: "private-key-block",
+        name: PRIVATE_KEY_BLOCK_RULE,
         group: RuleGroup::Secrets,
         capture_group: 0,
         validator: None,
@@ -360,7 +360,7 @@ const RULES: &[RuleSpec] = &[
             validators::quoted_credential_value,
         )),
         keyword: true,
-        description: "Value in braces directly after the `=` of a `password`, `secret`, `token` or `api_key` style key, the way an ODBC connection string quotes a password that holds `;`, 8 characters or more",
+        description: "Value in braces directly after the `=` of a `password`, `secret`, `token` or `api_key` style key, the way an ODBC connection string quotes a password that holds `;`, 7 characters or more",
         example: Example::Synthetic("Pwd={Sup3r;S3cret1}"),
         // Only `=` and no blanks before the brace: after a `:` the braces are a YAML or JSON
         // mapping (`password: {required: true, minLength: 8}`), and `println!("password={}")`
