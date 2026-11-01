@@ -341,10 +341,10 @@ Options:
           Write the report to this file
 
       --report-format <REPORT_FORMAT>
-          Format of the report file: 'json' for machines, 'text' for people. Requires --report-file. Default is 'json'
+          Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning (values are always masked). Requires --report-file. Default is 'json'
           
           [default: json]
-          [possible values: json, text]
+          [possible values: json, text, sarif]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -354,10 +354,46 @@ DLP is optional and should be enabled with `--redact` (`-d`) option.
 Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
 
-`--report-file` saves the result of the command to a file: `files_copied`, `files_redacted` and `files_skipped`
-as JSON by default, or the same three counts as text with `--report-format text`. The terminal output is the same
-with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
+`--report-file` saves the result of the command to a file as JSON by default, as the three counts with
+`--report-format text`, or as a [SARIF report](#sarif-report) with `--report-format sarif`. The terminal output is the
+same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
 is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
+
+### Copy report
+
+The JSON report of `cp` is one object with the counters `files_copied`, `files_redacted` and `files_skipped`, and
+`files`, an entry for each file the copy met, in the order it met them. Files that `--max-size-limit` or
+`--filename-filter` leave out of a directory listing are only counted in `files_skipped` and have no entry.
+
+An entry has the fields `path`, `mime_type`, `status`, `reason` and `redactions`:
+
+- `status` is `redacted`, `copied`, `copied_unredacted`, `skipped` or `failed`. `copied` is a file copied as it is
+  because no redacter was selected, and `copied_unredacted` a file copied as it is because
+  `--allow-unsupported-copies` is set;
+- `reason` is `null` for a redacted or copied file and says why for the others;
+- `redactions` lists what the redacters replaced in the file, sorted by location as in the scan report. A file with
+  the status `redacted` and no redactions went through the redacters unchanged.
+
+A redaction has the fields `redacter`, `label`, `score`, `location` and `value`, as a [finding of `scan`](#json-report)
+has. The `value` is always masked, since `cp` has no `--show-values`, see [Masking](#masking). The `location` has the
+`kind` `text`, `table_cell` or `image` of the scan report, and two more:
+
+- `page`: the `page` of a PDF file, counted from 1, when the position on it is not known;
+- `file`: the file as a whole, when the position in it is not known.
+
+How exactly a redaction is located depends on the redacter and the content:
+
+| Content | Location | Redacters |
+|---|---|---|
+| Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails`, `gcp-dlp` and the LLM redacters return only the new text, so the span is found by comparing the text before and after |
+| Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml` and `gcp-dlp`; other redacters read a CSV file as text |
+| Image or PDF page read with OCR | Page and box in pixels, around the words OCR blacked out | Any redacter that reads text |
+| Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode |
+| Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode |
+
+`gcp-dlp` and the LLM redacters do not name what they replaced in text, so such a redaction has the label
+`sensitive_data` and no score. A step that changes the shape of a table, or the size of an image, is located at the
+`file`, or at the `page` of a PDF.
 
 ## Source and destinations
 
@@ -1326,9 +1362,9 @@ enough for the longest path, so no path is shortened.
 
 `--report-format sarif` writes the report as [SARIF](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 2.1.0, the format GitHub code scanning reads, so the findings show in the code scanning tab and as annotations on pull
-requests. `cp` does not write it.
+requests. `scan` and `cp` both write it, and a redaction of `cp` is a finding here.
 
-| SARIF | What `scan` writes |
+| SARIF | What `scan` and `cp` write |
 |---|---|
 | `tool.driver` | `redacter`, its version and the repository URL |
 | rule | One for each redacter and label found, with the `ruleId` `<redacter>/<label>`, such as `local-rules/email`, and `redacter/unconfirmed` for unconfirmed files |
@@ -1336,6 +1372,7 @@ requests. `cp` does not write it.
 | text finding | A `region` with `startLine`, `startColumn`, `endLine` and `endColumn`, counted from 1; `endColumn` is the column after the last character |
 | table cell | No region, since the line of a cell in its file is not known; the message gives the row and column |
 | image or PDF page | No region; the message gives the page and the box in pixels |
+| a page of a PDF, or the whole file | No region; the message gives the page, if there is one, and has no value |
 | unconfirmed file | One result for the file, without a region |
 | failed, blocked and unsupported files | `invocations[0].toolExecutionNotifications` with the reason; `executionSuccessful` is `false` when a file failed or is blocked |
 | skipped files | Not reported |
@@ -1346,17 +1383,31 @@ Columns count characters (Unicode code points), as in the other reports, and the
 needs a line in the diff, so annotations appear for text findings only.
 
 A path is relative to the working directory, with `uriBaseId` `%SRCROOT%`, which GitHub resolves against the root of the
-repository: run `scan` from the root of the checkout. A path outside the working directory is a `file:///` URI, and a
+repository: run the command from the root of the checkout. A path outside the working directory is a `file:///` URI, and a
 file of a `gs://`, `s3://` or `zip://` source is a URI of that scheme.
 
 The message of a result has the label, the redacter, the score when there is one, and the masked value. SARIF always
 holds the masked value: `--show-values` does not apply to it, since the report is stored by GitHub and shown to everyone
-who can read the alerts.
+who can read the alerts. A result without a value, such as a page or a file that a redacter changed without saying where,
+has no value in its message.
+
+The SARIF report of `cp` has a result for each redaction of the [copy report](#copy-report) and these for the other
+files:
+
+- a file copied or skipped without being redacted, which includes every file of a copy without a redacter, is
+  `unsupported`, or `blocked` when OCR or the PDF renderer is missing, as for `scan`;
+- a file left out by `--max-size-limit` or `--filename-filter` is not reported;
+- a file with the status `failed` is `failed`;
+- a file with the status `redacted` and no redactions has no result.
 
 The fingerprint is a SHA-256 hash of the rule, the path and the masked value, followed by `:` and the number of earlier
 findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
 every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
 shows at most 5,000 results of a run, the most severe first.
+
+GitHub tells the analyses of one tool apart by the `category` of the upload, and an upload replaces the earlier one with
+the same `category`. `scan` and `cp` write the same tool, so a workflow that uploads both sets a different `category`
+for each.
 
 A workflow that uploads the findings to code scanning without failing the job:
 
@@ -1384,6 +1435,7 @@ jobs:
         if: always()
         with:
           sarif_file: redacter.sarif
+          category: redacter-scan
 ```
 
 ### Detection per redacter
