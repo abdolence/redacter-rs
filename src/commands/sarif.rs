@@ -1,6 +1,6 @@
 //! SARIF 2.1.0 reports for GitHub code scanning.
 //!
-//! The writer takes what a command found as [`SarifArtifact`]s, at whatever precision the
+//! The writer takes what a command found as [`ReportedFile`]s, at whatever precision the
 //! command knows, and returns the log to serialise. It does not know the command that
 //! produced them.
 //!
@@ -9,10 +9,8 @@
 //! finding has an exact place in a text. SARIF ends up in GitHub's UI and API, so a value is
 //! always masked here, whatever the caller passes.
 
-use crate::args::RedacterType;
 use crate::commands::copy_output::escaped;
-use crate::commands::scan_output::mask_value;
-use crate::redacters::{DetectionLabel, DetectionLocation, Score};
+use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -49,58 +47,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
-/// A file of a run and what the command found in it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SarifArtifact {
-    /// The path as the source's file system names it, relative to the source.
-    pub path: String,
-    pub outcome: ArtifactOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ArtifactOutcome {
-    /// The file was read. A clean file has no findings.
-    Findings(Vec<SarifFinding>),
-    /// The file was read and has no findings, but the redacters named values they could not
-    /// place in it, so it is not known to be clean.
-    Unconfirmed { unlocated_values: usize },
-    /// The file could not be read or processed.
-    Failed { reason: String },
-    /// The file needs a converter the run lacks.
-    Blocked { reason: String },
-    /// No selected redacter reads the file.
-    Unsupported { reason: String },
-}
-
-/// One piece of sensitive data in a file.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SarifFinding {
-    redacter: RedacterType,
-    label: DetectionLabel,
-    score: Option<Score>,
-    /// `None` when only the file is known to hold it.
-    place: Option<Place>,
-    masked_value: String,
-}
-
-impl SarifFinding {
-    /// `value` may be the value as found: it is masked here.
-    pub fn new(
-        redacter: RedacterType,
-        label: DetectionLabel,
-        score: Option<Score>,
-        place: Option<Place>,
-        value: &str,
-    ) -> Self {
-        Self {
-            redacter,
-            label,
-            score,
-            place,
-            masked_value: mask_value(value),
-        }
-    }
-
+impl ReportedFinding {
     fn rule_id(&self) -> RuleId {
         RuleId(format!(
             "{}/{}",
@@ -128,77 +75,7 @@ impl SarifFinding {
     }
 }
 
-/// Where in a file something is, at the precision a command knows. Line, column, row and page
-/// numbers count from 1.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Place {
-    /// A range of a text. The column counts characters, and `end_column` is the one after the
-    /// last character of the range.
-    Text {
-        line: usize,
-        column: usize,
-        end_line: usize,
-        end_column: usize,
-    },
-    /// A cell of a table, the header row not counted. The line of a cell in its file is not
-    /// known.
-    TableCell { row: usize, column: usize },
-    /// An image, or a page of a PDF, and the box on it when the position is known.
-    Image {
-        page: Option<usize>,
-        area: Option<PixelBox>,
-    },
-}
-
-/// A box in pixels, `x1 <= x2` and `y1 <= y2`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PixelBox {
-    pub x1: f32,
-    pub y1: f32,
-    pub x2: f32,
-    pub y2: f32,
-}
-
 impl Place {
-    /// The place of a detection; `value` is the text it matched, which gives the end of a
-    /// range that spans lines. `None` for a location that names the file as a whole, which
-    /// SARIF carries as the artifact alone.
-    pub fn new(location: DetectionLocation, value: &str) -> Option<Self> {
-        Some(match location {
-            DetectionLocation::Text { line, column, .. } => {
-                let (end_line, end_column) = match value.rsplit_once('\n') {
-                    Some((before, last_line)) => (
-                        line + before.matches('\n').count() + 1,
-                        last_line.chars().count() + 1,
-                    ),
-                    None => (line, column + value.chars().count()),
-                };
-                Self::Text {
-                    line,
-                    column,
-                    end_line,
-                    end_column,
-                }
-            }
-            DetectionLocation::TableCell { row, column, .. } => Self::TableCell { row, column },
-            DetectionLocation::Image {
-                page,
-                x1,
-                y1,
-                x2,
-                y2,
-            } => Self::Image {
-                page,
-                area: Some(PixelBox { x1, y1, x2, y2 }),
-            },
-            DetectionLocation::Page { page } => Self::Image {
-                page: Some(page),
-                area: None,
-            },
-            DetectionLocation::File => return None,
-        })
-    }
-
     fn region(&self) -> Option<Region> {
         match *self {
             Self::Text {
@@ -206,6 +83,7 @@ impl Place {
                 column,
                 end_line,
                 end_column,
+                ..
             } => Some(Region {
                 start_line: line,
                 start_column: column,
@@ -220,7 +98,7 @@ impl Place {
     fn description(&self) -> String {
         match *self {
             Self::Text { .. } => String::new(),
-            Self::TableCell { row, column } => {
+            Self::TableCell { row, column, .. } => {
                 format!(" Table cell: row {row}, column {column}, the header row not counted.")
             }
             Self::Image { page, area } => {
@@ -463,7 +341,7 @@ struct RuleProperties {
 }
 
 impl Rule {
-    fn for_finding(finding: &SarifFinding) -> Self {
+    fn for_finding(finding: &ReportedFinding) -> Self {
         let label = escaped(&finding.label.to_string());
         let help = format!(
             "The {} redacter reported data labelled `{label}`. Remove the value from the file, or \
@@ -621,25 +499,25 @@ impl Location {
 impl SarifLog {
     /// The log of one run over `artifacts`. Rules are sorted by id, so the log does not
     /// depend on the order the files were read in.
-    pub fn new(artifacts: &[SarifArtifact], locator: &ArtifactLocator) -> Self {
+    pub fn new(artifacts: &[ReportedFile], locator: &ArtifactLocator) -> Self {
         let mut rules: BTreeMap<RuleId, Rule> = BTreeMap::new();
         for artifact in artifacts {
             match &artifact.outcome {
-                ArtifactOutcome::Findings(findings) => {
+                FileOutcome::Findings(findings) => {
                     for finding in findings {
                         rules
                             .entry(finding.rule_id())
                             .or_insert_with(|| Rule::for_finding(finding));
                     }
                 }
-                ArtifactOutcome::Unconfirmed { .. } => {
+                FileOutcome::Unconfirmed { .. } => {
                     rules
                         .entry(RuleId::unconfirmed())
                         .or_insert_with(Rule::unconfirmed);
                 }
-                ArtifactOutcome::Failed { .. }
-                | ArtifactOutcome::Blocked { .. }
-                | ArtifactOutcome::Unsupported { .. } => {}
+                FileOutcome::Failed { .. }
+                | FileOutcome::Blocked { .. }
+                | FileOutcome::Unsupported { .. } => {}
             }
         }
         let rule_indexes: BTreeMap<&RuleId, usize> = rules
@@ -653,7 +531,7 @@ impl SarifLog {
         for artifact in artifacts {
             let location = locator.locate(&artifact.path);
             match &artifact.outcome {
-                ArtifactOutcome::Findings(findings) => {
+                FileOutcome::Findings(findings) => {
                     let mut seen: BTreeMap<(RuleId, &str), usize> = BTreeMap::new();
                     for finding in findings {
                         let rule_id = finding.rule_id();
@@ -679,7 +557,7 @@ impl SarifLog {
                         *occurrence += 1;
                     }
                 }
-                ArtifactOutcome::Unconfirmed { unlocated_values } => {
+                FileOutcome::Unconfirmed { unlocated_values } => {
                     let rule_id = RuleId::unconfirmed();
                     results.push(SarifResult {
                         rule_index: rule_indexes[&rule_id],
@@ -699,10 +577,10 @@ impl SarifLog {
                         rule_id,
                     });
                 }
-                ArtifactOutcome::Failed { reason } | ArtifactOutcome::Blocked { reason } => {
+                FileOutcome::Failed { reason } | FileOutcome::Blocked { reason } => {
                     notifications.push(Notification::new(Level::Error, artifact, reason, location));
                 }
-                ArtifactOutcome::Unsupported { reason } => {
+                FileOutcome::Unsupported { reason } => {
                     notifications.push(Notification::new(Level::Note, artifact, reason, location));
                 }
             }
@@ -716,7 +594,7 @@ impl SarifLog {
         let execution_successful = !artifacts.iter().any(|artifact| {
             matches!(
                 artifact.outcome,
-                ArtifactOutcome::Failed { .. } | ArtifactOutcome::Blocked { .. }
+                FileOutcome::Failed { .. } | FileOutcome::Blocked { .. }
             )
         });
         Self {
@@ -802,7 +680,7 @@ impl Notification {
 
     fn new(
         level: Level,
-        artifact: &SarifArtifact,
+        artifact: &ReportedFile,
         reason: &str,
         location: ArtifactLocation,
     ) -> Self {
@@ -817,7 +695,8 @@ impl Notification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redacters::TextLines;
+    use crate::args::RedacterType;
+    use crate::redacters::{DetectionLabel, DetectionLocation, Score, TextLines};
     use serde_json::{json, Value};
 
     fn text_at(line: usize, column: usize, end_column: usize) -> Option<Place> {
@@ -826,11 +705,13 @@ mod tests {
             column,
             end_line: line,
             end_column,
+            byte_start: 0,
+            byte_end: 0,
         })
     }
 
-    fn email(place: Option<Place>, value: &str) -> SarifFinding {
-        SarifFinding::new(
+    fn email(place: Option<Place>, value: &str) -> ReportedFinding {
+        ReportedFinding::new(
             RedacterType::LocalRules,
             DetectionLabel::new("email"),
             None,
@@ -839,19 +720,19 @@ mod tests {
         )
     }
 
-    fn artifact(path: &str, outcome: ArtifactOutcome) -> SarifArtifact {
-        SarifArtifact {
+    fn artifact(path: &str, outcome: FileOutcome) -> ReportedFile {
+        ReportedFile {
             path: path.to_string(),
             outcome,
         }
     }
 
-    fn log_of(artifacts: &[SarifArtifact]) -> Value {
+    fn log_of(artifacts: &[ReportedFile]) -> Value {
         let locator = ArtifactLocator::new("./", Path::new("/work"));
         serde_json::to_value(SarifLog::new(artifacts, &locator)).unwrap()
     }
 
-    fn results(artifacts: &[SarifArtifact]) -> Vec<Value> {
+    fn results(artifacts: &[ReportedFile]) -> Vec<Value> {
         log_of(artifacts)["runs"][0]["results"]
             .as_array()
             .cloned()
@@ -869,7 +750,7 @@ mod tests {
     fn a_text_finding_is_a_region_with_the_masked_value() {
         let log = log_of(&[artifact(
             "docs/note.txt",
-            ArtifactOutcome::Findings(vec![SarifFinding::new(
+            FileOutcome::Findings(vec![ReportedFinding::new(
                 RedacterType::LocalNer,
                 DetectionLabel::new("per"),
                 Some(Score::from_static(0.75)),
@@ -930,7 +811,7 @@ mod tests {
             &detection.value,
         );
 
-        let region = &results(&[artifact("a.txt", ArtifactOutcome::Findings(vec![finding]))])[0]
+        let region = &results(&[artifact("a.txt", FileOutcome::Findings(vec![finding]))])[0]
             ["locations"][0]["physicalLocation"]["region"];
 
         // "Grüße 😀 " is 8 characters, 9 bytes more in UTF-8 and one more in UTF-16.
@@ -953,7 +834,7 @@ mod tests {
             &detection.value,
         );
 
-        let region = &results(&[artifact("a.txt", ArtifactOutcome::Findings(vec![finding]))])[0]
+        let region = &results(&[artifact("a.txt", FileOutcome::Findings(vec![finding]))])[0]
             ["locations"][0]["physicalLocation"]["region"];
 
         assert_eq!(
@@ -964,12 +845,17 @@ mod tests {
 
     #[test]
     fn a_table_cell_has_no_region_and_the_message_names_the_cell() {
-        let finding = email(Some(Place::TableCell { row: 3, column: 2 }), "a@b.io");
+        let finding = email(
+            Some(Place::TableCell {
+                row: 3,
+                column: 2,
+                byte_start: 0,
+                byte_end: 6,
+            }),
+            "a@b.io",
+        );
 
-        let result = &results(&[artifact(
-            "people.csv",
-            ArtifactOutcome::Findings(vec![finding]),
-        )])[0];
+        let result = &results(&[artifact("people.csv", FileOutcome::Findings(vec![finding]))])[0];
 
         assert_eq!(
             result["message"]["text"],
@@ -1003,7 +889,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    ArtifactOutcome::Findings(vec![email(place, "a@b.io")]),
+                    FileOutcome::Findings(vec![email(place, "a@b.io")]),
                 )])
             })
             .map(|result| {
@@ -1037,7 +923,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    ArtifactOutcome::Findings(vec![email(place, "")]),
+                    FileOutcome::Findings(vec![email(place, "")]),
                 )])
             })
             .map(|result| result["message"]["text"].as_str().unwrap().to_string())
@@ -1056,7 +942,7 @@ mod tests {
     fn an_unconfirmed_file_is_a_warning_on_the_file() {
         let log = log_of(&[artifact(
             "reformatted.txt",
-            ArtifactOutcome::Unconfirmed {
+            FileOutcome::Unconfirmed {
                 unlocated_values: 2,
             },
         )]);
@@ -1078,10 +964,10 @@ mod tests {
 
     #[test]
     fn a_run_keeps_errors_before_warnings_up_to_the_result_limit_and_says_what_it_left_out() {
-        let per = |count: usize| -> Vec<SarifFinding> {
+        let per = |count: usize| -> Vec<ReportedFinding> {
             (0..count)
                 .map(|_| {
-                    SarifFinding::new(
+                    ReportedFinding::new(
                         RedacterType::LocalNer,
                         DetectionLabel::new("per"),
                         None,
@@ -1094,12 +980,12 @@ mod tests {
         let artifacts = vec![
             artifact(
                 "unconfirmed.txt",
-                ArtifactOutcome::Unconfirmed {
+                FileOutcome::Unconfirmed {
                     unlocated_values: 1,
                 },
             ),
-            artifact("a.txt", ArtifactOutcome::Findings(per(MAX_RESULTS))),
-            artifact("c.txt", ArtifactOutcome::Findings(per(2))),
+            artifact("a.txt", FileOutcome::Findings(per(MAX_RESULTS))),
+            artifact("c.txt", FileOutcome::Findings(per(2))),
         ];
 
         let log = log_of(&artifacts);
@@ -1126,14 +1012,14 @@ mod tests {
 
     #[test]
     fn a_rule_with_one_result_survives_the_limit_behind_a_rule_with_many() {
-        let emails: Vec<SarifFinding> = (0..MAX_RESULTS + 1)
+        let emails: Vec<ReportedFinding> = (0..MAX_RESULTS + 1)
             .map(|_| email(text_at(1, 1, 2), "x"))
             .collect();
         let artifacts = vec![
-            artifact("a.txt", ArtifactOutcome::Findings(emails)),
+            artifact("a.txt", FileOutcome::Findings(emails)),
             artifact(
                 "b.txt",
-                ArtifactOutcome::Findings(vec![SarifFinding::new(
+                FileOutcome::Findings(vec![ReportedFinding::new(
                     RedacterType::LocalRules,
                     DetectionLabel::new("github-token"),
                     None,
@@ -1156,8 +1042,8 @@ mod tests {
 
     #[test]
     fn a_file_that_failed_or_is_blocked_makes_the_invocation_unsuccessful() {
-        let invocation = |outcomes: Vec<ArtifactOutcome>| {
-            let artifacts: Vec<SarifArtifact> = outcomes
+        let invocation = |outcomes: Vec<FileOutcome>| {
+            let artifacts: Vec<ReportedFile> = outcomes
                 .into_iter()
                 .enumerate()
                 .map(|(index, outcome)| artifact(&format!("f{index}.bin"), outcome))
@@ -1165,19 +1051,19 @@ mod tests {
             log_of(&artifacts)["runs"][0]["invocations"][0].clone()
         };
 
-        let unsupported_only = invocation(vec![ArtifactOutcome::Unsupported {
+        let unsupported_only = invocation(vec![FileOutcome::Unsupported {
             reason: "type not supported".to_string(),
         }]);
         assert_eq!(unsupported_only["executionSuccessful"], true);
 
         let all = invocation(vec![
-            ArtifactOutcome::Failed {
+            FileOutcome::Failed {
                 reason: "provider unavailable".to_string(),
             },
-            ArtifactOutcome::Blocked {
+            FileOutcome::Blocked {
                 reason: "ocr unavailable".to_string(),
             },
-            ArtifactOutcome::Unsupported {
+            FileOutcome::Unsupported {
                 reason: "type not supported".to_string(),
             },
         ]);
@@ -1201,7 +1087,7 @@ mod tests {
             fingerprint(
                 &results(&[artifact(
                     "a.txt",
-                    ArtifactOutcome::Findings(vec![email(text_at(line, 5, 27), value)]),
+                    FileOutcome::Findings(vec![email(text_at(line, 5, 27), value)]),
                 )])[0],
             )
         };
@@ -1229,14 +1115,14 @@ mod tests {
         let results = results(&[
             artifact(
                 "a.txt",
-                ArtifactOutcome::Findings(vec![
+                FileOutcome::Findings(vec![
                     email(text_at(1, 1, 7), "a@b.io"),
                     email(text_at(2, 1, 7), "a@d.io"),
                 ]),
             ),
             artifact(
                 "b.txt",
-                ArtifactOutcome::Findings(vec![email(text_at(1, 1, 7), "a@b.io")]),
+                FileOutcome::Findings(vec![email(text_at(1, 1, 7), "a@b.io")]),
             ),
         ]);
 
@@ -1256,7 +1142,7 @@ mod tests {
     #[test]
     fn rules_are_sorted_and_results_point_at_them_whatever_the_file_order() {
         let ner = |label: &str| {
-            SarifFinding::new(
+            ReportedFinding::new(
                 RedacterType::LocalNer,
                 DetectionLabel::new(label),
                 None,
@@ -1265,19 +1151,16 @@ mod tests {
             )
         };
         let artifacts = vec![
-            artifact(
-                "a.txt",
-                ArtifactOutcome::Findings(vec![ner("per"), ner("org")]),
-            ),
+            artifact("a.txt", FileOutcome::Findings(vec![ner("per"), ner("org")])),
             artifact(
                 "b.txt",
-                ArtifactOutcome::Findings(vec![email(text_at(1, 1, 2), "x")]),
+                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")]),
             ),
         ];
         let mut reversed = artifacts.clone();
         reversed.reverse();
 
-        let rule_ids = |artifacts: &[SarifArtifact]| -> Vec<String> {
+        let rule_ids = |artifacts: &[ReportedFile]| -> Vec<String> {
             log_of(artifacts)["runs"][0]["tool"]["driver"]["rules"]
                 .as_array()
                 .unwrap()

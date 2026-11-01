@@ -5,6 +5,8 @@ mod copy_output;
 
 mod report;
 
+mod findings;
+
 mod sarif;
 
 mod scan_command;

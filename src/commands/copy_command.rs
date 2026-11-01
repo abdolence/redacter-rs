@@ -5,7 +5,7 @@ use crate::commands::copy_output::{
     CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, RowLayout, SkipReason,
     COPY_LEGEND,
 };
-use crate::commands::sarif::{ArtifactOutcome, SarifArtifact};
+use crate::commands::findings::{FileOutcome, ReportedFile};
 use crate::commands::scan_output::{FindingReport, ValueDisplay};
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -113,15 +113,15 @@ impl CopyFileReport {
 
     /// The file for a SARIF report, or `None` for a file the size limit or the name filter
     /// left out.
-    fn sarif_artifact(&self) -> Option<SarifArtifact> {
+    fn reported_file(&self) -> Option<ReportedFile> {
         let outcome = match &self.outcome {
-            CopyFileOutcome::Redacted { .. } => ArtifactOutcome::Findings(
+            CopyFileOutcome::Redacted { .. } => FileOutcome::Findings(
                 self.redactions
                     .iter()
-                    .map(FindingReport::sarif_finding)
+                    .map(FindingReport::reported_finding)
                     .collect(),
             ),
-            CopyFileOutcome::Error { message } => ArtifactOutcome::Failed {
+            CopyFileOutcome::Error { message } => FileOutcome::Failed {
                 reason: message.clone(),
             },
             CopyFileOutcome::Copied => not_redacted_outcome(NotRedactedReason::NoRedacterApplied),
@@ -131,28 +131,28 @@ impl CopyFileReport {
             } => not_redacted_outcome(*reason),
             CopyFileOutcome::Skipped { .. } => return None,
         };
-        Some(SarifArtifact {
+        Some(ReportedFile {
             path: self.path.clone(),
             outcome,
         })
     }
 }
 
-fn not_redacted_outcome(reason: NotRedactedReason) -> ArtifactOutcome {
+fn not_redacted_outcome(reason: NotRedactedReason) -> FileOutcome {
     let detail = reason.detail().to_string();
     if reason.needs_converter() {
-        ArtifactOutcome::Blocked { reason: detail }
+        FileOutcome::Blocked { reason: detail }
     } else {
-        ArtifactOutcome::Unsupported { reason: detail }
+        FileOutcome::Unsupported { reason: detail }
     }
 }
 
 impl CopyCommandResult {
     /// The files of the copy for a SARIF report.
-    pub fn sarif_artifacts(&self) -> Vec<SarifArtifact> {
+    pub fn reported_files(&self) -> Vec<ReportedFile> {
         self.files
             .iter()
-            .filter_map(CopyFileReport::sarif_artifact)
+            .filter_map(CopyFileReport::reported_file)
             .collect()
     }
 
@@ -833,16 +833,16 @@ mod tests {
 
     fn sarif_outcome_names(files: Vec<CopyFileReport>) -> Vec<(String, &'static str)> {
         result_of(files)
-            .sarif_artifacts()
+            .reported_files()
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    ArtifactOutcome::Findings(findings) if findings.is_empty() => "clean",
-                    ArtifactOutcome::Findings(_) => "findings",
-                    ArtifactOutcome::Unconfirmed { .. } => "unconfirmed",
-                    ArtifactOutcome::Failed { .. } => "failed",
-                    ArtifactOutcome::Blocked { .. } => "blocked",
-                    ArtifactOutcome::Unsupported { .. } => "unsupported",
+                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    FileOutcome::Findings(_) => "findings",
+                    FileOutcome::Unconfirmed { .. } => "unconfirmed",
+                    FileOutcome::Failed { .. } => "failed",
+                    FileOutcome::Blocked { .. } => "blocked",
+                    FileOutcome::Unsupported { .. } => "unsupported",
                 };
                 (artifact.path, outcome)
             })
@@ -927,7 +927,7 @@ mod tests {
     fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
         let result = result_of(files);
         let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
-        serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator)).unwrap()
+        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator)).unwrap()
     }
 
     #[test]
@@ -1017,7 +1017,7 @@ mod tests {
             &format!("{}/", source.path().display()),
             std::path::Path::new("/work"),
         );
-        let sarif = serde_json::to_value(SarifLog::new(&result.sarif_artifacts(), &locator))?;
+        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator))?;
         let results = sarif["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["ruleId"], "local-rules/email");
