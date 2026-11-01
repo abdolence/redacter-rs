@@ -6,8 +6,9 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    redact_rgba_image_at_coords, words_to_redact, Detection, DetectionLocation, RedactSupport,
-    Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent, Redacters,
+    redact_rgba_image_at_coords, words_to_redact, AllowMarks, Detection, DetectionLocation,
+    RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent,
+    Redacters,
 };
 use crate::AppResult;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -74,6 +75,9 @@ pub struct DetectStreamResult {
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
     pub unlocated: usize,
+    /// The detections left out of `detections` because they start on a line or in a cell that
+    /// carries [`crate::redacters::ALLOW_MARKER`], kept so the caller can count them.
+    pub allowed: Vec<(RedacterType, Detection)>,
     /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
     /// file read as text is not text. The plan was not blocked; the step was, so the caller
     /// reports the file as unsupported.
@@ -81,8 +85,19 @@ pub struct DetectStreamResult {
 }
 
 impl DetectStreamResult {
+    /// Moves the detections the marks of `content` allow from `detections` to `allowed`.
+    fn set_aside_allowed(&mut self, content: &RedacterDataItemContent) {
+        let marks = AllowMarks::from(content);
+        let (allowed, kept) = std::mem::take(&mut self.detections)
+            .into_iter()
+            .partition(|(_, detection)| marks.allows(&detection.location));
+        self.allowed.extend(allowed);
+        self.detections = kept;
+    }
+
     fn absorb(&mut self, other: Self) {
         self.detections.extend(other.detections);
+        self.allowed.extend(other.allowed);
         self.unlocated += other.unlocated;
     }
 }
@@ -480,6 +495,7 @@ impl<'a> StreamRedacter<'a> {
             }
             _ => result = Self::detect_all(redacters, &item, None).await?,
         }
+        result.set_aside_allowed(&item.content);
         Ok(result)
     }
 
@@ -1974,5 +1990,62 @@ mod tests {
         assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
         let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
         assert_eq!(output.concat(), b"\0heada@b.io");
+    }
+
+    #[tokio::test]
+    async fn a_marker_leaves_out_only_the_findings_starting_on_its_own_line() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let text = "first a@b.io\nsecond c@d.io # redacter:allow\nthird e@f.io\n";
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("notes.txt", mime::TEXT_PLAIN),
+            text.into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            located(&result)
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>(),
+            ["a@b.io", "e@f.io"]
+        );
+        assert_eq!(
+            result
+                .allowed
+                .iter()
+                .map(|(_, detection)| detection.value.as_str())
+                .collect::<Vec<_>>(),
+            ["c@d.io"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_marker_in_a_table_cell_leaves_out_only_the_findings_of_that_cell() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let table = "email,note\na@b.io,redacter:allow\nc@d.io redacter:allow,x\ne@f.io,y\n";
+
+        let result = detect(
+            &converters,
+            &redacters,
+            &file_ref("people.csv", mime::TEXT_CSV),
+            table.into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            located(&result)
+                .iter()
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>(),
+            ["a@b.io", "e@f.io"]
+        );
+        assert_eq!(result.allowed.len(), 1);
     }
 }

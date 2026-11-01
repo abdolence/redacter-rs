@@ -3,6 +3,7 @@
 
 use crate::errors::AppError;
 use crate::redacters::text_spans::{Finding, RuleName};
+use crate::redacters::RedacterDataItemContent;
 use crate::AppResult;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -172,6 +173,58 @@ impl Display for DetectionLocation {
                     y2.round()
                 )
             }
+        }
+    }
+}
+
+/// The text that, anywhere on a line or inside a table cell, leaves out the findings that start
+/// there. It is a substring, so it sits in whatever comment syntax the file uses.
+pub const ALLOW_MARKER: &str = "redacter:allow";
+
+/// Where an item carries [`ALLOW_MARKER`]. Only text lines and table cells can: the words OCR
+/// reads from an image or a PDF page have no author-controlled place for it.
+#[derive(Debug, Default)]
+pub struct AllowMarks {
+    lines: HashSet<usize>,
+    cells: HashSet<(usize, usize)>,
+}
+
+impl From<&RedacterDataItemContent> for AllowMarks {
+    fn from(content: &RedacterDataItemContent) -> Self {
+        let mut marks = Self::default();
+        match content {
+            RedacterDataItemContent::Value(text) => {
+                marks.lines = text
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(ALLOW_MARKER))
+                    .map(|(index, _)| index + 1)
+                    .collect();
+            }
+            RedacterDataItemContent::Table { rows, .. } => {
+                for (row, cells) in rows.iter().enumerate() {
+                    for (column, cell) in cells.iter().enumerate() {
+                        if cell.contains(ALLOW_MARKER) {
+                            marks.cells.insert((row + 1, column + 1));
+                        }
+                    }
+                }
+            }
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {}
+        }
+        marks
+    }
+}
+
+impl AllowMarks {
+    /// Whether the finding at `location` starts on a marked line or in a marked cell.
+    pub fn allows(&self, location: &DetectionLocation) -> bool {
+        match location {
+            DetectionLocation::Text { line, .. } => self.lines.contains(line),
+            DetectionLocation::TableCell { row, column, .. } => {
+                self.cells.contains(&(*row, *column))
+            }
+            DetectionLocation::Image { .. } => false,
         }
     }
 }

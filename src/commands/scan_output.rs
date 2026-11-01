@@ -125,6 +125,10 @@ pub struct ScanFileReport {
     /// not known to be clean, and a model's hallucination looks the same, so it is neither a
     /// finding nor clean. Only the count is kept, since a value is the sensitive data itself.
     unlocated_values: usize,
+    /// How many findings the file left out because their line or cell carries the allow marker.
+    /// Summed in the result; not part of the JSON report of the file.
+    #[serde(skip)]
+    findings_ignored: usize,
 }
 
 impl ScanFileReport {
@@ -143,6 +147,13 @@ impl ScanFileReport {
         Self {
             unlocated_values,
             ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
+        }
+    }
+
+    pub fn with_findings_ignored(self, findings_ignored: usize) -> Self {
+        Self {
+            findings_ignored,
+            ..self
         }
     }
 
@@ -228,6 +239,7 @@ impl ScanFileReport {
             reason,
             findings,
             unlocated_values: 0,
+            findings_ignored: 0,
         }
     }
 }
@@ -252,10 +264,14 @@ pub struct ScanCommandResult {
     pub files_with_findings: usize,
     pub files_unconfirmed: usize,
     pub files_skipped: usize,
+    /// Files left out by the ignore file. They are not in `files`.
+    pub files_ignored: usize,
     pub files_unsupported: usize,
     pub files_blocked: usize,
     pub files_failed: usize,
     pub findings: usize,
+    /// Findings left out because their line or cell carries the allow marker. Not in `findings`.
+    pub findings_ignored: usize,
     pub findings_by_label: FindingsByLabel,
     pub files: Vec<ScanFileReport>,
 }
@@ -278,6 +294,7 @@ impl ScanCommandResult {
             ScanFileStatus::Failed => self.files_failed += 1,
         }
         self.findings += file.findings.len();
+        self.findings_ignored += file.findings_ignored;
         for finding in &file.findings {
             *self
                 .findings_by_label
@@ -399,6 +416,7 @@ fn format_finding_lines(file: &ScanFileReport, styles: &OutputStyles) -> Vec<Str
 pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) -> String {
     let total = result.files_scanned
         + result.files_skipped
+        + result.files_ignored
         + result.files_unsupported
         + result.files_blocked
         + result.files_failed;
@@ -422,6 +440,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
         styles.highlighted.apply_to(result.files_skipped),
         styles.highlighted.apply_to(result.files_unsupported),
     ));
+    if result.files_ignored > 0 {
+        line.push_str(&format!(
+            ", {} ignored",
+            styles.highlighted.apply_to(result.files_ignored)
+        ));
+    }
     if result.files_blocked > 0 {
         line.push_str(&format!(
             ", {} blocked",
@@ -443,6 +467,12 @@ pub fn format_scan_summary(result: &ScanCommandResult, styles: &OutputStyles) ->
             "findings"
         }
     ));
+    if result.findings_ignored > 0 {
+        line.push_str(&format!(
+            " ({} ignored)",
+            styles.highlighted.apply_to(result.findings_ignored)
+        ));
+    }
     if !result.findings_by_label.0.is_empty() {
         let by_label: Vec<String> = result
             .findings_by_label
@@ -764,10 +794,12 @@ mod tests {
                 "files_with_findings": 3,
                 "files_unconfirmed": 0,
                 "files_skipped": 1,
+                "files_ignored": 0,
                 "files_unsupported": 1,
                 "files_blocked": 1,
                 "files_failed": 0,
                 "findings": 3,
+                "findings_ignored": 0,
                 "findings_by_label": {"email": 2, "person": 1},
                 "files": [
                     {"path": "customer-note.txt", "mime_type": "text/plain", "status": "scanned",
@@ -1075,5 +1107,43 @@ mod tests {
                 .collect();
             assert_eq!(exit_codes, expected, "{result:?}");
         }
+    }
+
+    #[test]
+    fn the_summary_and_the_json_report_count_what_the_ignore_rules_left_out() {
+        let mut result = ScanCommandResult::default();
+        result.push(
+            ScanFileReport::scanned(
+                &file_ref("config.txt", mime::TEXT_PLAIN),
+                vec![finding(
+                    "email",
+                    DetectionLocation::Text {
+                        start: 5,
+                        end: 11,
+                        line: 1,
+                        column: 6,
+                    },
+                    None,
+                    "a@b.io",
+                )],
+                0,
+            )
+            .with_findings_ignored(2),
+        );
+        result.files_ignored = 3;
+
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+
+        assert_eq!(
+            (&written["files_ignored"], &written["findings_ignored"]),
+            (&serde_json::json!(3), &serde_json::json!(2))
+        );
+        assert_eq!(written["files"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            format_scan_summary(&result, &OutputStyles::plain()),
+            "4 files: 1 with findings, 0 clean, 0 skipped, 0 unsupported, 3 ignored. \
+             1 finding (2 ignored): email 1. Total size: 0 B"
+        );
     }
 }

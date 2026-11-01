@@ -8,6 +8,7 @@ use gcloud_sdk::prost::bytes;
 use gcloud_sdk::prost::bytes::Bytes;
 use mime::Mime;
 use rvstruct::ValueStruct;
+use std::path::PathBuf;
 
 mod aws_s3;
 mod gcs;
@@ -91,6 +92,19 @@ pub trait FileSystemConnection<'a> {
     fn resolve(&self, file_ref: Option<&FileSystemRef>) -> AbsoluteFilePath;
 }
 
+fn is_local_source(source: &str) -> bool {
+    source.starts_with("file://") || !source.contains("://")
+}
+
+/// The directory a local source names, or `None` for a remote source and for a single file.
+pub fn local_source_directory(source: &str) -> Option<PathBuf> {
+    if !is_local_source(source) {
+        return None;
+    }
+    let path = PathBuf::from(source.trim_start_matches("file://"));
+    path.is_dir().then_some(path)
+}
+
 pub enum DetectFileSystem<'a> {
     Local(LocalFileSystem<'a>),
     GoogleCloudStorage(GoogleCloudStorageFileSystem<'a>),
@@ -105,7 +119,7 @@ impl<'a> DetectFileSystem<'a> {
         file_path: &str,
         reporter: &'a AppReporter<'a>,
     ) -> AppResult<impl FileSystemConnection<'a>> {
-        if file_path.starts_with("file://") || !file_path.contains("://") {
+        if is_local_source(file_path) {
             Ok(DetectFileSystem::Local(
                 LocalFileSystem::new(file_path, reporter).await?,
             ))
