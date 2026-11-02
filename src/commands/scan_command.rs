@@ -205,7 +205,7 @@ pub async fn command_scan(
 
 /// Scans one file and prints its lines. A failure on the file, in reading it or in a
 /// redacter, is part of the report, not an error of the scan: the other files are still
-/// scanned.
+/// scanned. A failure to keep the findings is an error of the scan.
 async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     context: &ScanContext<'_>,
     source_file_ref: Option<&FileSystemRef>,
@@ -270,7 +270,7 @@ fn failed_report(file_ref: &FileSystemRef, error: &AppError) -> ScanFileReport {
 }
 
 /// What the redacters found in the file's content, or why they could not read it. The error is
-/// the terminal's, never the file's.
+/// the run's, never the file's: the terminal failed, or the findings cannot be kept.
 async fn detect_in_file(
     context: &ScanContext<'_>,
     reader: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
@@ -330,6 +330,7 @@ async fn detect_in_file(
         Ok(None) => {
             ScanFileReport::scanned(file_ref, findings, unlocated).with_findings_ignored(ignored)
         }
+        Err(error @ AppError::FindingSpillFailed { .. }) => return Err(error),
         Err(error) => failed_report(file_ref, &error),
     })
 }
@@ -616,7 +617,7 @@ mod tests {
             .await
             .unwrap();
 
-            let spill = String::from_utf8(result.spill_contents()).unwrap();
+            let spill = serde_json::to_string(&result).unwrap();
             assert!(spill.contains(kept), "{values:?}: {spill}");
             assert!(!spill.contains(absent), "{values:?}: {spill}");
         }

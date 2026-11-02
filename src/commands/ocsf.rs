@@ -147,12 +147,6 @@ impl OcsfEvents {
         Ok(Self(events))
     }
 
-    /// The events of files that are all held in memory, as a test builds them.
-    #[cfg(test)]
-    pub fn new(files: &[ReportedFile], locator: &ArtifactLocator, time: EpochMillis) -> Self {
-        Self::try_new(files, locator, time).expect("findings held in memory read back")
-    }
-
     /// The events as NDJSON (newline-delimited JSON): one event on each line, each line ended by
     /// a newline, and nothing for a run without events.
     pub fn to_ndjson(&self) -> serde_json::Result<String> {
@@ -647,12 +641,13 @@ mod tests {
     }
 
     fn found(path: &str, findings: Vec<ReportedFinding>) -> ReportedFile {
-        file(path, FileOutcome::Findings(findings.into()))
+        file(path, FileOutcome::Findings(findings.into_iter().collect()))
     }
 
     fn ndjson_in(source: &str, files: &[ReportedFile]) -> String {
         let locator = ArtifactLocator::new(source, Path::new("/work"));
-        OcsfEvents::new(files, &locator, scan_time())
+        OcsfEvents::try_new(files, &locator, scan_time())
+            .unwrap()
             .to_ndjson()
             .unwrap()
     }

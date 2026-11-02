@@ -539,16 +539,6 @@ impl SarifLog {
             }],
         })
     }
-
-    /// The log of artifacts that are all held in memory, as a test builds them.
-    #[cfg(test)]
-    pub fn new(
-        artifacts: &[ReportedFile],
-        locator: &ArtifactLocator,
-        categories: Option<&Categories>,
-    ) -> Self {
-        Self::try_new(artifacts, locator, categories).expect("findings held in memory read back")
-    }
 }
 
 impl SarifResult {
@@ -660,17 +650,20 @@ mod tests {
 
     fn log_of(artifacts: &[ReportedFile]) -> Value {
         let locator = ArtifactLocator::new("./", Path::new("/work"));
-        serde_json::to_value(SarifLog::new(artifacts, &locator, None)).unwrap()
+        serde_json::to_value(SarifLog::try_new(artifacts, &locator, None).unwrap()).unwrap()
     }
 
     #[test]
     fn a_run_states_the_categories_only_when_they_limit_the_run() {
-        let artifacts = [artifact("a.txt", FileOutcome::Findings(Vec::new().into()))];
+        let artifacts = [artifact(
+            "a.txt",
+            FileOutcome::Findings(Vec::new().into_iter().collect()),
+        )];
         let locator = ArtifactLocator::new("./", Path::new("/work"));
         let run_of = |categories: Option<&Categories>| {
-            serde_json::to_value(SarifLog::new(&artifacts, &locator, categories)).unwrap()["runs"]
-                [0]
-            .clone()
+            serde_json::to_value(SarifLog::try_new(&artifacts, &locator, categories).unwrap())
+                .unwrap()["runs"][0]
+                .clone()
         };
 
         assert!(run_of(None).get("properties").is_none());
@@ -708,7 +701,8 @@ mod tests {
                     text_at(3, 15, 37),
                     "john.smith@example.com",
                 )]
-                .into(),
+                .into_iter()
+                .collect(),
             ),
         )]);
 
@@ -766,7 +760,7 @@ mod tests {
 
         let region = &results(&[artifact(
             "a.txt",
-            FileOutcome::Findings(vec![finding].into()),
+            FileOutcome::Findings(vec![finding].into_iter().collect()),
         )])[0]["locations"][0]["physicalLocation"]["region"];
 
         // "Grüße 😀 " is 8 characters, 9 bytes more in UTF-8 and one more in UTF-16.
@@ -791,7 +785,7 @@ mod tests {
 
         let region = &results(&[artifact(
             "a.txt",
-            FileOutcome::Findings(vec![finding].into()),
+            FileOutcome::Findings(vec![finding].into_iter().collect()),
         )])[0]["locations"][0]["physicalLocation"]["region"];
 
         assert_eq!(
@@ -806,7 +800,7 @@ mod tests {
 
         let result = &results(&[artifact(
             "people.csv",
-            FileOutcome::Findings(vec![finding].into()),
+            FileOutcome::Findings(vec![finding].into_iter().collect()),
         )])[0];
 
         assert_eq!(
@@ -841,7 +835,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "a@b.io")].into()),
+                    FileOutcome::Findings(vec![email(place, "a@b.io")].into_iter().collect()),
                 )])
             })
             .map(|result| {
@@ -875,7 +869,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "")].into()),
+                    FileOutcome::Findings(vec![email(place, "")].into_iter().collect()),
                 )])
             })
             .map(|result| result["message"]["text"].as_str().unwrap().to_string())
@@ -937,8 +931,11 @@ mod tests {
                     unlocated_values: 1,
                 },
             ),
-            artifact("a.txt", FileOutcome::Findings(per(MAX_RESULTS).into())),
-            artifact("c.txt", FileOutcome::Findings(per(2).into())),
+            artifact(
+                "a.txt",
+                FileOutcome::Findings(per(MAX_RESULTS).into_iter().collect()),
+            ),
+            artifact("c.txt", FileOutcome::Findings(per(2).into_iter().collect())),
         ];
 
         let log = log_of(&artifacts);
@@ -969,7 +966,7 @@ mod tests {
             .map(|_| email(text_at(1, 1, 2), "x"))
             .collect();
         let artifacts = vec![
-            artifact("a.txt", FileOutcome::Findings(emails.into())),
+            artifact("a.txt", FileOutcome::Findings(emails.into_iter().collect())),
             artifact(
                 "b.txt",
                 FileOutcome::Findings(
@@ -981,7 +978,8 @@ mod tests {
                         text_at(1, 1, 2),
                         "y",
                     )]
-                    .into(),
+                    .into_iter()
+                    .collect(),
                 ),
             ),
         ];
@@ -1044,7 +1042,11 @@ mod tests {
             fingerprint(
                 &results(&[artifact(
                     "a.txt",
-                    FileOutcome::Findings(vec![email(text_at(line, 5, 27), value)].into()),
+                    FileOutcome::Findings(
+                        vec![email(text_at(line, 5, 27), value)]
+                            .into_iter()
+                            .collect(),
+                    ),
                 )])[0],
             )
         };
@@ -1077,12 +1079,17 @@ mod tests {
                         email(text_at(1, 1, 7), "a@b.io"),
                         email(text_at(2, 1, 7), "a@d.io"),
                     ]
-                    .into(),
+                    .into_iter()
+                    .collect(),
                 ),
             ),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(vec![email(text_at(1, 1, 7), "a@b.io")].into()),
+                FileOutcome::Findings(
+                    vec![email(text_at(1, 1, 7), "a@b.io")]
+                        .into_iter()
+                        .collect(),
+                ),
             ),
         ]);
 
@@ -1114,11 +1121,11 @@ mod tests {
         let artifacts = vec![
             artifact(
                 "a.txt",
-                FileOutcome::Findings(vec![ner("per"), ner("org")].into()),
+                FileOutcome::Findings(vec![ner("per"), ner("org")].into_iter().collect()),
             ),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")].into()),
+                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")].into_iter().collect()),
             ),
         ];
         let mut reversed = artifacts.clone();

@@ -31,7 +31,7 @@ pub enum FileOutcome {
     Unsupported { reason: String },
 }
 
-/// The findings of a file, in the order a reader meets them.
+/// The findings of a file.
 #[derive(Debug, Clone)]
 pub struct Findings(Source);
 
@@ -48,12 +48,6 @@ impl FromIterator<ReportedFinding> for Findings {
     }
 }
 
-impl From<Vec<ReportedFinding>> for Findings {
-    fn from(findings: Vec<ReportedFinding>) -> Self {
-        Self(Source::Held(findings))
-    }
-}
-
 impl From<SpilledFindings> for Findings {
     fn from(findings: SpilledFindings) -> Self {
         Self(Source::Spilled(findings))
@@ -61,14 +55,6 @@ impl From<SpilledFindings> for Findings {
 }
 
 impl Findings {
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        match &self.0 {
-            Source::Held(findings) => findings.is_empty(),
-            Source::Spilled(findings) => findings.is_empty(),
-        }
-    }
-
     /// Calls `visit` with each finding in order. A finding that cannot be read back from the
     /// spill is an error of the report.
     pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {

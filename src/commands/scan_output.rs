@@ -110,7 +110,7 @@ impl FindingReport {
     }
 
     /// Writes the finding as one JSON value, with the place that the JSON report leaves out.
-    pub(super) fn write_spilled(&self, out: &mut Vec<u8>) -> AppResult<()> {
+    pub(super) fn write_spilled(&self, out: impl std::io::Write) -> std::io::Result<()> {
         Ok(serde_json::to_writer(
             out,
             &(
@@ -196,7 +196,9 @@ pub struct ScanFileReport {
 }
 
 impl ScanFileReport {
-    /// A scanned file, with its findings in the order a reader meets them.
+    /// A scanned file. Its findings are in the order of the windows it was read in, sorted by
+    /// location within a window, so a value over 64 KiB that crosses the end of a window is
+    /// listed after the later findings of the window before it.
     pub fn scanned(
         file_ref: &FileSystemRef,
         findings: SpilledFindings,
@@ -387,15 +389,6 @@ impl ScanCommandResult {
             *self.findings_by_label.0.entry(label.clone()).or_default() += count;
         }
         self.files.push(file);
-    }
-
-    /// The bytes of the spill that holds the findings of the scan.
-    #[cfg(test)]
-    pub fn spill_contents(&self) -> Vec<u8> {
-        self.files
-            .first()
-            .map(|file| file.findings.spill_contents())
-            .unwrap_or_default()
     }
 
     /// The files of the scan for the SARIF and OCSF reports.
@@ -610,6 +603,7 @@ mod tests {
     use super::*;
     use crate::commands::artifact_locator::ArtifactLocator;
     use crate::commands::copy_output::NotRedactedReason;
+    use crate::commands::finding_spill::FindingSpill;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::SarifLog;
     use crate::redacters::Category;
@@ -640,14 +634,20 @@ mod tests {
         }
     }
 
-    /// A scanned file with `findings`, in the order a reader meets them.
+    fn spilled_findings(findings: &[FindingReport]) -> SpilledFindings {
+        let mut spilled = SpilledFindings::new(&FindingSpill::default());
+        spilled.append(findings).unwrap();
+        spilled
+    }
+
+    /// A scanned file with `findings`, sorted by location.
     fn scanned(
         file_ref: &FileSystemRef,
         mut findings: Vec<FindingReport>,
         unlocated_values: usize,
     ) -> ScanFileReport {
         FindingReport::sort_by_location(&mut findings);
-        ScanFileReport::scanned(file_ref, SpilledFindings::of(&findings), unlocated_values)
+        ScanFileReport::scanned(file_ref, spilled_findings(&findings), unlocated_values)
     }
 
     fn to_text(result: &ScanCommandResult) -> String {
@@ -804,8 +804,10 @@ mod tests {
         ));
         let locator = ArtifactLocator::new("./", Path::new("/work"));
 
-        let sarif = serde_json::to_string(&SarifLog::new(&result.reported_files(), &locator, None))
-            .unwrap();
+        let sarif = serde_json::to_string(
+            &SarifLog::try_new(&result.reported_files(), &locator, None).unwrap(),
+        )
+        .unwrap();
 
         assert!(sarif.contains("j********************m"), "{sarif}");
         assert!(!sarif.contains("john.smith@example.com"), "{sarif}");
@@ -826,7 +828,8 @@ mod tests {
         let locator = ArtifactLocator::new("./", Path::new("/work"));
         let time = EpochMillis::try_from(std::time::SystemTime::now()).unwrap();
 
-        let ndjson = OcsfEvents::new(&result.reported_files(), &locator, time)
+        let ndjson = OcsfEvents::try_new(&result.reported_files(), &locator, time)
+            .unwrap()
             .to_ndjson()
             .unwrap();
 
@@ -848,8 +851,15 @@ mod tests {
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
-                    FileOutcome::Findings(_) => "findings",
+                    FileOutcome::Findings(findings) => {
+                        let mut count = 0;
+                        findings.for_each(|_| count += 1).unwrap();
+                        if count == 0 {
+                            "clean"
+                        } else {
+                            "findings"
+                        }
+                    }
                     FileOutcome::Unconfirmed { .. } => "unconfirmed",
                     FileOutcome::Failed { .. } => "failed",
                     FileOutcome::Blocked { .. } => "blocked",
@@ -1434,7 +1444,7 @@ mod tests {
             .into_iter()
             .map(|(path, findings)| ReportedFile {
                 path: path.to_string(),
-                outcome: FileOutcome::Findings(SpilledFindings::of(&findings).into()),
+                outcome: FileOutcome::Findings(spilled_findings(&findings).into()),
             })
             .collect();
 
@@ -1470,7 +1480,7 @@ mod tests {
                 .map(|(path, findings)| ReportedFile {
                     path: path.to_string(),
                     outcome: FileOutcome::Findings(if spilled {
-                        SpilledFindings::of(&findings).into()
+                        spilled_findings(&findings).into()
                     } else {
                         findings
                             .iter()
@@ -1516,7 +1526,7 @@ mod tests {
             ),
             finding("file", DetectionLocation::File, None, ""),
         ];
-        let spilled = SpilledFindings::of(&written);
+        let spilled = spilled_findings(&written);
 
         let read: Vec<FindingReport> = spilled.iter().collect::<AppResult<_>>().unwrap();
 

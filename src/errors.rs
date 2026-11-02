@@ -15,6 +15,14 @@ pub enum AppError {
     UnknownRedacter { redacter_type: String },
     #[error("Input/output error")]
     InputOutputError(#[from] std::io::Error),
+    #[error(
+        "The findings of the scan cannot be kept in a temporary file in '{directory}': {source}"
+    )]
+    FindingSpillFailed {
+        directory: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Destination '{destination}' doesn't support multiple files. Trailing slash needed?")]
     DestinationDoesNotSupportMultipleFiles { destination: String },
     #[error("Google Cloud REST SDK error:\n{0}")]
