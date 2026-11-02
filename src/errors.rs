@@ -1,7 +1,9 @@
 use crate::args::RedacterType;
 use crate::redacters::ModelStop;
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
+use gcloud_sdk::tonic::Code;
 use indicatif::style::TemplateError;
+use reqwest::StatusCode;
 use std::time::SystemTimeError;
 use thiserror::Error;
 
@@ -154,6 +156,23 @@ impl AppError {
             missing,
         }
     }
+
+    /// Whether a provider refused the call for want of quota, so that the same call may succeed
+    /// a moment later: gRPC `ResourceExhausted` and `Unavailable`, HTTP 429 and 503.
+    pub fn is_throttled(&self) -> bool {
+        match self {
+            Self::GoogleCloudGrpcError(status) => {
+                matches!(status.code(), Code::ResourceExhausted | Code::Unavailable)
+            }
+            Self::HttpClientError(error) => error.status().is_some_and(|status| {
+                matches!(
+                    status,
+                    StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+                )
+            }),
+            _ => false,
+        }
+    }
 }
 
 impl<
@@ -171,6 +190,55 @@ impl From<anyhow::Error> for AppError {
         Self::SystemErrorWithCause {
             message: err.to_string(),
             cause: Box::new(err),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gcloud_sdk::tonic::codegen::http;
+    use gcloud_sdk::tonic::Status;
+
+    fn http_failure(status: u16) -> AppError {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body("")
+                .expect("a status and an empty body make a response"),
+        );
+        response
+            .error_for_status()
+            .expect_err("a client or server status is an error")
+            .into()
+    }
+
+    #[test]
+    fn quota_refusals_are_throttled() {
+        let throttled = [
+            AppError::from(Status::resource_exhausted("quota")),
+            AppError::from(Status::unavailable("try later")),
+            http_failure(429),
+            http_failure(503),
+        ];
+        for error in throttled {
+            assert!(error.is_throttled(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn other_failures_are_not_throttled() {
+        let failures = [
+            AppError::from(Status::permission_denied("no")),
+            AppError::from(Status::invalid_argument("bad")),
+            http_failure(400),
+            http_failure(500),
+            AppError::SystemError {
+                message: "resource exhausted".to_string(),
+            },
+        ];
+        for error in failures {
+            assert!(!error.is_throttled(), "{error:?}");
         }
     }
 }

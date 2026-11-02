@@ -4,9 +4,11 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Categories, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
     Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    THROTTLED_ATTEMPTS,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
+use aws_config::retry::RetryConfig;
 use aws_config::Region;
 use aws_sdk_comprehend::types::{PiiEntity, PiiEntityType};
 
@@ -79,7 +81,11 @@ impl<'a> AwsComprehendRedacter<'a> {
             aws_dlp_options.region.clone(),
         )
         .or_default_provider();
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::from_env()
+            .region(region_provider)
+            .retry_config(RetryConfig::standard().with_max_attempts(THROTTLED_ATTEMPTS))
+            .load()
+            .await;
         let client = aws_sdk_comprehend::Client::new(&shared_config);
         Ok(Self { client, reporter })
     }

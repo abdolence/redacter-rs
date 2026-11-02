@@ -4,8 +4,10 @@
 
 use crate::errors::AppError;
 use crate::AppResult;
+use rand::RngExt;
 use std::fmt::{Display, Formatter};
 use std::future::Future;
+use std::time::Duration;
 
 /// Why a model did not complete its answer. It names the provider's finish reason and the
 /// blocked categories, never any content.
@@ -153,10 +155,109 @@ where
     }
 }
 
+const BACKOFF_BASE: Duration = Duration::from_millis(500);
+const BACKOFF_CEILING: Duration = Duration::from_secs(30);
+
+/// How many times a call is made when the provider throttles it, the first included.
+pub const THROTTLED_ATTEMPTS: u32 = 5;
+
+/// The result of `attempt`, which is made again after a pause while the provider throttles it
+/// (see [`AppError::is_throttled`]), up to [`THROTTLED_ATTEMPTS`] attempts in all. The pause
+/// doubles with each failure, with jitter so that calls throttled together do not return
+/// together. Any other failure is returned at once.
+pub async fn retrying_throttled<T, Attempt, Pending>(mut attempt: Attempt) -> AppResult<T>
+where
+    Attempt: FnMut() -> Pending,
+    Pending: Future<Output = AppResult<T>>,
+{
+    let mut failures = 0;
+    loop {
+        match attempt().await {
+            Err(error) if error.is_throttled() && failures + 1 < THROTTLED_ATTEMPTS => {
+                let pause = backoff_pause(failures);
+                tracing::debug!(%error, ?pause, "the provider throttled the call, trying again");
+                tokio::time::sleep(pause).await;
+                failures += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// The pause after the `failures`-th failure in a row: between half and all of 500 ms doubled
+/// for each earlier failure, and never more than 30 s.
+fn backoff_pause(failures: u32) -> Duration {
+    let ceiling = BACKOFF_BASE
+        .saturating_mul(2u32.saturating_pow(failures))
+        .min(BACKOFF_CEILING);
+    rand::rng().random_range(ceiling / 2..=ceiling)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gcloud_sdk::tonic::Status;
     use std::cell::Cell;
+
+    #[derive(Clone, Copy)]
+    enum Call {
+        Throttled,
+        Denied,
+        Answered,
+    }
+
+    /// What `retrying_throttled` gives when its attempts go as `calls` say, the last one for
+    /// every attempt after them, with the attempts made and the time they took.
+    async fn retried_over(calls: &[Call]) -> (AppResult<&'static str>, u32, Duration) {
+        let made = Cell::new(0u32);
+        let started = tokio::time::Instant::now();
+        let result = retrying_throttled(|| {
+            let call = calls[(made.get() as usize).min(calls.len() - 1)];
+            made.set(made.get() + 1);
+            async move {
+                match call {
+                    Call::Throttled => Err(Status::resource_exhausted("quota").into()),
+                    Call::Denied => Err(AppError::SystemError {
+                        message: "denied".to_string(),
+                    }),
+                    Call::Answered => Ok("answer"),
+                }
+            }
+        })
+        .await;
+        (result, made.get(), started.elapsed())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_throttled_twice_is_made_again_and_succeeds() {
+        let (result, made, _) =
+            retried_over(&[Call::Throttled, Call::Throttled, Call::Answered]).await;
+
+        assert_eq!(result.unwrap(), "answer");
+        assert_eq!(made, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_throttled_every_time_fails_after_five_attempts_with_growing_pauses() {
+        let (result, made, waited) = retried_over(&[Call::Throttled]).await;
+
+        assert!(result.unwrap_err().is_throttled());
+        assert_eq!(made, THROTTLED_ATTEMPTS);
+        // Four pauses, each between half and all of 500 ms, 1 s, 2 s and 4 s.
+        assert!(
+            (Duration::from_millis(3750)..=Duration::from_millis(7500)).contains(&waited),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_that_is_not_throttling_is_not_repeated() {
+        let (result, made, waited) = retried_over(&[Call::Denied]).await;
+
+        assert!(matches!(result, Err(AppError::SystemError { .. })));
+        assert_eq!(made, 1);
+        assert_eq!(waited, Duration::ZERO);
+    }
 
     fn answer_stopped_by(finish_reason: Result<&'static str, i32>) -> ModelAnswer {
         ModelAnswer::from_gemini(

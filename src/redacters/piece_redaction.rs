@@ -17,7 +17,8 @@ use crate::redacters::{
 };
 use crate::AppResult;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use tokio::sync::mpsc;
 
@@ -91,6 +92,8 @@ pub(crate) struct PieceRedaction<'a> {
     categories: Option<&'a Categories>,
     file_ref: FileSystemRef,
     recording: bool,
+    /// How many windows are read at a time: the fewest any redacter of the chain takes.
+    concurrency: NonZeroUsize,
 }
 
 /// What the chain found in one window, in the file.
@@ -133,11 +136,19 @@ impl<'a> PieceRedaction<'a> {
                 reach,
             })
             .collect();
+        let concurrency = limits
+            .iter()
+            .map(|limit| limit.concurrent_requests)
+            .min()
+            .ok_or_else(|| AppError::SystemError {
+                message: "A chain of redacters has no step".to_string(),
+            })?;
         Ok(Self {
             steps,
             categories,
             file_ref: file_ref.clone(),
             recording,
+            concurrency,
         })
     }
 
@@ -365,23 +376,28 @@ impl PendingMasks {
 /// The part of a file the stream hands the upload, and the redactions it lists, once every window
 /// is read. Stops as soon as the upload no longer takes the stream.
 ///
+/// The chain reads several windows at a time, and the file comes out in the order of its windows
+/// whatever the order they are read in.
+///
 /// When a window cannot be redacted, the stream ends with the error, so that the destination does
 /// not keep the part of the file it was given.
 pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
     redaction: PieceRedaction<'_>,
-    mut pieces: TextPieces<S>,
+    pieces: TextPieces<S>,
     first: TextWindow,
     written: mpsc::Sender<AppResult<Bytes>>,
 ) -> AppResult<Vec<(RedacterType, Detection)>> {
     let mut pending = PendingMasks::new(redaction.redacters(), redaction.recording);
     let outcome: AppResult<()> = async {
-        let mut next = Some(first);
-        while let Some(window) = next {
-            let text = pending.take(redaction.find_in_window(window).await?)?;
+        let found = pieces.read_ahead(Some(first), redaction.concurrency, |window| {
+            redaction.find_in_window(window)
+        });
+        futures::pin_mut!(found);
+        while let Some(window) = found.try_next().await? {
+            let text = pending.take(window)?;
             if !text.is_empty() && written.send(Ok(text)).await.is_err() {
                 return Ok(());
             }
-            next = pieces.next_window().await?;
         }
         Ok(())
     }
@@ -438,6 +454,7 @@ fn step_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reporter::AppReporter;
 
     fn finding(range: Range<usize>, step: usize, mask: TextMask, label: &str) -> StepFinding {
         StepFinding {
@@ -688,5 +705,66 @@ mod tests {
                 (RedacterType::LocalCredentialMl, "late-second".to_string()),
             ]
         );
+    }
+
+    async fn copy_in_windows(
+        text: &str,
+        concurrency: usize,
+    ) -> (String, Vec<(RedacterType, Detection)>) {
+        let term: &'static console::Term = Box::leak(Box::new(console::Term::stdout()));
+        let reporter: &'static AppReporter<'static> = Box::leak(Box::new(AppReporter::from(term)));
+        let rules = crate::redacters::LocalRulesRedacter::new(
+            crate::redacters::LocalRulesRedacterOptions {
+                groups: [crate::redacters::RuleGroup::Email].into(),
+                user_rules: Vec::new(),
+            },
+            reporter,
+        )
+        .await
+        .expect("a valid rule set");
+        let redacters = [Redacters::LocalRules(rules)];
+        let file_ref = FileSystemRef {
+            relative_path: "app.log".into(),
+            media_type: Some(mime::TEXT_PLAIN),
+            file_size: None,
+        };
+        let mut redaction = PieceRedaction::new(&[&redacters[0]], None, &file_ref, true).unwrap();
+        redaction.concurrency = NonZeroUsize::new(concurrency).unwrap();
+        let chunks = text
+            .as_bytes()
+            .chunks(7)
+            .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let mut pieces = TextPieces::new(futures::stream::iter(chunks), PieceLayout::new(200, 60));
+        let first = pieces.next_window().await.unwrap().unwrap();
+        let (written, stream) = written_windows();
+
+        let (output, redactions) = futures::join!(
+            stream.try_collect::<Vec<_>>(),
+            redact_windows(redaction, pieces, first, written)
+        );
+
+        let output = String::from_utf8(output.unwrap().concat()).unwrap();
+        (output, redactions.unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_file_and_its_redactions_are_the_same_whatever_the_number_of_windows_read_at_once()
+    {
+        let text: String = (0..300)
+            .map(|line| format!("line {line} mail user{line}@example.com sent\n"))
+            .collect();
+
+        let one_at_a_time = copy_in_windows(&text, 1).await;
+
+        assert!(!one_at_a_time.0.contains("@example.com"));
+        assert_eq!(one_at_a_time.1.len(), 300);
+        for concurrency in [2, 5, 64] {
+            assert_eq!(
+                copy_in_windows(&text, concurrency).await,
+                one_at_a_time,
+                "{concurrency} at once"
+            );
+        }
     }
 }
