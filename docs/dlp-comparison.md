@@ -200,7 +200,7 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 
 ## Large files and the models
 
-`local-ner` and `local-gliner` read a large text file whole, where `local-rules` and `local-credential-ml` read it in pieces, see [Scan command](../README.md#scan-command). Reading the two models in pieces was measured and lost.
+`local-ner` and `local-gliner` read a large text file whole, where `local-rules` and `local-credential-ml` read it in pieces, see [Scan command](../README.md#scan-command). Reading the two models in pieces was measured against reading them whole, on commit `63864f5` (release build, one machine), and lost.
 
 - `local-ner` on `long`, five documents of about 34 KB built from the public sample: 34 arms, with pieces of 777 to 16000 bytes and contexts of 128 to 8192 bytes. 19 arms lose. Person or address recall is down 1.3 to 3.5 points and precision is down 1.2 to 5.1 points. Only the contexts of 8192 bytes pass;
 - `local-ner` on `fixtures` and `public` passes from a context of 256 bytes up;
