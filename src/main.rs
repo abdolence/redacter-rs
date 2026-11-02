@@ -127,16 +127,14 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             }
             let copy_result =
                 command_copy(term, &source, &destination, options, redacter_options).await?;
-            report
-                .write(
-                    term,
-                    &copy_result,
-                    &copy_result.to_text(),
-                    || copy_result.reported_files(),
-                    &source,
-                    copy_result.categories.as_ref(),
-                )
-                .await?;
+            report.write(
+                term,
+                &copy_result,
+                |out| Ok(out.write_all(copy_result.to_text().as_bytes())?),
+                || copy_result.reported_files(),
+                &source,
+                copy_result.categories.as_ref(),
+            )?;
             Ok(0)
         }
         CliCommand::Scan {
@@ -168,16 +166,14 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             .with_ignore(ignore.into());
             let scan_result =
                 command_scan(term, &source, options, redacter_args.try_into()?).await?;
-            report
-                .write(
-                    term,
-                    &scan_result,
-                    &scan_result.to_text(),
-                    || scan_result.reported_files(),
-                    &source,
-                    scan_result.categories.as_ref(),
-                )
-                .await?;
+            report.write(
+                term,
+                &scan_result,
+                |out| scan_result.write_text(out),
+                || scan_result.reported_files(),
+                &source,
+                scan_result.categories.as_ref(),
+            )?;
             Ok(scan_result.exit_code(fail_on))
         }
         CliCommand::Ls {

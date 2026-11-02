@@ -15,6 +15,7 @@ use crate::commands::artifact_locator::{
 use crate::commands::copy_output::escaped;
 use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
 use crate::redacters::Categories;
+use crate::AppResult;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -405,51 +406,42 @@ impl Location {
 impl SarifLog {
     /// The log of one run over `artifacts`. Rules are sorted by id, so the log does not
     /// depend on the order the files were read in.
-    pub fn new(
+    ///
+    /// The findings of a file are read once, in order, and a rule keeps only its first
+    /// `MAX_RESULTS` results, so memory is bounded by the number of rules whatever the number
+    /// of findings. The results the cap would drop are never built: it ranks results of a rule
+    /// by their position in it, and every result of a rule has one level.
+    pub fn try_new(
         artifacts: &[ReportedFile],
         locator: &ArtifactLocator,
         categories: Option<&Categories>,
-    ) -> Self {
+    ) -> AppResult<Self> {
         let mut rules: BTreeMap<RuleId, Rule> = BTreeMap::new();
-        for artifact in artifacts {
-            match &artifact.outcome {
-                FileOutcome::Findings(findings) => {
-                    for finding in findings {
-                        rules
-                            .entry(finding.rule_id())
-                            .or_insert_with(|| Rule::for_finding(finding));
-                    }
-                }
-                FileOutcome::Unconfirmed { .. } => {
-                    rules
-                        .entry(RuleId::unconfirmed())
-                        .or_insert_with(Rule::unconfirmed);
-                }
-                FileOutcome::Failed { .. }
-                | FileOutcome::Blocked { .. }
-                | FileOutcome::Unsupported { .. } => {}
-            }
-        }
-        let rule_indexes: BTreeMap<&RuleId, usize> = rules
-            .keys()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect();
-
         let mut results = Vec::new();
+        let mut results_of_rule: BTreeMap<RuleId, usize> = BTreeMap::new();
+        let mut result_count = 0;
         let mut notifications = Vec::new();
         for artifact in artifacts {
             let location = locator.locate(&artifact.path);
             match &artifact.outcome {
                 FileOutcome::Findings(findings) => {
-                    let mut seen: BTreeMap<(RuleId, &str), usize> = BTreeMap::new();
-                    for finding in findings {
+                    let mut seen: BTreeMap<(RuleId, String), usize> = BTreeMap::new();
+                    findings.for_each(|finding| {
                         let rule_id = finding.rule_id();
+                        rules
+                            .entry(rule_id.clone())
+                            .or_insert_with(|| Rule::for_finding(finding));
+                        result_count += 1;
+                        let in_rule = results_of_rule.entry(rule_id.clone()).or_default();
+                        if *in_rule >= MAX_RESULTS {
+                            return;
+                        }
+                        *in_rule += 1;
                         let occurrence = seen
-                            .entry((rule_id.clone(), finding.masked_value.as_str()))
+                            .entry((rule_id.clone(), finding.masked_value.clone()))
                             .or_default();
                         results.push(SarifResult {
-                            rule_index: rule_indexes[&rule_id],
+                            rule_index: 0,
                             level: Level::Error,
                             message: finding.message().into(),
                             locations: vec![Location::of(
@@ -465,27 +457,35 @@ impl SarifLog {
                             rule_id,
                         });
                         *occurrence += 1;
-                    }
+                    })?;
                 }
                 FileOutcome::Unconfirmed { unlocated_values } => {
                     let rule_id = RuleId::unconfirmed();
-                    results.push(SarifResult {
-                        rule_index: rule_indexes[&rule_id],
-                        level: Level::Warning,
-                        message: format!(
-                            "{unlocated_values} {} named by the redacters could not be located in \
-                             the file, so it may still hold sensitive data.",
-                            if *unlocated_values == 1 {
-                                "value"
-                            } else {
-                                "values"
-                            }
-                        )
-                        .into(),
-                        partial_fingerprints: Fingerprints::new(&rule_id, &location.uri, "", 0),
-                        locations: vec![Location::of(location, None)],
-                        rule_id,
-                    });
+                    rules
+                        .entry(rule_id.clone())
+                        .or_insert_with(Rule::unconfirmed);
+                    result_count += 1;
+                    let in_rule = results_of_rule.entry(rule_id.clone()).or_default();
+                    if *in_rule < MAX_RESULTS {
+                        *in_rule += 1;
+                        results.push(SarifResult {
+                            rule_index: 0,
+                            level: Level::Warning,
+                            message: format!(
+                                "{unlocated_values} {} named by the redacters could not be \
+                                 located in the file, so it may still hold sensitive data.",
+                                if *unlocated_values == 1 {
+                                    "value"
+                                } else {
+                                    "values"
+                                }
+                            )
+                            .into(),
+                            partial_fingerprints: Fingerprints::new(&rule_id, &location.uri, "", 0),
+                            locations: vec![Location::of(location, None)],
+                            rule_id,
+                        });
+                    }
                 }
                 FileOutcome::Failed { reason } | FileOutcome::Blocked { reason } => {
                     notifications.push(Notification::new(Level::Error, artifact, reason, location));
@@ -496,7 +496,15 @@ impl SarifLog {
             }
         }
 
-        let left_out = keep_most_severe(&mut results);
+        let rule_indexes: BTreeMap<&RuleId, usize> = rules
+            .keys()
+            .enumerate()
+            .map(|(index, id)| (id, index))
+            .collect();
+        for result in &mut results {
+            result.rule_index = rule_indexes[&result.rule_id];
+        }
+        let left_out = keep_most_severe(&mut results, result_count);
         if left_out > 0 {
             notifications.push(Notification::results_left_out(left_out));
         }
@@ -507,7 +515,7 @@ impl SarifLog {
                 FileOutcome::Failed { .. } | FileOutcome::Blocked { .. }
             )
         });
-        Self {
+        Ok(Self {
             schema: SARIF_SCHEMA,
             version: "2.1.0",
             runs: vec![Run {
@@ -529,7 +537,17 @@ impl SarifLog {
                     categories: categories.clone(),
                 }),
             }],
-        }
+        })
+    }
+
+    /// The log of artifacts that are all held in memory, as a test builds them.
+    #[cfg(test)]
+    pub fn new(
+        artifacts: &[ReportedFile],
+        locator: &ArtifactLocator,
+        categories: Option<&Categories>,
+    ) -> Self {
+        Self::try_new(artifacts, locator, categories).expect("findings held in memory read back")
     }
 }
 
@@ -541,12 +559,13 @@ impl SarifResult {
     }
 }
 
-/// Drops all but the first `MAX_RESULTS` results, keeping the order of the rest, and returns how
-/// many it dropped. Results are ranked by level, then by their position within their own rule,
-/// so every rule keeps its first results and a rule with few results is not crowded out by one
-/// with many; rule and file break ties.
-fn keep_most_severe(results: &mut Vec<SarifResult>) -> usize {
-    let dropped = results.len().saturating_sub(MAX_RESULTS);
+/// Drops all but the first `MAX_RESULTS` results of the `total` the run has, keeping the order of
+/// the rest, and returns how many it dropped. `results` holds at most `MAX_RESULTS` of each rule.
+/// Results are ranked by level, then by their position within their own rule, so every rule
+/// keeps its first results and a rule with few results is not crowded out by one with many;
+/// rule and file break ties.
+fn keep_most_severe(results: &mut Vec<SarifResult>, total: usize) -> usize {
+    let dropped = total.saturating_sub(MAX_RESULTS);
     if dropped == 0 {
         return 0;
     }
@@ -646,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_run_states_the_categories_only_when_they_limit_the_run() {
-        let artifacts = [artifact("a.txt", FileOutcome::Findings(Vec::new()))];
+        let artifacts = [artifact("a.txt", FileOutcome::Findings(Vec::new().into()))];
         let locator = ArtifactLocator::new("./", Path::new("/work"));
         let run_of = |categories: Option<&Categories>| {
             serde_json::to_value(SarifLog::new(&artifacts, &locator, categories)).unwrap()["runs"]
@@ -680,14 +699,17 @@ mod tests {
     fn a_text_finding_is_a_region_with_the_masked_value() {
         let log = log_of(&[artifact(
             "docs/note.txt",
-            FileOutcome::Findings(vec![ReportedFinding::new(
-                RedacterType::LocalNer,
-                DetectionLabel::new("per"),
-                Some(Score::from_static(0.75)),
-                DetectionLocation::File,
-                text_at(3, 15, 37),
-                "john.smith@example.com",
-            )]),
+            FileOutcome::Findings(
+                vec![ReportedFinding::new(
+                    RedacterType::LocalNer,
+                    DetectionLabel::new("per"),
+                    Some(Score::from_static(0.75)),
+                    DetectionLocation::File,
+                    text_at(3, 15, 37),
+                    "john.smith@example.com",
+                )]
+                .into(),
+            ),
         )]);
 
         assert_eq!(
@@ -742,8 +764,10 @@ mod tests {
             &detection.value,
         );
 
-        let region = &results(&[artifact("a.txt", FileOutcome::Findings(vec![finding]))])[0]
-            ["locations"][0]["physicalLocation"]["region"];
+        let region = &results(&[artifact(
+            "a.txt",
+            FileOutcome::Findings(vec![finding].into()),
+        )])[0]["locations"][0]["physicalLocation"]["region"];
 
         // "Grüße 😀 " is 8 characters, 9 bytes more in UTF-8 and one more in UTF-16.
         assert_eq!(
@@ -765,8 +789,10 @@ mod tests {
             &detection.value,
         );
 
-        let region = &results(&[artifact("a.txt", FileOutcome::Findings(vec![finding]))])[0]
-            ["locations"][0]["physicalLocation"]["region"];
+        let region = &results(&[artifact(
+            "a.txt",
+            FileOutcome::Findings(vec![finding].into()),
+        )])[0]["locations"][0]["physicalLocation"]["region"];
 
         assert_eq!(
             *region,
@@ -778,7 +804,10 @@ mod tests {
     fn a_table_cell_has_no_region_and_the_message_names_the_cell() {
         let finding = email(Some(Place::TableCell { row: 3, column: 2 }), "a@b.io");
 
-        let result = &results(&[artifact("people.csv", FileOutcome::Findings(vec![finding]))])[0];
+        let result = &results(&[artifact(
+            "people.csv",
+            FileOutcome::Findings(vec![finding].into()),
+        )])[0];
 
         assert_eq!(
             result["message"]["text"],
@@ -812,7 +841,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "a@b.io")]),
+                    FileOutcome::Findings(vec![email(place, "a@b.io")].into()),
                 )])
             })
             .map(|result| {
@@ -846,7 +875,7 @@ mod tests {
             .flat_map(|place| {
                 results(&[artifact(
                     "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "")]),
+                    FileOutcome::Findings(vec![email(place, "")].into()),
                 )])
             })
             .map(|result| result["message"]["text"].as_str().unwrap().to_string())
@@ -908,8 +937,8 @@ mod tests {
                     unlocated_values: 1,
                 },
             ),
-            artifact("a.txt", FileOutcome::Findings(per(MAX_RESULTS))),
-            artifact("c.txt", FileOutcome::Findings(per(2))),
+            artifact("a.txt", FileOutcome::Findings(per(MAX_RESULTS).into())),
+            artifact("c.txt", FileOutcome::Findings(per(2).into())),
         ];
 
         let log = log_of(&artifacts);
@@ -940,17 +969,20 @@ mod tests {
             .map(|_| email(text_at(1, 1, 2), "x"))
             .collect();
         let artifacts = vec![
-            artifact("a.txt", FileOutcome::Findings(emails)),
+            artifact("a.txt", FileOutcome::Findings(emails.into())),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(vec![ReportedFinding::new(
-                    RedacterType::LocalRules,
-                    DetectionLabel::new("github-token"),
-                    None,
-                    DetectionLocation::File,
-                    text_at(1, 1, 2),
-                    "y",
-                )]),
+                FileOutcome::Findings(
+                    vec![ReportedFinding::new(
+                        RedacterType::LocalRules,
+                        DetectionLabel::new("github-token"),
+                        None,
+                        DetectionLocation::File,
+                        text_at(1, 1, 2),
+                        "y",
+                    )]
+                    .into(),
+                ),
             ),
         ];
 
@@ -1012,7 +1044,7 @@ mod tests {
             fingerprint(
                 &results(&[artifact(
                     "a.txt",
-                    FileOutcome::Findings(vec![email(text_at(line, 5, 27), value)]),
+                    FileOutcome::Findings(vec![email(text_at(line, 5, 27), value)].into()),
                 )])[0],
             )
         };
@@ -1040,14 +1072,17 @@ mod tests {
         let results = results(&[
             artifact(
                 "a.txt",
-                FileOutcome::Findings(vec![
-                    email(text_at(1, 1, 7), "a@b.io"),
-                    email(text_at(2, 1, 7), "a@d.io"),
-                ]),
+                FileOutcome::Findings(
+                    vec![
+                        email(text_at(1, 1, 7), "a@b.io"),
+                        email(text_at(2, 1, 7), "a@d.io"),
+                    ]
+                    .into(),
+                ),
             ),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(vec![email(text_at(1, 1, 7), "a@b.io")]),
+                FileOutcome::Findings(vec![email(text_at(1, 1, 7), "a@b.io")].into()),
             ),
         ]);
 
@@ -1077,10 +1112,13 @@ mod tests {
             )
         };
         let artifacts = vec![
-            artifact("a.txt", FileOutcome::Findings(vec![ner("per"), ner("org")])),
+            artifact(
+                "a.txt",
+                FileOutcome::Findings(vec![ner("per"), ner("org")].into()),
+            ),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")]),
+                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")].into()),
             ),
         ];
         let mut reversed = artifacts.clone();

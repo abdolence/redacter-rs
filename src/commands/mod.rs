@@ -7,6 +7,8 @@ mod copy_output;
 
 mod report;
 
+mod finding_spill;
+
 mod findings;
 
 mod ocsf;

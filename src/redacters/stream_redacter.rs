@@ -129,11 +129,11 @@ pub type ContentStream =
 /// large binary file is not read whole just to be skipped.
 const NOT_TEXT_PROBE_SIZE: usize = 8 * 1024;
 
+/// What a read of a file found, or what one window or batch of it found.
 #[derive(Default)]
 pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
-    /// in the order the redacter reported. A text read in pieces gives this order for each piece
-    /// in turn, and a table read in batches for each batch.
+    /// in the order the redacter reported.
     pub detections: Vec<(RedacterType, Detection)>,
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
@@ -141,10 +141,6 @@ pub struct DetectStreamResult {
     /// The detections moved out of `detections` because a line they cover, or their cell, carries
     /// [`crate::redacters::ALLOW_MARKER`] outside them, kept so the caller can count them.
     pub ignored: Vec<(RedacterType, Detection)>,
-    /// Set when the file could not be read as planned: OCR cannot decode its image format, or a
-    /// file read as text is not text. The plan was not blocked; the step was, so the caller
-    /// reports the file as unsupported.
-    pub blocked: Option<RedactionBlocked>,
 }
 
 impl DetectStreamResult {
@@ -249,7 +245,6 @@ impl DetectStreamResult {
             detections: self.detections.into_iter().filter_map(owned).collect(),
             ignored: self.ignored.into_iter().filter_map(owned).collect(),
             unlocated: self.unlocated,
-            blocked: self.blocked,
         }
     }
 
@@ -752,6 +747,15 @@ impl<'a> StreamRedacter<'a> {
 
     /// What the redacters of `plan` find in the file, read as `redact_stream` reads it. Every
     /// redacter reads the original content: unlike redaction, nothing is chained.
+    ///
+    /// `found` is called with what each window of a text, or batch of a table, finds as it is
+    /// placed in the file, so the findings of a large file are never held together; any other
+    /// file is read whole and `found` is called once. The findings of a window are in plan
+    /// order, and the windows are in file order.
+    ///
+    /// Returns why the file could not be read as planned, if it could not: OCR cannot decode
+    /// its image format, or a file read as text is not text. The plan was not blocked; the step
+    /// was, so the caller reports the file as unsupported. `found` is not called then.
     pub async fn detect_stream<
         S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     >(
@@ -759,7 +763,8 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         plan: &StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<DetectStreamResult> {
+        found: &mut dyn FnMut(DetectStreamResult) -> AppResult<()>,
+    ) -> AppResult<Option<RedactionBlocked>> {
         let redacters = &plan.supported_redacters;
         let categories = self.redacter_base_options.categories.as_ref();
         match plan.read {
@@ -772,13 +777,14 @@ impl<'a> StreamRedacter<'a> {
                     redacters,
                     categories,
                     file_ref,
+                    found,
                 )
                 .await;
             }
             PlannedRead::TableBatches { batch_bytes } => {
                 let batches =
                     TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
-                return Self::detect_table(batches, redacters, categories, file_ref).await;
+                return Self::detect_table(batches, redacters, categories, file_ref, found).await;
             }
             PlannedRead::Whole => {}
         }
@@ -786,10 +792,7 @@ impl<'a> StreamRedacter<'a> {
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
             .await?
         else {
-            return Ok(DetectStreamResult {
-                blocked: Some(RedactionBlocked::NotText),
-                ..DetectStreamResult::default()
-            });
+            return Ok(Some(RedactionBlocked::NotText));
         };
         let mut result = DetectStreamResult::default();
         match &item.content {
@@ -852,13 +855,14 @@ impl<'a> StreamRedacter<'a> {
                         )
                         .await?;
                     }
-                    None => result.blocked = Some(RedactionBlocked::OcrImageFormatNotSupported),
+                    None => return Ok(Some(RedactionBlocked::OcrImageFormatNotSupported)),
                 }
             }
             _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
         result.set_aside_ignored(&item.content, None);
-        Ok(result)
+        found(result)?;
+        Ok(None)
     }
 
     /// The pieces of the text `input` holds. A file read as text only on its content is not text
@@ -891,9 +895,9 @@ impl<'a> StreamRedacter<'a> {
         redacters: &[&Redacters<'a>],
         categories: Option<&Categories>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<DetectStreamResult> {
+        found: &mut dyn FnMut(DetectStreamResult) -> AppResult<()>,
+    ) -> AppResult<Option<RedactionBlocked>> {
         let mut pieces = Self::text_pieces(input, layout, unsupported_as_text);
-        let mut result = DetectStreamResult::default();
         let mut previous_window_end = 0;
         let mut windows = 0;
         loop {
@@ -901,10 +905,7 @@ impl<'a> StreamRedacter<'a> {
                 Ok(Some(window)) => window,
                 Ok(None) => break,
                 Err(error) if unsupported_as_text && windows == 0 && error.is_not_text() => {
-                    return Ok(DetectStreamResult {
-                        blocked: Some(RedactionBlocked::NotText),
-                        ..DetectStreamResult::default()
-                    });
+                    return Ok(Some(RedactionBlocked::NotText));
                 }
                 Err(error) => return Err(error),
             };
@@ -915,12 +916,13 @@ impl<'a> StreamRedacter<'a> {
                 content: RedacterDataItemContent::Value(window.text),
                 file_ref: file_ref.clone(),
             };
-            let mut found = Self::detect_all(redacters, &item, None, categories).await?;
-            found.set_aside_ignored(&item.content, Some(whole_lines));
+            let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
+            detected.set_aside_ignored(&item.content, Some(whole_lines));
             if is_whole {
-                return Ok(found);
+                found(detected)?;
+                return Ok(None);
             }
-            result.absorb(found.owned_by(&piece, start, previous_window_end));
+            found(detected.owned_by(&piece, start, previous_window_end))?;
             previous_window_end = window_end;
             windows += 1;
         }
@@ -931,7 +933,7 @@ impl<'a> StreamRedacter<'a> {
             ?layout,
             "read in pieces"
         );
-        Ok(result)
+        Ok(None)
     }
 
     /// What `redacters` find in the table `batches` read, a batch at a time. A marker in a cell
@@ -941,28 +943,28 @@ impl<'a> StreamRedacter<'a> {
         redacters: &[&Redacters<'a>],
         categories: Option<&Categories>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<DetectStreamResult> {
+        found: &mut dyn FnMut(DetectStreamResult) -> AppResult<()>,
+    ) -> AppResult<Option<RedactionBlocked>> {
         tracing::debug!(file = %file_ref.relative_path.value(), "reading a table in batches");
-        let mut result = DetectStreamResult::default();
         let mut number_of_batches = 0usize;
         loop {
             let batch = batches.next_batch().await?;
             number_of_batches += 1;
             let (rows_before, reaches_end) = (batch.rows_before, batch.reaches_end);
             let item = batch.into_item(file_ref);
-            let mut found = Self::detect_all(redacters, &item, None, categories).await?;
-            found.set_aside_ignored(&item.content, None);
-            for (_, detection) in found.detections.iter_mut().chain(&mut found.ignored) {
+            let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
+            detected.set_aside_ignored(&item.content, None);
+            for (_, detection) in detected.detections.iter_mut().chain(&mut detected.ignored) {
                 detection.location = detection.location.after_rows(rows_before);
             }
-            result.absorb(found);
+            found(detected)?;
             if reaches_end {
                 tracing::debug!(
                     file = %file_ref.relative_path.value(),
                     batches = number_of_batches,
                     "read a table in batches"
                 );
-                return Ok(result);
+                return Ok(None);
             }
         }
     }
@@ -1611,6 +1613,43 @@ mod tests {
     use crate::reporter::AppReporter;
     use std::collections::BTreeSet;
 
+    /// What a read found, gathered from the calls of `detect_stream`'s callback, and why the
+    /// file was blocked if it was.
+    #[derive(Default)]
+    struct Collected {
+        detections: Vec<(RedacterType, Detection)>,
+        ignored: Vec<(RedacterType, Detection)>,
+        unlocated: usize,
+        blocked: Option<RedactionBlocked>,
+    }
+
+    impl Collected {
+        fn add(&mut self, found: DetectStreamResult) -> AppResult<()> {
+            self.detections.extend(found.detections);
+            self.ignored.extend(found.ignored);
+            self.unlocated += found.unlocated;
+            Ok(())
+        }
+    }
+
+    impl<'a> StreamRedacter<'a> {
+        async fn detect_stream_collected<
+            S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
+        >(
+            &'a self,
+            input: S,
+            plan: &StreamRedactPlan<'a>,
+            file_ref: &FileSystemRef,
+        ) -> AppResult<Collected> {
+            let mut collected = Collected::default();
+            let blocked = self
+                .detect_stream(input, plan, file_ref, &mut |found| collected.add(found))
+                .await?;
+            collected.blocked = blocked;
+            Ok(collected)
+        }
+    }
+
     fn coord(text: &str, line: usize) -> TextImageCoords {
         coord_at(text, line, 0.0)
     }
@@ -2002,7 +2041,7 @@ mod tests {
         redacters: &[Redacters<'static>],
         file_ref: &FileSystemRef,
         data: bytes::Bytes,
-    ) -> AppResult<DetectStreamResult> {
+    ) -> AppResult<Collected> {
         detect_with(&base_options(), converters, redacters, file_ref, data).await
     }
 
@@ -2012,7 +2051,7 @@ mod tests {
         redacters: &[Redacters<'static>],
         file_ref: &FileSystemRef,
         data: bytes::Bytes,
-    ) -> AppResult<DetectStreamResult> {
+    ) -> AppResult<Collected> {
         let stream_redacter = StreamRedacter::new(options, converters);
         let plan = stream_redacter
             .create_detect_plan(redacters, file_ref)
@@ -2022,7 +2061,7 @@ mod tests {
             "nothing can read {file_ref:?}"
         );
         stream_redacter
-            .detect_stream(futures::stream::iter(vec![Ok(data)]), &plan, file_ref)
+            .detect_stream_collected(futures::stream::iter(vec![Ok(data)]), &plan, file_ref)
             .await
     }
 
@@ -2042,7 +2081,7 @@ mod tests {
             .await
             .unwrap();
 
-        let values = |result: &DetectStreamResult| {
+        let values = |result: &Collected| {
             result
                 .detections
                 .iter()
@@ -2053,7 +2092,7 @@ mod tests {
         assert_eq!(values(&credentials), ["hunter2-Secret"]);
     }
 
-    fn located(result: &DetectStreamResult) -> Vec<(DetectionLocation, &str)> {
+    fn located(result: &Collected) -> Vec<(DetectionLocation, &str)> {
         result
             .detections
             .iter()
@@ -2560,7 +2599,7 @@ mod tests {
             .await
             .unwrap();
         let text = stream_redacter
-            .detect_stream(one_chunk(b"ADMIN_EMAIL=a@b.io\n"), &plan, &env_file())
+            .detect_stream_collected(one_chunk(b"ADMIN_EMAIL=a@b.io\n"), &plan, &env_file())
             .await
             .unwrap();
         assert_eq!(
@@ -2577,7 +2616,7 @@ mod tests {
         );
         for data in not_text_files() {
             let result = stream_redacter
-                .detect_stream(in_probe_chunks(&data), &plan, &env_file())
+                .detect_stream_collected(in_probe_chunks(&data), &plan, &env_file())
                 .await
                 .unwrap();
             assert_eq!(result.blocked, Some(RedactionBlocked::NotText), "{data:?}");
@@ -2600,7 +2639,7 @@ mod tests {
         text.push_str("ADMIN_EMAIL=a@b.io\n");
 
         let result = stream_redacter
-            .detect_stream(in_probe_chunks(text.as_bytes()), &plan, &env_file())
+            .detect_stream_collected(in_probe_chunks(text.as_bytes()), &plan, &env_file())
             .await
             .unwrap();
 
@@ -2700,7 +2739,7 @@ mod tests {
         ]);
 
         let result = stream_redacter
-            .detect_stream(unreadable_after_the_head, &plan, &env_file())
+            .detect_stream_collected(unreadable_after_the_head, &plan, &env_file())
             .await
             .expect("the rest of a binary file is not read");
 
@@ -2804,7 +2843,7 @@ mod tests {
         redacters: &[Redacters<'static>],
         text: &str,
         layout: PieceLayout,
-    ) -> (DetectStreamResult, DetectStreamResult) {
+    ) -> (Collected, Collected) {
         let file = file_ref("app.log", mime::TEXT_PLAIN);
         let whole = detect(
             &FileConverters::new(),
@@ -2820,13 +2859,15 @@ mod tests {
             .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
             .collect::<Vec<_>>();
         let references: Vec<&Redacters> = redacters.iter().collect();
-        let in_pieces = StreamRedacter::detect_text(
+        let mut in_pieces = Collected::default();
+        StreamRedacter::detect_text(
             futures::stream::iter(chunks),
             layout,
             false,
             &references,
             None,
             &file,
+            &mut |found| in_pieces.add(found),
         )
         .await
         .unwrap();
@@ -2839,7 +2880,7 @@ mod tests {
         findings
     }
 
-    fn assert_same_findings(whole: DetectStreamResult, in_pieces: DetectStreamResult) {
+    fn assert_same_findings(whole: Collected, in_pieces: Collected) {
         let (whole_detections, piece_detections) = (
             by_location(whole.detections),
             by_location(in_pieces.detections),
@@ -3421,13 +3462,13 @@ mod tests {
         content: &[u8],
         read: PlannedRead,
         chunk_size: usize,
-    ) -> AppResult<DetectStreamResult> {
+    ) -> AppResult<Collected> {
         let converters = FileConverters::new();
         let stream_redacter = StreamRedacter::new(options, &converters);
         let mut plan = stream_redacter.create_detect_plan(redacters, file).await?;
         plan.read = read;
         stream_redacter
-            .detect_stream(in_chunks(content, chunk_size), &plan, file)
+            .detect_stream_collected(in_chunks(content, chunk_size), &plan, file)
             .await
     }
 
@@ -3436,7 +3477,7 @@ mod tests {
         redacters: &[Redacters<'static>],
         table: &str,
         read: PlannedRead,
-    ) -> DetectStreamResult {
+    ) -> Collected {
         detect_as(
             &base_options(),
             redacters,
@@ -3910,7 +3951,7 @@ mod tests {
         data: &[u8],
         layout: Option<PieceLayout>,
         chunk_size: usize,
-    ) -> AppResult<DetectStreamResult> {
+    ) -> AppResult<Collected> {
         detect_as(
             &unsupported_as_text(),
             redacters,

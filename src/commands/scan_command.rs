@@ -7,6 +7,7 @@ use crate::commands::copy_output::{
     format_capabilities_line, format_legend, Capabilities, NotRedactedReason, OutputStyles,
     RowLayout, SkipReason,
 };
+use crate::commands::finding_spill::{FindingSpill, SpilledFindings};
 use crate::commands::scan_output::{
     format_file_lines, format_scan_summary, FindingReport, ScanCommandResult, ScanFileReport,
     ValueDisplay, SCAN_LEGEND,
@@ -15,9 +16,7 @@ use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride, IgnoreFileChoice};
-use crate::redacters::{
-    CallPacing, DetectStreamResult, Detection, RedacterOptions, Redacters, Score, StreamRedacter,
-};
+use crate::redacters::{CallPacing, Detection, RedacterOptions, Redacters, Score, StreamRedacter};
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use console::Term;
@@ -76,6 +75,7 @@ struct ScanContext<'s> {
     styles: &'s OutputStyles,
     bar: &'s ProgressBar,
     call_pacing: Option<CallPacing>,
+    spill: FindingSpill,
 }
 
 pub async fn command_scan(
@@ -156,6 +156,7 @@ pub async fn command_scan(
         styles: &styles,
         bar: &bar,
         call_pacing,
+        spill: FindingSpill::default(),
     };
 
     let mut result = ScanCommandResult {
@@ -179,7 +180,7 @@ pub async fn command_scan(
             if !listing.files.is_empty() {
                 header.push(format_legend(&SCAN_LEGEND, &styles));
             }
-            write_lines(term, &bar, &header)?;
+            write_lines(term, &bar, header.into_iter().map(Ok))?;
             result.files_skipped += listing.skipped;
             result.files_ignored += listing.ignored;
             bar.set_length(listing.files.len() as u64);
@@ -189,7 +190,7 @@ pub async fn command_scan(
             }
         }
         None => {
-            write_lines(term, &bar, &[format_legend(&SCAN_LEGEND, &styles)])?;
+            write_lines(term, &bar, [Ok(format_legend(&SCAN_LEGEND, &styles))])?;
             let report = scan_file(&context, None, &mut source_fs).await?;
             result.push(report);
         }
@@ -239,11 +240,11 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     write_lines(
         context.term,
         context.bar,
-        &format_file_lines(
+        format_file_lines(
             &report,
             RowLayout::for_terminal(usize::from(context.term.size().1)),
             context.styles,
-        ),
+        )?,
     )?;
     context.bar.inc(1);
     Ok(report)
@@ -251,9 +252,16 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
 
 /// Writes `lines` to the terminal rather than through the bar, which drops what it is given to
 /// print when stdout is not a terminal, as in CI.
-fn write_lines(term: &Term, bar: &ProgressBar, lines: &[String]) -> AppResult<()> {
-    bar.suspend(|| lines.iter().try_for_each(|line| term.write_line(line)))?;
-    Ok(())
+fn write_lines(
+    term: &Term,
+    bar: &ProgressBar,
+    lines: impl IntoIterator<Item = AppResult<String>>,
+) -> AppResult<()> {
+    bar.suspend(|| {
+        lines
+            .into_iter()
+            .try_for_each(|line| Ok(term.write_line(&line?)?))
+    })
 }
 
 fn failed_report(file_ref: &FileSystemRef, error: &AppError) -> ScanFileReport {
@@ -282,51 +290,48 @@ async fn detect_in_file(
             SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
         ));
     }
-    Ok(
-        match CallPacing::scoped(
-            context.call_pacing.as_ref(),
-            context
-                .stream_redacter
-                .detect_stream(reader, &plan, file_ref),
-        )
-        .await
-        {
-            Ok(DetectStreamResult {
-                blocked: Some(blocked),
-                ..
-            }) => ScanFileReport::not_scanned(
-                file_ref,
-                SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
-            ),
-            Ok(scanned) => {
-                let meets_min_score = |detection: &Detection| {
-                    context.options.min_score.is_none_or(|min_score| {
-                        detection.score.is_none_or(|score| score >= min_score)
+    let meets_min_score = |detection: &Detection| {
+        context
+            .options
+            .min_score
+            .is_none_or(|min_score| detection.score.is_none_or(|score| score >= min_score))
+    };
+    let mut findings = SpilledFindings::new(&context.spill);
+    let (mut unlocated, mut ignored) = (0, 0);
+    let read = CallPacing::scoped(
+        context.call_pacing.as_ref(),
+        context
+            .stream_redacter
+            .detect_stream(reader, &plan, file_ref, &mut |found| {
+                unlocated += found.unlocated;
+                ignored += found
+                    .ignored
+                    .iter()
+                    .filter(|(_, detection)| meets_min_score(detection))
+                    .count();
+                let mut window: Vec<FindingReport> = found
+                    .detections
+                    .iter()
+                    .filter(|(_, detection)| meets_min_score(detection))
+                    .map(|(redacter, detection)| {
+                        FindingReport::new(*redacter, detection, context.options.values)
                     })
-                };
-                ScanFileReport::scanned(
-                    file_ref,
-                    scanned
-                        .detections
-                        .iter()
-                        .filter(|(_, detection)| meets_min_score(detection))
-                        .map(|(redacter, detection)| {
-                            FindingReport::new(*redacter, detection, context.options.values)
-                        })
-                        .collect(),
-                    scanned.unlocated,
-                )
-                .with_findings_ignored(
-                    scanned
-                        .ignored
-                        .iter()
-                        .filter(|(_, detection)| meets_min_score(detection))
-                        .count(),
-                )
-            }
-            Err(error) => failed_report(file_ref, &error),
-        },
+                    .collect();
+                FindingReport::sort_by_location(&mut window);
+                findings.append(&window)
+            }),
     )
+    .await;
+    Ok(match read {
+        Ok(Some(blocked)) => ScanFileReport::not_scanned(
+            file_ref,
+            SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
+        ),
+        Ok(None) => {
+            ScanFileReport::scanned(file_ref, findings, unlocated).with_findings_ignored(ignored)
+        }
+        Err(error) => failed_report(file_ref, &error),
+    })
 }
 
 #[cfg(test)]
@@ -582,5 +587,38 @@ mod tests {
 
         assert_eq!((result.files_scanned, result.findings), (1, 1));
         assert_eq!(result.exit_code(FailOn::Findings), 2);
+    }
+
+    #[tokio::test]
+    async fn the_spill_holds_a_value_masked_unless_values_are_shown() {
+        let dir = tempfile::TempDir::with_prefix("scan_spill_values").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "mail ana@example.com").unwrap();
+        let masked = crate::commands::scan_output::mask_value("ana@example.com");
+
+        for (values, kept, absent) in [
+            (ValueDisplay::Masked, masked.as_str(), "ana@example.com"),
+            (ValueDisplay::Raw, "ana@example.com", masked.as_str()),
+        ] {
+            let result = command_scan(
+                &silent_term(),
+                &format!("{}/", dir.path().display()),
+                ScanCommandOptions::new(
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    AddonStoreOptions::default(),
+                    None,
+                    values,
+                ),
+                email_rules(),
+            )
+            .await
+            .unwrap();
+
+            let spill = String::from_utf8(result.spill_contents()).unwrap();
+            assert!(spill.contains(kept), "{values:?}: {spill}");
+            assert!(!spill.contains(absent), "{values:?}: {spill}");
+        }
     }
 }
