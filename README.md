@@ -612,8 +612,8 @@ other extensions and source code take the same memory as a `.log`. `cp -d local-
 10 900 findings peaks near 81 MiB of memory, against 639 MiB when it is read whole, in about 4% more time. A file with a
 NUL byte or bytes that are not UTF-8 in its first window, the first 4 MiB or so, is skipped without
 `--allow-unsupported-copies` and copied as it is with it, as when it is read whole. One that turns out not to be text
-later fails with the byte it fails at, and nothing of it is left at the destination, where a whole read copies it as it
-is. `scan` reports the first as unsupported and the second as failed.
+later fails with the byte it fails at, and nothing of it is left at the destination, where a whole read skips it
+without `--allow-unsupported-copies`. `scan` reports the first as unsupported and the second as failed.
 
 ## Source and destinations
 
@@ -1348,7 +1348,8 @@ redacter cp -d local-rules --unsupported-as-text tmp/source/ tmp/redacted/
 
 A file read this way is redacted as text when its content is valid UTF-8 without NUL bytes. A file that is not text in
 its first 4 MiB or so stays unsupported: it is skipped, or copied as it is with `--allow-unsupported-copies`. A file that
-is not text only after that fails, in `cp` and in `scan`.
+is not text only after that fails, in `cp` and in `scan`, when the file is read in pieces. A file read whole, as with
+`--sampling-size`, stays unsupported whatever its content.
 
 Redact an image from clipboard:
 
@@ -1558,14 +1559,15 @@ A gate in a CI pipeline is the command itself, as the job fails on a non-zero ex
 # Exits with 2 and fails the job when a secret is found in the repository
 redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text --report-file scan-report.json
 
-# Writes the same report and always exits with 0, for a first run over an existing tree
+# Writes the same report and exits with 0 whatever it finds, for a first run over an existing tree
 redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text --report-file scan-report.json --fail-on never
 ```
 
 A repository keeps its secrets in `.env` files, keys and source code, which have no text media type, so
 `--unsupported-as-text` reads them as text when their content is valid UTF-8 without NUL bytes. A file with a NUL byte
 in its first 8 KiB is not read further, and one that is not text in its first 4 MiB or so is reported as unsupported. A
-file that is not text only after that is reported as failed. Without the option such files are reported as unsupported
+file that is not text only after that is reported as failed, and `scan` exits with 1 for it, even with `--fail-on never`,
+as for any failed file, since `--fail-on` governs findings only. Without the option such files are reported as unsupported
 and do not change the exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match code: `::de` in a Rust
 path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
