@@ -3,7 +3,7 @@
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
-use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, RuleName, REDACTED};
+use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, RuleName};
 #[cfg(feature = "local-ner")]
 use crate::redacters::Entity;
 use crate::redacters::{
@@ -529,15 +529,9 @@ impl Detection {
                 _ => None,
             })
             .collect();
-        replace_findings(
-            text,
-            &merge_findings(findings),
-            |finding, original| match mask {
-                TextMask::Token => REDACTED.to_string(),
-                TextMask::EveryCharacter => original.chars().map(|_| 'X').collect(),
-                TextMask::Label => format!("{{{}}}", finding.rule),
-            },
-        )
+        replace_findings(text, &merge_findings(findings), |finding, original| {
+            mask.replacement(&finding.rule, original)
+        })
     }
 }
 

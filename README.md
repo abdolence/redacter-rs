@@ -578,6 +578,28 @@ With a report, a 16 MiB sparse log peaks near 0.8 GB of memory, a 15 MiB CSV nea
 punctuation-dense text with an email on every line near 1.66 GB. The same copy without `--report-file`, or with
 `--report-format text`, compares nothing and takes what a copy without reports takes.
 
+A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
+`local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
+JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a table and whole. A piece is read with 64 KiB of text on
+each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
+masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
+longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
+left, so the first reads the contexts of all of them. A line longer than a window is cut inside.
+
+The output is the same as when the file is read whole, with two exceptions. A rule of your own that is anchored with `^`
+or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
+finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
+
+A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
+redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole.
+`cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
+more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
+its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
+the redactions are kept in memory until it is written.
+
+A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is
+not written to a local destination and is left out of a zip archive, see below.
+
 ## Source and destinations
 
 Source/destination can be a local file or directory, or a file in GCS, S3, and others:
@@ -588,9 +610,12 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 - Zip archive: `zip://tmp/archive.zip`
 - Clipboard: `clipboard://`
 
-A copy that fails leaves no partial output at a local or zip destination. A local file is written to a temporary file
-beside the destination and renamed into place once complete, so a file it would have replaced stays intact. A zip
-archive is deleted, because the format cannot drop a single entry.
+A copy that fails leaves no partial file at a local destination. A local file is written to a temporary file beside
+the destination and renamed into place once complete, so a file it would have replaced stays intact. In a zip archive,
+a file that fails is left out of the entries and the other entries stay. The compressed bytes it had written before the
+failure stay in the archive as unused space, up to the compressed size of what was written. They are the redacted
+output, or the content of the file where it is copied unredacted. The archive is deleted when no file was written to
+it, when writing it fails or when the copy stops with an error.
 
 S3 uploads over 8 MiB use multipart upload, so memory holds about one part rather than the whole file. An upload that is
 killed, or whose `AbortMultipartUpload` request fails, leaves its stored parts billed until they are aborted. Add an

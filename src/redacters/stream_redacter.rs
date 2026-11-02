@@ -5,14 +5,16 @@ use crate::file_converters::ocr::Ocr;
 use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
+use crate::redacters::piece_redaction::{redact_windows, written_windows, PieceRedaction};
 use crate::redacters::{
     has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
     DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
     RedacterDataItemContent, Redacters, StreamRedactions, TextLines, TextPieceLimits, TextPieces,
-    TextPosition,
+    TextPosition, TextWindow,
 };
 use crate::AppResult;
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::future::LocalBoxFuture;
+use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use image::ImageFormat;
 use mime::Mime;
 use rvstruct::ValueStruct;
@@ -54,15 +56,47 @@ pub struct RedactionSummary {
     pub blocked: Option<RedactionBlocked>,
 }
 
-pub struct RedactStreamResult {
+pub struct RedactStreamResult<'f> {
     /// How many redaction steps ran. This still counts a step that turned out to be a
     /// no-op (see `summary`), because it decides whether the file is uploaded.
     pub number_of_redactions: usize,
     pub summary: RedactionSummary,
+    pub output: RedactedOutput<'f>,
+}
+
+/// The redactions of a file, placed in it, once they are known.
+type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Detection)>>>;
+
+/// The redacted bytes of a file and the list of what was redacted in them.
+///
+/// A text read in pieces is redacted as its stream is read, so the stream stops when nobody
+/// polls the list and the list completes only once the stream has ended. That is why neither
+/// half can be taken alone: [`RedactedOutput::drive`] polls both.
+pub struct RedactedOutput<'f> {
+    stream: ContentStream,
     /// What each redacter replaced, placed in the file as it was read, in plan order and in the
-    /// order a reader meets it within a redacter. Empty when no redacter changed the file.
-    pub redactions: Vec<(RedacterType, Detection)>,
-    pub stream: ContentStream,
+    /// order a reader meets it within a redacter. Empty when no redacter changed the file. An
+    /// error means the file could not be redacted; the stream then ends with an error as well,
+    /// so that no destination keeps a partial copy.
+    redactions: RedactionRecords<'f>,
+}
+
+impl<'f> RedactedOutput<'f> {
+    fn known(stream: ContentStream, redactions: Vec<(RedacterType, Detection)>) -> Self {
+        Self {
+            stream,
+            redactions: futures::future::ready(Ok(redactions)).boxed_local(),
+        }
+    }
+
+    /// Hands the stream to `consume`, which reads it to the end, and returns what `consume`
+    /// returned beside the redactions.
+    pub async fn drive<T>(
+        self,
+        consume: impl AsyncFnOnce(ContentStream) -> T,
+    ) -> (T, AppResult<Vec<(RedacterType, Detection)>>) {
+        futures::join!(consume(self.stream), self.redactions)
+    }
 }
 
 /// The bytes of a file, in the order they were read.
@@ -252,9 +286,12 @@ impl<'a> StreamRedacter<'a> {
         redacters: &'a [Redacters<'a>],
         file_ref: &FileSystemRef,
     ) -> AppResult<StreamRedactPlan<'a>> {
-        self.create_plan(redacters, file_ref, async |redacter, file_ref| {
-            redacter.redact_support(file_ref).await
-        })
+        self.create_plan(
+            redacters,
+            file_ref,
+            async |redacter, file_ref| redacter.redact_support(file_ref).await,
+            PieceLayout::chained,
+        )
         .await
     }
 
@@ -264,9 +301,12 @@ impl<'a> StreamRedacter<'a> {
         redacters: &'a [Redacters<'a>],
         file_ref: &FileSystemRef,
     ) -> AppResult<StreamRedactPlan<'a>> {
-        self.create_plan(redacters, file_ref, async |redacter, file_ref| {
-            redacter.detect_support(file_ref).await
-        })
+        self.create_plan(
+            redacters,
+            file_ref,
+            async |redacter, file_ref| redacter.detect_support(file_ref).await,
+            PieceLayout::fitting,
+        )
         .await
     }
 
@@ -275,6 +315,7 @@ impl<'a> StreamRedacter<'a> {
         redacters: &'a [Redacters<'a>],
         file_ref: &FileSystemRef,
         supports: impl AsyncFn(&Redacters<'a>, &FileSystemRef) -> AppResult<RedactSupport>,
+        piece_layout: fn(&[TextPieceLimits]) -> AppResult<Option<PieceLayout>>,
     ) -> AppResult<StreamRedactPlan<'a>> {
         let mut stream_redact_plan = StreamRedactPlan {
             apply_pdf_image_converter: false,
@@ -368,7 +409,7 @@ impl<'a> StreamRedacter<'a> {
                 .map(|redacter| redacter.text_piece_limits())
                 .collect();
             if let Some(limits) = limits {
-                stream_redact_plan.piece_layout = PieceLayout::fitting(&limits)?;
+                stream_redact_plan.piece_layout = piece_layout(&limits)?;
             }
         }
 
@@ -402,11 +443,32 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
-    ) -> AppResult<RedactStreamResult> {
-        let mut redacted = match self
-            .stream_to_redact_item(self.redacter_base_options, input, file_ref, &redact_plan)
-            .await?
-        {
+    ) -> AppResult<RedactStreamResult<'a>> {
+        let item = match redact_plan.piece_layout {
+            Some(layout) => {
+                let mut pieces = TextPieces::new(input, layout);
+                let first = pieces
+                    .next_window()
+                    .await?
+                    .ok_or_else(|| AppError::SystemError {
+                        message: "A text has no first window".to_string(),
+                    })?;
+                if !first.is_whole_text() {
+                    return self.redact_text_in_pieces(pieces, first, redact_plan, file_ref);
+                }
+                Ok(self.text_redact_item(first.text, file_ref))
+            }
+            None => {
+                self.stream_to_redact_item(
+                    self.redacter_base_options,
+                    input,
+                    file_ref,
+                    &redact_plan,
+                )
+                .await?
+            }
+        };
+        let mut redacted = match item {
             Ok(item) => item,
             Err(data) => {
                 return Ok(RedactStreamResult {
@@ -415,8 +477,7 @@ impl<'a> StreamRedacter<'a> {
                         blocked: Some(RedactionBlocked::NotText),
                         ..RedactionSummary::default()
                     },
-                    redactions: Vec::new(),
-                    stream: data,
+                    output: RedactedOutput::known(data, Vec::new()),
                 });
             }
         };
@@ -559,8 +620,43 @@ impl<'a> StreamRedacter<'a> {
         Ok(RedactStreamResult {
             number_of_redactions,
             summary,
-            redactions: recorder.into_records(),
-            stream: output_stream,
+            output: RedactedOutput::known(output_stream, recorder.into_records()),
+        })
+    }
+
+    /// The result of redacting a text that does not fit in one window, whose first window is
+    /// `first`. The text is redacted as the stream is read, see [`RedactedOutput`].
+    fn redact_text_in_pieces<S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + 'static>(
+        &'a self,
+        pieces: TextPieces<S>,
+        first: TextWindow,
+        redact_plan: StreamRedactPlan<'a>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactStreamResult<'a>> {
+        let redaction = PieceRedaction::new(
+            &redact_plan.supported_redacters,
+            self.redacter_base_options.categories.as_ref(),
+            file_ref,
+            self.redacter_base_options.list_redactions,
+        )?;
+        let redacters = redaction.redacters();
+        tracing::debug!(
+            file = %file_ref.relative_path.value(),
+            redacters = redacters.len(),
+            layout = ?redact_plan.piece_layout,
+            "redacting in pieces"
+        );
+        let (written, stream) = written_windows();
+        Ok(RedactStreamResult {
+            number_of_redactions: redacters.len(),
+            summary: RedactionSummary {
+                applied: redacters,
+                ..RedactionSummary::default()
+            },
+            output: RedactedOutput {
+                stream,
+                redactions: redact_windows(redaction, pieces, first, written).boxed_local(),
+            },
         })
     }
 
@@ -1989,29 +2085,41 @@ mod tests {
         );
     }
 
+    /// What a result writes and lists, read together as `cp` does.
+    async fn written_and_listed(
+        output: RedactedOutput<'_>,
+    ) -> (
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    ) {
+        output
+            .drive(async |stream| stream.try_collect().await)
+            .await
+    }
+
     async fn redact(
         converters: &FileConverters<'_>,
         redacters: &[Redacters<'static>],
         file_ref: &FileSystemRef,
         data: &[u8],
-    ) -> RedactStreamResult {
+    ) -> Vec<(RedacterType, Detection)> {
         let options = base_options();
         let stream_redacter = StreamRedacter::new(&options, converters);
         let plan = stream_redacter
             .create_redact_plan(redacters, file_ref)
             .await
             .unwrap();
-        stream_redacter
+        let result = stream_redacter
             .redact_stream(one_chunk(data), plan, file_ref)
             .await
-            .unwrap()
+            .unwrap();
+        written_and_listed(result.output).await.1.unwrap()
     }
 
     fn redaction_places(
-        result: &RedactStreamResult,
+        redactions: &[(RedacterType, Detection)],
     ) -> Vec<(RedacterType, DetectionLocation, &str)> {
-        result
-            .redactions
+        redactions
             .iter()
             .map(|(redacter, detection)| (*redacter, detection.location, detection.value.as_str()))
             .collect()
@@ -2021,7 +2129,7 @@ mod tests {
     async fn a_redacted_csv_file_reports_the_cells() {
         let redacters = vec![email_rules().await];
 
-        let result = redact(
+        let redactions = redact(
             &FileConverters::new(),
             &redacters,
             &file_ref("customers.csv", mime::TEXT_CSV),
@@ -2030,7 +2138,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            redaction_places(&result),
+            redaction_places(&redactions),
             vec![(
                 RedacterType::LocalRules,
                 DetectionLocation::TableCell {
@@ -2063,8 +2171,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.number_of_redactions, 1);
-        assert!(result.redactions.is_empty());
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let (output, redactions) = written_and_listed(result.output).await;
+        assert!(redactions.unwrap().is_empty());
+        let output = output.unwrap();
         assert_eq!(output.concat(), b"Mail [REDACTED] today");
     }
 
@@ -2242,9 +2351,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{path}: no {label} found"));
             assert_box_on_ink(path, page, label, found, ink);
 
-            let redacted = redact(&converters, &redacters, &file_ref, &data).await;
-            let (_, replaced) = redacted
-                .redactions
+            let redactions = redact(&converters, &redacters, &file_ref, &data).await;
+            let (_, replaced) = redactions
                 .iter()
                 .find(|(_, detection)| detection.label == DetectionLabel::new(label))
                 .unwrap_or_else(|| panic!("{path}: no {label} redacted"));
@@ -2382,7 +2490,7 @@ mod tests {
             .redact_stream(one_chunk(b"ADMIN_EMAIL=a@b.io"), plan, &env_file())
             .await
             .unwrap();
-        let output: Vec<bytes::Bytes> = redacted.stream.try_collect().await.unwrap();
+        let output = written_and_listed(redacted.output).await.0.unwrap();
         assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
 
         for data in not_text_files() {
@@ -2396,7 +2504,7 @@ mod tests {
                 .unwrap();
             assert_eq!(result.number_of_redactions, 0, "{data:?}");
             assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-            let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+            let output = written_and_listed(result.output).await.0.unwrap();
             assert_eq!(output.concat(), data, "the file is left as it is");
         }
     }
@@ -2425,7 +2533,7 @@ mod tests {
 
         assert_eq!(result.summary.blocked, None);
         assert_eq!(result.number_of_redactions, 1);
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let output = written_and_listed(result.output).await.0.unwrap();
         assert_eq!(
             output.concat(),
             format!("{padding}ADMIN_EMAIL=[REDACTED]\n").as_bytes()
@@ -2480,7 +2588,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-        let output: Vec<bytes::Bytes> = result.stream.try_collect().await.unwrap();
+        let output = written_and_listed(result.output).await.0.unwrap();
         assert_eq!(output.concat(), b"\0heada@b.io");
     }
 
@@ -2823,6 +2931,39 @@ mod tests {
         assert!(!plan(base_options(), file_ref("table.csv", mime::TEXT_CSV)).await);
     }
 
+    #[tokio::test]
+    async fn a_chain_reads_the_contexts_of_all_its_steps_and_a_scan_the_widest() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await, secret_rules().await];
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let context = TextPieceLimits::LOCAL.context_bytes;
+
+        let redaction = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
+        let scan = stream_redacter
+            .create_detect_plan(&redacters, &file)
+            .await
+            .unwrap();
+
+        let window = TextPieceLimits::LOCAL.max_request_bytes;
+        let rounding = crate::redacters::CUT_ROUNDING_BYTES;
+        assert_eq!(
+            redaction.piece_layout,
+            Some(PieceLayout::new(
+                window - 2 * (2 * context + rounding),
+                2 * context
+            ))
+        );
+        assert_eq!(
+            scan.piece_layout,
+            Some(PieceLayout::new(window - 2 * (context + rounding), context))
+        );
+    }
+
     async fn text_item_of(
         options: &RedacterBaseOptions,
         chunks: Vec<AppResult<bytes::Bytes>>,
@@ -2882,5 +3023,349 @@ mod tests {
             matches!(error, AppError::TextNotUtf8 { offset: 5 }),
             "{error:?}"
         );
+    }
+
+    /// What a copy of a text writes and lists.
+    struct Copied {
+        output: Vec<u8>,
+        chunks: usize,
+        redactions: Vec<(RedacterType, Detection)>,
+    }
+
+    /// Copies `text` in chunks of 7 bytes, so that no chunk ends where a line does, read in
+    /// pieces of `layout` or, for `None`, whole. The stream and the redactions are polled
+    /// together, as `cp` does.
+    async fn copy_text_with(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        text: &[u8],
+        layout: Option<PieceLayout>,
+    ) -> AppResult<(
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    )> {
+        let converters = FileConverters::new();
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let stream_redacter = StreamRedacter::new(options, &converters);
+        let mut plan = stream_redacter.create_redact_plan(redacters, &file).await?;
+        plan.piece_layout = layout;
+        let chunks = text
+            .chunks(7)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let result = stream_redacter
+            .redact_stream(futures::stream::iter(chunks), plan, &file)
+            .await?;
+        Ok(written_and_listed(result.output).await)
+    }
+
+    async fn copy_text(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        text: &[u8],
+        layout: Option<PieceLayout>,
+    ) -> Copied {
+        let (stream, redactions) = copy_text_with(options, redacters, text, layout)
+            .await
+            .unwrap();
+        let chunks = stream.unwrap();
+        Copied {
+            chunks: chunks.len(),
+            output: chunks.concat(),
+            redactions: redactions.unwrap(),
+        }
+    }
+
+    /// The copy of `text` whole and in pieces of `layout`, which must be the same file. The
+    /// pieces copy must arrive in more than one chunk, or the text was not read in pieces at all.
+    async fn assert_same_file_in_pieces(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        text: &str,
+        layout: PieceLayout,
+    ) -> (Copied, Copied) {
+        let whole = copy_text(options, redacters, text.as_bytes(), None).await;
+        let in_pieces = copy_text(options, redacters, text.as_bytes(), Some(layout)).await;
+
+        assert!(in_pieces.chunks > 1, "{} chunks", in_pieces.chunks);
+        assert_eq!(whole.chunks, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&in_pieces.output),
+            String::from_utf8_lossy(&whole.output)
+        );
+        (whole, in_pieces)
+    }
+
+    /// As [`assert_same_file_in_pieces`], and the list of redactions must be the whole text's:
+    /// the same values, in the same places, with the same labels.
+    async fn assert_same_copy_in_pieces(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        text: &str,
+        layout: PieceLayout,
+    ) -> Copied {
+        let (whole, in_pieces) = assert_same_file_in_pieces(options, redacters, text, layout).await;
+
+        let missing: Vec<_> = whole
+            .redactions
+            .iter()
+            .filter(|found| !in_pieces.redactions.contains(found))
+            .collect();
+        let extra: Vec<_> = in_pieces
+            .redactions
+            .iter()
+            .filter(|found| !whole.redactions.contains(found))
+            .collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "missing in pieces: {missing:?}\nonly in pieces: {extra:?}"
+        );
+        assert_eq!(in_pieces.redactions, whole.redactions);
+        in_pieces
+    }
+
+    #[tokio::test]
+    async fn a_text_read_in_pieces_is_redacted_and_listed_as_the_whole_text_is() {
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(RuleGroup::all(), vec![]).await,
+        )];
+        let log = log_with_values_across_lines();
+        let crlf_multibyte = log
+            .replace("sent to", "envoyé à Zoë, Σίσυφος, 日本語 and")
+            .replace('\n', "\r\n");
+        for text in [&log, &crlf_multibyte] {
+            for layout in [
+                PieceLayout::new(60, 300),
+                PieceLayout::new(500, 900),
+                PieceLayout::new(2000, 700),
+            ] {
+                let copied =
+                    assert_same_copy_in_pieces(&base_options(), &redacters, text, layout).await;
+                assert!(
+                    copied.redactions.len() > 100,
+                    "the log has values to redact"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chain_of_redacters_reads_the_masks_of_the_ones_before_it_in_every_window() {
+        let redacters = vec![email_rules().await, secret_rules().await];
+        let log = log_with_values_across_lines()
+            .replace(
+                " in 3ms",
+                " token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 ok",
+            )
+            .replace("INFO", "password=\"hunter2hunter2\" INFO");
+        for layout in [PieceLayout::new(300, 200), PieceLayout::new(1500, 500)] {
+            let (whole, in_pieces) =
+                assert_same_file_in_pieces(&base_options(), &redacters, &log, layout).await;
+
+            // The whole text's diff can pair the mask of one step with the mask of another and
+            // list a change too large, so the list is checked against the text it places.
+            let by_label = |copied: &Copied| {
+                let mut labels: Vec<_> = copied
+                    .redactions
+                    .iter()
+                    .map(|(_, detection)| detection.label.to_string())
+                    .collect();
+                labels.sort();
+                labels.dedup();
+                labels
+            };
+            assert!(by_label(&in_pieces).len() > 2);
+            assert_eq!(by_label(&in_pieces), by_label(&whole));
+            for (_, detection) in &in_pieces.redactions {
+                let DetectionLocation::Text { start, end, .. } = detection.location else {
+                    panic!("a text location is expected");
+                };
+                assert_eq!(&log[start..end], detection.value);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_value_across_a_cut_is_masked_whole_and_listed_once() {
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(RuleGroup::all(), vec![]).await,
+        )];
+        // The first piece ends at 372, the start of the second line of a block of 258 bytes that
+        // starts at 340. The first window ends 160 after the cut, before the block does, and only
+        // the second window sees it whole.
+        let mut text = ".".repeat(339);
+        text.push('\n');
+        text.push_str(KEY_BLOCK);
+        text.push_str(&format!("{}\n", ".".repeat(700)));
+        text.push_str("tail ana@example.com\n");
+        let layout = PieceLayout::new(400, 160);
+
+        let copied = assert_same_copy_in_pieces(&base_options(), &redacters, &text, layout).await;
+
+        let output = String::from_utf8(copied.output).unwrap();
+        assert!(!output.contains("MIIEow") && !output.contains("ana@example"));
+        let key_blocks = copied
+            .redactions
+            .iter()
+            .filter(|(_, detection)| detection.label == DetectionLabel::new("private-key-block"))
+            .count();
+        assert_eq!(key_blocks, 1);
+    }
+
+    #[tokio::test]
+    async fn values_across_the_edges_of_windows_in_a_line_of_multibyte_text_are_masked_whole() {
+        let redacters = vec![email_rules().await];
+        let layout = PieceLayout::new(400, 160);
+        // The first piece ends at 400 and the second window starts 160 before it, at 240, while
+        // the first window ends 160 after it, at 560: each value crosses one of those places, in
+        // every position it can have across it.
+        for edge in [240, 400, 560] {
+            for shift in 0..24 {
+                let mut text = "日本語 Σίσυφος ".repeat(80);
+                while !text.is_char_boundary(edge - shift) {
+                    text.remove(0);
+                }
+                let mut at = edge - shift;
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                text.replace_range(at..at, " ana.maria@example.com ");
+
+                assert_same_copy_in_pieces(&base_options(), &redacters, &text, layout).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_text_that_fits_in_one_window_is_redacted_whole() {
+        let redacters = vec![email_rules().await];
+        let text = "Mail ana@x.io today\n".repeat(20);
+
+        let in_one_window = copy_text(
+            &base_options(),
+            &redacters,
+            text.as_bytes(),
+            Some(PieceLayout::new(5000, 100)),
+        )
+        .await;
+        let whole = copy_text(&base_options(), &redacters, text.as_bytes(), None).await;
+
+        assert_eq!(in_one_window.chunks, 1);
+        assert_eq!(in_one_window.output, whole.output);
+        assert_eq!(in_one_window.redactions, whole.redactions);
+    }
+
+    #[tokio::test]
+    async fn redactions_are_not_listed_unless_asked_for_and_the_text_is_the_same() {
+        let redacters = vec![email_rules().await];
+        let options = RedacterBaseOptions {
+            list_redactions: false,
+            ..base_options()
+        };
+        let text = log_with_values_across_lines();
+
+        let copied =
+            assert_same_copy_in_pieces(&options, &redacters, &text, PieceLayout::new(500, 300))
+                .await;
+
+        assert!(copied.redactions.is_empty());
+        assert!(!String::from_utf8(copied.output)
+            .unwrap()
+            .contains("@example.com"));
+    }
+
+    #[tokio::test]
+    async fn a_text_read_in_pieces_is_limited_to_the_chosen_categories() {
+        let redacters = vec![secret_rules().await];
+        let options = RedacterBaseOptions {
+            categories: Some(Categories::limiting([Category::Secrets]).unwrap()),
+            ..base_options()
+        };
+
+        let copied = assert_same_copy_in_pieces(
+            &options,
+            &redacters,
+            &log_with_values_across_lines(),
+            PieceLayout::new(500, 900),
+        )
+        .await;
+
+        assert!(!copied.redactions.is_empty());
+        assert!(String::from_utf8(copied.output)
+            .unwrap()
+            .contains("@example.com"));
+    }
+
+    #[tokio::test]
+    async fn a_text_that_is_not_utf8_in_a_later_window_ends_the_stream_with_the_error() {
+        let redacters = vec![email_rules().await];
+        let mut text = "Mail ana@x.io today\n".repeat(60).into_bytes();
+        let bad_at = text.len();
+        text.extend_from_slice(b"bad \xff byte\nMail ana@x.io\n");
+
+        let (stream, redactions) = copy_text_with(
+            &base_options(),
+            &redacters,
+            &text,
+            Some(PieceLayout::new(300, 100)),
+        )
+        .await
+        .unwrap();
+
+        assert!(stream.is_err(), "no destination may keep what was written");
+        assert!(
+            matches!(redactions, Err(AppError::TextNotUtf8 { offset }) if offset == bad_at + 4),
+            "{:?}",
+            redactions.map(|redactions| redactions.len())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_that_is_not_utf8_in_the_first_window_fails_before_a_byte_is_written() {
+        let redacters = vec![email_rules().await];
+        let mut text = b"bad \xff byte\n".to_vec();
+        text.extend_from_slice("Mail ana@x.io today\n".repeat(60).as_bytes());
+
+        let result = copy_text_with(
+            &base_options(),
+            &redacters,
+            &text,
+            Some(PieceLayout::new(300, 100)),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::TextNotUtf8 { offset: 4 })));
+    }
+
+    #[tokio::test]
+    async fn masks_that_lengthen_the_text_do_not_stop_a_chain_from_reading_it() {
+        let redacters = vec![
+            Redacters::LocalRules(local_rules([RuleGroup::Network].into(), vec![]).await),
+            secret_rules().await,
+        ];
+        // The masks of the first step make a window longer than the 4 MiB a local step is
+        // given to read, which is a memory budget and not a limit.
+        let lines = 230_000;
+        let text: String = (0..lines)
+            .map(|index| {
+                format!(
+                    "src 1.{}.{}.{} dst 5.6.{}.8 ok\n",
+                    index % 10,
+                    (index / 10) % 10,
+                    (index / 100) % 10,
+                    index % 10
+                )
+            })
+            .collect();
+        let expected = "src [REDACTED] dst [REDACTED] ok\n".repeat(lines);
+
+        let layout = PieceLayout::chained(&[TextPieceLimits::LOCAL; 2])
+            .unwrap()
+            .unwrap();
+
+        let copied = copy_text(&base_options(), &redacters, text.as_bytes(), Some(layout)).await;
+
+        assert!(copied.chunks > 1);
+        assert!(copied.output == expected.as_bytes());
     }
 }
