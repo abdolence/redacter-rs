@@ -8,7 +8,7 @@ use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, Ru
 use crate::redacters::Entity;
 use crate::redacters::{
     AwsBedrockGuardrailsRedacter, AwsComprehendRedacter, Category, GcpDlpRedacter, LlmTextFinding,
-    PresidioRedacter, RuleSet, TextMask, TextPosition,
+    PresidioRedacter, RuleSet, TextMask, TextPieceLimits, TextPosition,
 };
 use crate::AppResult;
 use serde::Serialize;
@@ -168,6 +168,99 @@ impl Detections {
         }
         Ok((Detection::mask(text, &self.found, mask), self.found))
     }
+}
+
+impl Detections {
+    /// The detections of `text` that `detect` returns, asked of parts of the text when the whole
+    /// is not one request. A text, or a part of it with `limits.context_bytes` of the text on both
+    /// sides, longer than `limits.max_request_bytes` is cut in two without being sent, and so is
+    /// a part for which `detect` answers [`AppError::FindingsTruncated`]. A part owns the
+    /// findings that start in it and the ones that start before it and run into it, see
+    /// [`piece_owns`]; a value seen by two parts is reported once, in the place it has in
+    /// `text`. A part too short to cut fails with the error, or is sent as it is when it is only
+    /// too long.
+    pub(crate) async fn of_text_in_parts(
+        text: &str,
+        limits: TextPieceLimits,
+        detect: impl AsyncFn(&str) -> AppResult<Self>,
+    ) -> AppResult<Self> {
+        let mut parts: Vec<Range<usize>> = std::iter::once(0..text.len()).collect();
+        let mut found = Vec::new();
+        let mut unlocated = Vec::new();
+        while let Some(part) = parts.pop() {
+            let from = text.floor_char_boundary(part.start.saturating_sub(limits.context_bytes));
+            let to = text.ceil_char_boundary(part.end.saturating_add(limits.context_bytes));
+            if to - from > limits.max_request_bytes {
+                if let Some(cuts) = halves(text, part.clone()) {
+                    parts.extend(cuts);
+                    continue;
+                }
+            }
+            match detect(&text[from..to]).await {
+                Ok(detections) => {
+                    unlocated.extend(detections.unlocated);
+                    for detection in detections.found {
+                        let DetectionLocation::Text { start, end, .. } = detection.location else {
+                            continue;
+                        };
+                        let range = from + start..from + end;
+                        if piece_owns(&part, &range) {
+                            found.push((range, detection.label, detection.score));
+                        }
+                    }
+                }
+                Err(AppError::FindingsTruncated { redacter }) => {
+                    let truncated = || AppError::FindingsTruncated { redacter };
+                    parts.extend(halves(text, part).ok_or_else(truncated)?);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        found.sort_by(|(left, left_label, _), (right, right_label, _)| {
+            (left.start, left.end, left_label).cmp(&(right.start, right.end, right_label))
+        });
+        found.dedup_by(|(later, later_label, _), (earlier, earlier_label, _)| {
+            later == earlier && later_label == earlier_label
+        });
+        let lines = TextLines::new(text);
+        Ok(Self {
+            found: found
+                .into_iter()
+                .map(|(range, label, score)| lines.detection(range, label, score))
+                .collect::<AppResult<_>>()?,
+            unlocated,
+        })
+    }
+}
+
+/// Whether the window that reads `piece` answers for a finding at `range`: it starts in the
+/// piece, or it starts before it and runs into it, which a window that holds the piece may have
+/// seen whole.
+pub(crate) fn piece_owns(piece: &Range<usize>, range: &Range<usize>) -> bool {
+    piece.contains(&range.start) || (range.start < piece.start && range.end > piece.start)
+}
+
+/// The two parts `part` of `text` is cut into: at the last line start before its middle that lies
+/// in its middle half, else the first one after the middle, else inside a line at a character
+/// boundary. `None` for a part too
+/// short to cut.
+fn halves(text: &str, part: Range<usize>) -> Option<[Range<usize>; 2]> {
+    let bytes = text.as_bytes();
+    let quarter = part.len() / 4;
+    let middle = part.start + part.len() / 2;
+    let cut = bytes[part.start + quarter..middle]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map(|newline| part.start + quarter + newline + 1)
+        .or_else(|| {
+            bytes[middle..part.end - quarter]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|newline| middle + newline + 1)
+        })
+        .filter(|&cut| part.start < cut && cut < part.end)
+        .unwrap_or_else(|| text.floor_char_boundary(middle));
+    (part.start < cut && cut < part.end).then_some([part.start..cut, cut..part.end])
 }
 
 impl From<Vec<Detection>> for Detections {
@@ -1086,5 +1179,187 @@ mod tests {
 
         assert_eq!(page, serde_json::json!({"kind": "page", "page": 2}));
         assert_eq!(file, serde_json::json!({"kind": "file"}));
+    }
+
+    const EMAIL: &str = "john@example.com";
+    const LIMITS: TextPieceLimits = TextPieceLimits::cloud(usize::MAX, 1024);
+    const SMALL_REQUESTS: TextPieceLimits = TextPieceLimits::cloud(1500, 100);
+
+    /// A stand-in for a provider that finds every `EMAIL` and every block from `<<` to `>>`
+    /// that is whole in the text it is given, and returns at most `cap` findings, answering
+    /// [`AppError::FindingsTruncated`] for a text with more. Counts its calls and keeps the size
+    /// of the largest text it was given.
+    struct CappedProvider {
+        cap: usize,
+        calls: Cell<usize>,
+        largest_text: Cell<usize>,
+    }
+
+    impl CappedProvider {
+        fn new(cap: usize) -> Self {
+            Self {
+                cap,
+                calls: Cell::new(0),
+                largest_text: Cell::new(0),
+            }
+        }
+
+        async fn detect(&self, text: &str) -> AppResult<Detections> {
+            self.calls.set(self.calls.get() + 1);
+            self.largest_text
+                .set(self.largest_text.get().max(text.len()));
+            let lines = TextLines::new(text);
+            let emails = text
+                .match_indices(EMAIL)
+                .map(|(start, email)| (start..start + email.len(), email_label()));
+            let blocks = text.match_indices("<<").filter_map(|(start, _)| {
+                let end = start + text[start..].find(">>")? + ">>".len();
+                Some((start..end, DetectionLabel::new("BLOCK")))
+            });
+            let mut found = emails
+                .chain(blocks)
+                .map(|(range, label)| lines.detection(range, label, None))
+                .collect::<AppResult<Vec<_>>>()?;
+            found.sort_by(|left, right| left.location.partial_cmp(&right.location).unwrap());
+            if found.len() > self.cap {
+                return Err(AppError::FindingsTruncated {
+                    redacter: RedacterType::GcpDlp,
+                });
+            }
+            Ok(found.into())
+        }
+    }
+
+    fn email_label() -> DetectionLabel {
+        DetectionLabel::new("EMAIL_ADDRESS")
+    }
+
+    #[tokio::test]
+    async fn a_call_that_finds_more_than_it_returns_is_asked_again_about_halves() {
+        let filler = "x".repeat(380);
+        let lines: String = (0..50)
+            .map(|line| format!("Grüße {line}: {filler} mail {EMAIL}\n"))
+            .collect();
+        let provider = CappedProvider::new(9);
+
+        let found =
+            Detections::of_text_in_parts(&lines, LIMITS, async |part| provider.detect(part).await)
+                .await
+                .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&lines)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(all.len(), 50);
+        assert_eq!(found.found, all);
+        assert!(provider.calls.get() > 1);
+    }
+
+    #[tokio::test]
+    async fn a_value_across_the_middle_of_a_split_text_is_found_once_whole() {
+        let padding = "ü ".repeat(2000);
+        let text = format!("{EMAIL}{padding}{EMAIL}{padding}{EMAIL}");
+        let second = text.match_indices(EMAIL).nth(1).unwrap().0;
+        assert!((second..second + EMAIL.len()).contains(&(text.len() / 2)));
+        let provider = CappedProvider::new(2);
+
+        let found =
+            Detections::of_text_in_parts(&text, LIMITS, async |part| provider.detect(part).await)
+                .await
+                .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&text)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(all.len(), 3);
+        assert_eq!(found.found, all);
+    }
+
+    /// Twenty lines of 100 bytes: a request of 1,500 bytes cannot hold them whole, and the
+    /// middle falls on the line start at byte 1,000.
+    fn twenty_lines_with(values: &[(usize, String)]) -> String {
+        let mut text = format!("{}\n", "a".repeat(99)).repeat(20);
+        for (at, value) in values {
+            text.replace_range(*at..at + value.len(), value);
+        }
+        text
+    }
+
+    /// A block of 150 bytes with the line end at byte 999 of the text inside it, which starts
+    /// 30 bytes before the cut at 1,000.
+    fn block_across_the_cut() -> (usize, String) {
+        const BEFORE_CUT: usize = 30;
+        const LEN: usize = 150;
+        let newline = BEFORE_CUT - 1;
+        let block = format!(
+            "<<{}\n{}>>",
+            "k".repeat(newline - 2),
+            "k".repeat(LEN - newline - 3)
+        );
+        (1000 - BEFORE_CUT, block)
+    }
+
+    #[tokio::test]
+    async fn a_value_across_the_cut_that_runs_past_the_context_of_its_half_is_found() {
+        let text = twenty_lines_with(&[
+            (200, EMAIL.to_string()),
+            (500, EMAIL.to_string()),
+            (1500, EMAIL.to_string()),
+            block_across_the_cut(),
+        ]);
+        let provider = CappedProvider::new(2);
+
+        let found = Detections::of_text_in_parts(&text, SMALL_REQUESTS, async |part| {
+            provider.detect(part).await
+        })
+        .await
+        .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&text)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(all.len(), 4);
+        assert_eq!(found.found, all);
+    }
+
+    #[tokio::test]
+    async fn a_text_longer_than_a_request_is_never_sent_whole() {
+        let text = twenty_lines_with(&[
+            (200, EMAIL.to_string()),
+            (1000, EMAIL.to_string()),
+            (1500, EMAIL.to_string()),
+        ]);
+        let provider = CappedProvider::new(usize::MAX);
+
+        let found = Detections::of_text_in_parts(&text, SMALL_REQUESTS, async |part| {
+            provider.detect(part).await
+        })
+        .await
+        .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&text)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(found.found, all);
+        assert!(provider.largest_text.get() <= 1500);
+    }
+
+    #[tokio::test]
+    async fn findings_past_the_cap_in_a_text_that_cannot_be_halved_are_an_error() {
+        let provider = CappedProvider::new(0);
+
+        let result =
+            Detections::of_text_in_parts(EMAIL, LIMITS, async |part| provider.detect(part).await)
+                .await;
+
+        assert!(matches!(result, Err(AppError::FindingsTruncated { .. })));
     }
 }

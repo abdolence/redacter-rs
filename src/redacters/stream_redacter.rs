@@ -441,11 +441,17 @@ impl<'a> StreamRedacter<'a> {
                 .iter()
                 .map(|redacter| redacter.text_piece_limits())
                 .collect();
-            if let Some(layout) = limits
-                .map(|limits| piece_layout(&limits))
-                .transpose()?
-                .flatten()
-            {
+            // Contexts that fill a request leave no room for a piece. The text is then read
+            // whole, as when a redacter has no limits. `cp` then fails at the provider's limit,
+            // while `scan` sends it in parts that fit a request.
+            let layout = limits.and_then(|limits| match piece_layout(&limits) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    tracing::debug!(%error, "the text is read whole");
+                    None
+                }
+            });
+            if let Some(layout) = layout {
                 stream_redact_plan.read = PlannedRead::TextPieces(layout);
             }
         }
@@ -3106,13 +3112,16 @@ mod tests {
             redaction.read,
             PlannedRead::TextPieces(
                 PieceLayout::new(window - 2 * (2 * context + rounding), 2 * context)
+                    .with_whole_text_up_to(window)
                     .reading(concurrency)
             )
         );
         assert_eq!(
             scan.read,
             PlannedRead::TextPieces(
-                PieceLayout::new(window - 2 * (context + rounding), context).reading(concurrency)
+                PieceLayout::new(window - 2 * (context + rounding), context)
+                    .with_whole_text_up_to(window)
+                    .reading(concurrency)
             )
         );
     }
@@ -4053,5 +4062,234 @@ mod tests {
         .unwrap();
 
         assert!(stream.unwrap().concat() == data);
+    }
+
+    /// The copy of `content` as `cp` plans it, without a read chosen by the test.
+    async fn copied_as_planned(redacters: &[Redacters<'static>], content: &[u8]) -> Copied {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let plan = stream_redacter
+            .create_redact_plan(redacters, &file)
+            .await
+            .unwrap();
+        let result = stream_redacter
+            .redact_stream(in_chunks(content, 64 * 1024), plan, &file)
+            .await
+            .unwrap();
+        let (stream, redactions) = written_and_listed(result.output).await;
+        let chunks = stream.unwrap();
+        Copied {
+            chunks: chunks.len(),
+            output: chunks.concat(),
+            redactions: redactions.unwrap(),
+        }
+    }
+
+    /// One line of short sentences with an email in place of two of them every `step` bytes and
+    /// across `piece_bytes`, the end of the first piece of a text cut as `cp` cuts it, and the
+    /// emails planted.
+    fn sentences_with_planted_emails(
+        len: usize,
+        step: usize,
+        piece_bytes: usize,
+    ) -> (String, Vec<String>) {
+        const SENTENCE: &str = "the cat sat on the mat. ";
+        let unit = SENTENCE.len();
+        let mut line = SENTENCE.repeat(len / unit + 1);
+        line.truncate(len);
+        let room = |at: &usize| at + 3 * unit < len;
+        let mut starts: Vec<usize> = (step..)
+            .step_by(step)
+            .take_while(room)
+            .map(|at| at / unit * unit)
+            .chain(
+                (piece_bytes..)
+                    .step_by(piece_bytes)
+                    .take_while(room)
+                    .map(|end| (end - 30).div_ceil(unit) * unit),
+            )
+            .collect();
+        starts.sort();
+        starts.dedup_by(|later, earlier| *later < *earlier + 2 * unit);
+        let mut emails = Vec::new();
+        for start in starts {
+            let email = format!("planted.user.{}@example.com", emails.len() + 1);
+            let padding = format!(" {SENTENCE}{SENTENCE}");
+            let filled = format!("{email}{}", &padding[..2 * unit - email.len()]);
+            line.replace_range(start..start + 2 * unit, &filled);
+            emails.push(email);
+        }
+        (line, emails)
+    }
+
+    /// `text` with each of `values` replaced by what `mask` makes of it.
+    fn masked_values(text: &str, values: &[String], mask: impl Fn(&str) -> String) -> String {
+        values.iter().fold(text.to_string(), |text, value| {
+            text.replace(value, &mask(value))
+        })
+    }
+
+    fn per_character(value: &str) -> String {
+        "X".repeat(value.chars().count())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn comprehend_masks_every_planted_email_of_a_text_over_its_request_limit() {
+        let region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let options = crate::redacters::AwsComprehendRedacterOptions {
+            region: Some(aws_config::Region::new(region)),
+        };
+        let redacters = vec![Redacters::AwsComprehend(
+            crate::redacters::AwsComprehendRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
+        let (text, emails) =
+            sentences_with_planted_emails(3 * limits.max_request_bytes, 7001, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            masked_values(&text, &emails, per_character)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn guardrails_masks_every_planted_email_of_a_text_over_its_request_limit() {
+        let region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let guardrail_id = std::env::var("TEST_AWS_BEDROCK_GUARDRAIL_ID")
+            .expect("TEST_AWS_BEDROCK_GUARDRAIL_ID required");
+        let options = crate::redacters::AwsBedrockGuardrailsRedacterOptions {
+            region: Some(aws_config::Region::new(region)),
+            guardrail_id: guardrail_id.into(),
+            guardrail_version: "DRAFT".to_string().into(),
+        };
+        let redacters = vec![Redacters::AwsBedrockGuardrails(
+            crate::redacters::AwsBedrockGuardrailsRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
+        let (text, emails) =
+            sentences_with_planted_emails(3 * limits.max_request_bytes, 7001, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        let output = String::from_utf8(copied.output).unwrap();
+        for email in &emails {
+            assert!(!output.contains(email), "{email} is left in the output");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-presidio"), ignore)]
+    async fn presidio_masks_every_planted_email_of_a_text_over_its_character_limit() {
+        let options = PresidioRedacterOptions {
+            text_analyze_url: Some(
+                url::Url::parse(
+                    &std::env::var("TEST_PRESIDIO_ANALYZE_URL")
+                        .expect("TEST_PRESIDIO_ANALYZE_URL required"),
+                )
+                .unwrap(),
+            ),
+            image_redact_url: None,
+            categories: None,
+        };
+        let redacters = vec![Redacters::Presidio(
+            PresidioRedacter::new(options, reporter()).await.unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
+        let (text, emails) = sentences_with_planted_emails(1_300_000, 20011, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            masked_values(&text, &emails, per_character)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn dlp_masks_every_email_of_a_text_over_its_request_limit_and_findings_limit() {
+        crate::redacters::test_support::initialize_crypto();
+        let options = crate::redacters::GcpDlpRedacterOptions {
+            project_id: crate::common_types::GcpProjectId::new(
+                std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required"),
+            ),
+            built_in_info_types: crate::redacters::GcpDlpRedacter::default_info_types(),
+            user_defined_stored_info_types: vec![],
+        };
+        let redacters = vec![Redacters::GcpDlp(
+            crate::redacters::GcpDlpRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let users = 29_000;
+        let text: String = (1..=users)
+            .map(|user| format!("user{user}@example.com\n"))
+            .collect();
+        let expected = "[REDACTED]\n".repeat(users);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert!(text.len() > limits.max_request_bytes);
+        assert_eq!(String::from_utf8(copied.output).unwrap(), expected);
+    }
+
+    async fn comprehend() -> Redacters<'static> {
+        let options = crate::redacters::AwsComprehendRedacterOptions {
+            region: Some(aws_config::Region::new("eu-west-1")),
+        };
+        Redacters::AwsComprehend(
+            crate::redacters::AwsComprehendRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )
+    }
+
+    /// The reads planned to redact and to detect in a text with `redacters`.
+    async fn planned_reads(redacters: Vec<Redacters<'static>>) -> (PlannedRead, PlannedRead) {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let redaction = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
+        let detection = stream_redacter
+            .create_detect_plan(&redacters, &file)
+            .await
+            .unwrap();
+        (redaction.read, detection.read)
+    }
+
+    #[tokio::test]
+    async fn contexts_that_do_not_fit_a_request_leave_the_text_to_be_read_whole() {
+        let (redaction, detection) =
+            planned_reads(vec![comprehend().await, email_rules().await]).await;
+        assert_eq!(
+            (redaction, detection),
+            (PlannedRead::Whole, PlannedRead::Whole)
+        );
+
+        // The first step reads the contexts of the ones after it, so a local step that comes
+        // first leaves Comprehend the room it needs.
+        let (redaction, _) = planned_reads(vec![email_rules().await, comprehend().await]).await;
+        assert!(matches!(redaction, PlannedRead::TextPieces(_)));
     }
 }
