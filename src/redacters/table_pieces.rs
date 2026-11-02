@@ -78,7 +78,7 @@ impl<S: Stream<Item = AppResult<Bytes>> + Send + Unpin> TableBatches<S> {
         let into_io_error: fn(AppError) -> std::io::Error = std::io::Error::other;
         let mut reader = csv_async::AsyncReaderBuilder::default()
             .has_headers(!options.csv_headers_disable)
-            .delimiter(options.csv_delimiter.unwrap_or(b','))
+            .delimiter(options.table_delimiter())
             .create_reader(StreamReader::new(input.map_err(into_io_error)));
         let headers = if options.csv_headers_disable {
             Vec::new()
@@ -204,8 +204,8 @@ impl DetectionLocation {
 }
 
 /// Redacts the batches of a table one after the other and hands the CSV of each to `written`,
-/// then returns what the redacters redacted in the table, a batch after another. `first` is the batch
-/// `batches` read first.
+/// then returns what the redacters redacted in the table, a batch after another. `first` is the
+/// batch `batches` read first.
 ///
 /// When a batch cannot be read or redacted, the stream ends with the error, so that the
 /// destination does not keep the part of the table it was given.
@@ -242,7 +242,7 @@ pub(crate) async fn table_csv(
     starts_table: bool,
 ) -> AppResult<Bytes> {
     let mut writer = csv_async::AsyncWriterBuilder::new()
-        .delimiter(options.csv_delimiter.unwrap_or(b','))
+        .delimiter(options.table_delimiter())
         .create_writer(vec![]);
     if starts_table && !options.csv_headers_disable {
         writer.write_record(headers).await?;

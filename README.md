@@ -597,7 +597,7 @@ more time. The same copy of a 366 MB log with 5.2 million findings peaks near 42
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
 the redactions are kept in memory until it is written.
 
-A CSV file of more than about 4 MiB is redacted in batches of rows when every selected redacter is `local-rules`,
+A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
 `local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
 A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
 The output is the same as when the file is read whole. A batch is compared before and after as a table of its own, so the
@@ -1382,7 +1382,7 @@ across lines, such as a private key block, is found wherever a piece ends, and a
 piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
 value longer than 64 KiB that crosses the end of a window can also be reported in part. A line longer than a
 window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are. Other
-redacters and `--unsupported-as-text` read the file whole. A CSV file of more than about 4 MiB is read in batches of rows
+redacters and `--unsupported-as-text` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
 when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
 locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against

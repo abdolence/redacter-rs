@@ -603,6 +603,13 @@ pub struct RedacterBaseOptions {
     pub list_redactions: bool,
 }
 
+impl RedacterBaseOptions {
+    /// The delimiter a table is read and written with: the one chosen, or a comma.
+    pub fn table_delimiter(&self) -> u8 {
+        self.csv_delimiter.unwrap_or(b',')
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RedacterProviderOptions {
     GcpDlp(GcpDlpRedacterOptions),
