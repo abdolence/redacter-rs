@@ -51,6 +51,11 @@ pub enum AppError {
     MimeError(#[from] mime::FromStrError),
     #[error("HTTP client error:\n{0}")]
     HttpClientError(#[from] reqwest::Error),
+    #[error("Failed to {operation}. HTTP status: {status}.")]
+    RequestRejected {
+        operation: String,
+        status: StatusCode,
+    },
     #[error("Zip error:\n{0}")]
     ZipError(#[from] zip::result::ZipError),
     #[error("A background task failed: {0}")]
@@ -150,6 +155,15 @@ impl AppError {
         }
     }
 
+    /// A provider answered `operation` with the HTTP status `status`. The response body is left
+    /// out because it can quote the scanned text.
+    pub fn request_rejected(operation: &str, status: StatusCode) -> Self {
+        Self::RequestRejected {
+            operation: operation.to_string(),
+            status,
+        }
+    }
+
     pub fn incomplete_result(redacter_type: RedacterType, missing: &'static str) -> Self {
         Self::IncompleteResult {
             redacter_type,
@@ -164,12 +178,11 @@ impl AppError {
             Self::GoogleCloudGrpcError(status) => {
                 matches!(status.code(), Code::ResourceExhausted | Code::Unavailable)
             }
-            Self::HttpClientError(error) => error.status().is_some_and(|status| {
-                matches!(
-                    status,
-                    StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-                )
-            }),
+            // 503 is a transient refusal like gRPC `Unavailable`, which is retried too.
+            Self::RequestRejected { status, .. } => matches!(
+                *status,
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+            ),
             _ => false,
         }
     }
@@ -197,20 +210,10 @@ impl From<anyhow::Error> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gcloud_sdk::tonic::codegen::http;
     use gcloud_sdk::tonic::Status;
 
-    fn http_failure(status: u16) -> AppError {
-        let response = reqwest::Response::from(
-            http::Response::builder()
-                .status(status)
-                .body("")
-                .expect("a status and an empty body make a response"),
-        );
-        response
-            .error_for_status()
-            .expect_err("a client or server status is an error")
-            .into()
+    fn rejected(status: StatusCode) -> AppError {
+        AppError::request_rejected("analyze text", status)
     }
 
     #[test]
@@ -218,8 +221,8 @@ mod tests {
         let throttled = [
             AppError::from(Status::resource_exhausted("quota")),
             AppError::from(Status::unavailable("try later")),
-            http_failure(429),
-            http_failure(503),
+            rejected(StatusCode::TOO_MANY_REQUESTS),
+            rejected(StatusCode::SERVICE_UNAVAILABLE),
         ];
         for error in throttled {
             assert!(error.is_throttled(), "{error:?}");
@@ -231,8 +234,8 @@ mod tests {
         let failures = [
             AppError::from(Status::permission_denied("no")),
             AppError::from(Status::invalid_argument("bad")),
-            http_failure(400),
-            http_failure(500),
+            rejected(StatusCode::BAD_REQUEST),
+            rejected(StatusCode::INTERNAL_SERVER_ERROR),
             AppError::SystemError {
                 message: "resource exhausted".to_string(),
             },
