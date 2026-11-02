@@ -15,7 +15,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::text_spans::table_cells::{find_in_cell, redact_rows};
 use crate::redacters::{
     text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Score, TextMask,
+    RedacterDataItem, RedacterDataItemContent, Score, TextMask, TextPieceLimits,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -182,6 +182,12 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
 
     fn text_mask(&self) -> TextMask {
         TextMask::Token
+    }
+
+    /// Reads whole: its results in pieces differ from the whole read's by more than the bench
+    /// gate allows, see `test-fixtures/bench-dlp/README.md`.
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        TextPieceLimits::forced_by_bench()
     }
 }
 

@@ -10,12 +10,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+/// How many records of the public sample make one document of the `long` dataset.
+const LONG_DOCUMENT_RECORDS: usize = 40;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatasetKind {
     Fixtures,
     Secrets,
     Public,
+    Long,
     Images,
 }
 
@@ -23,7 +27,7 @@ impl DatasetKind {
     /// Whether the truth lists everything sensitive in the files, which is what makes a finding
     /// on no target a false alarm. The annotation of the public dataset is not exhaustive.
     pub fn has_complete_truth(self) -> bool {
-        self != DatasetKind::Public
+        !matches!(self, DatasetKind::Public | DatasetKind::Long)
     }
 }
 
@@ -35,9 +39,10 @@ impl FromStr for DatasetKind {
             "fixtures" => Ok(DatasetKind::Fixtures),
             "secrets" => Ok(DatasetKind::Secrets),
             "public" => Ok(DatasetKind::Public),
+            "long" => Ok(DatasetKind::Long),
             "images" => Ok(DatasetKind::Images),
             other => Err(format!(
-                "unknown dataset {other:?} in BENCH_DLP_DATASETS, expected fixtures, secrets, public or images"
+                "unknown dataset {other:?} in BENCH_DLP_DATASETS, expected fixtures, secrets, public, long or images"
             )),
         }
     }
@@ -49,6 +54,7 @@ impl Display for DatasetKind {
             DatasetKind::Fixtures => "fixtures",
             DatasetKind::Secrets => "secrets",
             DatasetKind::Public => "public",
+            DatasetKind::Long => "long",
             DatasetKind::Images => "images",
         })
     }
@@ -84,6 +90,7 @@ impl DatasetPaths<'_> {
             DatasetKind::Fixtures => (self.copied_truth("bench-dlp/truth.json", &dir)?, &[]),
             DatasetKind::Secrets => (self.secrets_truth(&dir)?, &["--unsupported-as-text"]),
             DatasetKind::Public => (self.public_truth(&dir)?, &[]),
+            DatasetKind::Long => (self.long_truth(&dir)?, &[]),
             DatasetKind::Images => (self.copied_truth("bench-dlp/images.json", &dir)?, &[]),
         };
         Ok(Dataset {
@@ -143,6 +150,35 @@ impl DatasetPaths<'_> {
         for (name, (content, file_truth)) in corpus.assemble()? {
             fs::write(dir.join(&name), content).map_err(|e| format!("write {name}: {e}"))?;
             truth.insert(name, file_truth);
+        }
+        Ok(truth)
+    }
+
+    /// The records of the public sample joined, `LONG_DOCUMENT_RECORDS` to a document, so that
+    /// a document holds names and places across many cuts. The truth of a document is that of
+    /// its records.
+    fn long_truth(&self, dir: &Path) -> Result<BTreeMap<String, FileTruth>, String> {
+        let records: Vec<PublicRecord> = self.read_json("bench-dlp/public.json")?;
+        let mut truth = BTreeMap::new();
+        for (index, group) in records.chunks(LONG_DOCUMENT_RECORDS).enumerate() {
+            let name = format!("long-{index:02}.txt");
+            let text: Vec<&str> = group.iter().map(|record| record.text.as_str()).collect();
+            let lead = "Note. ".repeat(
+                std::env::var("BENCH_DLP_LONG_LEAD_WORDS")
+                    .ok()
+                    .and_then(|words| words.parse().ok())
+                    .unwrap_or(0),
+            );
+            fs::write(dir.join(&name), lead + &text.join("\n\n"))
+                .map_err(|e| format!("write {name}: {e}"))?;
+            let mut document = FileTruth::default();
+            for record in group {
+                let record_truth =
+                    FileTruth::try_from(record).map_err(|e| format!("{name}: {e}"))?;
+                document.sensitive.extend(record_truth.sensitive);
+                document.neutral.extend(record_truth.neutral);
+            }
+            truth.insert(name, document);
         }
         Ok(truth)
     }
@@ -360,6 +396,7 @@ mod tests {
             DatasetKind::Fixtures,
             DatasetKind::Secrets,
             DatasetKind::Public,
+            DatasetKind::Long,
             DatasetKind::Images,
         ] {
             let dataset = paths.load(kind).unwrap_or_else(|e| panic!("{kind}: {e}"));

@@ -55,6 +55,7 @@ impl Scanner<'_> {
         spec: &Spec,
         source: &Path,
         dataset_args: &[&str],
+        environment: &[(&str, String)],
     ) -> Result<ScanRun, String> {
         let scratch = tempfile::tempdir().map_err(|e| format!("create a report directory: {e}"))?;
         let report_path = scratch.path().join("report.json");
@@ -65,6 +66,7 @@ impl Scanner<'_> {
             .args(spec.0.iter().flat_map(|redacter| ["-d", redacter]))
             .args(&self.scan_args)
             .args(dataset_args)
+            .envs(environment.iter().map(|(name, value)| (name, value)))
             .arg("--show-values")
             .arg("--report-file")
             .arg(&report_path)

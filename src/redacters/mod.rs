@@ -901,6 +901,37 @@ impl TextPieceLimits {
         context_bytes: 64 * 1024,
         concurrent_requests: NonZeroUsize::new(2).expect("two is not zero"),
     };
+
+    /// The limits the benchmark asks for through `REDACTER_BENCH_WINDOW_BYTES` and
+    /// `REDACTER_BENCH_CONTEXT_BYTES`, when the binary is built with the `bench-pieces` feature,
+    /// so that files of a few kilobytes are cut into pieces. A redacter that reads whole until
+    /// its bench gate passes returns these, to be measured in pieces nevertheless.
+    #[cfg(all(
+        feature = "bench-pieces",
+        any(feature = "local-ner", feature = "local-gliner")
+    ))]
+    pub(crate) fn forced_by_bench() -> Option<Self> {
+        let bytes = |variable: &str| {
+            std::env::var(variable).ok().map(|value| {
+                value
+                    .parse::<usize>()
+                    .unwrap_or_else(|error| panic!("{variable}={value:?}: {error}"))
+            })
+        };
+        Some(Self {
+            max_request_bytes: bytes("REDACTER_BENCH_WINDOW_BYTES")?,
+            context_bytes: bytes("REDACTER_BENCH_CONTEXT_BYTES").unwrap_or(0),
+            concurrent_requests: Self::LOCAL.concurrent_requests,
+        })
+    }
+
+    #[cfg(all(
+        not(feature = "bench-pieces"),
+        any(feature = "local-ner", feature = "local-gliner")
+    ))]
+    pub(crate) fn forced_by_bench() -> Option<Self> {
+        None
+    }
 }
 
 pub trait Redacter {

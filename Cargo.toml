@@ -34,6 +34,7 @@ ci-local-ner = [] # For testing on CI with the downloaded local NER model
 ci-local-gliner = [] # For testing on CI with the downloaded local GLiNER model
 ci-local-credential-ml = [] # For testing on CI with the downloaded local credential model
 ci-gcp-vertex-ai = [] # For testing on CI/GCP with Vertex AI
+bench-pieces = [] # Lets the bench force small windows on the model redacters, see test-fixtures/bench-dlp/README.md
 ci = [
     "ci-gcp",
     "ci-aws",
