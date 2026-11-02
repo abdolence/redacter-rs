@@ -1398,9 +1398,15 @@ redacters, including `local-ner` and `local-gliner`, read the file whole. A CSV 
 when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
 locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
-755 MB in 0.21, in about 2% more time. The findings are still kept in memory until the reports are written, so a file with millions of findings
-needs memory for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.7 GB, against 4.4 GB in
-0.21.
+755 MB in 0.21, in about 2% more time.
+
+The findings of a scan are kept in a temporary file, so memory does not grow with their number. The file is in the
+system temporary directory, has no name, is readable by the current user only, and is removed when the scan ends,
+however it ends. It holds values masked, or as found with `--show-values`, and takes about 200 bytes of disk for each
+finding. `scan -d local-rules --report-file r.json` on a 152 MiB log with 5 million findings peaks near 140 MB of
+memory with `MallocSpaceEfficient=1` in the environment, against 3.7 GB in 0.21. Without it, on macOS, whose allocator
+keeps freed memory, the peak is near 1.2 GB, against 3.9 GB. The scan takes about 20% more time. The SARIF report keeps
+at most the results GitHub shows for each rule, and the OCSF report holds an event for each file.
 
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
