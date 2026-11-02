@@ -273,19 +273,7 @@ pub async fn command_copy(
     let call_pacing = redacter_options
         .as_ref()
         .and_then(|o| o.base_options.limit_dlp_requests.as_ref())
-        .map(|limit| {
-            let (bar, delayed_style) = (bar.clone(), styles.dimmed.clone());
-            CallPacing::new(limit, move |delay| {
-                bar.println(
-                    delayed_style
-                        .apply_to(format!(
-                            "⧗ Delaying redaction for {} seconds",
-                            delay.as_secs()
-                        ))
-                        .to_string(),
-                )
-            })
-        });
+        .map(CallPacing::new);
 
     let maybe_redacters = match redacter_options {
         Some(options) => {
@@ -549,7 +537,7 @@ async fn transfer_and_redact_file<
         redactions,
     } = if let Some(ref redacter_with_options) = redacter {
         CallPacing::scoped(
-            call_pacing,
+            call_pacing.as_ref(),
             redact_upload_file::<SFS, DFS, _>(
                 destination_fs,
                 source_reader,

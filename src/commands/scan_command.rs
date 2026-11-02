@@ -139,20 +139,7 @@ pub async fn command_scan(
         .base_options
         .limit_dlp_requests
         .as_ref()
-        .map(|limit| {
-            let (term, bar, delayed_style) = (term.clone(), bar.clone(), styles.dimmed.clone());
-            CallPacing::new(limit, move |delay| {
-                let line = delayed_style
-                    .apply_to(format!(
-                        "⧗ Delaying detection for {} seconds",
-                        delay.as_secs()
-                    ))
-                    .to_string();
-                if let Err(error) = write_lines(&term, &bar, &[line]) {
-                    tracing::debug!(%error, "could not tell that a call is delayed");
-                }
-            })
-        });
+        .map(CallPacing::new);
     let mut redacters = Vec::with_capacity(redacter_options.provider_options.len());
     for provider_options in redacter_options.provider_options {
         redacters.push(Redacters::new_redacter(provider_options, &term_reporter, &addons).await?);
@@ -297,7 +284,7 @@ async fn detect_in_file(
     }
     Ok(
         match CallPacing::scoped(
-            &context.call_pacing,
+            context.call_pacing.as_ref(),
             context
                 .stream_redacter
                 .detect_stream(reader, &plan, file_ref),

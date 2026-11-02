@@ -91,8 +91,8 @@ pub use stream_redacter::*;
 mod stream_redactions;
 pub(crate) use stream_redactions::StreamRedactions;
 
-mod redacter_throttler;
-pub use redacter_throttler::*;
+mod call_pacing;
+pub use call_pacing::CallPacing;
 
 use crate::args::RedacterType;
 use crate::common_types::{DlpRequestLimit, TextImageCoords};
