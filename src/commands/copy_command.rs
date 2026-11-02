@@ -1193,6 +1193,79 @@ mod tests {
         Ok(())
     }
 
+    /// An entry of a zip is copied as the same bytes in a directory would be, whatever its size.
+    #[tokio::test]
+    async fn a_small_zip_entry_gets_the_outcome_of_a_local_file_with_the_same_bytes(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::io::Write;
+
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let entries: [(&str, &[u8]); 2] = [
+            ("latin1.dat", b"Caf\xe9 owner ana@example.org\n"),
+            ("notes.dat", b"owner ana@example.org\n"),
+        ];
+        for (name, bytes) in entries {
+            for allow_unsupported_copies in [false, true] {
+                let scratch = TempDir::with_prefix("copy_command_tests_small_zip_entry")?;
+                let zip_path = scratch.path().join("archive.zip");
+                let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path)?);
+                writer.start_file(name, zip::write::SimpleFileOptions::default())?;
+                writer.write_all(bytes)?;
+                writer.finish()?;
+                let local_source = scratch.path().join("local");
+                std::fs::create_dir(&local_source)?;
+                std::fs::write(local_source.join(name), bytes)?;
+
+                let mut copies = Vec::new();
+                for (source, destination) in [
+                    (format!("zip://{}", zip_path.display()), "from-zip"),
+                    (format!("{}/", local_source.display()), "from-local"),
+                ] {
+                    let destination = scratch.path().join(destination);
+                    std::fs::create_dir(&destination)?;
+                    let mut redacter_options = base_redacter_options(
+                        RedacterProviderOptions::LocalRules(LocalRulesRedacterOptions {
+                            groups: RuleGroup::all(),
+                            user_rules: vec![],
+                        }),
+                    );
+                    redacter_options.base_options.unsupported_as_text = true;
+                    redacter_options.base_options.allow_unsupported_copies =
+                        allow_unsupported_copies;
+                    let result = command_copy(
+                        &Term::stdout(),
+                        &source,
+                        &destination.to_string_lossy(),
+                        CopyCommandOptions::new(
+                            None,
+                            None,
+                            None,
+                            vec![],
+                            AddonStoreOptions::default(),
+                        ),
+                        Some(redacter_options),
+                    )
+                    .await?;
+                    copies.push((
+                        (
+                            result.files_copied,
+                            result.files_redacted,
+                            result.files_skipped,
+                        ),
+                        std::fs::read(destination.join(name)).ok(),
+                    ));
+                }
+                assert_eq!(
+                    copies[0], copies[1],
+                    "{name}, allow_unsupported_copies = {allow_unsupported_copies}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Only `addons install` installs anything: a redacting copy of a PDF over an empty addons
     /// directory runs without the addons and leaves the directory as it found it.
     #[tokio::test]
