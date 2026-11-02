@@ -6,6 +6,9 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::piece_redaction::{redact_windows, written_windows, PieceRedaction};
+use crate::redacters::table_pieces::{
+    redact_batches, TableBatch, TableBatches, TableRedaction, TABLE_BATCH_BYTES,
+};
 use crate::redacters::{
     has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
     DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
@@ -75,7 +78,8 @@ type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Dete
 pub struct RedactedOutput<'f> {
     stream: ContentStream,
     /// What each redacter replaced, placed in the file as it was read, in plan order and in the
-    /// order a reader meets it within a redacter. Empty when no redacter changed the file. An
+    /// order a reader meets it within a redacter, which a table read in batches gives for each
+    /// batch in turn. Empty when no redacter changed the file. An
     /// error means the file could not be redacted; the stream then ends with an error as well,
     /// so that no destination keeps a partial copy.
     redactions: RedactionRecords<'f>,
@@ -111,7 +115,7 @@ const NOT_TEXT_PROBE_SIZE: usize = 8 * 1024;
 pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
     /// in the order the redacter reported. A text read in pieces gives this order for each piece
-    /// in turn.
+    /// in turn, and a table read in batches for each batch.
     pub detections: Vec<(RedacterType, Detection)>,
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
@@ -262,6 +266,10 @@ pub struct StreamRedactPlan<'a> {
     /// text in pieces, see [`Redacter::text_piece_limits`]. A text that fits in one window is
     /// read whole all the same.
     pub(crate) piece_layout: Option<PieceLayout>,
+    /// How many bytes of cells a batch of rows holds, when the file is a table that every
+    /// redacter of the plan reads one cell at a time, see [`RedacterType::reads_tables_by_cell`].
+    /// A table that fits in one batch is read whole all the same.
+    pub(crate) table_batch_bytes: Option<usize>,
     /// Set when `supported_redacters` is empty because a PDF or image needs a conversion
     /// engine (pdfium, OCR) that this build does not have, rather than because none of the
     /// configured redacters is willing to work on this file. `redact_stream` is never called
@@ -325,6 +333,7 @@ impl<'a> StreamRedacter<'a> {
             // Supports natively
             supported_redacters: Self::supporting(redacters, file_ref, None, &supports).await?,
             piece_layout: None,
+            table_batch_bytes: None,
             blocked: None,
         };
 
@@ -413,6 +422,21 @@ impl<'a> StreamRedacter<'a> {
             }
         }
 
+        let reads_cells = !stream_redact_plan.supported_redacters.is_empty()
+            && stream_redact_plan
+                .supported_redacters
+                .iter()
+                .all(|redacter| redacter.redacter_type().reads_tables_by_cell());
+        if reads_cells
+            && !stream_redact_plan.leave_data_table_as_text
+            && file_ref
+                .media_type
+                .as_ref()
+                .is_some_and(Redacters::is_mime_table)
+        {
+            stream_redact_plan.table_batch_bytes = Some(TABLE_BATCH_BYTES);
+        }
+
         Ok(stream_redact_plan)
     }
 
@@ -444,8 +468,17 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult<'a>> {
-        let item = match redact_plan.piece_layout {
-            Some(layout) => {
+        let item = match (redact_plan.piece_layout, redact_plan.table_batch_bytes) {
+            (None, Some(batch_bytes)) => {
+                let mut batches =
+                    TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
+                let first = batches.next_batch().await?;
+                if !first.is_whole_table() {
+                    return self.redact_table_in_batches(batches, first, redact_plan, file_ref);
+                }
+                Ok(first.into_item(file_ref))
+            }
+            (Some(layout), _) => {
                 let mut pieces = TextPieces::new(input, layout);
                 let first = pieces
                     .next_window()
@@ -458,7 +491,7 @@ impl<'a> StreamRedacter<'a> {
                 }
                 Ok(self.text_redact_item(first.text, file_ref))
             }
-            None => {
+            (None, None) => {
                 self.stream_to_redact_item(
                     self.redacter_base_options,
                     input,
@@ -660,6 +693,44 @@ impl<'a> StreamRedacter<'a> {
         })
     }
 
+    /// The result of redacting a table that does not fit in one batch, whose first batch is
+    /// `first`. The table is redacted as the stream is read, see [`RedactedOutput`].
+    fn redact_table_in_batches<
+        S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + 'static,
+    >(
+        &'a self,
+        batches: TableBatches<S>,
+        first: TableBatch,
+        redact_plan: StreamRedactPlan<'a>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactStreamResult<'a>> {
+        let redaction = TableRedaction::new(
+            &redact_plan.supported_redacters,
+            self.redacter_base_options.categories.as_ref(),
+            file_ref,
+            self.redacter_base_options.list_redactions,
+        );
+        let redacters = redaction.redacters();
+        tracing::debug!(
+            file = %file_ref.relative_path.value(),
+            redacters = redacters.len(),
+            batch_bytes = ?redact_plan.table_batch_bytes,
+            "redacting a table in batches"
+        );
+        let (written, stream) = written_windows();
+        Ok(RedactStreamResult {
+            number_of_redactions: redacters.len(),
+            summary: RedactionSummary {
+                applied: redacters,
+                ..RedactionSummary::default()
+            },
+            output: RedactedOutput {
+                stream,
+                redactions: redact_batches(redaction, batches, first, written).boxed_local(),
+            },
+        })
+    }
+
     /// What the redacters of `plan` find in the file, read as `redact_stream` reads it. Every
     /// redacter reads the original content: unlike redaction, nothing is chained.
     pub async fn detect_stream<
@@ -674,6 +745,10 @@ impl<'a> StreamRedacter<'a> {
         let categories = self.redacter_base_options.categories.as_ref();
         if let Some(layout) = plan.piece_layout {
             return Self::detect_text(input, layout, redacters, categories, file_ref).await;
+        }
+        if let Some(batch_bytes) = plan.table_batch_bytes {
+            let batches = TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
+            return Self::detect_table(batches, redacters, categories, file_ref).await;
         }
         let Ok(item) = self
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
@@ -794,6 +869,31 @@ impl<'a> StreamRedacter<'a> {
             "read in pieces"
         );
         Ok(result)
+    }
+
+    /// What `redacters` find in the table `batches` read, a batch at a time. A marker in a cell
+    /// is read within its batch, since a cell is in one.
+    async fn detect_table<S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin>(
+        mut batches: TableBatches<S>,
+        redacters: &[&Redacters<'a>],
+        categories: Option<&Categories>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<DetectStreamResult> {
+        let mut result = DetectStreamResult::default();
+        loop {
+            let batch = batches.next_batch().await?;
+            let (rows_before, reaches_end) = (batch.rows_before, batch.reaches_end);
+            let item = batch.into_item(file_ref);
+            let mut found = Self::detect_all(redacters, &item, None, categories).await?;
+            found.set_aside_ignored(&item.content, None);
+            for (_, detection) in found.detections.iter_mut().chain(&mut found.ignored) {
+                detection.location = detection.location.after_rows(rows_before);
+            }
+            result.absorb(found);
+            if reaches_end {
+                return Ok(result);
+            }
+        }
     }
 
     fn ocr(&self) -> AppResult<&dyn Ocr> {
@@ -1028,38 +1128,8 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
-        let reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
-        let mut reader = csv_async::AsyncReaderBuilder::default()
-            .has_headers(!redacter_base_options.csv_headers_disable)
-            .delimiter(
-                redacter_base_options
-                    .csv_delimiter
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or(b','),
-            )
-            .create_reader(reader);
-        let headers = if !redacter_base_options.csv_headers_disable {
-            reader
-                .headers()
-                .await?
-                .into_iter()
-                .map(|h| h.to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-        let records: Vec<csv_async::StringRecord> = reader.records().try_collect().await?;
-        Ok(RedacterDataItem {
-            content: RedacterDataItemContent::Table {
-                headers,
-                rows: records
-                    .iter()
-                    .map(|r| r.iter().map(|c| c.to_string()).collect())
-                    .collect(),
-            },
-            file_ref: file_ref.clone(),
-        })
+        let mut batches = TableBatches::new(input, redacter_base_options, usize::MAX).await?;
+        Ok(batches.next_batch().await?.into_item(file_ref))
     }
 
     async fn stream_to_image_redact_item<

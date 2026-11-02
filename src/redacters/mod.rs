@@ -68,6 +68,8 @@ mod text_changes;
 mod text_pieces;
 pub(crate) use text_pieces::*;
 
+mod table_pieces;
+
 pub(crate) mod piece_redaction;
 
 mod open_ai_llm;
@@ -652,6 +654,18 @@ impl RedacterType {
             self,
             RedacterType::GcpDlp
                 | RedacterType::LocalRules
+                | RedacterType::LocalNer
+                | RedacterType::LocalGliner
+                | RedacterType::LocalCredentialMl
+        )
+    }
+
+    /// Whether the redacter reads a table one cell at a time, so that rows read apart give the
+    /// findings they give together: the local redacters. GCP DLP sends a table as one request.
+    pub fn reads_tables_by_cell(self) -> bool {
+        matches!(
+            self,
+            RedacterType::LocalRules
                 | RedacterType::LocalNer
                 | RedacterType::LocalGliner
                 | RedacterType::LocalCredentialMl
