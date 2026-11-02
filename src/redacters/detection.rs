@@ -170,6 +170,74 @@ impl Detections {
     }
 }
 
+impl Detections {
+    /// The detections of `text` that `detect` returns. When `detect` answers
+    /// [`AppError::FindingsTruncated`], it is asked again about the two halves of the text, and
+    /// of any half it answers so for, each with `context_bytes` of the text on both sides. A
+    /// value is reported by the half it starts in, in the place it has in `text`. A part too
+    /// short to halve fails with the error.
+    pub(crate) async fn of_text_in_parts(
+        text: &str,
+        context_bytes: usize,
+        detect: impl AsyncFn(&str) -> AppResult<Self>,
+    ) -> AppResult<Self> {
+        let redacter = match detect(text).await {
+            Err(AppError::FindingsTruncated { redacter }) => redacter,
+            result => return result,
+        };
+        let truncated = || AppError::FindingsTruncated { redacter };
+        let lines = TextLines::new(text);
+        let mut parts = Self::halves(text, 0..text.len())
+            .ok_or_else(truncated)?
+            .to_vec();
+        let mut found = Vec::new();
+        let mut unlocated = Vec::new();
+        while let Some(part) = parts.pop() {
+            let from = text.floor_char_boundary(part.start.saturating_sub(context_bytes));
+            let to = text.ceil_char_boundary(part.end.saturating_add(context_bytes));
+            match detect(&text[from..to]).await {
+                Ok(detections) => {
+                    unlocated.extend(detections.unlocated);
+                    for detection in detections.found {
+                        let DetectionLocation::Text { start, end, .. } = detection.location else {
+                            continue;
+                        };
+                        if part.contains(&(from + start)) {
+                            found.push((
+                                from + start..from + end,
+                                detection.label,
+                                detection.score,
+                            ));
+                        }
+                    }
+                }
+                Err(AppError::FindingsTruncated { .. }) => {
+                    parts.extend(Self::halves(text, part).ok_or_else(truncated)?);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        found.sort_by_key(|(range, _, _)| (range.start, range.end));
+        Ok(Self {
+            found: found
+                .into_iter()
+                .map(|(range, label, score)| lines.detection(range, label, score))
+                .collect::<AppResult<_>>()?,
+            unlocated,
+        })
+    }
+
+    /// The two parts `part` of `text` is cut into: at the start of the line nearest its middle,
+    /// else inside a line at a character boundary. `None` for a part too short to cut.
+    fn halves(text: &str, part: Range<usize>) -> Option<[Range<usize>; 2]> {
+        let middle = text.floor_char_boundary(part.start + part.len() / 2);
+        let middle = text[part.start..middle]
+            .rfind('\n')
+            .map_or(middle, |newline| part.start + newline + 1);
+        (part.start < middle && middle < part.end).then_some([part.start..middle, middle..part.end])
+    }
+}
+
 impl From<Vec<Detection>> for Detections {
     fn from(found: Vec<Detection>) -> Self {
         Self {
@@ -1086,5 +1154,114 @@ mod tests {
 
         assert_eq!(page, serde_json::json!({"kind": "page", "page": 2}));
         assert_eq!(file, serde_json::json!({"kind": "file"}));
+    }
+
+    const EMAIL: &str = "john@example.com";
+
+    /// A stand-in for a provider that finds every `EMAIL` and returns at most `cap` findings,
+    /// answering [`AppError::FindingsTruncated`] for a text with more. Counts its calls.
+    struct CappedProvider {
+        cap: usize,
+        calls: Cell<usize>,
+    }
+
+    impl CappedProvider {
+        fn new(cap: usize) -> Self {
+            Self {
+                cap,
+                calls: Cell::new(0),
+            }
+        }
+
+        async fn detect(&self, text: &str) -> AppResult<Detections> {
+            self.calls.set(self.calls.get() + 1);
+            let lines = TextLines::new(text);
+            let found = text
+                .match_indices(EMAIL)
+                .map(|(start, email)| {
+                    lines.detection(start..start + email.len(), email_label(), None)
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            if found.len() > self.cap {
+                return Err(AppError::FindingsTruncated {
+                    redacter: RedacterType::GcpDlp,
+                });
+            }
+            Ok(found.into())
+        }
+    }
+
+    fn email_label() -> DetectionLabel {
+        DetectionLabel::new("EMAIL_ADDRESS")
+    }
+
+    #[tokio::test]
+    async fn a_call_that_finds_more_than_it_returns_is_asked_again_about_halves() {
+        let filler = "x".repeat(380);
+        let lines: String = (0..50)
+            .map(|line| format!("Grüße {line}: {filler} mail {EMAIL}\n"))
+            .collect();
+        let provider = CappedProvider::new(9);
+
+        let found =
+            Detections::of_text_in_parts(&lines, 1024, async |part| provider.detect(part).await)
+                .await
+                .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&lines)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(all.len(), 50);
+        assert_eq!(found.found, all);
+        assert!(provider.calls.get() > 1);
+    }
+
+    #[tokio::test]
+    async fn a_value_across_the_middle_of_a_split_text_is_found_once_whole() {
+        let padding = "ü ".repeat(2000);
+        let text = format!("{EMAIL}{padding}{EMAIL}{padding}{EMAIL}");
+        let second = text.match_indices(EMAIL).nth(1).unwrap().0;
+        assert!((second..second + EMAIL.len()).contains(&(text.len() / 2)));
+        let provider = CappedProvider::new(2);
+
+        let found =
+            Detections::of_text_in_parts(&text, 1024, async |part| provider.detect(part).await)
+                .await
+                .unwrap();
+
+        let all = CappedProvider::new(usize::MAX)
+            .detect(&text)
+            .await
+            .unwrap()
+            .found;
+        assert_eq!(all.len(), 3);
+        assert_eq!(found.found, all);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_is_not_truncation_is_not_asked_again() {
+        let calls = Cell::new(0);
+
+        let result = Detections::of_text_in_parts("text", 1024, async |_| {
+            calls.set(calls.get() + 1);
+            Err(AppError::unsupported_content())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn findings_past_the_cap_in_a_text_that_cannot_be_halved_are_an_error() {
+        let provider = CappedProvider::new(0);
+
+        let result =
+            Detections::of_text_in_parts(EMAIL, 1024, async |part| provider.detect(part).await)
+                .await;
+
+        assert!(matches!(result, Err(AppError::FindingsTruncated { .. })));
     }
 }

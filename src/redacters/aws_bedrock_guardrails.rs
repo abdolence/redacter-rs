@@ -12,10 +12,20 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     bedrock_error, Category, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextMask, THROTTLED_ATTEMPTS,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextMask, TextPieceLimits,
+    THROTTLED_ATTEMPTS,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
+
+/// The most text sent in one `ApplyGuardrail` request. The sensitive information policy takes at
+/// least 106 text units of 1,000 characters in a request in every Region, and 1,000 in the
+/// largest ones; 100,000 bytes are at most 100,000 characters.
+const APPLY_GUARDRAIL_MAX_TEXT_BYTES: usize = 100_000;
+
+/// The text the guardrail is given on each side of a piece of a text, to find what it would find
+/// there in the whole text. A request is billed per text unit, so context is paid for twice.
+const APPLY_GUARDRAIL_CONTEXT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, ValueStruct)]
 pub struct AwsBedrockGuardrailId(String);
@@ -252,6 +262,13 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
 
     fn text_mask(&self) -> TextMask {
         TextMask::Label
+    }
+
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        Some(TextPieceLimits::cloud(
+            APPLY_GUARDRAIL_MAX_TEXT_BYTES,
+            APPLY_GUARDRAIL_CONTEXT_BYTES,
+        ))
     }
 }
 
@@ -572,6 +589,48 @@ mod tests {
             .unwrap()
             .found
             .is_empty());
+    }
+
+    /// The placeholders a guardrail writes in its anonymised text are the labels of the values it
+    /// reports, regex filters included when the guardrail has any.
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn the_label_mask_of_the_detections_is_the_text_the_guardrail_anonymises() {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let test_aws_region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let test_guardrail_id = std::env::var("TEST_AWS_BEDROCK_GUARDRAIL_ID")
+            .expect("TEST_AWS_BEDROCK_GUARDRAIL_ID required");
+        let redacter = AwsBedrockGuardrailsRedacter::new(
+            AwsBedrockGuardrailsRedacterOptions {
+                region: Some(Region::new(test_aws_region)),
+                guardrail_id: AwsBedrockGuardrailId::from(test_guardrail_id),
+                guardrail_version: AwsBedrockGuardrailVersion::from("DRAFT".to_string()),
+            },
+            &reporter,
+        )
+        .await
+        .unwrap();
+        let text = "Zoë Keller wrote to zoe.keller@example.com and called +1 (555) 123-4567.";
+        let item = RedacterDataItem {
+            file_ref: FileSystemRef {
+                relative_path: "temp_file.txt".into(),
+                media_type: Some(mime::TEXT_PLAIN),
+                file_size: Some(text.len()),
+            },
+            content: RedacterDataItemContent::Value(text.to_string()),
+        };
+
+        let anonymised = redacter.redact(item.clone()).await.unwrap();
+        let detections = redacter.detect(&item).await.unwrap();
+
+        let RedacterDataItemContent::Value(anonymised) = anonymised.item.content else {
+            panic!("a text is expected");
+        };
+        assert_eq!(
+            Detection::mask(text, &detections.found, redacter.text_mask()),
+            anonymised
+        );
     }
 
     #[test]

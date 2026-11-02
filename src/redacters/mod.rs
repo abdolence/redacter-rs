@@ -901,6 +901,18 @@ impl TextPieceLimits {
         context_bytes: 64 * 1024,
         concurrent_requests: NonZeroUsize::new(2).expect("two is not zero"),
     };
+
+    /// What a cloud redacter reads at once: requests of up to `max_request_bytes`, the most its
+    /// provider takes, with `context_bytes` on each side of a piece and four requests in flight.
+    /// Context is billed twice, so it stays small: a value of up to twice `context_bytes` is
+    /// found across a cut.
+    pub const fn cloud(max_request_bytes: usize, context_bytes: usize) -> Self {
+        Self {
+            max_request_bytes,
+            context_bytes,
+            concurrent_requests: NonZeroUsize::new(4).expect("four is not zero"),
+        }
+    }
 }
 
 pub trait Redacter {
@@ -952,6 +964,16 @@ impl<'a> Redacters<'a> {
             #[cfg(feature = "local-credential-ml")]
             Redacters::LocalCredentialMl(redacter) => redacter.redact(input).await,
         }
+    }
+
+    /// `detect_with_provider` as a call to a remote provider: it waits for its turn under the
+    /// request limit, and is made again while the provider throttles it.
+    async fn detect_paced(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        retrying_throttled(|| async {
+            CallPacing::wait_for_turn().await;
+            self.detect_with_provider(input).await
+        })
+        .await
     }
 
     async fn detect_with_provider(&self, input: &RedacterDataItem) -> AppResult<Detections> {
@@ -1020,11 +1042,19 @@ impl<'a> Redacter for Redacters<'a> {
         if !self.redacter_type().is_remote() {
             return self.detect_with_provider(input).await;
         }
-        retrying_throttled(|| async {
-            CallPacing::wait_for_turn().await;
-            self.detect_with_provider(input).await
-        })
-        .await
+        match (&input.content, self.text_piece_limits()) {
+            (RedacterDataItemContent::Value(text), Some(limits)) => {
+                Detections::of_text_in_parts(text, limits.context_bytes, async |part| {
+                    let part = RedacterDataItem {
+                        file_ref: input.file_ref.clone(),
+                        content: RedacterDataItemContent::Value(part.to_string()),
+                    };
+                    self.detect_paced(&part).await
+                })
+                .await
+            }
+            _ => self.detect_paced(input).await,
+        }
     }
 
     async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {

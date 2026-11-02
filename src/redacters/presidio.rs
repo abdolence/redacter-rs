@@ -8,9 +8,20 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Categories, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
     Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
+    TextPieceLimits,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
+
+/// The most text sent in one analyze request. spaCy refuses a text of over 1,000,000 characters
+/// (`nlp.max_length`), and a byte is at least a character. Half of that keeps the request
+/// short enough for the analyzer's memory, which spaCy sizes at about 1 GB per 100,000
+/// characters.
+const ANALYZE_MAX_TEXT_BYTES: usize = 512 * 1024;
+
+/// The text the analyzer is given on each side of a piece of a text, to find what it would find
+/// there in the whole text.
+const ANALYZE_CONTEXT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct PresidioRedacterOptions {
@@ -364,6 +375,13 @@ impl<'a> Redacter for PresidioRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::Presidio
+    }
+
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        Some(TextPieceLimits::cloud(
+            ANALYZE_MAX_TEXT_BYTES,
+            ANALYZE_CONTEXT_BYTES,
+        ))
     }
 }
 

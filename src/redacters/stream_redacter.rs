@@ -441,11 +441,16 @@ impl<'a> StreamRedacter<'a> {
                 .iter()
                 .map(|redacter| redacter.text_piece_limits())
                 .collect();
-            if let Some(layout) = limits
-                .map(|limits| piece_layout(&limits))
-                .transpose()?
-                .flatten()
-            {
+            // Contexts that fill a request leave no room for a piece. The text is then read
+            // whole, as when a redacter has no limits, and fails at the provider's limit.
+            let layout = limits.and_then(|limits| match piece_layout(&limits) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    tracing::debug!(%error, "the text is read whole");
+                    None
+                }
+            });
+            if let Some(layout) = layout {
                 stream_redact_plan.read = PlannedRead::TextPieces(layout);
             }
         }
@@ -4053,5 +4058,366 @@ mod tests {
         .unwrap();
 
         assert!(stream.unwrap().concat() == data);
+    }
+
+    const PLANTED_NAME: &str = "Zoë Keller";
+    const PLANTED_NAME_MASKED: &str = "XXXXXXXXXX";
+
+    /// A Presidio analyzer on a local port that reports every `PLANTED_NAME` as a person, with
+    /// character offsets as Presidio gives them, and keeps the size of each text it was sent.
+    struct PlantedNameAnalyzer {
+        url: url::Url,
+        request_bytes: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    impl PlantedNameAnalyzer {
+        async fn start() -> Self {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = url::Url::parse(&format!(
+                "http://{}/analyze",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap();
+            let request_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sizes = request_bytes.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let sizes = sizes.clone();
+                    tokio::spawn(async move {
+                        let mut reader = BufReader::new(&mut socket);
+                        let mut length = 0;
+                        loop {
+                            let mut header = String::new();
+                            reader.read_line(&mut header).await.unwrap();
+                            if header.trim().is_empty() {
+                                break;
+                            }
+                            if let Some(value) =
+                                header.to_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).await.unwrap();
+                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let text = request["text"].as_str().unwrap();
+                        sizes.lock().unwrap().push(text.len());
+                        let items: Vec<_> = text
+                            .match_indices(PLANTED_NAME)
+                            .map(|(at, name)| {
+                                let start = text[..at].chars().count();
+                                serde_json::json!({
+                                    "entity_type": "PERSON",
+                                    "start": start,
+                                    "end": start + name.chars().count(),
+                                    "score": 0.85,
+                                })
+                            })
+                            .collect();
+                        let body = serde_json::to_string(&items).unwrap();
+                        socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    });
+                }
+            });
+            Self { url, request_bytes }
+        }
+
+        async fn redacter(&self) -> Vec<Redacters<'static>> {
+            let options = PresidioRedacterOptions {
+                text_analyze_url: Some(self.url.clone()),
+                image_redact_url: None,
+                categories: None,
+            };
+            vec![Redacters::Presidio(
+                PresidioRedacter::new(options, reporter()).await.unwrap(),
+            )]
+        }
+
+        fn requests(&self) -> Vec<usize> {
+            self.request_bytes.lock().unwrap().clone()
+        }
+    }
+
+    /// The copy of `content` as `cp` plans it, without a read chosen by the test.
+    async fn copied_as_planned(redacters: &[Redacters<'static>], content: &[u8]) -> Copied {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let plan = stream_redacter
+            .create_redact_plan(redacters, &file)
+            .await
+            .unwrap();
+        let result = stream_redacter
+            .redact_stream(in_chunks(content, 64 * 1024), plan, &file)
+            .await
+            .unwrap();
+        let (stream, redactions) = written_and_listed(result.output).await;
+        let chunks = stream.unwrap();
+        Copied {
+            chunks: chunks.len(),
+            output: chunks.concat(),
+            redactions: redactions.unwrap(),
+        }
+    }
+
+    fn lines_with_planted_names(bytes: usize) -> String {
+        let mut text = String::with_capacity(bytes + 100);
+        let mut line = 0;
+        while text.len() < bytes {
+            if line % 700 == 0 {
+                text.push_str(&format!("{line:07} Grüße von {PLANTED_NAME} aus Köln\n"));
+            } else {
+                text.push_str(&format!(
+                    "{line:07} Grüße aus Köln, nichts zu melden hier\n"
+                ));
+            }
+            line += 1;
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn a_text_that_fits_the_analyzer_request_is_sent_in_one_call_and_masked_per_character() {
+        let analyzer = PlantedNameAnalyzer::start().await;
+        let redacters = analyzer.redacter().await;
+        let text = lines_with_planted_names(10_000);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert_eq!(analyzer.requests(), [text.len()]);
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_over_the_analyzer_request_limit_is_sent_in_pieces_and_masked_per_character() {
+        let analyzer = PlantedNameAnalyzer::start().await;
+        let redacters = analyzer.redacter().await;
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let text = lines_with_planted_names(2 * limits.max_request_bytes + 1);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        let requests = analyzer.requests();
+        assert!(requests.len() > 1, "{requests:?}");
+        assert!(requests
+            .iter()
+            .all(|&bytes| bytes <= limits.max_request_bytes));
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
+        );
+        assert_eq!(copied.redactions.len(), text.matches(PLANTED_NAME).count());
+    }
+
+    #[tokio::test]
+    async fn a_value_across_the_end_of_a_piece_is_masked_whole_by_the_analyzer_pieces() {
+        let analyzer = PlantedNameAnalyzer::start().await;
+        let redacters = analyzer.redacter().await;
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
+        let mut text = "a".repeat(2 * limits.max_request_bytes);
+        text.replace_range(piece_bytes - 5..piece_bytes + 6, PLANTED_NAME);
+        text.replace_range(2 * piece_bytes - 5..2 * piece_bytes + 6, PLANTED_NAME);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert!(analyzer.requests().len() > 2);
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
+        );
+        assert_eq!(copied.redactions.len(), 2);
+    }
+
+    /// One line of short sentences with an email in place of two of them every `step` bytes and
+    /// across `piece_bytes`, the end of the first piece of a text cut as `cp` cuts it, and the
+    /// emails planted.
+    fn sentences_with_planted_emails(
+        len: usize,
+        step: usize,
+        piece_bytes: usize,
+    ) -> (String, Vec<String>) {
+        const SENTENCE: &str = "the cat sat on the mat. ";
+        let unit = SENTENCE.len();
+        let mut line = SENTENCE.repeat(len / unit + 1);
+        line.truncate(len);
+        let room = |at: &usize| at + 3 * unit < len;
+        let mut starts: Vec<usize> = (step..)
+            .step_by(step)
+            .take_while(room)
+            .map(|at| at / unit * unit)
+            .chain(
+                (piece_bytes..)
+                    .step_by(piece_bytes)
+                    .take_while(room)
+                    .map(|end| (end - 30).div_ceil(unit) * unit),
+            )
+            .collect();
+        starts.sort();
+        starts.dedup_by(|later, earlier| *later < *earlier + 2 * unit);
+        let mut emails = Vec::new();
+        for start in starts {
+            let email = format!("planted.user.{}@example.com", emails.len() + 1);
+            let padding = format!(" {SENTENCE}{SENTENCE}");
+            let filled = format!("{email}{}", &padding[..2 * unit - email.len()]);
+            line.replace_range(start..start + 2 * unit, &filled);
+            emails.push(email);
+        }
+        (line, emails)
+    }
+
+    /// `text` with each of `values` replaced by what `mask` makes of it.
+    fn masked_values(text: &str, values: &[String], mask: impl Fn(&str) -> String) -> String {
+        values.iter().fold(text.to_string(), |text, value| {
+            text.replace(value, &mask(value))
+        })
+    }
+
+    fn per_character(value: &str) -> String {
+        "X".repeat(value.chars().count())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn comprehend_masks_every_planted_email_of_a_text_over_its_request_limit() {
+        let region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let options = crate::redacters::AwsComprehendRedacterOptions {
+            region: Some(aws_config::Region::new(region)),
+        };
+        let redacters = vec![Redacters::AwsComprehend(
+            crate::redacters::AwsComprehendRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
+        let (text, emails) =
+            sentences_with_planted_emails(3 * limits.max_request_bytes, 7001, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            masked_values(&text, &emails, per_character)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-presidio"), ignore)]
+    async fn presidio_masks_every_planted_email_of_a_text_over_its_character_limit() {
+        let options = PresidioRedacterOptions {
+            text_analyze_url: Some(
+                url::Url::parse(
+                    &std::env::var("TEST_PRESIDIO_ANALYZE_URL")
+                        .expect("TEST_PRESIDIO_ANALYZE_URL required"),
+                )
+                .unwrap(),
+            ),
+            image_redact_url: None,
+            categories: None,
+        };
+        let redacters = vec![Redacters::Presidio(
+            PresidioRedacter::new(options, reporter()).await.unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
+        let (text, emails) = sentences_with_planted_emails(1_300_000, 20011, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert_eq!(
+            String::from_utf8(copied.output).unwrap(),
+            masked_values(&text, &emails, per_character)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-gcp"), ignore)]
+    async fn dlp_masks_every_email_of_a_text_over_its_request_limit_and_findings_limit() {
+        crate::redacters::test_support::initialize_crypto();
+        let options = crate::redacters::GcpDlpRedacterOptions {
+            project_id: crate::common_types::GcpProjectId::new(
+                std::env::var("TEST_GCP_PROJECT").expect("TEST_GCP_PROJECT required"),
+            ),
+            built_in_info_types: crate::redacters::GcpDlpRedacter::default_info_types(),
+            user_defined_stored_info_types: vec![],
+        };
+        let redacters = vec![Redacters::GcpDlp(
+            crate::redacters::GcpDlpRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let users = 29_000;
+        let text: String = (1..=users)
+            .map(|user| format!("user{user}@example.com\n"))
+            .collect();
+        let expected = "[REDACTED]\n".repeat(users);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        assert!(text.len() > limits.max_request_bytes);
+        assert_eq!(String::from_utf8(copied.output).unwrap(), expected);
+    }
+
+    async fn comprehend() -> Redacters<'static> {
+        let options = crate::redacters::AwsComprehendRedacterOptions {
+            region: Some(aws_config::Region::new("eu-west-1")),
+        };
+        Redacters::AwsComprehend(
+            crate::redacters::AwsComprehendRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )
+    }
+
+    /// The reads planned to redact and to detect in a text with `redacters`.
+    async fn planned_reads(redacters: Vec<Redacters<'static>>) -> (PlannedRead, PlannedRead) {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let redaction = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
+        let detection = stream_redacter
+            .create_detect_plan(&redacters, &file)
+            .await
+            .unwrap();
+        (redaction.read, detection.read)
+    }
+
+    #[tokio::test]
+    async fn contexts_that_do_not_fit_a_request_leave_the_text_to_be_read_whole() {
+        let (redaction, detection) =
+            planned_reads(vec![comprehend().await, email_rules().await]).await;
+        assert_eq!(
+            (redaction, detection),
+            (PlannedRead::Whole, PlannedRead::Whole)
+        );
+
+        // The first step reads the contexts of the ones after it, so a local step that comes
+        // first leaves Comprehend the room it needs.
+        let (redaction, _) = planned_reads(vec![email_rules().await, comprehend().await]).await;
+        assert!(matches!(redaction, PlannedRead::TextPieces(_)));
     }
 }
