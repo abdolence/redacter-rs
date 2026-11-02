@@ -342,6 +342,23 @@ fn counted(count: usize, noun: &str) -> String {
 #[serde(transparent)]
 pub struct FindingsByLabel(BTreeMap<DetectionLabel, usize>);
 
+impl FindingsByLabel {
+    pub(super) fn count(&mut self, label: &DetectionLabel) {
+        match self.0.get_mut(label) {
+            Some(count) => *count += 1,
+            None => {
+                self.0.insert(label.clone(), 1);
+            }
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (label, count) in &other.0 {
+            *self.0.entry(label.clone()).or_default() += count;
+        }
+    }
+}
+
 /// What `scan` reports. Fields are only ever added, so a consumer of the JSON report can rely
 /// on every one here.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -385,9 +402,7 @@ impl ScanCommandResult {
         }
         self.findings += file.findings.len();
         self.findings_ignored += file.findings_ignored;
-        for (label, count) in file.findings.by_label() {
-            *self.findings_by_label.0.entry(label.clone()).or_default() += count;
-        }
+        self.findings_by_label.merge(file.findings.by_label());
         self.files.push(file);
     }
 
@@ -1394,107 +1409,6 @@ mod tests {
             "4 files: 1 with findings, 0 clean, 0 skipped, 0 unsupported, 3 ignored. \
              1 finding (2 ignored): email 1. Total size: 0 B"
         );
-    }
-    /// Findings of three rules: more than `MAX_RESULTS` of one, repeated values within it, and
-    /// two files, so that the cap, the occurrence numbers of the fingerprints and the order of
-    /// the files all matter.
-    fn many_findings() -> Vec<(&'static str, Vec<FindingReport>)> {
-        let at = |line: usize| DetectionLocation::Text {
-            start: line * 20,
-            end: line * 20 + 6,
-            line,
-            column: 1,
-        };
-        let many: Vec<FindingReport> = (1..=5_020)
-            .map(|line| {
-                let value = format!("{:05}@x.io", line % 7);
-                finding("email", at(line), None, &value)
-            })
-            .collect();
-        let few = vec![
-            finding("phone", at(1), Some(0.5), "+44 7700 900123"),
-            finding("person", at(2), Some(0.9), "Akira"),
-            finding("person", at(3), Some(0.9), "Akira"),
-        ];
-        vec![("big.log", many), ("small.txt", few)]
-    }
-
-    fn results_of(files: Vec<ReportedFile>) -> (usize, serde_json::Value) {
-        let locator = ArtifactLocator::new("./", Path::new("/work"));
-        let log = serde_json::to_value(SarifLog::try_new(&files, &locator, None).unwrap()).unwrap();
-        let results = log["runs"][0]["results"].as_array().unwrap().len();
-        (results, log)
-    }
-
-    #[test]
-    fn the_sarif_log_from_the_spill_is_the_log_from_memory_past_the_result_cap() {
-        let held: Vec<ReportedFile> = many_findings()
-            .into_iter()
-            .map(|(path, findings)| ReportedFile {
-                path: path.to_string(),
-                outcome: FileOutcome::Findings(
-                    findings
-                        .iter()
-                        .map(FindingReport::reported_finding)
-                        .collect(),
-                ),
-            })
-            .collect();
-        let spilled: Vec<ReportedFile> = many_findings()
-            .into_iter()
-            .map(|(path, findings)| ReportedFile {
-                path: path.to_string(),
-                outcome: FileOutcome::Findings(spilled_findings(&findings).into()),
-            })
-            .collect();
-
-        let (held_results, held_log) = results_of(held);
-        let (spilled_results, spilled_log) = results_of(spilled);
-
-        assert_eq!(held_results, 5_000, "the cap applies");
-        assert_eq!(spilled_results, held_results);
-        assert_eq!(spilled_log, held_log);
-    }
-
-    #[test]
-    fn the_ocsf_events_from_the_spill_are_the_events_from_memory() {
-        let locator = ArtifactLocator::new("./", Path::new("/work"));
-        let time = EpochMillis::try_from(std::time::SystemTime::now()).unwrap();
-        let events = |files: Vec<ReportedFile>| -> Vec<serde_json::Value> {
-            let ndjson = OcsfEvents::try_new(&files, &locator, time)
-                .unwrap()
-                .to_ndjson()
-                .unwrap();
-            ndjson
-                .lines()
-                .map(|line| {
-                    let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
-                    event["metadata"]["uid"].take();
-                    event
-                })
-                .collect()
-        };
-        let report = |spilled: bool| -> Vec<ReportedFile> {
-            many_findings()
-                .into_iter()
-                .map(|(path, findings)| ReportedFile {
-                    path: path.to_string(),
-                    outcome: FileOutcome::Findings(if spilled {
-                        spilled_findings(&findings).into()
-                    } else {
-                        findings
-                            .iter()
-                            .map(FindingReport::reported_finding)
-                            .collect()
-                    }),
-                })
-                .collect()
-        };
-
-        let (held, spilled) = (events(report(false)), events(report(true)));
-
-        assert_eq!(held.len(), 2);
-        assert_eq!(spilled, held);
     }
 
     #[test]

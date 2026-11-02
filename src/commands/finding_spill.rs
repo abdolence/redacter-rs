@@ -2,12 +2,10 @@
 //! grow with how much it finds. Each finding is one line of JSON; a file's findings are a range
 //! of lines that the writers of the reports, and the terminal, read back one at a time.
 
-use crate::commands::scan_output::FindingReport;
-use crate::redacters::DetectionLabel;
+use crate::commands::scan_output::{FindingReport, FindingsByLabel};
 use crate::{AppError, AppResult};
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -45,7 +43,7 @@ pub struct SpilledFindings {
     spill: FindingSpill,
     range: Range<u64>,
     count: usize,
-    by_label: BTreeMap<DetectionLabel, usize>,
+    by_label: FindingsByLabel,
 }
 
 impl SpilledFindings {
@@ -56,7 +54,7 @@ impl SpilledFindings {
             spill: spill.clone(),
             range: end..end,
             count: 0,
-            by_label: BTreeMap::new(),
+            by_label: FindingsByLabel::default(),
         }
     }
 
@@ -73,12 +71,7 @@ impl SpilledFindings {
             })?;
         self.count += findings.len();
         for finding in findings {
-            match self.by_label.get_mut(finding.label()) {
-                Some(count) => *count += 1,
-                None => {
-                    self.by_label.insert(finding.label().clone(), 1);
-                }
-            }
+            self.by_label.count(finding.label());
         }
         Ok(())
     }
@@ -90,7 +83,11 @@ impl SpilledFindings {
             Some(file) => file,
             unopened => unopened.insert(tempfile::tempfile()?),
         };
-        debug_assert_eq!(spill.len, self.range.end, "another file wrote in between");
+        if spill.len != self.range.end {
+            return Err(std::io::Error::other(
+                "another file wrote to the spill in between",
+            ));
+        }
         file.seek(SeekFrom::Start(spill.len))?;
         let mut out = BufWriter::new(&mut *file);
         for finding in findings {
@@ -113,7 +110,7 @@ impl SpilledFindings {
     }
 
     /// How many findings each label has.
-    pub fn by_label(&self) -> &BTreeMap<DetectionLabel, usize> {
+    pub fn by_label(&self) -> &FindingsByLabel {
         &self.by_label
     }
 
@@ -203,7 +200,7 @@ impl Read for SpillRead {
 mod tests {
     use super::*;
     use crate::args::RedacterType;
-    use crate::redacters::{Detection, DetectionLocation};
+    use crate::redacters::{Detection, DetectionLabel, DetectionLocation};
     use crate::ValueDisplay;
 
     fn email_finding() -> FindingReport {
@@ -217,6 +214,19 @@ mod tests {
             },
             ValueDisplay::Masked,
         )
+    }
+
+    #[test]
+    fn an_append_after_another_file_wrote_is_an_error() {
+        let spill = FindingSpill::default();
+        let mut first = SpilledFindings::new(&spill);
+        let mut second = SpilledFindings::new(&spill);
+        first.append(&[email_finding()]).unwrap();
+
+        let result = second.append(&[email_finding()]);
+
+        assert!(matches!(result, Err(AppError::FindingSpillFailed { .. })));
+        assert_eq!(first.iter().count(), 1);
     }
 
     #[test]

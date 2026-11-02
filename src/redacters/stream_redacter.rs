@@ -1617,19 +1617,8 @@ mod tests {
     /// file was blocked if it was.
     #[derive(Default)]
     struct Collected {
-        detections: Vec<(RedacterType, Detection)>,
-        ignored: Vec<(RedacterType, Detection)>,
-        unlocated: usize,
+        found: DetectStreamResult,
         blocked: Option<RedactionBlocked>,
-    }
-
-    impl Collected {
-        fn add(&mut self, found: DetectStreamResult) -> AppResult<()> {
-            self.detections.extend(found.detections);
-            self.ignored.extend(found.ignored);
-            self.unlocated += found.unlocated;
-            Ok(())
-        }
     }
 
     impl<'a> StreamRedacter<'a> {
@@ -1643,7 +1632,10 @@ mod tests {
         ) -> AppResult<Collected> {
             let mut collected = Collected::default();
             let blocked = self
-                .detect_stream(input, plan, file_ref, &mut |found| collected.add(found))
+                .detect_stream(input, plan, file_ref, &mut |found| {
+                    collected.found.absorb(found);
+                    Ok(())
+                })
                 .await?;
             collected.blocked = blocked;
             Ok(collected)
@@ -2083,6 +2075,7 @@ mod tests {
 
         let values = |result: &Collected| {
             result
+                .found
                 .detections
                 .iter()
                 .map(|(_, detection)| detection.value.clone())
@@ -2094,6 +2087,7 @@ mod tests {
 
     fn located(result: &Collected) -> Vec<(DetectionLocation, &str)> {
         result
+            .found
             .detections
             .iter()
             .map(|(_, detection)| (detection.location, detection.value.as_str()))
@@ -2143,6 +2137,7 @@ mod tests {
             ]
         );
         assert!(result
+            .found
             .detections
             .iter()
             .all(|(redacter, _)| *redacter == RedacterType::LocalRules));
@@ -2170,7 +2165,7 @@ mod tests {
                 Some(RedactionBlocked::OcrImageFormatNotSupported),
                 "{media_type}"
             );
-            assert!(result.detections.is_empty(), "{media_type}");
+            assert!(result.found.detections.is_empty(), "{media_type}");
         }
     }
 
@@ -2193,6 +2188,7 @@ mod tests {
         .unwrap();
 
         let pages: Vec<Option<usize>> = result
+            .found
             .detections
             .iter()
             .map(|(_, detection)| match detection.location {
@@ -2224,6 +2220,7 @@ mod tests {
         .unwrap();
 
         let labels: Vec<&DetectionLabel> = result
+            .found
             .detections
             .iter()
             .map(|(_, detection)| &detection.label)
@@ -2525,6 +2522,7 @@ mod tests {
                 .await
                 .unwrap();
             let (_, found) = detected
+                .found
                 .detections
                 .iter()
                 .find(|(_, detection)| detection.label == DetectionLabel::new(label))
@@ -2620,7 +2618,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(result.blocked, Some(RedactionBlocked::NotText), "{data:?}");
-            assert!(result.detections.is_empty(), "{data:?}");
+            assert!(result.found.detections.is_empty(), "{data:?}");
         }
     }
 
@@ -2646,6 +2644,7 @@ mod tests {
         assert_eq!(result.blocked, None);
         assert_eq!(
             result
+                .found
                 .detections
                 .iter()
                 .map(|(_, detection)| detection.value.as_str())
@@ -2794,7 +2793,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["a@b.io", "e@f.io"]
         );
-        assert_eq!(result.ignored.len(), 1);
+        assert_eq!(result.found.ignored.len(), 1);
     }
 
     async fn secret_rules() -> Redacters<'static> {
@@ -2815,8 +2814,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.detections.len(), 2);
-        assert!(result.ignored.is_empty());
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
     }
 
     #[tokio::test]
@@ -2834,8 +2833,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.detections.is_empty());
-        assert_eq!(result.ignored.len(), 1);
+        assert!(result.found.detections.is_empty());
+        assert_eq!(result.found.ignored.len(), 1);
     }
     /// The detections of `redacters` in `text` read whole, and in pieces of `layout`, in
     /// chunks of 7 bytes so that no chunk ends where a line does.
@@ -2867,7 +2866,10 @@ mod tests {
             &references,
             None,
             &file,
-            &mut |found| in_pieces.add(found),
+            &mut |found| {
+                in_pieces.found.absorb(found);
+                Ok(())
+            },
         )
         .await
         .unwrap();
@@ -2882,8 +2884,8 @@ mod tests {
 
     fn assert_same_findings(whole: Collected, in_pieces: Collected) {
         let (whole_detections, piece_detections) = (
-            by_location(whole.detections),
-            by_location(in_pieces.detections),
+            by_location(whole.found.detections),
+            by_location(in_pieces.found.detections),
         );
         let missing: Vec<_> = whole_detections
             .iter()
@@ -2898,8 +2900,11 @@ mod tests {
             "missing in pieces: {missing:?}\nonly in pieces: {extra:?}"
         );
         assert_eq!(piece_detections, whole_detections);
-        assert_eq!(by_location(in_pieces.ignored), by_location(whole.ignored));
-        assert_eq!(in_pieces.unlocated, whole.unlocated);
+        assert_eq!(
+            by_location(in_pieces.found.ignored),
+            by_location(whole.found.ignored)
+        );
+        assert_eq!(in_pieces.found.unlocated, whole.found.unlocated);
     }
 
     const KEY_BLOCK: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
@@ -2946,8 +2951,11 @@ mod tests {
                 PieceLayout::new(2000, 700),
             ] {
                 let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, text, layout).await;
-                assert!(whole.detections.len() > 100, "the log has values to find");
-                assert!(!whole.ignored.is_empty());
+                assert!(
+                    whole.found.detections.len() > 100,
+                    "the log has values to find"
+                );
+                assert!(!whole.found.ignored.is_empty());
                 assert_same_findings(whole, in_pieces);
             }
         }
@@ -2962,8 +2970,8 @@ mod tests {
 
         let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &text, cut_at_400()).await;
 
-        assert_eq!(whole.detections.len(), 2);
-        assert!(whole.ignored.is_empty());
+        assert_eq!(whole.found.detections.len(), 2);
+        assert!(whole.found.ignored.is_empty());
         assert_same_findings(whole, in_pieces);
     }
 
@@ -3009,7 +3017,7 @@ mod tests {
 
         let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
 
-        assert_eq!(whole.detections.len(), 1);
+        assert_eq!(whole.found.detections.len(), 1);
         assert_same_findings(whole, in_pieces);
     }
 
@@ -3027,14 +3035,15 @@ mod tests {
 
         let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
 
-        assert_eq!(whole.detections.len(), 1);
+        assert_eq!(whole.found.detections.len(), 1);
         assert!(
             in_pieces
+                .found
                 .detections
                 .iter()
-                .any(|found| found == &whole.detections[0]),
+                .any(|found| found == &whole.found.detections[0]),
             "{:?}",
-            in_pieces.detections
+            in_pieces.found.detections
         );
     }
 
@@ -3052,14 +3061,18 @@ mod tests {
 
             let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
 
-            assert_eq!(in_pieces.detections.len(), 1, "from line {first_line}");
+            assert_eq!(
+                in_pieces.found.detections.len(),
+                1,
+                "from line {first_line}"
+            );
             assert_same_findings(whole, in_pieces);
         }
 
         let too_long = ten_byte_lines(100, &[(23, "BEGIN....\n"), (56, "END.......\n")]);
         let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &too_long, cut_at_400()).await;
-        assert_eq!(whole.detections.len(), 1);
-        assert!(in_pieces.detections.is_empty());
+        assert_eq!(whole.found.detections.len(), 1);
+        assert!(in_pieces.found.detections.is_empty());
     }
 
     #[tokio::test]
@@ -3078,7 +3091,7 @@ mod tests {
 
         for layout in [PieceLayout::new(50, 30), PieceLayout::new(300, 100)] {
             let (whole, in_pieces) = detect_whole_and_in_pieces(&redacters, &text, layout).await;
-            assert!(whole.detections.len() > 10);
+            assert!(whole.found.detections.len() > 10);
             assert_same_findings(whole, in_pieces);
         }
     }
@@ -3498,10 +3511,10 @@ mod tests {
         let whole = detect_table_as(&redacters, &table, PlannedRead::Whole).await;
         let in_batches = detect_table_as(&redacters, &table, SMALL_BATCH).await;
 
-        assert_eq!(whole.detections.len(), 40 * 3);
-        assert_eq!(whole.ignored.len(), 1);
+        assert_eq!(whole.found.detections.len(), 40 * 3);
+        assert_eq!(whole.found.ignored.len(), 1);
         assert_eq!(
-            in_batches.ignored[0].1.location,
+            in_batches.found.ignored[0].1.location,
             DetectionLocation::TableCell {
                 row: 41,
                 column: 2,
@@ -3618,7 +3631,7 @@ mod tests {
         let whole = detect_table_as(&redacters, &table, PlannedRead::Whole).await;
         let in_batches = detect_table_as(&redacters, &table, ONE_ROW_BATCHES).await;
 
-        assert!(!whole.detections.is_empty());
+        assert!(!whole.found.detections.is_empty());
         assert_same_findings(whole, in_batches);
     }
 
@@ -4005,7 +4018,7 @@ mod tests {
             let scan = scan_unsupported(&redacters, log.as_bytes(), Some(layout), 7)
                 .await
                 .unwrap();
-            assert!(whole_scan.detections.len() > 100);
+            assert!(whole_scan.found.detections.len() > 100);
             assert_eq!(scan.blocked, None);
             assert_same_findings(whole_scan, scan);
         }
@@ -4032,7 +4045,7 @@ mod tests {
                         .await
                         .unwrap();
                     assert_eq!(scan.blocked, Some(RedactionBlocked::NotText), "{context}");
-                    assert!(scan.detections.is_empty(), "{context}");
+                    assert!(scan.found.detections.is_empty(), "{context}");
                 }
 
                 for position in [FIRST_WINDOW_END, 900] {
@@ -4065,7 +4078,7 @@ mod tests {
         let whole = scan_unsupported(&redacters, b"", None, 7).await.unwrap();
         let in_pieces = scan_unsupported(&redacters, b"", layout, 7).await.unwrap();
         assert_eq!(in_pieces.blocked, whole.blocked);
-        assert!(in_pieces.detections.is_empty());
+        assert!(in_pieces.found.detections.is_empty());
     }
 
     /// A stream that panics when polled after it ended, as a bare `unfold` does.
