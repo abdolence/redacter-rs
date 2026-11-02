@@ -156,7 +156,6 @@ where
 }
 
 const BACKOFF_BASE: Duration = Duration::from_millis(500);
-const BACKOFF_CEILING: Duration = Duration::from_secs(30);
 
 /// How many times a call is made when the provider throttles it, the first included.
 pub const THROTTLED_ATTEMPTS: u32 = 5;
@@ -185,11 +184,9 @@ where
 }
 
 /// The pause after the `failures`-th failure in a row: between half and all of 500 ms doubled
-/// for each earlier failure, and never more than 30 s.
+/// for each earlier failure.
 fn backoff_pause(failures: u32) -> Duration {
-    let ceiling = BACKOFF_BASE
-        .saturating_mul(2u32.saturating_pow(failures))
-        .min(BACKOFF_CEILING);
+    let ceiling = BACKOFF_BASE.saturating_mul(2u32.saturating_pow(failures));
     rand::rng().random_range(ceiling / 2..=ceiling)
 }
 

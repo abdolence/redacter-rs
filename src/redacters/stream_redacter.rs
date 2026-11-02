@@ -2951,16 +2951,17 @@ mod tests {
 
         let window = TextPieceLimits::LOCAL.max_request_bytes;
         let rounding = crate::redacters::CUT_ROUNDING_BYTES;
+        let concurrency = TextPieceLimits::LOCAL.concurrent_requests;
         assert_eq!(
             redaction.piece_layout,
-            Some(PieceLayout::new(
-                window - 2 * (2 * context + rounding),
-                2 * context
-            ))
+            Some(
+                PieceLayout::new(window - 2 * (2 * context + rounding), 2 * context)
+                    .reading(concurrency)
+            )
         );
         assert_eq!(
             scan.piece_layout,
-            Some(PieceLayout::new(window - 2 * (context + rounding), context))
+            Some(PieceLayout::new(window - 2 * (context + rounding), context).reading(concurrency))
         );
     }
 
