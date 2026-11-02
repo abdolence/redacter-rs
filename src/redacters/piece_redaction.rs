@@ -26,18 +26,18 @@ const WRITTEN_WINDOWS_IN_FLIGHT: usize = 4;
 
 /// A value one step of the chain found, placed in a text.
 #[derive(Debug, Clone)]
-struct StepFinding {
-    range: Range<usize>,
+pub(crate) struct StepFinding {
+    pub(crate) range: Range<usize>,
     /// The place of the redacter in the chain.
-    step: usize,
-    mask: TextMask,
-    label: DetectionLabel,
-    score: Option<Score>,
+    pub(crate) step: usize,
+    pub(crate) mask: TextMask,
+    pub(crate) label: DetectionLabel,
+    pub(crate) score: Option<Score>,
 }
 
 /// Findings that overlap, as one range to mask.
 #[derive(Debug, PartialEq, Eq)]
-struct MergedRange {
+pub(crate) struct MergedRange {
     range: Range<usize>,
     /// The finding whose mask the range takes: the latest step among the findings that make it,
     /// and among those the one that starts first and reaches furthest.
@@ -46,7 +46,7 @@ struct MergedRange {
 
 /// The findings united where they overlap, in order of position. Findings that only touch stay
 /// apart, as a mask stands for one value.
-fn merge(findings: &[StepFinding]) -> Vec<MergedRange> {
+pub(crate) fn merge(findings: &[StepFinding]) -> Vec<MergedRange> {
     let mut order: Vec<usize> = Vec::with_capacity(findings.len());
     order.extend((0..findings.len()).filter(|&index| !findings[index].range.is_empty()));
     order.sort_by(|&a, &b| {
@@ -223,7 +223,7 @@ impl<'a> PieceRedaction<'a> {
 /// `text`, which starts at `base` in the file, with `ranges` masked as the findings they were
 /// merged from say, and the changes that made it. The ranges are in the file and in order, and
 /// the text from the end of the last one is kept.
-fn mask_ranges(
+pub(crate) fn mask_ranges(
     text: &str,
     base: usize,
     ranges: &[MergedRange],
