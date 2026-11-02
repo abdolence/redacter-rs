@@ -265,10 +265,15 @@ impl<'a> Redacter for AwsBedrockGuardrailsRedacter<'a> {
     }
 
     fn text_piece_limits(&self) -> Option<TextPieceLimits> {
-        Some(TextPieceLimits::cloud(
-            APPLY_GUARDRAIL_MAX_TEXT_BYTES,
-            APPLY_GUARDRAIL_CONTEXT_BYTES,
-        ))
+        // A request of 100 text units against a sensitive information filter quota of 75 text
+        // units per second in some Regions.
+        Some(
+            TextPieceLimits::cloud(
+                APPLY_GUARDRAIL_MAX_TEXT_BYTES,
+                APPLY_GUARDRAIL_CONTEXT_BYTES,
+            )
+            .one_request_at_a_time(),
+        )
     }
 }
 

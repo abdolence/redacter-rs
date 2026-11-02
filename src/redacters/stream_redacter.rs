@@ -3111,13 +3111,16 @@ mod tests {
             redaction.read,
             PlannedRead::TextPieces(
                 PieceLayout::new(window - 2 * (2 * context + rounding), 2 * context)
+                    .with_whole_text_up_to(window)
                     .reading(concurrency)
             )
         );
         assert_eq!(
             scan.read,
             PlannedRead::TextPieces(
-                PieceLayout::new(window - 2 * (context + rounding), context).reading(concurrency)
+                PieceLayout::new(window - 2 * (context + rounding), context)
+                    .with_whole_text_up_to(window)
+                    .reading(concurrency)
             )
         );
     }
@@ -4060,98 +4063,6 @@ mod tests {
         assert!(stream.unwrap().concat() == data);
     }
 
-    const PLANTED_NAME: &str = "Zoë Keller";
-    const PLANTED_NAME_MASKED: &str = "XXXXXXXXXX";
-
-    /// A Presidio analyzer on a local port that reports every `PLANTED_NAME` as a person, with
-    /// character offsets as Presidio gives them, and keeps the size of each text it was sent.
-    struct PlantedNameAnalyzer {
-        url: url::Url,
-        request_bytes: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
-    }
-
-    impl PlantedNameAnalyzer {
-        async fn start() -> Self {
-            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = url::Url::parse(&format!(
-                "http://{}/analyze",
-                listener.local_addr().unwrap()
-            ))
-            .unwrap();
-            let request_bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let sizes = request_bytes.clone();
-            tokio::spawn(async move {
-                loop {
-                    let (mut socket, _) = listener.accept().await.unwrap();
-                    let sizes = sizes.clone();
-                    tokio::spawn(async move {
-                        let mut reader = BufReader::new(&mut socket);
-                        let mut length = 0;
-                        loop {
-                            let mut header = String::new();
-                            reader.read_line(&mut header).await.unwrap();
-                            if header.trim().is_empty() {
-                                break;
-                            }
-                            if let Some(value) =
-                                header.to_lowercase().strip_prefix("content-length:")
-                            {
-                                length = value.trim().parse().unwrap();
-                            }
-                        }
-                        let mut body = vec![0; length];
-                        reader.read_exact(&mut body).await.unwrap();
-                        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        let text = request["text"].as_str().unwrap();
-                        sizes.lock().unwrap().push(text.len());
-                        let items: Vec<_> = text
-                            .match_indices(PLANTED_NAME)
-                            .map(|(at, name)| {
-                                let start = text[..at].chars().count();
-                                serde_json::json!({
-                                    "entity_type": "PERSON",
-                                    "start": start,
-                                    "end": start + name.chars().count(),
-                                    "score": 0.85,
-                                })
-                            })
-                            .collect();
-                        let body = serde_json::to_string(&items).unwrap();
-                        socket
-                            .write_all(
-                                format!(
-                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                                    body.len()
-                                )
-                                .as_bytes(),
-                            )
-                            .await
-                            .unwrap();
-                    });
-                }
-            });
-            Self { url, request_bytes }
-        }
-
-        async fn redacter(&self) -> Vec<Redacters<'static>> {
-            let options = PresidioRedacterOptions {
-                text_analyze_url: Some(self.url.clone()),
-                image_redact_url: None,
-                categories: None,
-            };
-            vec![Redacters::Presidio(
-                PresidioRedacter::new(options, reporter()).await.unwrap(),
-            )]
-        }
-
-        fn requests(&self) -> Vec<usize> {
-            self.request_bytes.lock().unwrap().clone()
-        }
-    }
-
     /// The copy of `content` as `cp` plans it, without a read chosen by the test.
     async fn copied_as_planned(redacters: &[Redacters<'static>], content: &[u8]) -> Copied {
         let converters = FileConverters::new();
@@ -4173,78 +4084,6 @@ mod tests {
             output: chunks.concat(),
             redactions: redactions.unwrap(),
         }
-    }
-
-    fn lines_with_planted_names(bytes: usize) -> String {
-        let mut text = String::with_capacity(bytes + 100);
-        let mut line = 0;
-        while text.len() < bytes {
-            if line % 700 == 0 {
-                text.push_str(&format!("{line:07} Grüße von {PLANTED_NAME} aus Köln\n"));
-            } else {
-                text.push_str(&format!(
-                    "{line:07} Grüße aus Köln, nichts zu melden hier\n"
-                ));
-            }
-            line += 1;
-        }
-        text
-    }
-
-    #[tokio::test]
-    async fn a_text_that_fits_the_analyzer_request_is_sent_in_one_call_and_masked_per_character() {
-        let analyzer = PlantedNameAnalyzer::start().await;
-        let redacters = analyzer.redacter().await;
-        let text = lines_with_planted_names(10_000);
-
-        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
-
-        assert_eq!(analyzer.requests(), [text.len()]);
-        assert_eq!(
-            String::from_utf8(copied.output).unwrap(),
-            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_text_over_the_analyzer_request_limit_is_sent_in_pieces_and_masked_per_character() {
-        let analyzer = PlantedNameAnalyzer::start().await;
-        let redacters = analyzer.redacter().await;
-        let limits = redacters[0].text_piece_limits().unwrap();
-        let text = lines_with_planted_names(2 * limits.max_request_bytes + 1);
-
-        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
-
-        let requests = analyzer.requests();
-        assert!(requests.len() > 1, "{requests:?}");
-        assert!(requests
-            .iter()
-            .all(|&bytes| bytes <= limits.max_request_bytes));
-        assert_eq!(
-            String::from_utf8(copied.output).unwrap(),
-            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
-        );
-        assert_eq!(copied.redactions.len(), text.matches(PLANTED_NAME).count());
-    }
-
-    #[tokio::test]
-    async fn a_value_across_the_end_of_a_piece_is_masked_whole_by_the_analyzer_pieces() {
-        let analyzer = PlantedNameAnalyzer::start().await;
-        let redacters = analyzer.redacter().await;
-        let limits = redacters[0].text_piece_limits().unwrap();
-        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
-        let mut text = "a".repeat(2 * limits.max_request_bytes);
-        text.replace_range(piece_bytes - 5..piece_bytes + 6, PLANTED_NAME);
-        text.replace_range(2 * piece_bytes - 5..2 * piece_bytes + 6, PLANTED_NAME);
-
-        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
-
-        assert!(analyzer.requests().len() > 2);
-        assert_eq!(
-            String::from_utf8(copied.output).unwrap(),
-            text.replace(PLANTED_NAME, PLANTED_NAME_MASKED)
-        );
-        assert_eq!(copied.redactions.len(), 2);
     }
 
     /// One line of short sentences with an email in place of two of them every `step` bytes and

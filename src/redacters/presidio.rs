@@ -14,9 +14,8 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 
 /// The most text sent in one analyze request. spaCy refuses a text of over 1,000,000 characters
-/// (`nlp.max_length`), and a byte is at least a character. Half of that keeps the request
-/// short enough for the analyzer's memory, which spaCy sizes at about 1 GB per 100,000
-/// characters.
+/// (`nlp.max_length`), and a byte is at least a character, so a request of this many bytes is
+/// always within it.
 const ANALYZE_MAX_TEXT_BYTES: usize = 512 * 1024;
 
 /// The text the analyzer is given on each side of a piece of a text, to find what it would find
@@ -378,10 +377,11 @@ impl<'a> Redacter for PresidioRedacter<'a> {
     }
 
     fn text_piece_limits(&self) -> Option<TextPieceLimits> {
-        Some(TextPieceLimits::cloud(
-            ANALYZE_MAX_TEXT_BYTES,
-            ANALYZE_CONTEXT_BYTES,
-        ))
+        // The container of the `presidio-analyzer` image answers one request at a time.
+        Some(
+            TextPieceLimits::cloud(ANALYZE_MAX_TEXT_BYTES, ANALYZE_CONTEXT_BYTES)
+                .one_request_at_a_time(),
+        )
     }
 }
 

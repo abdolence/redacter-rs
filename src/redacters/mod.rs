@@ -913,6 +913,14 @@ impl TextPieceLimits {
             concurrent_requests: NonZeroUsize::new(4).expect("four is not zero"),
         }
     }
+
+    /// The same limits for a provider that takes one request at a time.
+    pub const fn one_request_at_a_time(self) -> Self {
+        Self {
+            concurrent_requests: NonZeroUsize::MIN,
+            ..self
+        }
+    }
 }
 
 pub trait Redacter {
@@ -1044,7 +1052,7 @@ impl<'a> Redacter for Redacters<'a> {
         }
         match (&input.content, self.text_piece_limits()) {
             (RedacterDataItemContent::Value(text), Some(limits)) => {
-                Detections::of_text_in_parts(text, limits.context_bytes, async |part| {
+                Detections::of_text_in_parts(text, limits, async |part| {
                     let part = RedacterDataItem {
                         file_ref: input.file_ref.clone(),
                         content: RedacterDataItemContent::Value(part.to_string()),

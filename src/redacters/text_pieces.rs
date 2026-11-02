@@ -52,6 +52,9 @@ impl TextPosition {
 pub(crate) struct PieceLayout {
     piece_bytes: usize,
     context_bytes: usize,
+    /// The longest text that is read as one window: what one request takes, which is more than
+    /// a piece with its context.
+    whole_text_bytes: usize,
     /// How many windows are read at a time.
     concurrency: NonZeroUsize,
 }
@@ -63,7 +66,16 @@ impl PieceLayout {
         Self {
             piece_bytes,
             context_bytes,
+            whole_text_bytes: piece_bytes.saturating_add(context_bytes),
             concurrency: NonZeroUsize::MIN,
+        }
+    }
+
+    /// The same layout where a text of up to `bytes` is one window.
+    pub fn with_whole_text_up_to(self, bytes: usize) -> Self {
+        Self {
+            whole_text_bytes: bytes,
+            ..self
         }
     }
 
@@ -95,7 +107,9 @@ impl PieceLayout {
                 context_bytes,
             })?;
         Ok(Some(
-            Self::new(piece_bytes, context_bytes).reading(concurrency),
+            Self::new(piece_bytes, context_bytes)
+                .with_whole_text_up_to(window_bytes)
+                .reading(concurrency),
         ))
     }
 
@@ -128,7 +142,9 @@ impl PieceLayout {
             return Ok(None);
         };
         let mut piece_bytes = usize::MAX;
+        let mut window_bytes = usize::MAX;
         for (limit, reach) in limits.iter().zip(reaches) {
+            window_bytes = window_bytes.min(limit.max_request_bytes);
             piece_bytes = limit
                 .max_request_bytes
                 .checked_sub(2 * (reach + CUT_ROUNDING_BYTES))
@@ -140,7 +156,9 @@ impl PieceLayout {
                 .min(piece_bytes);
         }
         Ok(Some(
-            Self::new(piece_bytes, first_reach).reading(concurrency),
+            Self::new(piece_bytes, first_reach)
+                .with_whole_text_up_to(window_bytes)
+                .reading(concurrency),
         ))
     }
 }
@@ -335,7 +353,12 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
     /// ends at the last line start it can, and inside a line when none is in reach.
     async fn piece_end(&mut self, piece_start: usize) -> AppResult<(usize, bool)> {
         let target = piece_start + self.layout.piece_bytes;
-        if self.is_end_of_text(target).await? {
+        let whole_text_end = if piece_start == 0 {
+            target.max(self.layout.whole_text_bytes)
+        } else {
+            target
+        };
+        if self.is_end_of_text(whole_text_end).await? {
             return Ok((self.buffer_end(), true));
         }
         let from = piece_start - self.buffer_start.offset;
@@ -539,6 +562,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_text_of_the_request_limit_is_one_window_and_a_byte_more_is_cut() {
+        let limits = [TextPieceLimits::cloud(1000, 100)];
+        let layout = PieceLayout::fitting(&limits).unwrap().unwrap();
+        let fits = "abcdefghi\n".repeat(100);
+        let over = format!("{fits}x");
+
+        let one = windows(fits.as_bytes(), 64, layout).await;
+        let several = windows(over.as_bytes(), 64, layout).await;
+
+        assert_eq!(one.len(), 1);
+        assert!(one[0].is_whole_text());
+        assert!(several.len() > 1);
+        assert!(several.iter().all(|window| window.text.len() <= 1000));
+    }
+
+    #[tokio::test]
     async fn pieces_tile_the_text_whatever_the_chunks_cuts_and_line_ends() {
         let texts = [
             "alpha\nbeta\ngamma\ndelta\nepsilon",
@@ -672,6 +711,7 @@ mod tests {
         assert_eq!(
             layout,
             PieceLayout::new(500 - 2 * (50 + 3), 150)
+                .with_whole_text_up_to(500)
                 .reading(TextPieceLimits::LOCAL.concurrent_requests)
         );
     }
