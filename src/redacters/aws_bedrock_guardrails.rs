@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// The placeholders a guardrail writes in its anonymised text are the labels of the values it
-    /// reports, regex filters included when the guardrail has any.
+    /// reports, for the PII types the guardrail is set to anonymise.
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-aws"), ignore)]
     async fn the_label_mask_of_the_detections_is_the_text_the_guardrail_anonymises() {

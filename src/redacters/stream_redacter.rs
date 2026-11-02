@@ -442,7 +442,8 @@ impl<'a> StreamRedacter<'a> {
                 .map(|redacter| redacter.text_piece_limits())
                 .collect();
             // Contexts that fill a request leave no room for a piece. The text is then read
-            // whole, as when a redacter has no limits, and fails at the provider's limit.
+            // whole, as when a redacter has no limits. `cp` then fails at the provider's limit,
+            // while `scan` sends it in parts that fit a request.
             let layout = limits.and_then(|limits| match piece_layout(&limits) {
                 Ok(layout) => layout,
                 Err(error) => {
@@ -4147,7 +4148,8 @@ mod tests {
                 .unwrap(),
         )];
         let limits = redacters[0].text_piece_limits().unwrap();
-        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
         let (text, emails) =
             sentences_with_planted_emails(3 * limits.max_request_bytes, 7001, piece_bytes);
 
@@ -4157,6 +4159,36 @@ mod tests {
             String::from_utf8(copied.output).unwrap(),
             masked_values(&text, &emails, per_character)
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-aws"), ignore)]
+    async fn guardrails_masks_every_planted_email_of_a_text_over_its_request_limit() {
+        let region = std::env::var("TEST_AWS_REGION").expect("TEST_AWS_REGION required");
+        let guardrail_id = std::env::var("TEST_AWS_BEDROCK_GUARDRAIL_ID")
+            .expect("TEST_AWS_BEDROCK_GUARDRAIL_ID required");
+        let options = crate::redacters::AwsBedrockGuardrailsRedacterOptions {
+            region: Some(aws_config::Region::new(region)),
+            guardrail_id: guardrail_id.into(),
+            guardrail_version: "DRAFT".to_string().into(),
+        };
+        let redacters = vec![Redacters::AwsBedrockGuardrails(
+            crate::redacters::AwsBedrockGuardrailsRedacter::new(options, reporter())
+                .await
+                .unwrap(),
+        )];
+        let limits = redacters[0].text_piece_limits().unwrap();
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
+        let (text, emails) =
+            sentences_with_planted_emails(3 * limits.max_request_bytes, 7001, piece_bytes);
+
+        let copied = copied_as_planned(&redacters, text.as_bytes()).await;
+
+        let output = String::from_utf8(copied.output).unwrap();
+        for email in &emails {
+            assert!(!output.contains(email), "{email} is left in the output");
+        }
     }
 
     #[tokio::test]
@@ -4177,7 +4209,8 @@ mod tests {
             PresidioRedacter::new(options, reporter()).await.unwrap(),
         )];
         let limits = redacters[0].text_piece_limits().unwrap();
-        let piece_bytes = limits.max_request_bytes - 2 * (limits.context_bytes + 3);
+        let piece_bytes = limits.max_request_bytes
+            - 2 * (limits.context_bytes + crate::redacters::CUT_ROUNDING_BYTES);
         let (text, emails) = sentences_with_planted_emails(1_300_000, 20011, piece_bytes);
 
         let copied = copied_as_planned(&redacters, text.as_bytes()).await;

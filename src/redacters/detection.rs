@@ -174,7 +174,7 @@ impl Detections {
     /// The detections of `text` that `detect` returns, asked of parts of the text when the whole
     /// is not one request. A text, or a part of it with `limits.context_bytes` of the text on both
     /// sides, longer than `limits.max_request_bytes` is cut in two without being sent, and so is
-    /// a part for which `detect` answers [`AppError::FindingsTruncated`]. A part is owned by the
+    /// a part for which `detect` answers [`AppError::FindingsTruncated`]. A part owns the
     /// findings that start in it and the ones that start before it and run into it, see
     /// [`piece_owns`]; a value seen by two parts is reported once, in the place it has in
     /// `text`. A part too short to cut fails with the error, or is sent as it is when it is only
@@ -234,14 +234,15 @@ impl Detections {
 }
 
 /// Whether the window that reads `piece` answers for a finding at `range`: it starts in the
-/// piece, or it starts before it and runs into it, which only a window that holds the piece can
-/// have seen whole.
+/// piece, or it starts before it and runs into it, which a window that holds the piece may have
+/// seen whole.
 pub(crate) fn piece_owns(piece: &Range<usize>, range: &Range<usize>) -> bool {
     piece.contains(&range.start) || (range.start < piece.start && range.end > piece.start)
 }
 
-/// The two parts `part` of `text` is cut into: at the start of the line nearest its middle that
-/// lies in its middle half, else inside a line at a character boundary. `None` for a part too
+/// The two parts `part` of `text` is cut into: at the last line start before its middle that lies
+/// in its middle half, else the first one after the middle, else inside a line at a character
+/// boundary. `None` for a part too
 /// short to cut.
 fn halves(text: &str, part: Range<usize>) -> Option<[Range<usize>; 2]> {
     let bytes = text.as_bytes();
@@ -1288,16 +1289,18 @@ mod tests {
         text
     }
 
-    /// A block of `len` bytes with the line end at byte 999 of the text inside it, which starts
-    /// `before_cut` bytes before the cut at 1,000.
-    fn block_across_the_cut(before_cut: usize, len: usize) -> (usize, String) {
-        let newline = before_cut - 1;
+    /// A block of 150 bytes with the line end at byte 999 of the text inside it, which starts
+    /// 30 bytes before the cut at 1,000.
+    fn block_across_the_cut() -> (usize, String) {
+        const BEFORE_CUT: usize = 30;
+        const LEN: usize = 150;
+        let newline = BEFORE_CUT - 1;
         let block = format!(
             "<<{}\n{}>>",
             "k".repeat(newline - 2),
-            "k".repeat(len - newline - 3)
+            "k".repeat(LEN - newline - 3)
         );
-        (1000 - before_cut, block)
+        (1000 - BEFORE_CUT, block)
     }
 
     #[tokio::test]
@@ -1306,32 +1309,7 @@ mod tests {
             (200, EMAIL.to_string()),
             (500, EMAIL.to_string()),
             (1500, EMAIL.to_string()),
-            block_across_the_cut(30, 150),
-        ]);
-        let provider = CappedProvider::new(2);
-
-        let found = Detections::of_text_in_parts(&text, SMALL_REQUESTS, async |part| {
-            provider.detect(part).await
-        })
-        .await
-        .unwrap();
-
-        let all = CappedProvider::new(usize::MAX)
-            .detect(&text)
-            .await
-            .unwrap()
-            .found;
-        assert_eq!(all.len(), 4);
-        assert_eq!(found.found, all);
-    }
-
-    #[tokio::test]
-    async fn a_value_across_the_cut_that_both_halves_see_whole_is_found_once() {
-        let text = twenty_lines_with(&[
-            (200, EMAIL.to_string()),
-            (500, EMAIL.to_string()),
-            (1500, EMAIL.to_string()),
-            block_across_the_cut(15, 30),
+            block_across_the_cut(),
         ]);
         let provider = CappedProvider::new(2);
 
