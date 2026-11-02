@@ -138,6 +138,10 @@ pub enum AppError {
         max_request_bytes: usize,
         context_bytes: usize,
     },
+    /// The provider found more in the item than it returns, and says so. A text can be asked
+    /// again in parts.
+    #[error("{redacter} found more in the item than it returns")]
+    FindingsTruncated { redacter: RedacterType },
     #[error("A detection at {start}..{end} is outside the content it was given")]
     DetectionOutsideContent { start: usize, end: usize },
     #[error("Invalid ignore file: {source}")]

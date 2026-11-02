@@ -5,6 +5,7 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Category, Detection, DetectionLabel, DetectionLocation, Detections, RedactSupport, Redacted,
     Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines, TextMask,
+    TextPieceLimits,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -17,6 +18,14 @@ use rvstruct::ValueStruct;
 use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::ops::Range;
+
+/// The most text sent in one DLP request: the request limit of 0.5 MB, less the request's own
+/// fields.
+const INSPECT_MAX_TEXT_BYTES: usize = 480_000;
+
+/// The text DLP is given on each side of a piece of a text, to find what it would find there
+/// in the whole text.
+const INSPECT_CONTEXT_BYTES: usize = 1024;
 
 #[derive(Clone)]
 pub struct GcpDlpRedacter<'a> {
@@ -227,9 +236,8 @@ impl<'a> GcpDlpRedacter<'a> {
         result: dlp::InspectResult,
     ) -> AppResult<Vec<Detection>> {
         if result.findings_truncated {
-            return Err(AppError::SystemError {
-                message: "GCP DLP truncated its findings, so the item has more than it reported"
-                    .to_string(),
+            return Err(AppError::FindingsTruncated {
+                redacter: RedacterType::GcpDlp,
             });
         }
         let text_lines = OnceCell::new();
@@ -449,6 +457,13 @@ impl<'a> Redacter for GcpDlpRedacter<'a> {
 
     fn text_mask(&self) -> TextMask {
         TextMask::Token
+    }
+
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        Some(TextPieceLimits::cloud(
+            INSPECT_MAX_TEXT_BYTES,
+            INSPECT_CONTEXT_BYTES,
+        ))
     }
 }
 
@@ -950,12 +965,14 @@ mod tests {
             findings_truncated: true,
             ..result_of(Vec::new())
         };
-        assert!(GcpDlpRedacter::detections_in(
-            &RedacterDataItemContent::Value("x".to_string()),
-            &[],
-            result
-        )
-        .is_err());
+        assert!(matches!(
+            GcpDlpRedacter::detections_in(
+                &RedacterDataItemContent::Value("x".to_string()),
+                &[],
+                result
+            ),
+            Err(AppError::FindingsTruncated { .. })
+        ));
     }
 
     fn form_image() -> RedacterDataItemContent {

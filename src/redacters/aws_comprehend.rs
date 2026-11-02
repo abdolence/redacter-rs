@@ -4,13 +4,20 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     Categories, Category, CharOffsets, Detection, DetectionLabel, Detections, RedactSupport,
     Redacted, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines,
-    THROTTLED_ATTEMPTS,
+    TextPieceLimits, THROTTLED_ATTEMPTS,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use aws_config::retry::RetryConfig;
 use aws_config::Region;
 use aws_sdk_comprehend::types::{PiiEntity, PiiEntityType};
+
+/// The most text sent in one `DetectPiiEntities` request: its limit of 100 KB of UTF-8.
+const DETECT_PII_MAX_TEXT_BYTES: usize = 100_000;
+
+/// The text Comprehend is given on each side of a piece of a text, to find what it would find
+/// there in the whole text. A request is billed per 100 characters, so context is paid for twice.
+const DETECT_PII_CONTEXT_BYTES: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct AwsComprehendRedacterOptions {
@@ -193,6 +200,13 @@ impl<'a> Redacter for AwsComprehendRedacter<'a> {
 
     fn redacter_type(&self) -> RedacterType {
         RedacterType::AwsComprehend
+    }
+
+    fn text_piece_limits(&self) -> Option<TextPieceLimits> {
+        Some(TextPieceLimits::cloud(
+            DETECT_PII_MAX_TEXT_BYTES,
+            DETECT_PII_CONTEXT_BYTES,
+        ))
     }
 }
 

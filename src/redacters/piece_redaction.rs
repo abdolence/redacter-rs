@@ -9,6 +9,7 @@
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::redacters::detection::piece_owns;
 use crate::redacters::text_changes::{OutputPosition, TextChange, TextChanges};
 use crate::redacters::{
     Categories, ContentStream, Detection, DetectionLabel, DetectionLocation, PieceLayout, Redacter,
@@ -204,10 +205,7 @@ impl<'a> PieceRedaction<'a> {
             }
         }
 
-        found.retain(|finding| {
-            piece.contains(&finding.range.start)
-                || (finding.range.start < piece.start && finding.range.end > piece.start)
-        });
+        found.retain(|finding| piece_owns(&piece, &finding.range));
         for finding in &mut found {
             finding.range = finding.range.start + window_start..finding.range.end + window_start;
         }
