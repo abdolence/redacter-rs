@@ -120,6 +120,8 @@ pub enum AppError {
     },
     #[error("The text is not valid UTF-8 at byte {offset}")]
     TextNotUtf8 { offset: usize },
+    #[error("The text holds a NUL byte at byte {offset}")]
+    TextHasNul { offset: usize },
     #[error(
         "A request of at most {max_request_bytes} bytes has no room for a piece beside \
          {context_bytes} bytes of context on each side"
@@ -147,6 +149,12 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Whether the error says the bytes read as text are not text: not UTF-8, or holding a NUL
+    /// byte.
+    pub fn is_not_text(&self) -> bool {
+        matches!(self, Self::TextNotUtf8 { .. } | Self::TextHasNul { .. })
+    }
+
     /// A redacter was handed content of a type it does not support: `redact_support` said no
     /// and the caller ignored it.
     pub fn unsupported_content() -> Self {
