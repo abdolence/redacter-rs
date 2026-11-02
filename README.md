@@ -591,7 +591,9 @@ or `$` and has no `(?m)` can match at the edge of a piece, and masks more than i
 finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
 
 A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
-redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole.
+redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole. This
+includes `local-ner` and `local-gliner`: a model lays its windows from the start of the text, and in pieces its recall
+and precision on the bench fall outside the spread of the whole read, see `test-fixtures/bench-dlp/README.md`.
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
@@ -1382,7 +1384,7 @@ across lines, such as a private key block, is found wherever a piece ends, and a
 piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
 value longer than 64 KiB that crosses the end of a window can also be reported in part. A line longer than a
 window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are. Other
-redacters and `--unsupported-as-text` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
+redacters, including `local-ner` and `local-gliner`, and `--unsupported-as-text` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
 when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
 locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
