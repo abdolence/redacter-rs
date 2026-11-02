@@ -12,7 +12,7 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    Categories, Detection, RedacterBaseOptions, RedacterOptions, RedacterThrottler, Redacters,
+    CallPacing, Categories, Detection, RedacterBaseOptions, RedacterOptions, Redacters,
     StreamRedacter,
 };
 use crate::reporter::AppReporter;
@@ -24,7 +24,7 @@ use indicatif::*;
 use rvstruct::ValueStruct;
 use serde::Serialize;
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// What `cp` reports. Fields are only ever added, so a consumer of the JSON report can rely
 /// on every one here.
@@ -270,10 +270,10 @@ pub async fn command_copy(
         &styles,
     )?;
 
-    let mut redacter_throttler = redacter_options
+    let call_pacing = redacter_options
         .as_ref()
-        .and_then(|o| o.base_options.limit_dlp_requests.clone())
-        .map(|limit| limit.to_throttling_counter());
+        .and_then(|o| o.base_options.limit_dlp_requests.as_ref())
+        .map(CallPacing::new);
 
     let maybe_redacters = match redacter_options {
         Some(options) => {
@@ -331,7 +331,7 @@ pub async fn command_copy(
                 &options,
                 &maybe_redacters,
                 &file_converters,
-                &mut redacter_throttler,
+                &call_pacing,
                 &styles,
             )
             .await?;
@@ -364,7 +364,7 @@ pub async fn command_copy(
             &options,
             &maybe_redacters,
             &file_converters,
-            &mut redacter_throttler,
+            &call_pacing,
             &styles,
         )
         .await?;
@@ -496,7 +496,7 @@ async fn transfer_and_redact_file<
     options: &CopyCommandOptions,
     redacter: &Option<(RedacterBaseOptions, Vec<Redacters<'a>>)>,
     file_converters: &FileConverters<'a>,
-    redacter_throttler: &mut Option<RedacterThrottler>,
+    call_pacing: &Option<CallPacing>,
     styles: &OutputStyles,
 ) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
@@ -536,16 +536,16 @@ async fn transfer_and_redact_file<
         outcome,
         redactions,
     } = if let Some(ref redacter_with_options) = redacter {
-        redact_upload_file::<SFS, DFS, _>(
-            bar,
-            destination_fs,
-            styles,
-            source_reader,
-            file_ref,
-            options,
-            redacter_with_options,
-            file_converters,
-            redacter_throttler,
+        CallPacing::scoped(
+            call_pacing.as_ref(),
+            redact_upload_file::<SFS, DFS, _>(
+                destination_fs,
+                source_reader,
+                file_ref,
+                options,
+                redacter_with_options,
+                file_converters,
+            ),
         )
         .await?
     } else {
@@ -589,22 +589,18 @@ fn print_file_row(
     ));
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn redact_upload_file<
     'a,
     SFS: FileSystemConnection<'a>,
     DFS: FileSystemConnection<'a>,
     S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
 >(
-    bar: &ProgressBar,
     destination_fs: &mut DFS,
-    styles: &OutputStyles,
     source_reader: S,
     dest_file_ref: &FileSystemRef,
     options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
-    redacter_throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<UploadResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters);
@@ -618,22 +614,6 @@ async fn redact_upload_file<
         .await?;
 
     if !redact_plan.supported_redacters.is_empty() {
-        if let Some(ref mut throttler) = redacter_throttler {
-            *throttler = throttler.update(Instant::now());
-            let delay = throttler.delay();
-            if delay.as_millis() > 0 {
-                bar.println(
-                    styles
-                        .dimmed
-                        .apply_to(format!(
-                            "⧗ Delaying redaction for {} seconds",
-                            throttler.delay().as_secs()
-                        ))
-                        .to_string(),
-                );
-                tokio::time::sleep(*delay).await;
-            }
-        }
         match stream_redacter
             .redact_stream(source_reader, redact_plan, &dest_file_ref_overridden)
             .await

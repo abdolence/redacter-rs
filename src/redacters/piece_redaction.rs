@@ -17,7 +17,7 @@ use crate::redacters::{
 };
 use crate::AppResult;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use std::ops::Range;
 use tokio::sync::mpsc;
 
@@ -365,23 +365,26 @@ impl PendingMasks {
 /// The part of a file the stream hands the upload, and the redactions it lists, once every window
 /// is read. Stops as soon as the upload no longer takes the stream.
 ///
+/// The chain reads several windows at a time, and the file comes out in the order of its windows
+/// whatever the order they are read in.
+///
 /// When a window cannot be redacted, the stream ends with the error, so that the destination does
 /// not keep the part of the file it was given.
 pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
     redaction: PieceRedaction<'_>,
-    mut pieces: TextPieces<S>,
+    pieces: TextPieces<S>,
     first: TextWindow,
     written: mpsc::Sender<AppResult<Bytes>>,
 ) -> AppResult<Vec<(RedacterType, Detection)>> {
     let mut pending = PendingMasks::new(redaction.redacters(), redaction.recording);
     let outcome: AppResult<()> = async {
-        let mut next = Some(first);
-        while let Some(window) = next {
-            let text = pending.take(redaction.find_in_window(window).await?)?;
+        let found = pieces.read_ahead(Some(first), |window| redaction.find_in_window(window));
+        futures::pin_mut!(found);
+        while let Some(window) = found.try_next().await? {
+            let text = pending.take(window)?;
             if !text.is_empty() && written.send(Ok(text)).await.is_err() {
                 return Ok(());
             }
-            next = pieces.next_window().await?;
         }
         Ok(())
     }

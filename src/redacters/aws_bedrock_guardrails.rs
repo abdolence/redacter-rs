@@ -1,3 +1,4 @@
+use aws_config::retry::RetryConfig;
 use aws_config::Region;
 use aws_sdk_bedrockruntime::operation::apply_guardrail::ApplyGuardrailOutput;
 use aws_sdk_bedrockruntime::types::{
@@ -11,7 +12,7 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
     bedrock_error, Category, Detection, DetectionLabel, Detections, RedactSupport, Redacted,
-    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextMask,
+    Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, TextMask, THROTTLED_ATTEMPTS,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -132,7 +133,11 @@ impl<'a> AwsBedrockGuardrailsRedacter<'a> {
         let region_provider =
             aws_config::meta::region::RegionProviderChain::first_try(options.region.clone())
                 .or_default_provider();
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::from_env()
+            .region(region_provider)
+            .retry_config(RetryConfig::standard().with_max_attempts(THROTTLED_ATTEMPTS))
+            .load()
+            .await;
         let client = aws_sdk_bedrockruntime::Client::new(&shared_config);
         Ok(Self {
             client,

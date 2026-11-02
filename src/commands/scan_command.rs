@@ -16,8 +16,7 @@ use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride, IgnoreFileChoice};
 use crate::redacters::{
-    DetectStreamResult, Detection, RedacterOptions, RedacterThrottler, Redacters, Score,
-    StreamRedacter,
+    CallPacing, DetectStreamResult, Detection, RedacterOptions, Redacters, Score, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -25,7 +24,7 @@ use console::Term;
 use futures::Stream;
 use indicatif::{HumanBytes, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_util::bytes;
 
 #[derive(Debug, Clone)]
@@ -76,6 +75,7 @@ struct ScanContext<'s> {
     stream_redacter: &'s StreamRedacter<'s>,
     styles: &'s OutputStyles,
     bar: &'s ProgressBar,
+    call_pacing: Option<CallPacing>,
 }
 
 pub async fn command_scan(
@@ -135,11 +135,11 @@ pub async fn command_scan(
     ))?;
     term.write_line("")?;
 
-    let mut throttler = redacter_options
+    let call_pacing = redacter_options
         .base_options
         .limit_dlp_requests
         .as_ref()
-        .map(|limit| limit.to_throttling_counter());
+        .map(CallPacing::new);
     let mut redacters = Vec::with_capacity(redacter_options.provider_options.len());
     for provider_options in redacter_options.provider_options {
         redacters.push(Redacters::new_redacter(provider_options, &term_reporter, &addons).await?);
@@ -155,6 +155,7 @@ pub async fn command_scan(
         stream_redacter: &stream_redacter,
         styles: &styles,
         bar: &bar,
+        call_pacing,
     };
 
     let mut result = ScanCommandResult {
@@ -183,14 +184,13 @@ pub async fn command_scan(
             result.files_ignored += listing.ignored;
             bar.set_length(listing.files.len() as u64);
             for file in &listing.files {
-                let report =
-                    scan_file(&context, Some(file), &mut source_fs, &mut throttler).await?;
+                let report = scan_file(&context, Some(file), &mut source_fs).await?;
                 result.push(report);
             }
         }
         None => {
             write_lines(term, &bar, &[format_legend(&SCAN_LEGEND, &styles)])?;
-            let report = scan_file(&context, None, &mut source_fs, &mut throttler).await?;
+            let report = scan_file(&context, None, &mut source_fs).await?;
             result.push(report);
         }
     }
@@ -209,7 +209,6 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
     context: &ScanContext<'_>,
     source_file_ref: Option<&FileSystemRef>,
     source_fs: &mut SFS,
-    throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<ScanFileReport> {
     let report = match source_fs.download(source_file_ref).await {
         Ok((base_file_ref, reader)) => {
@@ -225,7 +224,7 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
             };
             match skip_reason {
                 Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
-                None => detect_in_file(context, reader, &file_ref, throttler).await?,
+                None => detect_in_file(context, reader, &file_ref).await?,
             }
         }
         Err(error) => {
@@ -268,7 +267,6 @@ async fn detect_in_file(
     context: &ScanContext<'_>,
     reader: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + Sync + 'static,
     file_ref: &FileSystemRef,
-    throttler: &mut Option<RedacterThrottler>,
 ) -> AppResult<ScanFileReport> {
     let plan = match context
         .stream_redacter
@@ -284,30 +282,14 @@ async fn detect_in_file(
             SkipReason::NotRedacted(plan_blocked_reason(plan.blocked)),
         ));
     }
-    if let Some(throttler) = throttler {
-        *throttler = throttler.update(Instant::now());
-        let delay = *throttler.delay();
-        if !delay.is_zero() {
-            write_lines(
-                context.term,
-                context.bar,
-                &[context
-                    .styles
-                    .dimmed
-                    .apply_to(format!(
-                        "⧗ Delaying detection for {} seconds",
-                        delay.as_secs()
-                    ))
-                    .to_string()],
-            )?;
-            tokio::time::sleep(delay).await;
-        }
-    }
     Ok(
-        match context
-            .stream_redacter
-            .detect_stream(reader, &plan, file_ref)
-            .await
+        match CallPacing::scoped(
+            context.call_pacing.as_ref(),
+            context
+                .stream_redacter
+                .detect_stream(reader, &plan, file_ref),
+        )
+        .await
         {
             Ok(DetectStreamResult {
                 blocked: Some(blocked),

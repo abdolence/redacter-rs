@@ -533,7 +533,7 @@ pub struct RedacterArgs {
 
     #[arg(
         long,
-        help = "Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled"
+        help = "Limit the number of requests to cloud providers, as '10rps' or '100rpm'. Some providers have strict quotas and to avoid errors, the requests are delayed. Every call counts, a retry included, a PDF counts each page and a long text counts each piece. One limit is shared by all the providers of a run, and local redacters are not limited. Default is disabled"
     )]
     pub limit_dlp_requests: Option<DlpRequestLimit>,
 

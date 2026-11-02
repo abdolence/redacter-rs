@@ -10,6 +10,7 @@ use mime::Mime;
 use rvstruct::ValueStruct;
 use std::fmt::Display;
 use std::future::Future;
+use std::num::NonZeroUsize;
 
 mod gcp_dlp;
 pub use gcp_dlp::*;
@@ -90,8 +91,8 @@ pub use stream_redacter::*;
 mod stream_redactions;
 pub(crate) use stream_redactions::StreamRedactions;
 
-mod redacter_throttler;
-pub use redacter_throttler::*;
+mod call_pacing;
+pub use call_pacing::CallPacing;
 
 use crate::args::RedacterType;
 use crate::common_types::{DlpRequestLimit, TextImageCoords};
@@ -644,6 +645,22 @@ impl RedacterProviderOptions {
 }
 
 impl RedacterType {
+    /// Whether the redacter sends the text to a provider over the network, whose quotas bound
+    /// the calls it makes.
+    pub fn is_remote(self) -> bool {
+        matches!(
+            self,
+            RedacterType::GcpDlp
+                | RedacterType::AwsComprehend
+                | RedacterType::Presidio
+                | RedacterType::GeminiLlm
+                | RedacterType::OpenAiLlm
+                | RedacterType::GcpVertexAi
+                | RedacterType::AwsBedrock
+                | RedacterType::AwsBedrockGuardrails
+        )
+    }
+
     /// Whether the chosen categories narrow the redacter's own request, so that its redaction
     /// leaves the other categories alone: the local redacters and GCP DLP. The others redact
     /// everything they detect.
@@ -847,6 +864,9 @@ pub struct TextPieceLimits {
     /// would find there in the whole text. A value no longer than twice this is found whichever
     /// way a cut falls through it.
     pub context_bytes: usize,
+    /// How many `detect` calls the redacter takes at once: windows of a file are read this many
+    /// at a time.
+    pub concurrent_requests: NonZeroUsize,
 }
 
 impl TextPieceLimits {
@@ -858,6 +878,7 @@ impl TextPieceLimits {
     pub const LOCAL: Self = Self {
         max_request_bytes: 4 * 1024 * 1024,
         context_bytes: 64 * 1024,
+        concurrent_requests: NonZeroUsize::new(2).expect("two is not zero"),
     };
 }
 
@@ -891,14 +912,8 @@ pub trait Redacter {
     }
 }
 
-impl<'a> Redacter for Redacters<'a> {
-    // Text with nothing in it never reaches the redacter, in `redact` or in `detect`: a model
-    // has nothing to answer for it and would make something up (written to the file by
-    // `redact`), and the DLP services reject empty content as an invalid request.
-    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        if input.is_blank_text() {
-            return Ok(Redacted::located(input, Vec::new()));
-        }
+impl<'a> Redacters<'a> {
+    async fn redact_with_provider(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match self {
             Redacters::GcpDlp(redacter) => redacter.redact(input).await,
             Redacters::AwsComprehend(redacter) => redacter.redact(input).await,
@@ -916,6 +931,45 @@ impl<'a> Redacter for Redacters<'a> {
             #[cfg(feature = "local-credential-ml")]
             Redacters::LocalCredentialMl(redacter) => redacter.redact(input).await,
         }
+    }
+
+    async fn detect_with_provider(&self, input: &RedacterDataItem) -> AppResult<Detections> {
+        match self {
+            Redacters::GcpDlp(redacter) => redacter.detect(input).await,
+            Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
+            Redacters::Presidio(redacter) => redacter.detect(input).await,
+            Redacters::GeminiLlm(redacter) => redacter.detect(input).await,
+            Redacters::OpenAiLlm(redacter) => redacter.detect(input).await,
+            Redacters::GcpVertexAi(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrock(redacter) => redacter.detect(input).await,
+            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect(input).await,
+            Redacters::LocalRules(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-ner")]
+            Redacters::LocalNer(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-gliner")]
+            Redacters::LocalGliner(redacter) => redacter.detect(input).await,
+            #[cfg(feature = "local-credential-ml")]
+            Redacters::LocalCredentialMl(redacter) => redacter.detect(input).await,
+        }
+    }
+}
+
+impl<'a> Redacter for Redacters<'a> {
+    // Text with nothing in it never reaches the redacter, in `redact` or in `detect`: a model
+    // has nothing to answer for it and would make something up (written to the file by
+    // `redact`), and the DLP services reject empty content as an invalid request.
+    async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
+        if input.is_blank_text() {
+            return Ok(Redacted::located(input, Vec::new()));
+        }
+        if !self.redacter_type().is_remote() {
+            return self.redact_with_provider(input).await;
+        }
+        retrying_throttled(|| async {
+            CallPacing::wait_for_turn().await;
+            self.redact_with_provider(input.clone()).await
+        })
+        .await
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
@@ -942,23 +996,14 @@ impl<'a> Redacter for Redacters<'a> {
         if input.is_blank_text() {
             return Ok(Detections::default());
         }
-        match self {
-            Redacters::GcpDlp(redacter) => redacter.detect(input).await,
-            Redacters::AwsComprehend(redacter) => redacter.detect(input).await,
-            Redacters::Presidio(redacter) => redacter.detect(input).await,
-            Redacters::GeminiLlm(redacter) => redacter.detect(input).await,
-            Redacters::OpenAiLlm(redacter) => redacter.detect(input).await,
-            Redacters::GcpVertexAi(redacter) => redacter.detect(input).await,
-            Redacters::AwsBedrock(redacter) => redacter.detect(input).await,
-            Redacters::AwsBedrockGuardrails(redacter) => redacter.detect(input).await,
-            Redacters::LocalRules(redacter) => redacter.detect(input).await,
-            #[cfg(feature = "local-ner")]
-            Redacters::LocalNer(redacter) => redacter.detect(input).await,
-            #[cfg(feature = "local-gliner")]
-            Redacters::LocalGliner(redacter) => redacter.detect(input).await,
-            #[cfg(feature = "local-credential-ml")]
-            Redacters::LocalCredentialMl(redacter) => redacter.detect(input).await,
+        if !self.redacter_type().is_remote() {
+            return self.detect_with_provider(input).await;
         }
+        retrying_throttled(|| async {
+            CallPacing::wait_for_turn().await;
+            self.detect_with_provider(input).await
+        })
+        .await
     }
 
     async fn detect_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {

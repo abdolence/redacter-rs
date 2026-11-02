@@ -48,15 +48,6 @@ impl PresidioAnalyzedItem {
 }
 
 impl<'a> PresidioRedacter<'a> {
-    /// The error of a rejected request: the status only. The response body can quote the
-    /// scanned text, and both the error and the log reach the terminal and the scan report.
-    fn request_failure(operation: &str, status: reqwest::StatusCode) -> AppError {
-        tracing::debug!(%status, operation, "Presidio rejected the request");
-        AppError::SystemError {
-            message: format!("Failed to {operation}. HTTP status: {status}."),
-        }
-    }
-
     /// The entities of the supported-entities list of Presidio, by what they hold.
     const ENTITY_CATEGORIES: &'static [(&'static str, Category)] = &[
         ("PERSON", Category::Person),
@@ -211,7 +202,10 @@ impl<'a> PresidioRedacter<'a> {
                 .iter()
                 .all(|v| *v != mime::APPLICATION_JSON.as_ref())
         {
-            return Err(Self::request_failure("analyze text", response.status()));
+            return Err(AppError::request_rejected(
+                "analyze text",
+                response.status(),
+            ));
         }
         Ok(response.json().await?)
     }
@@ -291,7 +285,10 @@ impl<'a> PresidioRedacter<'a> {
                     .send()
                     .await?;
                 if !response.status().is_success() {
-                    return Err(Self::request_failure("redact image", response.status()));
+                    return Err(AppError::request_rejected(
+                        "redact image",
+                        response.status(),
+                    ));
                 }
                 let redacted_image_bytes = response.bytes().await?;
                 Ok(Redacted::unlocated(RedacterDataItem {
