@@ -601,9 +601,12 @@ the redactions are kept in memory until it is written.
 
 `aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
 request of the provider, where it fails otherwise. A text that fits in one request is sent as it is and redacted by the
-provider as before. A longer text is cut into pieces that fill a request, read with 1 KiB of text on each side, with up
-to four requests in flight. The provider only finds the values here, and each is masked as the provider masks it: one `X`
-for each character for `aws-comprehend` and `presidio`, `[REDACTED]` for `gcp-dlp`, and the type or the name of the regex
+provider as before. A longer text is cut into pieces that fill a request, read with 1 KiB of text on each side. Four
+requests are in flight at a time for `aws-comprehend` and `gcp-dlp`, and one for `presidio` and `aws-bedrock-guardrails`.
+With a local redacter in the chain, at most two requests are in flight. A cloud redacter before the local one, as in
+`-d gcp-dlp -d local-rules`, is sent the 64 KiB of context of the local redacter on each side of a piece, which the
+provider bills as well. With the local redacter first, as in `-d local-rules -d gcp-dlp`, the provider is sent 1 KiB.
+The provider only finds the values here, and each is masked as the provider masks it: one `X` for each character for `aws-comprehend` and `presidio`, `[REDACTED]` for `gcp-dlp`, and the type or the name of the regex
 in braces, such as `{NAME}`, for `aws-bedrock-guardrails`. The rest of the text is copied as it is, and a value of up to
 2 KiB across the end of a piece is masked whole. A provider reads a piece without the rest of the text, so it can find
 other values in it than in a whole text. A request of `gcp-dlp` that reaches the limit of 3000 findings is sent again as
@@ -612,14 +615,16 @@ its two halves. Each request holds at most:
 | Redacter | Request | Limit it follows |
 |---|---|---|
 | `aws-comprehend` | 100 000 bytes | The 100 KB document of `DetectPiiEntities` |
-| `presidio` | 512 KiB | Half of the 1 000 000 characters that spaCy accepts in `nlp.max_length`, which the analyzer refuses above |
+| `presidio` | 512 KiB | The 1 000 000 characters that spaCy accepts in `nlp.max_length`, which the analyzer refuses above; a byte is at least a character |
 | `gcp-dlp` | 480 000 bytes | The 0.5 MB request, less the fields around the text |
 | `aws-bedrock-guardrails` | 100 000 bytes | 106 text units of 1000 characters, the least a Region takes in a request for the sensitive information policy |
 
 The 64 KiB context of `local-rules` and `local-credential-ml` does not fit in a request of `aws-comprehend` or
 `aws-bedrock-guardrails`. With one of them, `cp` reads a text in pieces only when the local redacter comes first in the
-chain, and reads it whole otherwise; `scan` reads it whole. The container of the `presidio-analyzer` image answers one
-request at a time, so its pieces are read one after another.
+chain, and reads it whole otherwise, so a text over the request limit of the provider then fails; `scan` reads it whole.
+The container of the `presidio-analyzer` image answers one request at a time, and `aws-bedrock-guardrails` is limited in
+some Regions to 75 text units per second, against the 100 text units of a full request, so the pieces of both are read
+one after another.
 
 A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
 `local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
