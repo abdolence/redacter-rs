@@ -584,9 +584,7 @@ JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with 64 KiB of text on
 each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
 masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
 longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
-left, so the first reads the contexts of all of them. A line longer than a window is cut inside. A CSV file of more than
-about 4 MiB is redacted in batches of rows when every selected redacter is `local-rules`, `local-credential-ml`,
-`local-ner` or `local-gliner`, with the output of a whole read and every redaction located in its cell.
+left, so the first reads the contexts of all of them. A line longer than a window is cut inside.
 
 The output is the same as when the file is read whole, with two exceptions. A rule of your own that is anchored with `^`
 or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
@@ -598,6 +596,13 @@ redaction of a large file is located, in the report too. Other redacters and `--
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
 the redactions are kept in memory until it is written.
+
+A CSV file of more than about 4 MiB is redacted in batches of rows when every selected redacter is `local-rules`,
+`local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
+A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
+The output is the same as when the file is read whole. A batch is compared before and after as a table of its own, so the
+16 MiB limit above applies to a batch and not to the file, and every redaction is located in its cell. Other redacters
+read the file whole.
 
 A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is
 not written to a local destination and is left out of a zip archive, see below.
