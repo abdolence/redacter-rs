@@ -296,7 +296,7 @@ Options:
           Open AI model name for native image editing. Default is 'gpt-image-2'
 
       --limit-dlp-requests <LIMIT_DLP_REQUESTS>
-          Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled
+          Limit the number of requests to cloud providers, as '10rps' or '100rpm'. Some providers have strict quotas and to avoid errors, the requests are delayed. Every call counts, a retry included, a PDF counts each page and a long text counts each piece. One limit is shared by all the providers of a run, and local redacters are not limited. Default is disabled
 
       --local-rules <LOCAL_RULES>
           Rule groups enabled for the local-rules redacter, comma separated. Default is every group
