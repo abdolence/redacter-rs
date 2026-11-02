@@ -386,18 +386,24 @@ pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
         Ok(())
     }
     .await;
-    match outcome {
-        Ok(()) => Ok(pending.into_redactions()),
-        Err(error) => {
-            // The receiver may be gone already, and then there is nobody to tell.
-            let _ = written
-                .send(Err(AppError::SystemError {
-                    message: error.to_string(),
-                }))
-                .await;
-            Err(error)
-        }
+    end_with_error(outcome.map(|()| pending.into_redactions()), &written).await
+}
+
+/// Passes `outcome` on. A failure first ends the stream behind `written` with the error, so that
+/// the destination does not keep the part of the file it was given.
+pub(crate) async fn end_with_error<T>(
+    outcome: AppResult<T>,
+    written: &mpsc::Sender<AppResult<Bytes>>,
+) -> AppResult<T> {
+    if let Err(error) = &outcome {
+        // The receiver may be gone already, and then there is nobody to tell.
+        let _ = written
+            .send(Err(AppError::SystemError {
+                message: error.to_string(),
+            }))
+            .await;
     }
+    outcome
 }
 
 /// The channel the redacted windows go through, and the stream of what comes out of it.
