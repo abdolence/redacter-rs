@@ -428,13 +428,12 @@ impl<'a> StreamRedacter<'a> {
             }
         }
 
-        // Sampling cuts the text to a prefix, and a file read as text only on its content is not
-        // known to be text before it is all read.
-        let reads_pieces = file_ref
-            .media_type
-            .as_ref()
-            .is_some_and(Redacters::is_mime_text)
-            && !stream_redact_plan.read_unsupported_as_text
+        // Sampling cuts the text to a prefix, so a sampled file is read whole.
+        let reads_pieces = (stream_redact_plan.read_unsupported_as_text
+            || file_ref
+                .media_type
+                .as_ref()
+                .is_some_and(Redacters::is_mime_text))
             && self.redacter_base_options.sampling_size.is_none();
         if reads_pieces {
             let limits: Option<Vec<TextPieceLimits>> = stream_redact_plan
@@ -510,17 +509,23 @@ impl<'a> StreamRedacter<'a> {
                 Ok(first.into_item(file_ref))
             }
             PlannedRead::TextPieces(layout) => {
-                let mut pieces = TextPieces::new(input, layout);
-                let first = pieces
-                    .next_window()
-                    .await?
-                    .ok_or_else(|| AppError::SystemError {
-                        message: "A text has no first window".to_string(),
-                    })?;
-                if !first.is_whole_text() {
-                    return self.redact_text_in_pieces(pieces, first, redact_plan, file_ref);
+                let unsupported = redact_plan.read_unsupported_as_text;
+                let mut pieces = Self::text_pieces(input, layout, unsupported);
+                match pieces.next_window().await {
+                    Ok(Some(first)) if first.is_whole_text() => {
+                        Ok(self.text_redact_item(first.text, file_ref))
+                    }
+                    Ok(Some(first)) => {
+                        return self.redact_text_in_pieces(pieces, first, redact_plan, file_ref);
+                    }
+                    Ok(None) => {
+                        return Err(AppError::SystemError {
+                            message: "A text has no first window".to_string(),
+                        });
+                    }
+                    Err(error) if unsupported && error.is_not_text() => Err(pieces.into_unread()?),
+                    Err(error) => return Err(error),
                 }
-                Ok(self.text_redact_item(first.text, file_ref))
             }
             PlannedRead::Whole => {
                 self.stream_to_redact_item(
@@ -759,7 +764,16 @@ impl<'a> StreamRedacter<'a> {
         let categories = self.redacter_base_options.categories.as_ref();
         match plan.read {
             PlannedRead::TextPieces(layout) => {
-                return Self::detect_text(input, layout, redacters, categories, file_ref).await;
+                let unsupported = plan.read_unsupported_as_text;
+                return Self::detect_text(
+                    input,
+                    layout,
+                    unsupported,
+                    redacters,
+                    categories,
+                    file_ref,
+                )
+                .await;
             }
             PlannedRead::TableBatches { batch_bytes } => {
                 let batches =
@@ -847,22 +861,53 @@ impl<'a> StreamRedacter<'a> {
         Ok(result)
     }
 
+    /// The pieces of the text `input` holds. A file read as text only on its content is not text
+    /// where a NUL byte is, which binary formats carry and text does not.
+    fn text_pieces<S: Stream<Item = AppResult<bytes::Bytes>> + Unpin>(
+        input: S,
+        layout: PieceLayout,
+        unsupported_as_text: bool,
+    ) -> TextPieces<S> {
+        let pieces = TextPieces::new(input, layout);
+        if unsupported_as_text {
+            pieces.rejecting_nul(NOT_TEXT_PROBE_SIZE)
+        } else {
+            pieces
+        }
+    }
+
     /// What `redacters` find in the text `input` holds, read in pieces of `layout`. A text that
     /// fits in one window is read whole, as `detect_stream` reads any other file.
+    ///
+    /// A file read as text only on its content, `unsupported_as_text`, reports nothing but
+    /// [`RedactionBlocked::NotText`] when its first window is not text, as `cp` leaves it as it
+    /// is. A later window that is not text fails the scan, as it fails the copy.
     ///
     /// A finding is reported by the window of the piece it starts in, see `owned_by`.
     async fn detect_text<S: Stream<Item = AppResult<bytes::Bytes>> + Unpin>(
         input: S,
         layout: PieceLayout,
+        unsupported_as_text: bool,
         redacters: &[&Redacters<'a>],
         categories: Option<&Categories>,
         file_ref: &FileSystemRef,
     ) -> AppResult<DetectStreamResult> {
-        let mut pieces = TextPieces::new(input, layout);
+        let mut pieces = Self::text_pieces(input, layout, unsupported_as_text);
         let mut result = DetectStreamResult::default();
         let mut previous_window_end = 0;
         let mut windows = 0;
-        while let Some(window) = pieces.next_window().await? {
+        loop {
+            let window = match pieces.next_window().await {
+                Ok(Some(window)) => window,
+                Ok(None) => break,
+                Err(error) if unsupported_as_text && windows == 0 && error.is_not_text() => {
+                    return Ok(DetectStreamResult {
+                        blocked: Some(RedactionBlocked::NotText),
+                        ..DetectStreamResult::default()
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             let (is_whole, window_end) = (window.is_whole_text(), window.end());
             let whole_lines = window.whole_lines();
             let (piece, start) = (window.piece, window.start);
@@ -2778,6 +2823,7 @@ mod tests {
         let in_pieces = StreamRedacter::detect_text(
             futures::stream::iter(chunks),
             layout,
+            false,
             &references,
             None,
             &file,
@@ -3021,7 +3067,17 @@ mod tests {
 
         assert!(plan(base_options(), text.clone()).await);
         assert!(!plan(sampled, text).await);
-        assert!(!plan(as_text, unknown).await);
+        assert!(plan(as_text.clone(), unknown.clone()).await);
+        assert!(
+            !plan(
+                RedacterBaseOptions {
+                    sampling_size: Some(100),
+                    ..as_text
+                },
+                unknown
+            )
+            .await
+        );
         assert!(!plan(base_options(), file_ref("table.csv", mime::TEXT_CSV)).await);
     }
 
@@ -3129,9 +3185,40 @@ mod tests {
         redactions: Vec<(RedacterType, Detection)>,
     }
 
+    /// `data` as a stream of chunks of `chunk_size` bytes.
+    fn in_chunks(
+        data: &[u8],
+        chunk_size: usize,
+    ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
+        futures::stream::iter(
+            data.chunks(chunk_size)
+                .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Copies the file `file` that `input` reads, as `read` plans. The stream and the
+    /// redactions are polled together, as `cp` does.
+    async fn copy_stream_with(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        file: &FileSystemRef,
+        input: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static,
+        read: PlannedRead,
+    ) -> AppResult<(
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    )> {
+        let converters = FileConverters::new();
+        let stream_redacter = StreamRedacter::new(options, &converters);
+        let mut plan = stream_redacter.create_redact_plan(redacters, file).await?;
+        plan.read = read;
+        let result = stream_redacter.redact_stream(input, plan, file).await?;
+        Ok(written_and_listed(result.output).await)
+    }
+
     /// Copies `content` of the file `file` in chunks of 7 bytes, so that no chunk ends where a
-    /// line does, read as `read` plans. The stream and the redactions are polled together, as
-    /// `cp` does.
+    /// line does, read as `read` plans.
     async fn copy_file_with(
         options: &RedacterBaseOptions,
         redacters: &[Redacters<'static>],
@@ -3142,18 +3229,7 @@ mod tests {
         AppResult<Vec<bytes::Bytes>>,
         AppResult<Vec<(RedacterType, Detection)>>,
     )> {
-        let converters = FileConverters::new();
-        let stream_redacter = StreamRedacter::new(options, &converters);
-        let mut plan = stream_redacter.create_redact_plan(redacters, file).await?;
-        plan.read = read;
-        let chunks = content
-            .chunks(7)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect::<Vec<_>>();
-        let result = stream_redacter
-            .redact_stream(futures::stream::iter(chunks), plan, file)
-            .await?;
-        Ok(written_and_listed(result.output).await)
+        copy_stream_with(options, redacters, file, in_chunks(content, 7), read).await
     }
 
     async fn copy_text_with(
@@ -3336,29 +3412,41 @@ mod tests {
         assert!(redactions.is_err());
     }
 
+    /// The detections of `redacters` in `content` of the file `file`, in chunks of `chunk_size`
+    /// bytes, read as `read` plans.
+    async fn detect_as(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        file: &FileSystemRef,
+        content: &[u8],
+        read: PlannedRead,
+        chunk_size: usize,
+    ) -> AppResult<DetectStreamResult> {
+        let converters = FileConverters::new();
+        let stream_redacter = StreamRedacter::new(options, &converters);
+        let mut plan = stream_redacter.create_detect_plan(redacters, file).await?;
+        plan.read = read;
+        stream_redacter
+            .detect_stream(in_chunks(content, chunk_size), &plan, file)
+            .await
+    }
+
     /// The detections of `redacters` in `table`, read as `read` plans.
     async fn detect_table_as(
         redacters: &[Redacters<'static>],
         table: &str,
         read: PlannedRead,
     ) -> DetectStreamResult {
-        let converters = FileConverters::new();
-        let options = base_options();
-        let stream_redacter = StreamRedacter::new(&options, &converters);
-        let mut plan = stream_redacter
-            .create_detect_plan(redacters, &csv_file())
-            .await
-            .unwrap();
-        plan.read = read;
-        let chunks = table
-            .as_bytes()
-            .chunks(7)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect::<Vec<_>>();
-        stream_redacter
-            .detect_stream(futures::stream::iter(chunks), &plan, &csv_file())
-            .await
-            .unwrap()
+        detect_as(
+            &base_options(),
+            redacters,
+            &csv_file(),
+            table.as_bytes(),
+            read,
+            7,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -3784,5 +3872,213 @@ mod tests {
 
         assert!(copied.chunks > 1);
         assert!(copied.output == expected.as_bytes());
+    }
+
+    /// The options of `cp --unsupported-as-text`.
+    fn unsupported_as_text() -> RedacterBaseOptions {
+        RedacterBaseOptions {
+            unsupported_as_text: true,
+            ..base_options()
+        }
+    }
+
+    /// `data` of the file `.env`, copied as `cp --unsupported-as-text` does, read as `layout` cuts
+    /// it or, for `None`, whole, in chunks of `chunk_size` bytes.
+    async fn copy_unsupported(
+        redacters: &[Redacters<'static>],
+        data: &[u8],
+        layout: Option<PieceLayout>,
+        chunk_size: usize,
+    ) -> (
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    ) {
+        copy_stream_with(
+            &unsupported_as_text(),
+            redacters,
+            &env_file(),
+            in_chunks(data, chunk_size),
+            layout.map_or(PlannedRead::Whole, PlannedRead::TextPieces),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// As [`copy_unsupported`] for `scan`.
+    async fn scan_unsupported(
+        redacters: &[Redacters<'static>],
+        data: &[u8],
+        layout: Option<PieceLayout>,
+        chunk_size: usize,
+    ) -> AppResult<DetectStreamResult> {
+        detect_as(
+            &unsupported_as_text(),
+            redacters,
+            &env_file(),
+            data,
+            layout.map_or(PlannedRead::Whole, PlannedRead::TextPieces),
+            chunk_size,
+        )
+        .await
+    }
+
+    /// A log of 20-byte lines with an email on each, long enough to be cut into pieces of a few
+    /// hundred bytes.
+    fn mail_log() -> Vec<u8> {
+        b"Mail ana@x.io today\n".repeat(60)
+    }
+
+    fn with_byte_at(mut data: Vec<u8>, position: usize, byte: u8) -> Vec<u8> {
+        data[position] = byte;
+        data
+    }
+
+    /// Pieces of 300 bytes with 100 of context: the first window of `mail_log` ends at byte 400.
+    const FIRST_WINDOW_END: usize = 400;
+
+    fn pieces_of_300_with_100_of_context() -> Option<PieceLayout> {
+        Some(PieceLayout::new(300, 100))
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_file_read_in_pieces_is_redacted_listed_and_scanned_as_the_whole_file_is(
+    ) {
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(RuleGroup::all(), vec![]).await,
+        )];
+        let log = log_with_values_across_lines()
+            .replace("sent to", "envoyé à Zoë, Σίσυφος, 日本語 and")
+            .replace('\n', "\r\n");
+        let (whole, whole_redactions) = copy_unsupported(&redacters, log.as_bytes(), None, 7).await;
+
+        for layout in [PieceLayout::new(500, 900), PieceLayout::new(2000, 700)] {
+            let (stream, redactions) =
+                copy_unsupported(&redacters, log.as_bytes(), Some(layout), 7).await;
+            assert!(stream.as_ref().unwrap().len() > 1);
+            assert!(stream.unwrap().concat() == whole.as_ref().unwrap().concat());
+            assert_eq!(redactions.unwrap(), *whole_redactions.as_ref().unwrap());
+
+            let whole_scan = scan_unsupported(&redacters, log.as_bytes(), None, 7)
+                .await
+                .unwrap();
+            let scan = scan_unsupported(&redacters, log.as_bytes(), Some(layout), 7)
+                .await
+                .unwrap();
+            assert!(whole_scan.detections.len() > 100);
+            assert_eq!(scan.blocked, None);
+            assert_same_findings(whole_scan, scan);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_text_in_its_first_window_is_left_as_it_is() {
+        let redacters = vec![email_rules().await];
+        let layout = pieces_of_300_with_100_of_context();
+        for data in [
+            with_byte_at(mail_log(), 50, 0xff),
+            with_byte_at(mail_log(), 50, 0),
+            with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0),
+            with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0xff),
+        ] {
+            let (stream, redactions) = copy_unsupported(&redacters, &data, layout, 7).await;
+            assert!(stream.unwrap().concat() == data);
+            assert!(redactions.unwrap().is_empty());
+
+            let scan = scan_unsupported(&redacters, &data, layout, 7)
+                .await
+                .unwrap();
+            assert_eq!(scan.blocked, Some(RedactionBlocked::NotText));
+            assert!(scan.detections.is_empty());
+        }
+    }
+
+    /// A file that is not text only after its first window has had pieces written, which cannot
+    /// be undone: the copy fails, and so does the scan, as for a text file.
+    #[tokio::test]
+    async fn a_file_that_is_not_text_after_its_first_window_fails_the_copy_and_the_scan() {
+        let redacters = vec![email_rules().await];
+        let layout = pieces_of_300_with_100_of_context();
+        for data in [
+            with_byte_at(mail_log(), 900, 0xff),
+            with_byte_at(mail_log(), 900, 0),
+        ] {
+            let (stream, redactions) = copy_unsupported(&redacters, &data, layout, 7).await;
+            assert!(stream.is_err());
+            assert!(redactions.is_err());
+
+            let error = scan_unsupported(&redacters, &data, layout, 7)
+                .await
+                .err()
+                .expect("the scan fails");
+            assert!(error.is_not_text(), "{error:?}");
+        }
+    }
+
+    /// Whether a NUL byte leaves the file as it is or fails it is decided by the first window,
+    /// not by where the chunks of the input end.
+    #[tokio::test]
+    async fn a_nul_byte_decides_by_the_first_window_whatever_the_chunks_are() {
+        let redacters = vec![email_rules().await];
+        let layout = pieces_of_300_with_100_of_context();
+        let inside = with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0);
+        let past = with_byte_at(mail_log(), FIRST_WINDOW_END, 0);
+        for chunk_size in [1, 7, 100, 4096, 100_000] {
+            let (stream, _) = copy_unsupported(&redacters, &inside, layout, chunk_size).await;
+            assert!(stream.unwrap().concat() == inside, "chunks of {chunk_size}");
+            let scan = scan_unsupported(&redacters, &inside, layout, chunk_size).await;
+            assert_eq!(
+                scan.unwrap().blocked,
+                Some(RedactionBlocked::NotText),
+                "chunks of {chunk_size}"
+            );
+
+            let (stream, _) = copy_unsupported(&redacters, &past, layout, chunk_size).await;
+            assert!(stream.is_err(), "chunks of {chunk_size}");
+            let scan = scan_unsupported(&redacters, &past, layout, chunk_size).await;
+            assert!(scan.is_err(), "chunks of {chunk_size}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_unsupported_file_is_copied_and_scanned_as_it_is_whole() {
+        let redacters = vec![email_rules().await];
+        let layout = pieces_of_300_with_100_of_context();
+        let (whole, _) = copy_unsupported(&redacters, b"", None, 7).await;
+        let (in_pieces, redactions) = copy_unsupported(&redacters, b"", layout, 7).await;
+        assert!(in_pieces.unwrap().concat() == whole.unwrap().concat());
+        assert!(redactions.unwrap().is_empty());
+
+        let whole = scan_unsupported(&redacters, b"", None, 7).await.unwrap();
+        let in_pieces = scan_unsupported(&redacters, b"", layout, 7).await.unwrap();
+        assert_eq!(in_pieces.blocked, whole.blocked);
+        assert!(in_pieces.detections.is_empty());
+    }
+
+    /// A stream that panics when polled after it ended, as the stream of a zip entry does.
+    fn single_pass(
+        data: &[u8],
+    ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
+        Box::pin(futures::stream::unfold(
+            Some(bytes::Bytes::copy_from_slice(data)),
+            |chunk| async move { chunk.map(|chunk| (Ok(chunk), None)) },
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_short_file_that_is_not_text_is_read_once() {
+        let redacters = vec![email_rules().await];
+        let data = b"Caf\xe9 owner ana@example.org\n";
+
+        let (stream, _) = copy_stream_with(
+            &unsupported_as_text(),
+            &redacters,
+            &env_file(),
+            single_pass(data),
+            PlannedRead::TextPieces(PieceLayout::new(300, 100)),
+        )
+        .await
+        .unwrap();
+
+        assert!(stream.unwrap().concat() == data);
     }
 }

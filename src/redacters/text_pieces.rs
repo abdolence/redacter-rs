@@ -7,7 +7,7 @@
 //! cut inside, at a character boundary.
 
 use crate::errors::AppError;
-use crate::redacters::TextPieceLimits;
+use crate::redacters::{ContentStream, TextPieceLimits};
 use crate::AppResult;
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
@@ -199,6 +199,9 @@ pub(crate) struct TextPieces<S> {
     input_ended: bool,
     next_piece_start: usize,
     finished: bool,
+    /// Set when a NUL byte makes the text not text: how many bytes at the start are checked for
+    /// one as they are read.
+    nul_probe_bytes: Option<usize>,
 }
 
 impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
@@ -211,7 +214,41 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
             input_ended: false,
             next_piece_start: 0,
             finished: false,
+            nul_probe_bytes: None,
         }
+    }
+
+    /// The same pieces, where a window whose text holds a NUL byte fails with
+    /// [`AppError::TextHasNul`] as one that is not UTF-8 fails with [`AppError::TextNotUtf8`].
+    ///
+    /// A NUL byte in the first `probe_bytes` of the text fails as soon as it is read, so that a
+    /// binary file is not read to the end of its first window. The probe reaches no further than
+    /// the first window surely does, the context of its piece.
+    pub fn rejecting_nul(self, probe_bytes: usize) -> Self {
+        Self {
+            nul_probe_bytes: Some(probe_bytes),
+            ..self
+        }
+    }
+
+    /// The whole input again, from its first byte: what was read, then what was not. Fails once
+    /// a window was taken, since the bytes before it are dropped; a window that failed to be cut
+    /// took none.
+    pub fn into_unread(self) -> AppResult<ContentStream>
+    where
+        S: Send + Sync + 'static,
+    {
+        if self.buffer_start.offset != 0 {
+            return Err(AppError::SystemError {
+                message: "The start of the text was dropped already".to_string(),
+            });
+        }
+        let read = stream::iter([Ok(Bytes::from(self.buffer))]);
+        Ok(if self.input_ended {
+            Box::new(read)
+        } else {
+            Box::new(read.chain(self.input))
+        })
     }
 
     /// The next window, or `None` after the last. A text with no bytes has one empty window.
@@ -234,6 +271,13 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
 
         let bytes = &self.buffer
             [window_start - self.buffer_start.offset..window_end - self.buffer_start.offset];
+        if self.nul_probe_bytes.is_some() {
+            if let Some(nul) = bytes.iter().position(|&byte| byte == 0) {
+                return Err(AppError::TextHasNul {
+                    offset: window_start + nul,
+                });
+            }
+        }
         let text = String::from_utf8(bytes.to_vec()).map_err(|error| AppError::TextNotUtf8 {
             offset: window_start + error.utf8_error().valid_up_to(),
         })?;
@@ -361,12 +405,30 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
                 Some(chunk) if chunk.is_empty() => {}
                 Some(chunk) => {
                     self.buffer.extend_from_slice(&chunk);
+                    self.check_probe(chunk.len())?;
                     return Ok(true);
                 }
                 None => self.input_ended = true,
             }
         }
         Ok(false)
+    }
+
+    /// Fails on a NUL byte in the part of the last `chunk_len` bytes read that the probe covers.
+    fn check_probe(&self, chunk_len: usize) -> AppResult<()> {
+        let Some(probe_bytes) = self.nul_probe_bytes else {
+            return Ok(());
+        };
+        let probe_end = probe_bytes.min(self.layout.context_bytes);
+        let chunk_start = self.buffer_end() - chunk_len;
+        let probed = probe_end.saturating_sub(chunk_start).min(chunk_len);
+        let chunk = &self.buffer[chunk_start - self.buffer_start.offset..][..probed];
+        match chunk.iter().position(|&byte| byte == 0) {
+            Some(nul) => Err(AppError::TextHasNul {
+                offset: chunk_start + nul,
+            }),
+            None => Ok(()),
+        }
     }
 
     fn position_of(&self, offset: usize) -> TextPosition {
@@ -728,5 +790,70 @@ mod tests {
             Err(AppError::TextNotUtf8 { offset: 24 })
         ));
         assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_window_with_a_nul_byte_fails_only_when_asked_to_and_names_the_byte() {
+        let text = b"line one\nline two\nline\0three\nline four\n";
+        let layout = PieceLayout::new(40, 0);
+        let mut accepting = TextPieces::new(chunks(text, 3), layout);
+        assert!(accepting.next_window().await.unwrap().is_some());
+
+        let mut rejecting = TextPieces::new(chunks(text, 3), layout).rejecting_nul(0);
+        assert!(matches!(
+            rejecting.next_window().await,
+            Err(AppError::TextHasNul { offset: 22 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_first_window_that_cannot_be_cut_gives_the_whole_input_back() {
+        let layout = PieceLayout::new(40, 10);
+        let long = "line of text\n".repeat(30);
+        let cases = [
+            [b"not \xff text\n".as_slice(), long.as_bytes()].concat(),
+            [b"not \0 text\n".as_slice(), long.as_bytes()].concat(),
+            b"Caf\xe9".to_vec(),
+            b"\0".to_vec(),
+        ];
+        for text in cases {
+            for chunk_size in [1, 5, 1000] {
+                let mut pieces =
+                    TextPieces::new(chunks(&text, chunk_size), layout).rejecting_nul(0);
+                let error = pieces.next_window().await.expect_err("not text");
+                assert!(error.is_not_text(), "{error:?}");
+
+                let unread: Vec<Bytes> = pieces.into_unread().unwrap().try_collect().await.unwrap();
+
+                assert_eq!(unread.concat(), text, "chunks of {chunk_size}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nul_byte_in_the_probe_fails_before_the_rest_of_the_window_is_read() {
+        let layout = PieceLayout::new(1000, 100);
+        let unreadable_after_the_probe = |nul_at: usize| {
+            let mut head = vec![b'a'; 50];
+            head[nul_at] = 0;
+            stream::iter(vec![
+                Ok(Bytes::from(head)),
+                Err(AppError::SystemError {
+                    message: "read past the probe".to_string(),
+                }),
+            ])
+        };
+
+        let mut pieces = TextPieces::new(unreadable_after_the_probe(40), layout).rejecting_nul(60);
+        assert!(matches!(
+            pieces.next_window().await,
+            Err(AppError::TextHasNul { offset: 40 })
+        ));
+
+        let mut pieces = TextPieces::new(unreadable_after_the_probe(40), layout).rejecting_nul(30);
+        assert!(matches!(
+            pieces.next_window().await,
+            Err(AppError::SystemError { .. })
+        ));
     }
 }

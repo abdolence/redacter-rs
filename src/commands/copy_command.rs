@@ -1246,6 +1246,80 @@ mod tests {
         Ok(())
     }
 
+    /// A file found not to be text after pieces of it were written is a failed file, and the
+    /// destination keeps no part of it, whether the destination is a directory or a zip.
+    #[tokio::test]
+    async fn a_file_that_is_not_text_after_its_first_window_leaves_nothing_at_the_destination(
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let lock = pdfium_test_lock();
+        let _guard = lock.lock().await;
+
+        let source = TempDir::with_prefix("copy_command_tests_late_not_text_source")?;
+        let mut late_nul = format!("owner {SAMPLE_EMAIL}\n").into_bytes();
+        late_nul.extend(b"a line with nothing to find\n".repeat(160_000));
+        late_nul.push(0);
+        late_nul.extend(b"owner a@b.io\n");
+        std::fs::write(source.path().join("late.dat"), &late_nul)?;
+        std::fs::write(
+            source.path().join("ok.txt"),
+            format!("owner {SAMPLE_EMAIL}\n"),
+        )?;
+
+        let scratch = TempDir::with_prefix("copy_command_tests_late_not_text_destination")?;
+        let zip_path = scratch.path().join("out.zip");
+        let directory = scratch.path().join("out");
+        std::fs::create_dir(&directory)?;
+        for destination in [
+            directory.to_string_lossy().into_owned(),
+            format!("zip://{}", zip_path.display()),
+        ] {
+            let mut redacter_options = base_redacter_options(RedacterProviderOptions::LocalRules(
+                LocalRulesRedacterOptions {
+                    groups: RuleGroup::all(),
+                    user_rules: vec![],
+                },
+            ));
+            redacter_options.base_options.unsupported_as_text = true;
+            redacter_options.base_options.allow_unsupported_copies = true;
+
+            let result = command_copy(
+                &Term::stdout(),
+                &format!("{}/", source.path().display()),
+                &destination,
+                CopyCommandOptions::new(None, None, None, vec![], AddonStoreOptions::default()),
+                Some(redacter_options),
+            )
+            .await?;
+
+            let statuses: Vec<_> = serde_json::to_value(&result)?["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|file| {
+                    (
+                        file["path"].as_str().unwrap().to_string(),
+                        file["status"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            assert!(
+                statuses.contains(&("late.dat".to_string(), "failed".to_string())),
+                "{destination}: {statuses:?}"
+            );
+            assert!(
+                statuses.contains(&("ok.txt".to_string(), "redacted".to_string())),
+                "{destination}: {statuses:?}"
+            );
+        }
+
+        assert!(!directory.join("late.dat").exists());
+        assert!(directory.join("ok.txt").is_file());
+        let archive = zip::ZipArchive::new(std::fs::File::open(&zip_path)?)?;
+        let names: Vec<_> = archive.file_names().collect::<Result<_, _>>()?;
+        assert_eq!(names, ["ok.txt"]);
+        Ok(())
+    }
+
     /// Only `addons install` installs anything: a redacting copy of a PDF over an empty addons
     /// directory runs without the addons and leaves the directory as it found it.
     #[tokio::test]
