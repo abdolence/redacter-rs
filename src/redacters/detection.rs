@@ -11,7 +11,7 @@ use crate::redacters::{
     PresidioRedacter, RuleSet, TextMask, TextPieceLimits, TextPosition,
 };
 use crate::AppResult;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -21,7 +21,7 @@ use std::str::FromStr;
 /// The provider's own name for the kind of data it found: `email` from local-rules,
 /// `EMAIL_ADDRESS` from GCP DLP, `per` from local-ner, `person` from local-gliner. Names are
 /// not mapped across providers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DetectionLabel(String);
 
@@ -83,6 +83,12 @@ impl Display for DetectionLabel {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct Score(f32);
+
+impl<'de> Deserialize<'de> for Score {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::try_from(f32::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
 
 impl Score {
     /// A score fixed in the source. Evaluated in a `const` item, an out-of-range value fails
@@ -278,7 +284,7 @@ impl From<Vec<Detection>> for Detections {
 /// Locations are ordered the way a reader meets them: texts by offset, then cells by row and
 /// column, then image boxes by page, top to bottom and left to right, then whole pages, then
 /// the whole file. The fields are declared in that order for the derived `PartialOrd`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DetectionLocation {
     /// A half-open byte range of the item's text on character boundaries, and the line and

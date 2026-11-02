@@ -10,8 +10,9 @@
 //! always masked here, whatever the caller passes, and no hash of a value is written.
 
 use crate::commands::artifact_locator::ArtifactLocator;
-use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
+use crate::commands::findings::{FileOutcome, Findings, Place, ReportedFile, ReportedFinding};
 use crate::redacters::{DetectionLabel, DetectionLocation, Score};
+use crate::AppResult;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -134,13 +135,16 @@ pub struct OcsfEvents(Vec<Event>);
 
 impl OcsfEvents {
     /// `time` is when the report is written. `locator` tells where the files are.
-    pub fn new(files: &[ReportedFile], locator: &ArtifactLocator, time: EpochMillis) -> Self {
-        Self(
-            files
-                .iter()
-                .filter_map(|file| Event::of(file, locator, time))
-                .collect(),
-        )
+    pub fn try_new(
+        files: &[ReportedFile],
+        locator: &ArtifactLocator,
+        time: EpochMillis,
+    ) -> AppResult<Self> {
+        let mut events = Vec::new();
+        for file in files {
+            events.extend(Event::of(file, locator, time)?);
+        }
+        Ok(Self(events))
     }
 
     /// The events as NDJSON (newline-delimited JSON): one event on each line, each line ended by
@@ -185,24 +189,28 @@ struct Event {
 
 impl Event {
     /// The event of a file, or `None` for a file with nothing to report.
-    fn of(file: &ReportedFile, locator: &ArtifactLocator, time: EpochMillis) -> Option<Self> {
+    fn of(
+        file: &ReportedFile,
+        locator: &ArtifactLocator,
+        time: EpochMillis,
+    ) -> AppResult<Option<Self>> {
         let summary = match &file.outcome {
-            FileOutcome::Findings(findings) if !findings.is_empty() => {
-                Summary::found(&file.path, findings)
-            }
+            FileOutcome::Findings(findings) => match Summary::found(&file.path, findings)? {
+                Some(summary) => summary,
+                None => return Ok(None),
+            },
             FileOutcome::Unconfirmed { unlocated_values } => {
                 Summary::unconfirmed(&file.path, *unlocated_values)
             }
-            FileOutcome::Findings(_)
-            | FileOutcome::Failed { .. }
+            FileOutcome::Failed { .. }
             | FileOutcome::Blocked { .. }
-            | FileOutcome::Unsupported { .. } => return None,
+            | FileOutcome::Unsupported { .. } => return Ok(None),
         };
         let confidence = summary
             .confidence
             .map_or(Confidence::Unknown, Confidence::from);
         let uri = locator.full_uri(&file.path);
-        Some(Self {
+        Ok(Some(Self {
             class_uid: CLASS_UID,
             class_name: "Data Security Finding",
             category_uid: CATEGORY_UID,
@@ -225,7 +233,7 @@ impl Event {
             data_security: summary.data_security,
             file: File::new(&locator.full_path(&file.path), uri),
             unmapped: summary.unmapped,
-        })
+        }))
     }
 }
 
@@ -243,17 +251,27 @@ struct Summary {
 
 impl Summary {
     /// The findings of a file are grouped by redacter, label and masked value: a group is one
-    /// discovery detail, with a place for each finding in it.
-    fn found(path: &str, findings: &[ReportedFinding]) -> Self {
+    /// discovery detail, with a place for each finding in it. `None` for a file without
+    /// findings.
+    fn found(path: &str, findings: &Findings) -> AppResult<Option<Self>> {
         let mut details: Vec<DiscoveryDetail> = Vec::new();
-        let mut detail_of_group: BTreeMap<(String, &DetectionLabel, &str), usize> = BTreeMap::new();
+        let mut detail_of_group: BTreeMap<(String, DetectionLabel, String), usize> =
+            BTreeMap::new();
         let mut redacter_extras = Vec::new();
         let mut omitted = 0;
-        for finding in findings {
+        let mut count = 0;
+        let mut redacters = BTreeSet::new();
+        let mut has_secret = false;
+        let mut confidence: Option<ConfidenceScore> = None;
+        findings.for_each(|finding| {
+            count += 1;
+            redacters.insert(finding.redacter.to_string());
+            has_secret |= finding.is_secret();
+            confidence = confidence.max(finding.score.map(ConfidenceScore::from));
             let group = (
                 finding.redacter.to_string(),
-                &finding.label,
-                finding.masked_value.as_str(),
+                finding.label.clone(),
+                finding.masked_value.clone(),
             );
             let index = *detail_of_group.entry(group).or_insert_with(|| {
                 details.push(DiscoveryDetail::new(finding));
@@ -263,7 +281,7 @@ impl Summary {
             detail.count += 1;
             if detail.count > MAX_LISTED_FINDINGS_PER_DETAIL {
                 omitted += 1;
-                continue;
+                return;
             }
             let occurrence = finding
                 .place
@@ -279,30 +297,20 @@ impl Summary {
                 score: finding.score,
                 location: finding.location,
             });
+        })?;
+        if count == 0 {
+            return Ok(None);
         }
-        let redacters: BTreeSet<String> = findings
-            .iter()
-            .map(|finding| finding.redacter.to_string())
-            .collect();
-        Self {
-            severity: if findings.iter().any(ReportedFinding::is_secret) {
+        Ok(Some(Self {
+            severity: if has_secret {
                 Severity::High
             } else {
                 Severity::Medium
             },
-            confidence: findings
-                .iter()
-                .filter_map(|finding| finding.score)
-                .map(ConfidenceScore::from)
-                .max(),
+            confidence,
             message: format!(
-                "{} sensitive {} found in {path}",
-                findings.len(),
-                if findings.len() == 1 {
-                    "value"
-                } else {
-                    "values"
-                }
+                "{count} sensitive {} found in {path}",
+                if count == 1 { "value" } else { "values" }
             ),
             title: "Sensitive data found",
             types: ["sensitive_data"],
@@ -322,7 +330,7 @@ impl Summary {
                     unlocated_values: None,
                 },
             },
-        }
+        }))
     }
 
     fn unconfirmed(path: &str, unlocated_values: usize) -> Self {
@@ -633,12 +641,13 @@ mod tests {
     }
 
     fn found(path: &str, findings: Vec<ReportedFinding>) -> ReportedFile {
-        file(path, FileOutcome::Findings(findings))
+        file(path, FileOutcome::Findings(findings.into_iter().collect()))
     }
 
     fn ndjson_in(source: &str, files: &[ReportedFile]) -> String {
         let locator = ArtifactLocator::new(source, Path::new("/work"));
-        OcsfEvents::new(files, &locator, scan_time())
+        OcsfEvents::try_new(files, &locator, scan_time())
+            .unwrap()
             .to_ndjson()
             .unwrap()
     }

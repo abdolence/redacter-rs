@@ -2,21 +2,24 @@
 //! writers take it. A writer does not know the command that produced it.
 
 use crate::args::RedacterType;
+use crate::commands::finding_spill::SpilledFindings;
 use crate::commands::scan_output::mask_value;
 use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score};
+use crate::AppResult;
+use serde::{Deserialize, Serialize};
 
 /// A file of a run and what the command found in it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ReportedFile {
     /// The path as the source's file system names it, relative to the source.
     pub path: String,
     pub outcome: FileOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum FileOutcome {
     /// The file was read. A clean file has no findings.
-    Findings(Vec<ReportedFinding>),
+    Findings(Findings),
     /// The file was read and has no findings, but the redacters named values they could not
     /// place in it, so it is not known to be clean.
     Unconfirmed { unlocated_values: usize },
@@ -26,6 +29,45 @@ pub enum FileOutcome {
     Blocked { reason: String },
     /// No selected redacter reads the file.
     Unsupported { reason: String },
+}
+
+/// The findings of a file.
+#[derive(Debug, Clone)]
+pub struct Findings(Source);
+
+#[derive(Debug, Clone)]
+enum Source {
+    Held(Vec<ReportedFinding>),
+    /// Read from the spill when visited, so a file with millions of findings is never held.
+    Spilled(SpilledFindings),
+}
+
+impl FromIterator<ReportedFinding> for Findings {
+    fn from_iter<I: IntoIterator<Item = ReportedFinding>>(findings: I) -> Self {
+        Self(Source::Held(findings.into_iter().collect()))
+    }
+}
+
+impl From<SpilledFindings> for Findings {
+    fn from(findings: SpilledFindings) -> Self {
+        Self(Source::Spilled(findings))
+    }
+}
+
+impl Findings {
+    /// Calls `visit` with each finding in order. A finding that cannot be read back from the
+    /// spill is an error of the report.
+    pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {
+        match &self.0 {
+            Source::Held(findings) => findings.iter().for_each(visit),
+            Source::Spilled(findings) => {
+                for finding in findings.iter() {
+                    visit(&finding?.reported_finding());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One piece of sensitive data in a file. A report holds its value masked, whatever the
@@ -70,7 +112,7 @@ impl ReportedFinding {
 
 /// Where in a file something is, at the precision a command knows. Line, column, row and page
 /// numbers count from 1.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Place {
     /// A range of a text. The column counts characters, and `end_column` is the one after the
     /// last character of the range.
@@ -91,7 +133,7 @@ pub enum Place {
 }
 
 /// A box in pixels, `x1 <= x2` and `y1 <= y2`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PixelBox {
     pub x1: f32,
     pub y1: f32,

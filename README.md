@@ -1419,16 +1419,27 @@ A text file of more than about 4 MiB is read in pieces when every selected redac
 64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
 across lines, such as a private key block, is found wherever a piece ends, and a longer one that crosses the end of a
 piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
-value longer than 64 KiB that crosses the end of a window can also be reported in part. A line longer than a
+value longer than 64 KiB that crosses the end of a window can also be reported in part. Findings are sorted by location
+within a window, so such a value is listed after the findings of the window before it that start later in the file. A line longer than a
 window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are.
 `aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
 request, with the limits listed for `cp`. The LLM redacters, `local-ner` and `local-gliner` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
 when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
 locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
-755 MB in 0.21, in about 2% more time. The findings are still kept in memory until the reports are written, so a file with millions of findings
-needs memory for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.7 GB, against 4.4 GB in
-0.21.
+755 MB in 0.21, in about 2% more time.
+
+The findings of a scan are kept in a temporary file instead of in memory. The file is in the system temporary
+directory, has no name, is removed when the scan ends, however it ends, and on Unix is readable by the current user only.
+It holds values masked, or as found with `--show-values`, and takes about 200 bytes of disk for each finding. A scan that
+cannot write to it stops with an error that names the directory.
+
+The memory the findings need depends on the allocator. `scan -d local-rules --report-file r.json` on an 88 MB log with
+2.4 million findings peaks near 72 MB with `MallocSpaceEfficient=1` in the environment, and near 910 MB without it on
+macOS, whose default allocator keeps freed memory. 0.21 peaks near 1.4 GB
+with `MallocSpaceEfficient=1` and near 1.6 GB without it, on the same log. The scan takes about 15% more time than in
+0.21. The SARIF report still lists at most 5000 results, and building it keeps at most that many in memory. Building the
+OCSF report keeps an event for each file.
 
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).

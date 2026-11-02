@@ -850,8 +850,15 @@ mod tests {
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
-                    FileOutcome::Findings(_) => "findings",
+                    FileOutcome::Findings(findings) => {
+                        let mut count = 0;
+                        findings.for_each(|_| count += 1).unwrap();
+                        if count == 0 {
+                            "clean"
+                        } else {
+                            "findings"
+                        }
+                    }
                     FileOutcome::Unconfirmed { .. } => "unconfirmed",
                     FileOutcome::Failed { .. } => "failed",
                     FileOutcome::Blocked { .. } => "blocked",
@@ -940,7 +947,8 @@ mod tests {
     fn sarif_of(files: Vec<CopyFileReport>) -> serde_json::Value {
         let result = result_of(files);
         let locator = ArtifactLocator::new("./", std::path::Path::new("/work"));
-        serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None)).unwrap()
+        serde_json::to_value(SarifLog::try_new(&result.reported_files(), &locator, None).unwrap())
+            .unwrap()
     }
 
     #[test]
@@ -1030,7 +1038,8 @@ mod tests {
             &format!("{}/", source.path().display()),
             std::path::Path::new("/work"),
         );
-        let sarif = serde_json::to_value(SarifLog::new(&result.reported_files(), &locator, None))?;
+        let sarif =
+            serde_json::to_value(SarifLog::try_new(&result.reported_files(), &locator, None)?)?;
         let results = sarif["runs"][0]["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["ruleId"], "local-rules/email");
@@ -1040,11 +1049,11 @@ mod tests {
         );
         assert!(!sarif.to_string().contains(SAMPLE_EMAIL));
 
-        let ndjson = OcsfEvents::new(
+        let ndjson = OcsfEvents::try_new(
             &result.reported_files(),
             &locator,
             EpochMillis::try_from(std::time::SystemTime::now())?,
-        )
+        )?
         .to_ndjson()?;
         let event: serde_json::Value = serde_json::from_str(&ndjson)?;
         assert_eq!(ndjson.lines().count(), 1);
