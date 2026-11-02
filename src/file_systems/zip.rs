@@ -5,7 +5,7 @@ use crate::file_systems::{
 use crate::file_tools::{FileMatcher, FileMatcherResult};
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use gcloud_sdk::prost::bytes::Bytes;
 use rvstruct::ValueStruct;
 use std::collections::hash_map::Entry;
@@ -390,6 +390,9 @@ impl<'a> ZipFileSystem<'a> {
 
     /// Ends with an error item if the thread behind `chunks` panicked, so that a stopped
     /// thread is never read as the end of the entry.
+    ///
+    /// Stays ended once it has ended: a reader that stops at the first `None` and then reads the
+    /// rest of the stream polls it again, which a bare `unfold` panics on.
     fn chunk_stream(
         chunks: mpsc::Receiver<AppResult<Bytes>>,
         task: JoinHandle<()>,
@@ -401,6 +404,7 @@ impl<'a> ZipFileSystem<'a> {
                 None => task.await.err().map(|error| (Err(error.into()), None)),
             }
         })
+        .fuse()
     }
 }
 

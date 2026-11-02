@@ -1,7 +1,9 @@
 use crate::args::RedacterType;
 use crate::redacters::ModelStop;
 use gcloud_sdk::tonic::metadata::errors::InvalidMetadataValue;
+use gcloud_sdk::tonic::Code;
 use indicatif::style::TemplateError;
+use reqwest::StatusCode;
 use std::time::SystemTimeError;
 use thiserror::Error;
 
@@ -49,6 +51,11 @@ pub enum AppError {
     MimeError(#[from] mime::FromStrError),
     #[error("HTTP client error:\n{0}")]
     HttpClientError(#[from] reqwest::Error),
+    #[error("Failed to {operation}. HTTP status: {status}.")]
+    RequestRejected {
+        operation: String,
+        status: StatusCode,
+    },
     #[error("Zip error:\n{0}")]
     ZipError(#[from] zip::result::ZipError),
     #[error("A background task failed: {0}")]
@@ -148,10 +155,35 @@ impl AppError {
         }
     }
 
+    /// A provider answered `operation` with the HTTP status `status`. The response body is left
+    /// out because it can quote the scanned text.
+    pub fn request_rejected(operation: &str, status: StatusCode) -> Self {
+        Self::RequestRejected {
+            operation: operation.to_string(),
+            status,
+        }
+    }
+
     pub fn incomplete_result(redacter_type: RedacterType, missing: &'static str) -> Self {
         Self::IncompleteResult {
             redacter_type,
             missing,
+        }
+    }
+
+    /// Whether a provider refused the call for want of quota, so that the same call may succeed
+    /// a moment later: gRPC `ResourceExhausted` and `Unavailable`, HTTP 429 and 503.
+    pub fn is_throttled(&self) -> bool {
+        match self {
+            Self::GoogleCloudGrpcError(status) => {
+                matches!(status.code(), Code::ResourceExhausted | Code::Unavailable)
+            }
+            // 503 is a transient refusal like gRPC `Unavailable`, which is retried too.
+            Self::RequestRejected { status, .. } => matches!(
+                *status,
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+            ),
+            _ => false,
         }
     }
 }
@@ -171,6 +203,45 @@ impl From<anyhow::Error> for AppError {
         Self::SystemErrorWithCause {
             message: err.to_string(),
             cause: Box::new(err),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gcloud_sdk::tonic::Status;
+
+    fn rejected(status: StatusCode) -> AppError {
+        AppError::request_rejected("analyze text", status)
+    }
+
+    #[test]
+    fn quota_refusals_are_throttled() {
+        let throttled = [
+            AppError::from(Status::resource_exhausted("quota")),
+            AppError::from(Status::unavailable("try later")),
+            rejected(StatusCode::TOO_MANY_REQUESTS),
+            rejected(StatusCode::SERVICE_UNAVAILABLE),
+        ];
+        for error in throttled {
+            assert!(error.is_throttled(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn other_failures_are_not_throttled() {
+        let failures = [
+            AppError::from(Status::permission_denied("no")),
+            AppError::from(Status::invalid_argument("bad")),
+            rejected(StatusCode::BAD_REQUEST),
+            rejected(StatusCode::INTERNAL_SERVER_ERROR),
+            AppError::SystemError {
+                message: "resource exhausted".to_string(),
+            },
+        ];
+        for error in failures {
+            assert!(!error.is_throttled(), "{error:?}");
         }
     }
 }

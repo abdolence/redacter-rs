@@ -296,7 +296,7 @@ Options:
           Open AI model name for native image editing. Default is 'gpt-image-2'
 
       --limit-dlp-requests <LIMIT_DLP_REQUESTS>
-          Limit the number of DLP requests. Some DLPs has strict quotas and to avoid errors, limit the number of requests delaying them. Default is disabled
+          Limit the number of requests to cloud providers, as '10rps' or '100rpm'. Some providers have strict quotas and to avoid errors, the requests are delayed. Every call counts, a retry included, a PDF counts each page and a long text counts each piece. One limit is shared by all the providers of a run, and local redacters are not limited. Default is disabled
 
       --local-rules <LOCAL_RULES>
           Rule groups enabled for the local-rules redacter, comma separated. Default is every group
@@ -580,7 +580,7 @@ punctuation-dense text with an email on every line near 1.66 GB. The same copy w
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
-JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a table and whole. A piece is read with 64 KiB of text on
+JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with 64 KiB of text on
 each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
 masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
 longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
@@ -596,6 +596,13 @@ redaction of a large file is located, in the report too. Other redacters and `--
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
 the redactions are kept in memory until it is written.
+
+A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
+`local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
+A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
+The output is the same as when the file is read whole. A batch is compared before and after as a table of its own, so the
+16 MiB limit above applies to a batch and not to the file, and every redaction is located in its cell. Other redacters
+read the file whole.
 
 A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is
 not written to a local destination and is left out of a zip archive, see below.
@@ -1369,13 +1376,15 @@ For example:
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
 A text file of more than about 4 MiB is read in pieces when every selected redacter is `local-rules` or
-`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a
-table and whole. A piece is read with 64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
+`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with
+64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
 across lines, such as a private key block, is found wherever a piece ends, and a longer one that crosses the end of a
 piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
 value longer than 64 KiB that crosses the end of a window can also be reported in part. A line longer than a
 window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are. Other
-redacters and `--unsupported-as-text` read the file whole. With `--sampling-size`, `scan` reads only as much of a text
+redacters and `--unsupported-as-text` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
+when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
+locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
 755 MB in 0.21, in about 2% more time. The findings are still kept in memory until the reports are written, so a file with millions of findings
 needs memory for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.7 GB, against 4.4 GB in

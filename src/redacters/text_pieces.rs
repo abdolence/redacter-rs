@@ -10,7 +10,9 @@ use crate::errors::AppError;
 use crate::redacters::TextPieceLimits;
 use crate::AppResult;
 use bytes::Bytes;
-use futures::{Stream, TryStreamExt};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
+use std::future::Future;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 /// The most bytes a window can hold beyond the context it was asked for on one side, because a
@@ -50,25 +52,38 @@ impl TextPosition {
 pub(crate) struct PieceLayout {
     piece_bytes: usize,
     context_bytes: usize,
+    /// How many windows are read at a time.
+    concurrency: NonZeroUsize,
 }
 
 impl PieceLayout {
-    /// Pieces of at most `piece_bytes`, and `context_bytes` of the text on each side of a piece.
+    /// Pieces of at most `piece_bytes`, and `context_bytes` of the text on each side of a piece,
+    /// read one window at a time.
     pub fn new(piece_bytes: usize, context_bytes: usize) -> Self {
         Self {
             piece_bytes,
             context_bytes,
+            concurrency: NonZeroUsize::MIN,
+        }
+    }
+
+    /// The same layout with up to `concurrency` windows read at a time.
+    pub fn reading(self, concurrency: NonZeroUsize) -> Self {
+        Self {
+            concurrency,
+            ..self
         }
     }
 
     /// The layout whose windows fit every one of `limits`, or `None` for no limits. Every
     /// redacter reads the same window, so it carries the widest context asked for, and a window
     /// is never longer than the smallest request limit. Fails when that leaves no room for a
-    /// piece.
+    /// piece. Windows are read as many at a time as the redacter that takes the fewest.
     pub fn fitting(limits: &[TextPieceLimits]) -> AppResult<Option<Self>> {
-        let (Some(context_bytes), Some(window_bytes)) = (
+        let (Some(context_bytes), Some(window_bytes), Some(concurrency)) = (
             limits.iter().map(|limit| limit.context_bytes).max(),
             limits.iter().map(|limit| limit.max_request_bytes).min(),
+            limits.iter().map(|limit| limit.concurrent_requests).min(),
         ) else {
             return Ok(None);
         };
@@ -79,7 +94,9 @@ impl PieceLayout {
                 max_request_bytes: window_bytes,
                 context_bytes,
             })?;
-        Ok(Some(Self::new(piece_bytes, context_bytes)))
+        Ok(Some(
+            Self::new(piece_bytes, context_bytes).reading(concurrency),
+        ))
     }
 
     /// The text each step of a chain reads on each side of a piece: the contexts of the step and
@@ -101,10 +118,13 @@ impl PieceLayout {
     /// The layout for redacters that run one after another on each window, the first on the
     /// window as read: it carries the context the first step reaches, and the piece is the
     /// largest that leaves every step a window within its request limit. Fails when that leaves
-    /// no room for a piece.
+    /// no room for a piece. Windows are read as many at a time as the step that takes the fewest.
     pub fn chained(limits: &[TextPieceLimits]) -> AppResult<Option<Self>> {
         let reaches = Self::chain_reaches(limits);
-        let Some(&first_reach) = reaches.first() else {
+        let (Some(&first_reach), Some(concurrency)) = (
+            reaches.first(),
+            limits.iter().map(|limit| limit.concurrent_requests).min(),
+        ) else {
             return Ok(None);
         };
         let mut piece_bytes = usize::MAX;
@@ -119,7 +139,9 @@ impl PieceLayout {
                 })?
                 .min(piece_bytes);
         }
-        Ok(Some(Self::new(piece_bytes, first_reach)))
+        Ok(Some(
+            Self::new(piece_bytes, first_reach).reading(concurrency),
+        ))
     }
 }
 
@@ -227,6 +249,42 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
         self.finished = last_piece;
         self.drop_before(keep_from);
         Ok(Some(window))
+    }
+
+    /// What `read` gives for each window, in the order of the windows, with up to the layout's
+    /// `concurrency` windows read at a time. `first` is a window already taken from `self`, which
+    /// comes first.
+    ///
+    /// Windows are cut one after another, so memory is that of `concurrency` windows and the
+    /// text between them. The stream ends after the error of a window that cannot be cut; an
+    /// error from `read` does not end it, so a caller stops at the first error.
+    pub fn read_ahead<T, Read, Pending>(
+        self,
+        first: Option<TextWindow>,
+        mut read: Read,
+    ) -> impl Stream<Item = AppResult<T>>
+    where
+        Read: FnMut(TextWindow) -> Pending,
+        Pending: Future<Output = AppResult<T>>,
+    {
+        let concurrency = self.layout.concurrency;
+        stream::unfold(Some((self, first)), |state| async move {
+            let (mut pieces, first) = state?;
+            let next = match first {
+                Some(window) => Ok(Some(window)),
+                None => pieces.next_window().await,
+            };
+            match next {
+                Ok(Some(window)) => Some((Ok(window), Some((pieces, None)))),
+                Ok(None) => None,
+                Err(error) => Some((Err(error), None)),
+            }
+        })
+        .map(move |window| {
+            let pending = window.map(&mut read);
+            async move { pending?.await }
+        })
+        .buffered(concurrency.get())
     }
 
     /// Where the piece that starts at `piece_start` ends, and whether it is the last. A piece
@@ -338,7 +396,8 @@ fn characters(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
+    use std::cell::Cell;
+    use std::time::Duration;
 
     /// `text` as a stream of chunks of `chunk_size` bytes.
     fn chunks(text: &[u8], chunk_size: usize) -> impl Stream<Item = AppResult<Bytes>> + Unpin {
@@ -479,12 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_window_is_longer_than_the_request_limit() {
-        let layout = PieceLayout::fitting(&[TextPieceLimits {
-            max_request_bytes: 400,
-            context_bytes: 100,
-        }])
-        .unwrap()
-        .unwrap();
+        let layout = PieceLayout::fitting(&[limits(400, 100)]).unwrap().unwrap();
         let texts = [
             "0123456789\n".repeat(200),
             "é7\nλλλλ\n日本語日本語\n😀\n".repeat(60),
@@ -501,12 +555,7 @@ mod tests {
     #[tokio::test]
     async fn a_line_longer_than_a_window_is_cut_inside_and_never_held_whole() {
         let text = format!("short\n{}\nshort\n", "x".repeat(10_000));
-        let layout = PieceLayout::fitting(&[TextPieceLimits {
-            max_request_bytes: 400,
-            context_bytes: 100,
-        }])
-        .unwrap()
-        .unwrap();
+        let layout = PieceLayout::fitting(&[limits(400, 100)]).unwrap().unwrap();
         let mut pieces = TextPieces::new(chunks(text.as_bytes(), 64), layout);
 
         let mut windows = 0;
@@ -523,19 +572,10 @@ mod tests {
 
     #[test]
     fn limits_that_leave_no_room_for_a_piece_are_refused() {
-        let limits = [
-            TextPieceLimits {
-                max_request_bytes: 1000,
-                context_bytes: 100,
-            },
-            TextPieceLimits {
-                max_request_bytes: 500,
-                context_bytes: 247,
-            },
-        ];
+        let too_tight = [limits(1000, 100), limits(500, 247)];
 
         assert!(matches!(
-            PieceLayout::fitting(&limits),
+            PieceLayout::fitting(&too_tight),
             Err(AppError::TextPieceLimitsTooTight {
                 max_request_bytes: 500,
                 context_bytes: 247
@@ -548,6 +588,7 @@ mod tests {
         TextPieceLimits {
             max_request_bytes,
             context_bytes,
+            ..TextPieceLimits::LOCAL
         }
     }
 
@@ -566,7 +607,29 @@ mod tests {
             .unwrap();
 
         // The second step is the narrower: 500 less its own reach of 50 and the rounding, twice.
-        assert_eq!(layout, PieceLayout::new(500 - 2 * (50 + 3), 150));
+        assert_eq!(
+            layout,
+            PieceLayout::new(500 - 2 * (50 + 3), 150)
+                .reading(TextPieceLimits::LOCAL.concurrent_requests)
+        );
+    }
+
+    fn taking(concurrent_requests: usize) -> TextPieceLimits {
+        TextPieceLimits {
+            concurrent_requests: NonZeroUsize::new(concurrent_requests).unwrap(),
+            ..limits(9000, 100)
+        }
+    }
+
+    #[test]
+    fn windows_are_read_as_many_at_a_time_as_the_redacter_that_takes_the_fewest() {
+        let chain = [taking(4), taking(2), taking(3)];
+        let fewest = NonZeroUsize::new(2).unwrap();
+
+        let fitting = PieceLayout::fitting(&chain).unwrap().unwrap();
+        let chained = PieceLayout::chained(&chain).unwrap().unwrap();
+
+        assert_eq!((fitting.concurrency, chained.concurrency), (fewest, fewest));
     }
 
     #[test]
@@ -598,5 +661,72 @@ mod tests {
             matches!(error, Some(AppError::TextNotUtf8 { offset: 24 })),
             "{error:?}"
         );
+    }
+
+    /// Reads the eight windows of a text with `concurrency` at a time, the later windows
+    /// answering sooner than the earlier ones. Returns where the pieces of the answers start and
+    /// the most windows that were being read at once.
+    async fn read_in_reverse_speed(first: bool, concurrency: usize) -> (Vec<usize>, usize) {
+        let text = "aaaa\n".repeat(16);
+        let layout = PieceLayout::new(10, 0).reading(NonZeroUsize::new(concurrency).unwrap());
+        let mut pieces = TextPieces::new(chunks(text.as_bytes(), 7), layout);
+        let first = if first {
+            pieces.next_window().await.unwrap()
+        } else {
+            None
+        };
+        let (reading, most_reading) = (Cell::new(0usize), Cell::new(0usize));
+        let starts = pieces
+            .read_ahead(first, |window| {
+                reading.set(reading.get() + 1);
+                most_reading.set(most_reading.get().max(reading.get()));
+                let (reading, start) = (&reading, window.piece.start);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(100 - start as u64)).await;
+                    reading.set(reading.get() - 1);
+                    Ok(start)
+                }
+            })
+            .try_collect()
+            .await
+            .unwrap();
+        (starts, most_reading.get())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn windows_are_read_as_many_at_a_time_as_asked_and_come_out_in_order() {
+        let in_order: Vec<usize> = (0..8).map(|piece| piece * 10).collect();
+        for (concurrency, most_reading) in [(1, 1), (3, 3), (20, 8)] {
+            let (starts, most) = read_in_reverse_speed(false, concurrency).await;
+
+            assert_eq!(starts, in_order, "concurrency {concurrency}");
+            assert_eq!(most, most_reading, "concurrency {concurrency}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_window_taken_beforehand_comes_first() {
+        let (starts, _) = read_in_reverse_speed(true, 2).await;
+
+        assert_eq!(starts, (0..8).map(|piece| piece * 10).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn reading_ends_at_the_first_window_that_cannot_be_read() {
+        let text = b"fine line\nfine line\nbad \xff byte\nfine line\nfine line\n";
+        let layout = PieceLayout::new(10, 0).reading(NonZeroUsize::new(3).unwrap());
+        let pieces = TextPieces::new(chunks(text, 4), layout);
+
+        let results: Vec<_> = pieces
+            .read_ahead(None, |window| async move { Ok(window.piece) })
+            .collect()
+            .await;
+
+        assert!(results[..2].iter().all(Result::is_ok));
+        assert!(matches!(
+            results[2],
+            Err(AppError::TextNotUtf8 { offset: 24 })
+        ));
+        assert_eq!(results.len(), 3);
     }
 }

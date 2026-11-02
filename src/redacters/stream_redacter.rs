@@ -6,6 +6,9 @@ use crate::file_converters::pdf::{PdfInfo, PdfPageInfo, PdfToImage};
 use crate::file_converters::FileConverters;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::piece_redaction::{redact_windows, written_windows, PieceRedaction};
+use crate::redacters::table_pieces::{
+    redact_batches, table_csv, TableBatch, TableBatches, TableRedaction, TABLE_BATCH_BYTES,
+};
 use crate::redacters::{
     has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
     DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
@@ -75,10 +78,29 @@ type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Dete
 pub struct RedactedOutput<'f> {
     stream: ContentStream,
     /// What each redacter replaced, placed in the file as it was read, in plan order and in the
-    /// order a reader meets it within a redacter. Empty when no redacter changed the file. An
+    /// order a reader meets it within a redacter, which a table read in batches gives for each
+    /// batch in turn. Empty when no redacter changed the file. An
     /// error means the file could not be redacted; the stream then ends with an error as well,
     /// so that no destination keeps a partial copy.
     redactions: RedactionRecords<'f>,
+}
+
+impl<'f> RedactStreamResult<'f> {
+    /// The result of a file redacted part by part as its stream is read.
+    fn in_parts(
+        redacters: Vec<RedacterType>,
+        stream: ContentStream,
+        redactions: RedactionRecords<'f>,
+    ) -> Self {
+        Self {
+            number_of_redactions: redacters.len(),
+            summary: RedactionSummary {
+                applied: redacters,
+                ..RedactionSummary::default()
+            },
+            output: RedactedOutput { stream, redactions },
+        }
+    }
 }
 
 impl<'f> RedactedOutput<'f> {
@@ -111,7 +133,7 @@ const NOT_TEXT_PROBE_SIZE: usize = 8 * 1024;
 pub struct DetectStreamResult {
     /// What each redacter of the plan found, with the redacter that found it, in plan order and
     /// in the order the redacter reported. A text read in pieces gives this order for each piece
-    /// in turn.
+    /// in turn, and a table read in batches for each batch.
     pub detections: Vec<(RedacterType, Detection)>,
     /// How many values the redacters named without being able to place them in the file, see
     /// [`crate::redacters::Detections::unlocated`].
@@ -250,6 +272,21 @@ pub struct StreamRedacter<'a> {
     file_converters: &'a FileConverters<'a>,
 }
 
+/// How the content of a file is read: whole, or in parts when every redacter of the plan gives
+/// the same findings on the parts as on the whole. A file that fits in one part is read whole
+/// all the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedRead {
+    Whole,
+    /// A text, cut in pieces by the layout, see [`Redacter::text_piece_limits`].
+    TextPieces(PieceLayout),
+    /// A table, cut in batches of rows of about `batch_bytes` of cells, see
+    /// [`RedacterType::reads_tables_by_cell`].
+    TableBatches {
+        batch_bytes: usize,
+    },
+}
+
 pub struct StreamRedactPlan<'a> {
     pub apply_pdf_image_converter: bool,
     pub apply_ocr: bool,
@@ -258,10 +295,7 @@ pub struct StreamRedactPlan<'a> {
     /// read as text.
     pub read_unsupported_as_text: bool,
     pub supported_redacters: Vec<&'a Redacters<'a>>,
-    /// How a text is cut into pieces, when the file is text and every redacter of the plan reads
-    /// text in pieces, see [`Redacter::text_piece_limits`]. A text that fits in one window is
-    /// read whole all the same.
-    pub(crate) piece_layout: Option<PieceLayout>,
+    pub(crate) read: PlannedRead,
     /// Set when `supported_redacters` is empty because a PDF or image needs a conversion
     /// engine (pdfium, OCR) that this build does not have, rather than because none of the
     /// configured redacters is willing to work on this file. `redact_stream` is never called
@@ -324,7 +358,7 @@ impl<'a> StreamRedacter<'a> {
             read_unsupported_as_text: false,
             // Supports natively
             supported_redacters: Self::supporting(redacters, file_ref, None, &supports).await?,
-            piece_layout: None,
+            read: PlannedRead::Whole,
             blocked: None,
         };
 
@@ -408,9 +442,30 @@ impl<'a> StreamRedacter<'a> {
                 .iter()
                 .map(|redacter| redacter.text_piece_limits())
                 .collect();
-            if let Some(limits) = limits {
-                stream_redact_plan.piece_layout = piece_layout(&limits)?;
+            if let Some(layout) = limits
+                .map(|limits| piece_layout(&limits))
+                .transpose()?
+                .flatten()
+            {
+                stream_redact_plan.read = PlannedRead::TextPieces(layout);
             }
+        }
+
+        let reads_cells = !stream_redact_plan.supported_redacters.is_empty()
+            && stream_redact_plan
+                .supported_redacters
+                .iter()
+                .all(|redacter| redacter.redacter_type().reads_tables_by_cell());
+        if reads_cells
+            && !stream_redact_plan.leave_data_table_as_text
+            && file_ref
+                .media_type
+                .as_ref()
+                .is_some_and(Redacters::is_mime_table)
+        {
+            stream_redact_plan.read = PlannedRead::TableBatches {
+                batch_bytes: TABLE_BATCH_BYTES,
+            };
         }
 
         Ok(stream_redact_plan)
@@ -444,8 +499,17 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedactStreamResult<'a>> {
-        let item = match redact_plan.piece_layout {
-            Some(layout) => {
+        let item = match redact_plan.read {
+            PlannedRead::TableBatches { batch_bytes } => {
+                let mut batches =
+                    TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
+                let first = batches.next_batch().await?;
+                if !first.is_whole_table() {
+                    return self.redact_table_in_batches(batches, first, redact_plan, file_ref);
+                }
+                Ok(first.into_item(file_ref))
+            }
+            PlannedRead::TextPieces(layout) => {
                 let mut pieces = TextPieces::new(input, layout);
                 let first = pieces
                     .next_window()
@@ -458,7 +522,7 @@ impl<'a> StreamRedacter<'a> {
                 }
                 Ok(self.text_redact_item(first.text, file_ref))
             }
-            None => {
+            PlannedRead::Whole => {
                 self.stream_to_redact_item(
                     self.redacter_base_options,
                     input,
@@ -606,13 +670,7 @@ impl<'a> StreamRedacter<'a> {
                 Box::new(futures::stream::iter(vec![Ok(data)]))
             }
             RedacterDataItemContent::Table { headers, rows } => {
-                let mut writer = csv_async::AsyncWriter::from_writer(vec![]);
-                writer.write_record(headers).await?;
-                for row in rows {
-                    writer.write_record(row).await?;
-                }
-                writer.flush().await?;
-                let bytes = bytes::Bytes::from(writer.into_inner().await?);
+                let bytes = table_csv(self.redacter_base_options, headers, rows, true).await?;
                 Box::new(futures::stream::iter(vec![Ok(bytes)]))
             }
         };
@@ -639,25 +697,52 @@ impl<'a> StreamRedacter<'a> {
             file_ref,
             self.redacter_base_options.list_redactions,
         )?;
-        let redacters = redaction.redacters();
         tracing::debug!(
             file = %file_ref.relative_path.value(),
-            redacters = redacters.len(),
-            layout = ?redact_plan.piece_layout,
+            redacters = redaction.redacters().len(),
+            read = ?redact_plan.read,
             "redacting in pieces"
         );
         let (written, stream) = written_windows();
-        Ok(RedactStreamResult {
-            number_of_redactions: redacters.len(),
-            summary: RedactionSummary {
-                applied: redacters,
-                ..RedactionSummary::default()
-            },
-            output: RedactedOutput {
-                stream,
-                redactions: redact_windows(redaction, pieces, first, written).boxed_local(),
-            },
-        })
+        Ok(RedactStreamResult::in_parts(
+            redaction.redacters(),
+            stream,
+            redact_windows(redaction, pieces, first, written).boxed_local(),
+        ))
+    }
+
+    /// The result of redacting a table that does not fit in one batch, whose first batch is
+    /// `first`. The table is redacted as the stream is read, see [`RedactedOutput`].
+    fn redact_table_in_batches<
+        S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin + 'static,
+    >(
+        &'a self,
+        batches: TableBatches<S>,
+        first: TableBatch,
+        redact_plan: StreamRedactPlan<'a>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<RedactStreamResult<'a>> {
+        let redaction = TableRedaction::new(
+            &redact_plan.supported_redacters,
+            self.redacter_base_options,
+            file_ref,
+        );
+        let redacters = redact_plan
+            .supported_redacters
+            .iter()
+            .map(|redacter| redacter.redacter_type())
+            .collect();
+        tracing::debug!(
+            file = %file_ref.relative_path.value(),
+            read = ?redact_plan.read,
+            "redacting a table in batches"
+        );
+        let (written, stream) = written_windows();
+        Ok(RedactStreamResult::in_parts(
+            redacters,
+            stream,
+            redact_batches(redaction, batches, first, written).boxed_local(),
+        ))
     }
 
     /// What the redacters of `plan` find in the file, read as `redact_stream` reads it. Every
@@ -672,8 +757,16 @@ impl<'a> StreamRedacter<'a> {
     ) -> AppResult<DetectStreamResult> {
         let redacters = &plan.supported_redacters;
         let categories = self.redacter_base_options.categories.as_ref();
-        if let Some(layout) = plan.piece_layout {
-            return Self::detect_text(input, layout, redacters, categories, file_ref).await;
+        match plan.read {
+            PlannedRead::TextPieces(layout) => {
+                return Self::detect_text(input, layout, redacters, categories, file_ref).await;
+            }
+            PlannedRead::TableBatches { batch_bytes } => {
+                let batches =
+                    TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
+                return Self::detect_table(batches, redacters, categories, file_ref).await;
+            }
+            PlannedRead::Whole => {}
         }
         let Ok(item) = self
             .stream_to_redact_item(self.redacter_base_options, input, file_ref, plan)
@@ -794,6 +887,39 @@ impl<'a> StreamRedacter<'a> {
             "read in pieces"
         );
         Ok(result)
+    }
+
+    /// What `redacters` find in the table `batches` read, a batch at a time. A marker in a cell
+    /// is read within its batch, since a cell is in one.
+    async fn detect_table<S: Stream<Item = AppResult<bytes::Bytes>> + Send + Unpin>(
+        mut batches: TableBatches<S>,
+        redacters: &[&Redacters<'a>],
+        categories: Option<&Categories>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<DetectStreamResult> {
+        tracing::debug!(file = %file_ref.relative_path.value(), "reading a table in batches");
+        let mut result = DetectStreamResult::default();
+        let mut number_of_batches = 0usize;
+        loop {
+            let batch = batches.next_batch().await?;
+            number_of_batches += 1;
+            let (rows_before, reaches_end) = (batch.rows_before, batch.reaches_end);
+            let item = batch.into_item(file_ref);
+            let mut found = Self::detect_all(redacters, &item, None, categories).await?;
+            found.set_aside_ignored(&item.content, None);
+            for (_, detection) in found.detections.iter_mut().chain(&mut found.ignored) {
+                detection.location = detection.location.after_rows(rows_before);
+            }
+            result.absorb(found);
+            if reaches_end {
+                tracing::debug!(
+                    file = %file_ref.relative_path.value(),
+                    batches = number_of_batches,
+                    "read a table in batches"
+                );
+                return Ok(result);
+            }
+        }
     }
 
     fn ocr(&self) -> AppResult<&dyn Ocr> {
@@ -1028,38 +1154,8 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         file_ref: &FileSystemRef,
     ) -> AppResult<RedacterDataItem> {
-        let reader = tokio_util::io::StreamReader::new(input.map_err(std::io::Error::other));
-        let mut reader = csv_async::AsyncReaderBuilder::default()
-            .has_headers(!redacter_base_options.csv_headers_disable)
-            .delimiter(
-                redacter_base_options
-                    .csv_delimiter
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or(b','),
-            )
-            .create_reader(reader);
-        let headers = if !redacter_base_options.csv_headers_disable {
-            reader
-                .headers()
-                .await?
-                .into_iter()
-                .map(|h| h.to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-        let records: Vec<csv_async::StringRecord> = reader.records().try_collect().await?;
-        Ok(RedacterDataItem {
-            content: RedacterDataItemContent::Table {
-                headers,
-                rows: records
-                    .iter()
-                    .map(|r| r.iter().map(|c| c.to_string()).collect())
-                    .collect(),
-            },
-            file_ref: file_ref.clone(),
-        })
+        let mut batches = TableBatches::new(input, redacter_base_options, usize::MAX).await?;
+        Ok(batches.next_batch().await?.into_item(file_ref))
     }
 
     async fn stream_to_image_redact_item<
@@ -1465,7 +1561,7 @@ mod tests {
     use super::*;
     use crate::redacters::{
         parse_inline_rule, Category, DetectionLabel, LocalRulesRedacter, LocalRulesRedacterOptions,
-        RuleGroup, UserRule,
+        PresidioRedacter, PresidioRedacterOptions, RuleGroup, UserRule,
     };
     use crate::reporter::AppReporter;
     use std::collections::BTreeSet;
@@ -2691,12 +2787,13 @@ mod tests {
         (whole, in_pieces)
     }
 
+    /// The way a report orders what it lists: by place.
+    fn by_location(mut findings: Vec<(RedacterType, Detection)>) -> Vec<(RedacterType, Detection)> {
+        findings.sort_by(|(_, a), (_, b)| a.location.partial_cmp(&b.location).unwrap());
+        findings
+    }
+
     fn assert_same_findings(whole: DetectStreamResult, in_pieces: DetectStreamResult) {
-        let by_location = |findings: Vec<(RedacterType, Detection)>| {
-            let mut findings = findings;
-            findings.sort_by(|(_, a), (_, b)| a.location.partial_cmp(&b.location).unwrap());
-            findings
-        };
         let (whole_detections, piece_detections) = (
             by_location(whole.detections),
             by_location(in_pieces.detections),
@@ -2903,16 +3000,13 @@ mod tests {
     async fn only_text_that_every_redacter_reads_in_pieces_is_planned_in_pieces() {
         let converters = FileConverters::new();
         let redacters = vec![email_rules().await];
-        let plan = |options: RedacterBaseOptions, file: FileSystemRef| {
-            let (redacters, converters) = (&redacters, &converters);
-            async move {
-                StreamRedacter::new(&options, converters)
-                    .create_detect_plan(redacters, &file)
-                    .await
-                    .unwrap()
-                    .piece_layout
-                    .is_some()
-            }
+        let plan = async |options: RedacterBaseOptions, file: FileSystemRef| {
+            let stream_redacter = StreamRedacter::new(&options, &converters);
+            let plan = stream_redacter
+                .create_detect_plan(&redacters, &file)
+                .await
+                .unwrap();
+            matches!(plan.read, PlannedRead::TextPieces(_))
         };
         let text = file_ref("app.log", mime::TEXT_PLAIN);
         let sampled = RedacterBaseOptions {
@@ -2951,16 +3045,19 @@ mod tests {
 
         let window = TextPieceLimits::LOCAL.max_request_bytes;
         let rounding = crate::redacters::CUT_ROUNDING_BYTES;
+        let concurrency = TextPieceLimits::LOCAL.concurrent_requests;
         assert_eq!(
-            redaction.piece_layout,
-            Some(PieceLayout::new(
-                window - 2 * (2 * context + rounding),
-                2 * context
-            ))
+            redaction.read,
+            PlannedRead::TextPieces(
+                PieceLayout::new(window - 2 * (2 * context + rounding), 2 * context)
+                    .reading(concurrency)
+            )
         );
         assert_eq!(
-            scan.piece_layout,
-            Some(PieceLayout::new(window - 2 * (context + rounding), context))
+            scan.read,
+            PlannedRead::TextPieces(
+                PieceLayout::new(window - 2 * (context + rounding), context).reading(concurrency)
+            )
         );
     }
 
@@ -3032,9 +3129,33 @@ mod tests {
         redactions: Vec<(RedacterType, Detection)>,
     }
 
-    /// Copies `text` in chunks of 7 bytes, so that no chunk ends where a line does, read in
-    /// pieces of `layout` or, for `None`, whole. The stream and the redactions are polled
-    /// together, as `cp` does.
+    /// Copies `content` of the file `file` in chunks of 7 bytes, so that no chunk ends where a
+    /// line does, read as `read` plans. The stream and the redactions are polled together, as
+    /// `cp` does.
+    async fn copy_file_with(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        file: &FileSystemRef,
+        content: &[u8],
+        read: PlannedRead,
+    ) -> AppResult<(
+        AppResult<Vec<bytes::Bytes>>,
+        AppResult<Vec<(RedacterType, Detection)>>,
+    )> {
+        let converters = FileConverters::new();
+        let stream_redacter = StreamRedacter::new(options, &converters);
+        let mut plan = stream_redacter.create_redact_plan(redacters, file).await?;
+        plan.read = read;
+        let chunks = content
+            .chunks(7)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        let result = stream_redacter
+            .redact_stream(futures::stream::iter(chunks), plan, file)
+            .await?;
+        Ok(written_and_listed(result.output).await)
+    }
+
     async fn copy_text_with(
         options: &RedacterBaseOptions,
         redacters: &[Redacters<'static>],
@@ -3044,28 +3165,19 @@ mod tests {
         AppResult<Vec<bytes::Bytes>>,
         AppResult<Vec<(RedacterType, Detection)>>,
     )> {
-        let converters = FileConverters::new();
+        let read = layout.map_or(PlannedRead::Whole, PlannedRead::TextPieces);
         let file = file_ref("app.log", mime::TEXT_PLAIN);
-        let stream_redacter = StreamRedacter::new(options, &converters);
-        let mut plan = stream_redacter.create_redact_plan(redacters, &file).await?;
-        plan.piece_layout = layout;
-        let chunks = text
-            .chunks(7)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-            .collect::<Vec<_>>();
-        let result = stream_redacter
-            .redact_stream(futures::stream::iter(chunks), plan, &file)
-            .await?;
-        Ok(written_and_listed(result.output).await)
+        copy_file_with(options, redacters, &file, text, read).await
     }
 
-    async fn copy_text(
+    async fn copied_file(
         options: &RedacterBaseOptions,
         redacters: &[Redacters<'static>],
-        text: &[u8],
-        layout: Option<PieceLayout>,
+        file: &FileSystemRef,
+        content: &[u8],
+        read: PlannedRead,
     ) -> Copied {
-        let (stream, redactions) = copy_text_with(options, redacters, text, layout)
+        let (stream, redactions) = copy_file_with(options, redacters, file, content, read)
             .await
             .unwrap();
         let chunks = stream.unwrap();
@@ -3074,6 +3186,311 @@ mod tests {
             output: chunks.concat(),
             redactions: redactions.unwrap(),
         }
+    }
+
+    async fn copy_text(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        text: &[u8],
+        layout: Option<PieceLayout>,
+    ) -> Copied {
+        let read = layout.map_or(PlannedRead::Whole, PlannedRead::TextPieces);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        copied_file(options, redacters, &file, text, read).await
+    }
+
+    const SMALL_BATCH: PlannedRead = PlannedRead::TableBatches { batch_bytes: 300 };
+    const ONE_ROW_BATCHES: PlannedRead = PlannedRead::TableBatches { batch_bytes: 1 };
+
+    fn csv_file() -> FileSystemRef {
+        file_ref("people.csv", mime::TEXT_CSV)
+    }
+
+    /// Rows with an email, an address and a note that holds a comma, quotes and a line break,
+    /// which a batch boundary must not cut.
+    fn people(rows: usize) -> String {
+        let mut table = String::from("id,contact,note\r\n");
+        for row in 0..rows {
+            table.push_str(&format!(
+                "{row},user{row}@example.com,\"host 10.1.{row}.3, \"\"main\"\"\nthen mail ops{row}@example.com\"\r\n"
+            ));
+        }
+        table
+    }
+
+    async fn copied_table(
+        options: &RedacterBaseOptions,
+        redacters: &[Redacters<'static>],
+        table: &str,
+        read: PlannedRead,
+    ) -> Copied {
+        copied_file(options, redacters, &csv_file(), table.as_bytes(), read).await
+    }
+
+    async fn email_and_network_rules() -> Vec<Redacters<'static>> {
+        vec![
+            email_rules().await,
+            Redacters::LocalRules(local_rules([RuleGroup::Network].into(), vec![]).await),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_table_copied_in_batches_is_the_table_copied_whole() {
+        let redacters = email_and_network_rules().await;
+        let table = people(40);
+        let options = base_options();
+        let copy = |read| copied_table(&options, &redacters, &table, read);
+
+        let whole = copy(PlannedRead::Whole).await;
+        let in_batches = copy(SMALL_BATCH).await;
+
+        assert_eq!(whole.chunks, 1);
+        assert!(in_batches.chunks > 1, "{} chunks", in_batches.chunks);
+        assert_eq!(
+            String::from_utf8_lossy(&in_batches.output),
+            String::from_utf8_lossy(&whole.output)
+        );
+        assert_eq!(whole.redactions.len(), 40 * 3);
+        assert_eq!(
+            by_location(in_batches.redactions),
+            by_location(whole.redactions)
+        );
+    }
+
+    #[tokio::test]
+    async fn tables_of_other_shapes_are_copied_in_batches_as_they_are_whole() {
+        let redacters = vec![email_rules().await];
+        let options = base_options();
+        let tables = [
+            "\u{feff}id,mail\r\n1,a@example.com\r\n2,b@example.com\r\n",
+            "id,mail\n1,a@example.com\n2,b@example.com\n3,c@example.com\n",
+            "id,mail\n1,a@example.com\n2,b@example.com",
+        ];
+
+        for table in tables {
+            let copy = |read| copied_table(&options, &redacters, table, read);
+            let whole = copy(PlannedRead::Whole).await;
+            let in_batches = copy(ONE_ROW_BATCHES).await;
+
+            assert_eq!(
+                String::from_utf8_lossy(&in_batches.output),
+                String::from_utf8_lossy(&whole.output),
+                "{table:?}"
+            );
+            assert_eq!(
+                by_location(in_batches.redactions),
+                by_location(whole.redactions),
+                "{table:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_table_is_written_with_the_delimiter_it_is_read_with() {
+        let redacters = vec![email_rules().await];
+        let options = RedacterBaseOptions {
+            csv_delimiter: Some(b';'),
+            ..base_options()
+        };
+        let table = "id;note\n1;x,y\n2;z\n3;w\n";
+
+        for read in [PlannedRead::Whole, ONE_ROW_BATCHES] {
+            let copied = copied_table(&options, &redacters, table, read).await;
+
+            assert_eq!(String::from_utf8(copied.output).unwrap(), table, "{read:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_table_read_without_headers_is_written_without_them() {
+        let redacters = vec![email_rules().await];
+        let options = RedacterBaseOptions {
+            csv_headers_disable: true,
+            ..base_options()
+        };
+        let table = "1,a\n2,b\n3,c\n";
+
+        for read in [PlannedRead::Whole, ONE_ROW_BATCHES] {
+            let copied = copied_table(&options, &redacters, table, read).await;
+
+            assert_eq!(String::from_utf8(copied.output).unwrap(), table, "{read:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_row_of_the_wrong_length_after_the_first_batch_fails_the_copy() {
+        let redacters = vec![email_rules().await];
+        let table = format!("{}9,only one cell\r\n", people(10));
+
+        let (stream, redactions) = copy_file_with(
+            &base_options(),
+            &redacters,
+            &csv_file(),
+            table.as_bytes(),
+            SMALL_BATCH,
+        )
+        .await
+        .unwrap();
+
+        assert!(stream.is_err());
+        assert!(redactions.is_err());
+    }
+
+    /// The detections of `redacters` in `table`, read as `read` plans.
+    async fn detect_table_as(
+        redacters: &[Redacters<'static>],
+        table: &str,
+        read: PlannedRead,
+    ) -> DetectStreamResult {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let mut plan = stream_redacter
+            .create_detect_plan(redacters, &csv_file())
+            .await
+            .unwrap();
+        plan.read = read;
+        let chunks = table
+            .as_bytes()
+            .chunks(7)
+            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        stream_redacter
+            .detect_stream(futures::stream::iter(chunks), &plan, &csv_file())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_scan_of_a_table_in_batches_finds_what_a_scan_of_the_whole_table_finds() {
+        let redacters = email_and_network_rules().await;
+        let table = format!("{}x,\"eve@example.com redacter:allow\",n\r\n", people(40));
+
+        let whole = detect_table_as(&redacters, &table, PlannedRead::Whole).await;
+        let in_batches = detect_table_as(&redacters, &table, SMALL_BATCH).await;
+
+        assert_eq!(whole.detections.len(), 40 * 3);
+        assert_eq!(whole.ignored.len(), 1);
+        assert_eq!(
+            in_batches.ignored[0].1.location,
+            DetectionLocation::TableCell {
+                row: 41,
+                column: 2,
+                start: 0,
+                end: 15
+            }
+        );
+        assert_same_findings(whole, in_batches);
+    }
+
+    /// The read planned for a CSV file when every one of `redacters` supports a table as it is,
+    /// as GCP DLP does, so that only [`RedacterType::reads_tables_by_cell`] decides the read.
+    async fn planned_read_of_supported_tables<'a>(
+        stream_redacter: &'a StreamRedacter<'a>,
+        redacters: &'a [Redacters<'a>],
+    ) -> PlannedRead {
+        stream_redacter
+            .create_plan(
+                redacters,
+                &csv_file(),
+                async |_, _| Ok(RedactSupport::Supported),
+                PieceLayout::chained,
+            )
+            .await
+            .unwrap()
+            .read
+    }
+
+    #[tokio::test]
+    async fn a_table_is_planned_in_batches_only_when_every_redacter_reads_its_cells() {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let by_cell = email_rules().await;
+        let whole_table = Redacters::Presidio(
+            PresidioRedacter::new(
+                PresidioRedacterOptions {
+                    text_analyze_url: Some("http://localhost:5002/analyze".parse().unwrap()),
+                    image_redact_url: None,
+                    categories: None,
+                },
+                reporter(),
+            )
+            .await
+            .unwrap(),
+        );
+        let planned = async |redacters: Vec<Redacters<'static>>| {
+            planned_read_of_supported_tables(&stream_redacter, &redacters).await
+        };
+
+        assert_eq!(
+            planned(vec![by_cell.clone()]).await,
+            PlannedRead::TableBatches {
+                batch_bytes: TABLE_BATCH_BYTES
+            }
+        );
+        assert_eq!(planned(vec![whole_table.clone()]).await, PlannedRead::Whole);
+        assert_eq!(
+            planned(vec![by_cell, whole_table]).await,
+            PlannedRead::Whole
+        );
+    }
+
+    #[tokio::test]
+    async fn a_table_read_as_text_is_not_planned_in_batches() {
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let text_only = vec![Redacters::Presidio(
+            PresidioRedacter::new(
+                PresidioRedacterOptions {
+                    text_analyze_url: Some("http://localhost:5002/analyze".parse().unwrap()),
+                    image_redact_url: None,
+                    categories: None,
+                },
+                reporter(),
+            )
+            .await
+            .unwrap(),
+        )];
+
+        let plan = stream_redacter
+            .create_redact_plan(&text_only, &csv_file())
+            .await
+            .unwrap();
+
+        assert!(plan.leave_data_table_as_text);
+        assert_eq!(plan.read, PlannedRead::Whole);
+    }
+
+    /// The names in the cells are found by the model, which reads `"{header}: {cell}"`, so a
+    /// batch gives the findings the whole table gives. The model is installed with
+    /// `redacter addons install local-ner`; a test never downloads it.
+    #[cfg(feature = "local-ner")]
+    #[tokio::test]
+    #[cfg_attr(not(feature = "ci-local-ner"), ignore)]
+    async fn the_model_finds_the_same_names_in_a_table_read_in_batches() {
+        let store = crate::addon_store::AddonStore::new(&Default::default());
+        let options = crate::redacters::LocalNerRedacterOptions::validated(
+            crate::redacters::Entity::all(),
+            crate::redacters::Score::from_static(0.5),
+        )
+        .unwrap();
+        let redacters = vec![Redacters::LocalNer(
+            crate::redacters::LocalNerRedacter::new(options, reporter(), &store)
+                .await
+                .unwrap(),
+        )];
+        let mut table = String::from("name,city\n");
+        for person in ["John Michael Smith", "Maria Garcia Lopez", "Wei Zhang Chen"] {
+            table.push_str(&format!("{person},Madrid\n"));
+        }
+
+        let whole = detect_table_as(&redacters, &table, PlannedRead::Whole).await;
+        let in_batches = detect_table_as(&redacters, &table, ONE_ROW_BATCHES).await;
+
+        assert!(!whole.detections.is_empty());
+        assert_same_findings(whole, in_batches);
     }
 
     /// The copy of `text` whole and in pieces of `layout`, which must be the same file. The

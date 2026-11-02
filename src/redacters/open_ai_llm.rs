@@ -353,20 +353,16 @@ impl<'a> OpenAiLlmRedacter<'a> {
         }
     }
 
-    /// The error of a rejected request. It carries the status and OpenAI's error type and code
-    /// but not the body: the message of an API error can quote the scanned text, and both the
-    /// error and the log reach the terminal and the scan report.
+    /// The error of a rejected request. It carries the status but not the body: the message of
+    /// an API error can quote the scanned text, and both the error and the log reach the terminal
+    /// and the scan report. OpenAI's error type and code go to the debug log.
     fn request_failure(operation: &str, status: reqwest::StatusCode, body: &str) -> AppError {
         let identifiers = serde_json::from_str::<OpenAiErrorResponse>(body)
             .map(|response| [response.error.r#type, response.error.code])
             .unwrap_or_default();
         let identifiers: Vec<String> = identifiers.into_iter().flatten().collect();
         tracing::debug!(%status, ?identifiers, operation, "OpenAI rejected the request");
-        let mut message = format!("Failed to {operation}. HTTP status: {status}.");
-        if !identifiers.is_empty() {
-            message.push_str(&format!(" OpenAI error: {}.", identifiers.join(", ")));
-        }
-        AppError::SystemError { message }
+        AppError::request_rejected(operation, status)
     }
 
     /// Sends a chat completion request and returns its last choice with how it ended.
@@ -637,6 +633,17 @@ mod tests {
             );
             assert!(!error.to_string().contains(PLANTED_VALUE), "{body}");
         }
+    }
+
+    #[test]
+    fn a_rate_limited_request_is_throttled() {
+        let rate_limited = r#"{"error": {"message": "slow down", "type": "requests", "code": "rate_limit_exceeded"}}"#;
+        let error = OpenAiLlmRedacter::request_failure(
+            "analyze text",
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            rate_limited,
+        );
+        assert!(error.is_throttled());
     }
 
     #[tokio::test]
