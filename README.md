@@ -580,11 +580,13 @@ punctuation-dense text with an email on every line near 1.66 GB. The same copy w
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
-JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a table and whole. A piece is read with 64 KiB of text on
+JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with 64 KiB of text on
 each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
 masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
 longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
-left, so the first reads the contexts of all of them. A line longer than a window is cut inside.
+left, so the first reads the contexts of all of them. A line longer than a window is cut inside. A CSV file of more than
+about 4 MiB is redacted in batches of rows when every selected redacter is `local-rules`, `local-credential-ml`,
+`local-ner` or `local-gliner`, with the output of a whole read and every redaction located in its cell.
 
 The output is the same as when the file is read whole, with two exceptions. A rule of your own that is anchored with `^`
 or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
@@ -1369,13 +1371,15 @@ For example:
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
 A text file of more than about 4 MiB is read in pieces when every selected redacter is `local-rules` or
-`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown; a CSV file is read as a
-table and whole. A piece is read with 64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
+`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with
+64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
 across lines, such as a private key block, is found wherever a piece ends, and a longer one that crosses the end of a
 piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
 value longer than 64 KiB that crosses the end of a window can also be reported in part. A line longer than a
 window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are. Other
-redacters and `--unsupported-as-text` read the file whole. With `--sampling-size`, `scan` reads only as much of a text
+redacters and `--unsupported-as-text` read the file whole. A CSV file of more than about 4 MiB is read in batches of rows
+when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
+locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
 file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
 755 MB in 0.21, in about 2% more time. The findings are still kept in memory until the reports are written, so a file with millions of findings
 needs memory for them: the same scan of a 366 MB log with 5.2 million findings peaks near 3.7 GB, against 4.4 GB in
