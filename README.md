@@ -615,13 +615,13 @@ its two halves. Each request holds at most:
 | Redacter | Request | Limit it follows |
 |---|---|---|
 | `aws-comprehend` | 100 000 bytes | The 100 KB document of `DetectPiiEntities` |
-| `presidio` | 512 KiB | The 1 000 000 characters that spaCy accepts in `nlp.max_length`, which the analyzer refuses above; a byte is at least a character |
+| `presidio` | 512 KiB | The 1 000 000 characters that spaCy accepts in `nlp.max_length`, which the analyzer refuses above; a character takes at least one byte |
 | `gcp-dlp` | 480 000 bytes | The 0.5 MB request, less the fields around the text |
 | `aws-bedrock-guardrails` | 100 000 bytes | 106 text units of 1000 characters, the least a Region takes in a request for the sensitive information policy |
 
 The 64 KiB context of `local-rules` and `local-credential-ml` does not fit in a request of `aws-comprehend` or
 `aws-bedrock-guardrails`. With one of them, `cp` reads a text in pieces only when the local redacter comes first in the
-chain, and reads it whole otherwise, so a text over the request limit of the provider then fails; `scan` reads it whole.
+chain, and reads it whole otherwise, so a text over the request limit of the provider then fails. `scan` also reads it whole, but sends it to the provider in parts that fit a request, so it succeeds.
 The container of the `presidio-analyzer` image answers one request at a time, and `aws-bedrock-guardrails` is limited in
 some Regions to 75 text units per second, against the 100 text units of a full request, so the pieces of both are read
 one after another.

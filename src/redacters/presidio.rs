@@ -14,7 +14,7 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 
 /// The most text sent in one analyze request. spaCy refuses a text of over 1,000,000 characters
-/// (`nlp.max_length`), and a byte is at least a character, so a request of this many bytes is
+/// (`nlp.max_length`), and a character takes at least one byte, so a request of this many bytes is
 /// always within it.
 const ANALYZE_MAX_TEXT_BYTES: usize = 512 * 1024;
 
