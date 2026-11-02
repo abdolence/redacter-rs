@@ -198,6 +198,17 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 - times are from one machine and one network;
 - `fixtures` is the only dataset with deliberately multilingual text, in German, French and Spanish. `aws-comprehend` reads English text only.
 
+## Large files and the models
+
+`local-ner` and `local-gliner` read a large text file whole, where `local-rules` and `local-credential-ml` read it in pieces, see [Scan command](../README.md#scan-command). Reading the two models in pieces was measured and lost.
+
+- `local-ner` on `long`, five documents of about 34 KB built from the public sample: 34 arms, with pieces of 777 to 16000 bytes and contexts of 128 to 8192 bytes. 19 arms lose. Person or address recall is down 1.3 to 3.5 points and precision is down 1.2 to 5.1 points. Only the contexts of 8192 bytes pass;
+- `local-ner` on `fixtures` and `public` passes from a context of 256 bytes up;
+- `local-gliner` on `long`: all 5 arms, with contexts of 256 to 4096 bytes, lose. Address recall is down 5.3 to 8.8 points;
+- no arm failed a file on values that could not be located.
+
+A whole read with 7 to 200 leading words added to each document moves the results as much: `local-ner` finds 189 to 202 of 244 person values, and `local-gliner` finds 44 to 48 of 57 address values. The harness for these runs is not part of the repository.
+
 ## How the numbers were measured
 
 - commit `2390a25` of this repository, release build;

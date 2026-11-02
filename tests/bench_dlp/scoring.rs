@@ -258,7 +258,11 @@ impl FileTruth {
             }
         }
         let mut tally = self.unscored();
-        let found = self.found(&distinct);
+        let found: Vec<bool> = self
+            .sensitive
+            .iter()
+            .map(|sensitive| sensitive.value.is_found_by(&distinct))
+            .collect();
         for (sensitive, found) in self.sensitive.iter().zip(&found) {
             tally.recall.entry(sensitive.category).or_default().found += usize::from(*found);
         }
@@ -292,14 +296,6 @@ impl FileTruth {
             }
         }
         tally
-    }
-
-    /// Whether each sensitive entry, in the order of `sensitive`, is found by `findings`.
-    pub fn found(&self, findings: &[Finding]) -> Vec<bool> {
-        self.sensitive
-            .iter()
-            .map(|sensitive| sensitive.value.is_found_by(findings))
-            .collect()
     }
 
     /// What a file the scan did not read adds: every target missed.
@@ -339,13 +335,13 @@ struct ReportFile {
     findings: Vec<ReportFinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ReportFinding {
     value: String,
     location: ReportLocation,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ReportLocation {
     Text {
@@ -394,56 +390,25 @@ impl From<ReportFinding> for Finding {
 }
 
 impl ScanReport {
-    /// The findings of each file the scan read.
-    fn scanned(&self) -> BTreeMap<&str, Vec<Finding>> {
-        self.files
-            .iter()
+    /// Scores every file of `truth`. A file the report lacks, or did not scan, counts as missed.
+    pub fn score(self, truth: &BTreeMap<String, FileTruth>) -> Tally {
+        let mut scanned: BTreeMap<String, Vec<Finding>> = self
+            .files
+            .into_iter()
             .filter(|file| file.status == FileStatus::Scanned)
             .map(|file| {
-                let findings = file
-                    .findings
-                    .iter()
-                    .map(|finding| Finding::from(finding.clone()))
-                    .collect();
-                (file.path.as_str(), findings)
+                let findings = file.findings.into_iter().map(Finding::from).collect();
+                (file.path, findings)
             })
-            .collect()
-    }
-
-    /// Scores every file of `truth`. A file the report lacks, or did not scan, counts as missed.
-    pub fn score(&self, truth: &BTreeMap<String, FileTruth>) -> Tally {
-        let scanned = self.scanned();
+            .collect();
         let mut tally = Tally::default();
         for (path, file_truth) in truth {
-            tally.merge(&match scanned.get(path.as_str()) {
-                Some(findings) => file_truth.score(findings),
+            tally.merge(&match scanned.remove(path) {
+                Some(findings) => file_truth.score(&findings),
                 None => file_truth.unscored(),
             });
         }
         tally
-    }
-
-    /// How many of the sensitive entries in `chosen` the report finds, `chosen` naming the
-    /// entries of each file by their index in its truth. An entry of a file the scan did not
-    /// read is missed.
-    pub fn recall_of(
-        &self,
-        truth: &BTreeMap<String, FileTruth>,
-        chosen: &BTreeMap<String, Vec<usize>>,
-    ) -> Recall {
-        let scanned = self.scanned();
-        let mut recall = Recall::default();
-        for (path, entries) in chosen {
-            let found = scanned
-                .get(path.as_str())
-                .map(|findings| truth[path].found(findings));
-            recall.total += entries.len();
-            recall.found += entries
-                .iter()
-                .filter(|&&entry| found.as_ref().is_some_and(|found| found[entry]))
-                .count();
-        }
-        recall
     }
 }
 
@@ -641,25 +606,6 @@ mod tests {
             {"path": "c.txt", "status": "failed", "findings": []}
         ]
     }"#;
-
-    #[test]
-    fn recall_of_chosen_entries_counts_entries_of_unread_files_as_missed() {
-        let email = || truth_of(&[(Category::Contact, "alice@example.com")], &[], &[]);
-        let truth = BTreeMap::from([
-            ("a.txt".to_string(), email()),
-            ("c.txt".to_string(), email()),
-        ]);
-        let chosen = BTreeMap::from([
-            ("a.txt".to_string(), vec![0]),
-            ("c.txt".to_string(), vec![0]),
-        ]);
-        let report: ScanReport = serde_json::from_str(REPORT).unwrap();
-
-        assert_eq!(
-            report.recall_of(&truth, &chosen),
-            Recall { found: 1, total: 2 }
-        );
-    }
 
     #[test]
     fn report_is_scored_per_file_and_unread_files_count_as_missed() {

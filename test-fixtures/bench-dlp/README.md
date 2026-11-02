@@ -84,9 +84,6 @@ Select them with `BENCH_DLP_DATASETS`, a comma-separated list. The default is
   treat as neutral (places, organisations, dates and times, occupation, language, employment
   and education). The labels map to the categories in `nemotron_category` in `tests/bench_dlp/datasets.rs`. The
   annotation is not exhaustive, so only recall is reported.
-- `long`: the records of `public`, 40 to a document, joined with blank lines: five documents of about
-  34 KB with the truth of their records. It is the dataset for the pieces gate below, since a document holds
-  many names and places across cuts. Only recall is reported, as for `public`.
 - `images`: `test-fixtures/media/form-example.png` and `test-fixtures/documents/customer-form.pdf`,
   the same customer form. `images.json` holds a pixel box for each value, measured on the
   PNG and, for the PDF, at the 1 pixel per point scale the PDF renderer uses. The local
@@ -136,70 +133,13 @@ Settings are environment variables:
 | Variable | Meaning |
 |---|---|
 | `BENCH_DLP_PROVIDERS` | Comma-separated specs. A spec joined with `+` is a chain, run as one `redacter scan -d a -d b`. Default is the local redacters and their chains |
-| `BENCH_DLP_DATASETS` | `fixtures`, `secrets`, `public`, `long`, `images`. Default is `fixtures,secrets,public` |
+| `BENCH_DLP_DATASETS` | `fixtures`, `secrets`, `public`, `images`. Default is `fixtures,secrets,public` |
 | `BENCH_DLP_SCAN_ARGS` | Options added to every `redacter scan`, split on whitespace, so a value cannot hold a space. They configure the cloud redacters: see `redacter scan --help` |
 | `BENCH_DLP_OUT` | Output directory. Default is `target/bench-dlp` |
-| `BENCH_DLP_PIECES` | Runs the pieces gate instead of the normal run, see below |
-| `BENCH_DLP_LONG_LEAD_WORDS` | Puts this many words (`Note. `) in front of each document of `long`, which moves where the windows of a model fall in the text |
 
 A spec for which `scan` writes no report is listed as failed with the `Error:` line of its
 output, which names the setting or the addon a redacter lacks. It does not stop the run. Cloud
 redacters bill for what they read, and each dataset is sent once.
-
-## Pieces gate
-
-A redacter that reads a large text file in pieces is run on windows laid out by the file and not from its first
-byte, so a model finds a slightly different set of values than in a whole read. The gate measures that difference
-for a model before it reads in pieces. For each arm it scans the dataset whole twice, for the spread of the run, and
-in pieces, and compares recall per category, precision, recall of the values within one context of a cut, and the
-files that failed. A pieces run loses when a share is below the lower of the two whole runs by more than the spread
-between them, or by more than one point when they agree.
-
-Set `BENCH_DLP_PIECES` to a comma-separated list of arms. An arm is `piece:context` in bytes, or
-`dataset=piece:context` for one dataset, and the piece size is how far apart the cuts fall. The window of a run is
-the piece with the context on both sides. The binary has to be built with the `bench-pieces` feature, which makes it
-read the window and the context from `REDACTER_BENCH_WINDOW_BYTES` and `REDACTER_BENCH_CONTEXT_BYTES`:
-
-```sh
-BENCH_DLP_PROVIDERS=local-ner BENCH_DLP_DATASETS=fixtures,public,long \
-BENCH_DLP_PIECES=fixtures=128:2048,public=256:2048,long=2048:2048,long=8192:2048 \
-cargo test --release --features bench-pieces --test bench_dlp -- --ignored --nocapture
-```
-
-The verdicts go to `<BENCH_DLP_OUT>/gate.md`. `secrets` is read with `--unsupported-as-text`, which is always read
-whole, so no arm cuts it.
-
-### Results for the local models
-
-`local-ner` and `local-gliner` read large text files whole. The runs were made on 2026-11-02 with pieces of 128 to
-16000 bytes and contexts of 0 bytes to 8 KiB. On `long`, `local-ner` loses the gate at every context from 128 to
-4096 bytes, and `local-gliner` at every context from 256 to 4096 bytes.
-
-| Redacter | Dataset | Arms run | Arms that lose |
-|---|---|---|---|
-| `local-ner` | `fixtures` | pieces of 128, contexts 0 to 4096 | context 0: precision 64.7% against 68.8% |
-| `local-ner` | `public` | pieces of 128 and 256, contexts 0 to 4096 | context 0: contact, address and other recall, precision; context 128: other recall 5.0% against 6.7% |
-| `local-ner` | `long` | 34 arms, pieces of 777 to 16000, contexts 128 to 8192 | 19: person or address recall down 1.3 to 3.5 points, precision down 1.2 to 5.1 points |
-| `local-gliner` | `fixtures` | pieces of 128, contexts 512 and 2048 | none |
-| `local-gliner` | `public` | pieces of 256, contexts 512 and 2048 | context 512: precision 78.6% against 79.9% |
-| `local-gliner` | `long` | pieces of 2048, contexts 256 to 4096 | all 5: address recall down 5.3 to 8.8 points |
-
-On `long`, every context of `local-ner` from 128 to 4096 has an arm that loses. The three arms with a context of 8192
-pass, and their windows reach over half of a 34 KB document. An arm with a context longer than the file is one window
-and gives the whole read's numbers.
-
-The loss does not follow the context. The windows of a model start at the first token of the text, so moving where
-they fall moves the result. A whole read of `long` with a few words put in front of each document, which changes
-nothing else, differs from the unmoved whole read by as much as the pieces do:
-
-| Leading words in front of each document | 0 | 7 | 50 | 111 | 200 |
-|---|---|---|---|---|---|
-| `local-ner`, person values found of 244 | 201 | 189 | 202 | 193 | 194 |
-| `local-ner`, address values found of 57 | 17 | 19 | 23 | 21 | 19 |
-| `local-gliner`, address values found of 57 | 48 | 45 | 45 | 44 | - |
-
-Two identical runs agree exactly, since both models are deterministic, so the spread the gate allows is zero and
-does not include this difference.
 
 ## Output
 

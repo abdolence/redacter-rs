@@ -20,15 +20,12 @@
 #[path = "../../src/redacters/category.rs"]
 mod category;
 mod datasets;
-mod gate;
 mod runner;
 mod scoring;
 mod summary;
 
 use datasets::{Dataset, DatasetKind, DatasetPaths};
-use gate::{ArmResult, PiecesArm, Run};
 use runner::{Scanner, Spec};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -36,29 +33,6 @@ use summary::{DatasetResult, Measurement, Outcome, ProviderResult, Results};
 
 const DEFAULT_PROVIDERS: &str = "local-rules,local-ner,local-rules+local-ner,local-gliner,local-rules+local-gliner,local-credential-ml,local-rules+local-credential-ml";
 const DEFAULT_DATASETS: &str = "fixtures,secrets,public";
-
-/// A pieces arm for one dataset (`long=2048:512`) or for all of them (`128:512`).
-struct DatasetArm {
-    dataset: Option<DatasetKind>,
-    arm: PiecesArm,
-}
-
-impl FromStr for DatasetArm {
-    type Err = String;
-
-    fn from_str(spec: &str) -> Result<Self, Self::Err> {
-        match spec.split_once('=') {
-            Some((dataset, arm)) => Ok(Self {
-                dataset: Some(dataset.parse()?),
-                arm: arm.parse()?,
-            }),
-            None => Ok(Self {
-                dataset: None,
-                arm: spec.parse()?,
-            }),
-        }
-    }
-}
 
 fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> Vec<T> {
     let value = std::env::var(variable).unwrap_or_else(|_| default.to_string());
@@ -76,7 +50,7 @@ fn comma_separated<T: FromStr<Err = String>>(variable: &str, default: &str) -> V
 fn measure(scanner: &Scanner, spec: &Spec, dataset: &Dataset) -> Outcome {
     let files = dataset.truth.len();
     println!("  {spec} on {}: {files} files", dataset.kind);
-    let run = match scanner.scan(spec, &dataset.dir, dataset.scan_args, &[]) {
+    let run = match scanner.scan(spec, &dataset.dir, dataset.scan_args) {
         Ok(run) => run,
         Err(reason) => return Outcome::Failed { reason },
     };
@@ -89,50 +63,6 @@ fn measure(scanner: &Scanner, spec: &Spec, dataset: &Dataset) -> Outcome {
         files_unsupported: run.report.files_unsupported,
         tally: run.report.score(&dataset.truth),
     })
-}
-
-/// The sensitive entries of each file of `dataset` that a cut of `arm` puts at risk.
-fn entries_near_cuts(dataset: &Dataset, arm: PiecesArm) -> BTreeMap<String, Vec<usize>> {
-    dataset
-        .truth
-        .iter()
-        .filter_map(|(name, truth)| {
-            let text = fs::read_to_string(dataset.dir.join(name)).ok()?;
-            Some((name.clone(), arm.entries_near_cuts(truth, &text)))
-        })
-        .collect()
-}
-
-/// Scans `dataset` with `spec` whole twice and in pieces for each of `arms`, and judges each arm.
-fn gate(
-    scanner: &Scanner,
-    spec: &Spec,
-    dataset: &Dataset,
-    arms: &[PiecesArm],
-) -> Result<Vec<ArmResult>, String> {
-    println!("  {spec} on {}: whole twice", dataset.kind);
-    let whole = [
-        scanner.scan(spec, &dataset.dir, dataset.scan_args, &[])?,
-        scanner.scan(spec, &dataset.dir, dataset.scan_args, &[])?,
-    ];
-    let mut results = Vec::new();
-    for &arm in arms {
-        println!("  {spec} on {}: pieces {arm}", dataset.kind);
-        let near_cuts = entries_near_cuts(dataset, arm);
-        let run_of = |run: &runner::ScanRun| Run {
-            tally: run.report.score(&dataset.truth),
-            files_failed: run.report.files_failed,
-            near_cuts: run.report.recall_of(&dataset.truth, &near_cuts),
-            wall_ms: run.wall.as_millis(),
-        };
-        let pieces = scanner.scan(spec, &dataset.dir, dataset.scan_args, &arm.environment())?;
-        results.push(ArmResult::judge(
-            arm,
-            [run_of(&whole[0]), run_of(&whole[1])],
-            run_of(&pieces),
-        ));
-    }
-    Ok(results)
 }
 
 #[test]
@@ -162,36 +92,11 @@ fn bench_dlp() {
     let mut results = Results {
         datasets: Vec::new(),
     };
-    let arms: Vec<DatasetArm> = if std::env::var("BENCH_DLP_PIECES").is_ok() {
-        comma_separated("BENCH_DLP_PIECES", "")
-    } else {
-        Vec::new()
-    };
-    let mut gate_report = String::new();
     for kind in kinds {
         println!("=== dataset: {kind} ===");
         let dataset = paths
             .load(kind)
             .unwrap_or_else(|e| panic!("load the {kind} dataset: {e}"));
-        if !arms.is_empty() {
-            let arms: Vec<PiecesArm> = arms
-                .iter()
-                .filter(|arm| arm.dataset.is_none_or(|only| only == kind))
-                .map(|arm| arm.arm)
-                .collect();
-            if arms.is_empty() {
-                continue;
-            }
-            for spec in &specs {
-                gate_report.push_str(&format!("### {spec} on {kind}\n\n"));
-                gate_report.push_str(&match gate(&scanner, spec, &dataset, &arms) {
-                    Ok(results) => gate::table(&results),
-                    Err(reason) => format!("Failed: {reason}"),
-                });
-                gate_report.push_str("\n\n");
-            }
-            continue;
-        }
         results.datasets.push(DatasetResult {
             dataset: kind,
             files: dataset.truth.len(),
@@ -204,13 +109,6 @@ fn bench_dlp() {
                 })
                 .collect(),
         });
-    }
-
-    if !arms.is_empty() {
-        println!("\n{gate_report}");
-        fs::write(out_root.join("gate.md"), &gate_report).expect("write gate.md");
-        println!("written to {}", out_root.display());
-        return;
     }
 
     let markdown = results.to_markdown();

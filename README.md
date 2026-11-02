@@ -591,9 +591,9 @@ or `$` and has no `(?m)` can match at the edge of a piece, and masks more than i
 finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
 
 A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
-redaction of a large file is located, in the report too. Other redacters and `--sampling-size` read the file whole. This
-includes `local-ner` and `local-gliner`: a model lays its windows from the start of the text, and in pieces its recall
-and precision on the bench fall outside the spread of the whole read, see `test-fixtures/bench-dlp/README.md`.
+redaction of a large file is located, in the report too. Other redacters, including `local-ner` and `local-gliner`, and
+`--sampling-size` read the file whole. A model read in pieces loses recall and precision on the bench, see
+[Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
