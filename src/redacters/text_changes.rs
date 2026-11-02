@@ -2,7 +2,8 @@
 //! output, and mapped back to the text as first read.
 
 use crate::errors::AppError;
-use crate::redacters::{Detection, DetectionLabel, Score, TextLines};
+use crate::redacters::piece_redaction::{mask_ranges, merge, StepFinding};
+use crate::redacters::{Detection, DetectionLabel, Score, TextLines, TextMask};
 use crate::AppResult;
 use similar::{capture_diff_slices_deadline, Algorithm, DiffTag};
 use std::ops::Range;
@@ -86,6 +87,25 @@ impl TextChanges {
                 })
                 .collect(),
         )
+    }
+
+    /// The changes from masking `found` in `input` as `mask` says, when that gives `output`;
+    /// `None` when it gives anything else, or when a detection does not fit `input`.
+    fn masked(input: &str, output: &str, found: &[Detection], mask: TextMask) -> Option<Self> {
+        let findings: Vec<StepFinding> = found
+            .iter()
+            .filter_map(|detection| {
+                Some(StepFinding {
+                    range: detection.location.byte_range()?,
+                    step: 0,
+                    mask,
+                    label: detection.label.clone(),
+                    score: detection.score,
+                })
+            })
+            .collect();
+        let (masked, changes) = mask_ranges(input, 0, &merge(&findings), &findings).ok()?;
+        (masked == output).then_some(changes)
     }
 
     /// The changes of a step whose replacements are all known. Both ranges of every change are
@@ -318,6 +338,33 @@ impl TextChain {
         deadline: Instant,
     ) -> AppResult<Vec<Detection>> {
         let changes = TextChanges::between(input, output, deadline);
+        self.place_step(input, changes, found)
+    }
+
+    /// [`step`](Self::step) for a redacter that replaced exactly the values `found` locates,
+    /// each with the look `mask` gives it. When masking `input` that way gives `output`, the
+    /// changes are those masks and not a diff, which can line a mask up with the characters it
+    /// shares with its value and with the text next to it. Otherwise the step falls back to the
+    /// diff.
+    pub(crate) fn step_masked(
+        &mut self,
+        input: &str,
+        output: &str,
+        found: &[Detection],
+        mask: TextMask,
+        deadline: Instant,
+    ) -> AppResult<Vec<Detection>> {
+        let changes = TextChanges::masked(input, output, found, mask)
+            .unwrap_or_else(|| TextChanges::between(input, output, deadline));
+        self.place_step(input, changes, found)
+    }
+
+    fn place_step(
+        &mut self,
+        input: &str,
+        changes: TextChanges,
+        found: &[Detection],
+    ) -> AppResult<Vec<Detection>> {
         let placed = self.place(input, &changes, found);
         self.steps.push(changes);
         placed

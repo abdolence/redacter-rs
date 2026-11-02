@@ -7,7 +7,7 @@ use crate::redacters::stream_redacter::OcrText;
 use crate::redacters::text_changes::{TextChain, MAX_DIFFED_BYTES, TEXT_DIFF_TIME_LIMIT};
 use crate::redacters::{
     Categories, Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
-    RedacterDataItemContent, Redacters,
+    RedacterDataItemContent, Redacters, TextMask,
 };
 use crate::AppResult;
 use std::collections::BTreeMap;
@@ -70,6 +70,7 @@ impl StreamRedactions {
         let Redacted { item, replaced } = redacter.redact_in(item, categories).await?;
         self.record(
             redacter.redacter_type(),
+            redacter.text_mask(),
             page,
             &input,
             &item.content,
@@ -89,12 +90,13 @@ impl StreamRedactions {
     fn record(
         &mut self,
         redacter: RedacterType,
+        mask: TextMask,
         page: Option<usize>,
         input: &RedacterDataItemContent,
         output: &RedacterDataItemContent,
         replaced: Option<Vec<Detection>>,
     ) {
-        match self.place(page, input, output, replaced) {
+        match self.place(mask, page, input, output, replaced) {
             Ok(placed) => self
                 .records
                 .extend(placed.into_iter().map(|detection| (redacter, detection))),
@@ -107,6 +109,7 @@ impl StreamRedactions {
 
     fn place(
         &mut self,
+        mask: TextMask,
         page: Option<usize>,
         input: &RedacterDataItemContent,
         output: &RedacterDataItemContent,
@@ -115,12 +118,12 @@ impl StreamRedactions {
         let deadline = Instant::now() + TEXT_DIFF_TIME_LIMIT;
         match (input, output) {
             (RedacterDataItemContent::Value(before), RedacterDataItemContent::Value(after)) => {
-                self.place_text(page, before, after, &replaced.unwrap_or_default(), deadline)
+                self.place_text(mask, page, before, after, replaced.as_deref(), deadline)
             }
             (
                 RedacterDataItemContent::Table { rows: before, .. },
                 RedacterDataItemContent::Table { rows: after, .. },
-            ) => self.place_table(page, before, after, replaced, deadline),
+            ) => self.place_table(mask, page, before, after, replaced, deadline),
             (
                 RedacterDataItemContent::Image { data: before, .. },
                 RedacterDataItemContent::Image { data: after, .. },
@@ -133,10 +136,11 @@ impl StreamRedactions {
 
     fn place_text(
         &mut self,
+        mask: TextMask,
         page: Option<usize>,
         before: &str,
         after: &str,
-        found: &[Detection],
+        replaced: Option<&[Detection]>,
         deadline: Instant,
     ) -> AppResult<Vec<Detection>> {
         if before == after {
@@ -146,9 +150,13 @@ impl StreamRedactions {
             self.text_placed_as_whole = true;
             return Ok(vec![Detection::whole(page)]);
         }
-        self.text
-            .get_or_insert_with(|| TextChain::new(before.to_string()))
-            .step(before, after, found, deadline)
+        let chain = self
+            .text
+            .get_or_insert_with(|| TextChain::new(before.to_string()));
+        match replaced {
+            Some(found) => chain.step_masked(before, after, found, mask, deadline),
+            None => chain.step(before, after, &[], deadline),
+        }
     }
 
     /// Every changed cell is placed in its original text. A table whose cells no longer pair up
@@ -156,6 +164,7 @@ impl StreamRedactions {
     /// then on.
     fn place_table(
         &mut self,
+        mask: TextMask,
         page: Option<usize>,
         before: &[Vec<String>],
         after: &[Vec<String>],
@@ -173,6 +182,7 @@ impl StreamRedactions {
             return Ok(vec![Detection::whole(page)]);
         }
 
+        let located = replaced.is_some();
         let mut found_by_cell: BTreeMap<CellPosition, Vec<Detection>> = BTreeMap::new();
         for detection in replaced.unwrap_or_default() {
             if let Some(position) = CellPosition::of(&detection.location) {
@@ -193,11 +203,15 @@ impl StreamRedactions {
                 let found = found_by_cell.remove(&position).unwrap_or_default();
                 // Every changed cell takes its step, even after a failure, or the cell's
                 // later steps would be mapped through a chain that skipped one.
-                let step = self
+                let chain = self
                     .cells
                     .entry(position)
-                    .or_insert_with(|| TextChain::new(cell_before.clone()))
-                    .step(cell_before, cell_after, &found, deadline);
+                    .or_insert_with(|| TextChain::new(cell_before.clone()));
+                let step = if located {
+                    chain.step_masked(cell_before, cell_after, &found, mask, deadline)
+                } else {
+                    chain.step(cell_before, cell_after, &found, deadline)
+                };
                 match step {
                     Ok(in_cell) => placed.extend(
                         in_cell
@@ -516,6 +530,7 @@ mod tests {
 
         recorder.record(
             RedacterType::LocalRules,
+            TextMask::Token,
             None,
             &text(original),
             &text(after_rules),
@@ -523,6 +538,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::GeminiLlm,
+            TextMask::Token,
             None,
             &text(after_rules),
             &text(after_model),
@@ -547,6 +563,72 @@ mod tests {
     }
 
     #[test]
+    fn values_a_step_masked_are_recorded_where_it_found_them() {
+        let block = "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----";
+        let original = format!("{block}\n{block}");
+        let found = vec![
+            TextLines::new(&original)
+                .detection(
+                    0..block.len(),
+                    DetectionLabel::new("private-key-block"),
+                    None,
+                )
+                .unwrap(),
+            TextLines::new(&original)
+                .detection(
+                    block.len() + 1..original.len(),
+                    DetectionLabel::new("private-key-block"),
+                    None,
+                )
+                .unwrap(),
+        ];
+        let masked = Detection::mask(&original, &found, TextMask::Token);
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::LocalRules,
+            TextMask::Token,
+            None,
+            &text(&original),
+            &text(&masked),
+            Some(found.clone()),
+        );
+
+        let records = recorder.into_records();
+        assert_eq!(
+            records
+                .iter()
+                .map(|(_, detection)| detection.location)
+                .collect::<Vec<_>>(),
+            found
+                .iter()
+                .map(|detection| detection.location)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_step_whose_output_is_not_its_masked_values_is_placed_by_comparing_its_texts() {
+        let original = "Mail ana@x.io, ask Ana Lima.";
+        let rewritten = "Mail [REDACTED], ask Ana Lima.";
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::LocalRules,
+            TextMask::EveryCharacter,
+            None,
+            &text(original),
+            &text(rewritten),
+            Some(vec![span(original, "ana@x.io", "email")]),
+        );
+
+        assert_eq!(
+            summary(&recorder.into_records()),
+            vec![(text_at(5, 13, 1, 6), "email".into(), "ana@x.io")]
+        );
+    }
+
+    #[test]
     fn a_text_too_large_to_compare_is_the_file_at_that_step_and_at_every_later_one() {
         let padding = "x".repeat(MAX_DIFFED_BYTES);
         let original = format!("ana@x.io {padding}");
@@ -556,6 +638,7 @@ mod tests {
 
         recorder.record(
             RedacterType::LocalRules,
+            TextMask::Token,
             None,
             &text(&original),
             &text(&after_rules),
@@ -563,6 +646,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::GeminiLlm,
+            TextMask::Token,
             None,
             &text(&after_rules),
             &text(&after_rules),
@@ -570,6 +654,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::GeminiLlm,
+            TextMask::Token,
             None,
             &text(&after_rules),
             &text(&after_model),
@@ -601,6 +686,7 @@ mod tests {
 
         recorder.record(
             RedacterType::GcpDlp,
+            TextMask::Token,
             None,
             &input,
             &output,
@@ -628,9 +714,17 @@ mod tests {
         let one_row = table(&[&["[REDACTED]", "b"]]);
         let mut recorder = StreamRedactions::new(true);
 
-        recorder.record(RedacterType::GcpDlp, None, &original, &one_row, None);
+        recorder.record(
+            RedacterType::GcpDlp,
+            TextMask::Token,
+            None,
+            &original,
+            &one_row,
+            None,
+        );
         recorder.record(
             RedacterType::LocalRules,
+            TextMask::Token,
             None,
             &one_row,
             &table(&[&["[REDACTED]", "[REDACTED]"]]),
@@ -638,6 +732,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::LocalNer,
+            TextMask::Token,
             None,
             &table(&[&["[REDACTED]", "[REDACTED]"]]),
             &table(&[&["[REDACTED]", "[REDACTED]"]]),
@@ -666,6 +761,7 @@ mod tests {
 
         recorder.record(
             RedacterType::LocalRules,
+            TextMask::Token,
             None,
             &text("mail a@b.io"),
             &text("mail [REDACTED]"),
@@ -686,7 +782,14 @@ mod tests {
             data: bytes::Bytes::from_static(b"not an image"),
         };
 
-        recorder.record(RedacterType::GeminiLlm, Some(3), &garbage, &garbage, None);
+        recorder.record(
+            RedacterType::GeminiLlm,
+            TextMask::Token,
+            Some(3),
+            &garbage,
+            &garbage,
+            None,
+        );
 
         assert_eq!(
             summary(&recorder.into_records()),
@@ -704,6 +807,7 @@ mod tests {
 
         recorder.record(
             RedacterType::GeminiLlm,
+            TextMask::Token,
             Some(2),
             &png(40, 50, 255),
             &png(20, 25, 255),
@@ -711,6 +815,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::OpenAiLlm,
+            TextMask::Token,
             Some(2),
             &png(20, 25, 255),
             &png(20, 25, 255),
@@ -748,6 +853,7 @@ mod tests {
 
         recorder.record(
             RedacterType::GeminiLlm,
+            TextMask::Token,
             None,
             &png(40, 50, 255),
             &png(20, 25, 255),
@@ -763,6 +869,7 @@ mod tests {
 
         recorder.record(
             RedacterType::Presidio,
+            TextMask::Token,
             None,
             &png(8, 8, 255),
             &png(8, 8, 255),
@@ -772,6 +879,7 @@ mod tests {
 
         recorder.record(
             RedacterType::Presidio,
+            TextMask::Token,
             None,
             &png(8, 8, 255),
             &png(8, 8, 0),
@@ -779,6 +887,7 @@ mod tests {
         );
         recorder.record(
             RedacterType::Presidio,
+            TextMask::Token,
             Some(4),
             &png(8, 8, 255),
             &png(8, 8, 0),
@@ -811,6 +920,7 @@ mod tests {
 
         recorder.record(
             RedacterType::Presidio,
+            TextMask::Token,
             None,
             &header_only,
             &header_only,
