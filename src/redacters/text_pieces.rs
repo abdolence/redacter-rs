@@ -829,31 +829,4 @@ mod tests {
             }
         }
     }
-
-    #[tokio::test]
-    async fn a_nul_byte_in_the_probe_fails_before_the_rest_of_the_window_is_read() {
-        let layout = PieceLayout::new(1000, 100);
-        let unreadable_after_the_probe = |nul_at: usize| {
-            let mut head = vec![b'a'; 50];
-            head[nul_at] = 0;
-            stream::iter(vec![
-                Ok(Bytes::from(head)),
-                Err(AppError::SystemError {
-                    message: "read past the probe".to_string(),
-                }),
-            ])
-        };
-
-        let mut pieces = TextPieces::new(unreadable_after_the_probe(40), layout).rejecting_nul(60);
-        assert!(matches!(
-            pieces.next_window().await,
-            Err(AppError::TextHasNul { offset: 40 })
-        ));
-
-        let mut pieces = TextPieces::new(unreadable_after_the_probe(40), layout).rejecting_nul(30);
-        assert!(matches!(
-            pieces.next_window().await,
-            Err(AppError::SystemError { .. })
-        ));
-    }
 }

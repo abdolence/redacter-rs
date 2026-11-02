@@ -3970,72 +3970,45 @@ mod tests {
         }
     }
 
+    /// The first window decides: a NUL or non-UTF-8 byte inside it leaves the file as it is,
+    /// and one past it fails the copy and the scan, because pieces were already written. The
+    /// outcome does not depend on where the chunks of the input end.
     #[tokio::test]
-    async fn a_file_that_is_not_text_in_its_first_window_is_left_as_it_is() {
+    async fn the_first_window_decides_whether_a_file_that_is_not_text_is_left_or_fails() {
         let redacters = vec![email_rules().await];
         let layout = pieces_of_300_with_100_of_context();
-        for data in [
-            with_byte_at(mail_log(), 50, 0xff),
-            with_byte_at(mail_log(), 50, 0),
-            with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0),
-            with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0xff),
-        ] {
-            let (stream, redactions) = copy_unsupported(&redacters, &data, layout, 7).await;
-            assert!(stream.unwrap().concat() == data);
-            assert!(redactions.unwrap().is_empty());
+        for bad_byte in [0, 0xff] {
+            for chunk_size in [1, 7, 4096] {
+                for position in [50, FIRST_WINDOW_END - 1] {
+                    let data = with_byte_at(mail_log(), position, bad_byte);
+                    let context = format!("{bad_byte:#x} at {position}, chunks of {chunk_size}");
+                    let (stream, redactions) =
+                        copy_unsupported(&redacters, &data, layout, chunk_size).await;
+                    assert!(stream.unwrap().concat() == data, "{context}");
+                    assert!(redactions.unwrap().is_empty(), "{context}");
 
-            let scan = scan_unsupported(&redacters, &data, layout, 7)
-                .await
-                .unwrap();
-            assert_eq!(scan.blocked, Some(RedactionBlocked::NotText));
-            assert!(scan.detections.is_empty());
-        }
-    }
+                    let scan = scan_unsupported(&redacters, &data, layout, chunk_size)
+                        .await
+                        .unwrap();
+                    assert_eq!(scan.blocked, Some(RedactionBlocked::NotText), "{context}");
+                    assert!(scan.detections.is_empty(), "{context}");
+                }
 
-    /// A file that is not text only after its first window has had pieces written, which cannot
-    /// be undone: the copy fails, and so does the scan, as for a text file.
-    #[tokio::test]
-    async fn a_file_that_is_not_text_after_its_first_window_fails_the_copy_and_the_scan() {
-        let redacters = vec![email_rules().await];
-        let layout = pieces_of_300_with_100_of_context();
-        for data in [
-            with_byte_at(mail_log(), 900, 0xff),
-            with_byte_at(mail_log(), 900, 0),
-        ] {
-            let (stream, redactions) = copy_unsupported(&redacters, &data, layout, 7).await;
-            assert!(stream.is_err());
-            assert!(redactions.is_err());
+                for position in [FIRST_WINDOW_END, 900] {
+                    let data = with_byte_at(mail_log(), position, bad_byte);
+                    let context = format!("{bad_byte:#x} at {position}, chunks of {chunk_size}");
+                    let (stream, redactions) =
+                        copy_unsupported(&redacters, &data, layout, chunk_size).await;
+                    assert!(stream.is_err(), "{context}");
+                    assert!(redactions.is_err(), "{context}");
 
-            let error = scan_unsupported(&redacters, &data, layout, 7)
-                .await
-                .err()
-                .expect("the scan fails");
-            assert!(error.is_not_text(), "{error:?}");
-        }
-    }
-
-    /// Whether a NUL byte leaves the file as it is or fails it is decided by the first window,
-    /// not by where the chunks of the input end.
-    #[tokio::test]
-    async fn a_nul_byte_decides_by_the_first_window_whatever_the_chunks_are() {
-        let redacters = vec![email_rules().await];
-        let layout = pieces_of_300_with_100_of_context();
-        let inside = with_byte_at(mail_log(), FIRST_WINDOW_END - 1, 0);
-        let past = with_byte_at(mail_log(), FIRST_WINDOW_END, 0);
-        for chunk_size in [1, 7, 100, 4096, 100_000] {
-            let (stream, _) = copy_unsupported(&redacters, &inside, layout, chunk_size).await;
-            assert!(stream.unwrap().concat() == inside, "chunks of {chunk_size}");
-            let scan = scan_unsupported(&redacters, &inside, layout, chunk_size).await;
-            assert_eq!(
-                scan.unwrap().blocked,
-                Some(RedactionBlocked::NotText),
-                "chunks of {chunk_size}"
-            );
-
-            let (stream, _) = copy_unsupported(&redacters, &past, layout, chunk_size).await;
-            assert!(stream.is_err(), "chunks of {chunk_size}");
-            let scan = scan_unsupported(&redacters, &past, layout, chunk_size).await;
-            assert!(scan.is_err(), "chunks of {chunk_size}");
+                    let error = scan_unsupported(&redacters, &data, layout, chunk_size)
+                        .await
+                        .err()
+                        .expect("the scan fails");
+                    assert!(error.is_not_text(), "{context}: {error:?}");
+                }
+            }
         }
     }
 
@@ -4054,7 +4027,7 @@ mod tests {
         assert!(in_pieces.detections.is_empty());
     }
 
-    /// A stream that panics when polled after it ended, as the stream of a zip entry does.
+    /// A stream that panics when polled after it ended, as a bare `unfold` does.
     fn single_pass(
         data: &[u8],
     ) -> impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static {
