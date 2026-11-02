@@ -10,7 +10,8 @@
 //! always masked here, whatever the caller passes, and no hash of a value is written.
 
 use crate::commands::artifact_locator::ArtifactLocator;
-use crate::commands::findings::{FileOutcome, Findings, Place, ReportedFile, ReportedFinding};
+use crate::commands::finding_spill::SpilledFindings;
+use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
 use crate::redacters::{DetectionLabel, DetectionLocation, Score};
 use crate::AppResult;
 use serde::Serialize;
@@ -253,7 +254,7 @@ impl Summary {
     /// The findings of a file are grouped by redacter, label and masked value: a group is one
     /// discovery detail, with a place for each finding in it. `None` for a file without
     /// findings.
-    fn found(path: &str, findings: &Findings) -> AppResult<Option<Self>> {
+    fn found(path: &str, findings: &SpilledFindings) -> AppResult<Option<Self>> {
         let mut details: Vec<DiscoveryDetail> = Vec::new();
         let mut detail_of_group: BTreeMap<(String, DetectionLabel, String), usize> =
             BTreeMap::new();

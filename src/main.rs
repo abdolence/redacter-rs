@@ -130,7 +130,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
             report.write(
                 term,
                 &copy_result,
-                |out| Ok(out.write_all(copy_result.to_text().as_bytes())?),
+                |out| copy_result.write_text(out),
                 || copy_result.reported_files(),
                 &source,
                 copy_result.categories.as_ref(),

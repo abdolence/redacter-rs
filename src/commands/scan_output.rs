@@ -11,7 +11,7 @@ use crate::commands::copy_output::{
     GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::commands::finding_spill::SpilledFindings;
-use crate::commands::findings::{FileOutcome, Findings, Place, ReportedFile, ReportedFinding};
+use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
 use crate::AppResult;
@@ -137,6 +137,19 @@ impl FindingReport {
         })
     }
 
+    /// A finding of a report test, with the place the test chose.
+    #[cfg(test)]
+    pub(super) fn of_reported(finding: &ReportedFinding) -> Self {
+        Self {
+            redacter: finding.redacter,
+            label: finding.label.clone(),
+            score: finding.score,
+            location: finding.location,
+            place: finding.place,
+            value: finding.masked_value.clone(),
+        }
+    }
+
     /// The finding for the SARIF and OCSF reports, which mask the value whatever the report
     /// holds.
     pub(super) fn reported_finding(&self) -> ReportedFinding {
@@ -255,7 +268,7 @@ impl ScanFileReport {
             ScanFileStatus::Scanned if self.is_unconfirmed() => FileOutcome::Unconfirmed {
                 unlocated_values: self.unlocated_values,
             },
-            ScanFileStatus::Scanned => FileOutcome::Findings(Findings::from(self.findings.clone())),
+            ScanFileStatus::Scanned => FileOutcome::Findings(self.findings.clone()),
             ScanFileStatus::Failed => FileOutcome::Failed { reason },
             ScanFileStatus::Blocked => FileOutcome::Blocked { reason },
             ScanFileStatus::Unsupported => FileOutcome::Unsupported { reason },

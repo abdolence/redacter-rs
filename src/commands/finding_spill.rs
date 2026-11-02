@@ -1,7 +1,9 @@
-//! The findings of a `scan`, kept in a temporary file so that the memory a scan needs does not
-//! grow with how much it finds. Each finding is one line of JSON; a file's findings are a range
-//! of lines that the writers of the reports, and the terminal, read back one at a time.
+//! The findings of a `scan` and the redactions of a `cp` report, kept in a temporary file so that
+//! the memory a run needs does not grow with how much it finds. Each finding is one line of JSON;
+//! a file's findings are a range of lines that the writers of the reports, and the terminal, read
+//! back one at a time.
 
+use crate::commands::findings::ReportedFinding;
 use crate::commands::scan_output::{FindingReport, FindingsByLabel};
 use crate::{AppError, AppResult};
 use serde::ser::{Error as _, SerializeSeq};
@@ -114,6 +116,15 @@ impl SpilledFindings {
         &self.by_label
     }
 
+    /// Calls `visit` with each finding as the SARIF and OCSF reports take it, in order. A
+    /// finding that cannot be read back is an error of the report.
+    pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {
+        for finding in self.iter() {
+            visit(&finding?.reported_finding());
+        }
+        Ok(())
+    }
+
     /// Reads the findings back, one at a time. Readers are independent of one another and of
     /// later `append`s.
     pub fn iter(&self) -> SpilledFindingsIter {
@@ -126,6 +137,20 @@ impl SpilledFindings {
             line: Vec::new(),
             failed: false,
         }
+    }
+}
+
+/// The findings that report tests spell out, in a spill of their own.
+#[cfg(test)]
+impl FromIterator<ReportedFinding> for SpilledFindings {
+    fn from_iter<I: IntoIterator<Item = ReportedFinding>>(findings: I) -> Self {
+        let findings: Vec<_> = findings
+            .into_iter()
+            .map(|finding| FindingReport::of_reported(&finding))
+            .collect();
+        let mut spilled = Self::new(&FindingSpill::default());
+        spilled.append(&findings).unwrap();
+        spilled
     }
 }
 

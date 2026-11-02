@@ -67,22 +67,27 @@ pub struct RedactStreamResult<'f> {
     pub output: RedactedOutput<'f>,
 }
 
-/// The redactions of a file, placed in it, once they are known.
-type RedactionRecords<'f> = LocalBoxFuture<'f, AppResult<Vec<(RedacterType, Detection)>>>;
+/// Receives what the redacters replaced in a file, placed in it, a window of a text or a batch
+/// of a table at a time, in the order the windows and batches are read. Within one call the
+/// redactions are in plan order. A file read whole gives one call.
+///
+/// An error stops the redaction of the file, and `redact_stream` or [`RedactedOutput::drive`]
+/// returns it as it is.
+pub type RecordRedactions<'r> = dyn FnMut(Vec<(RedacterType, Detection)>) -> AppResult<()> + 'r;
 
-/// The redacted bytes of a file and the list of what was redacted in them.
+/// How a file is redacted, once its redactions are all handed over.
+type RedactionRun<'f> = LocalBoxFuture<'f, AppResult<()>>;
+
+/// The redacted bytes of a file and the run that hands over what was redacted in them.
 ///
 /// A text read in pieces is redacted as its stream is read, so the stream stops when nobody
-/// polls the list and the list completes only once the stream has ended. That is why neither
+/// polls the run and the run completes only once the stream has ended. That is why neither
 /// half can be taken alone: [`RedactedOutput::drive`] polls both.
 pub struct RedactedOutput<'f> {
     stream: ContentStream,
-    /// What each redacter replaced, placed in the file as it was read, in plan order and in the
-    /// order a reader meets it within a redacter, which a table read in batches gives for each
-    /// batch in turn. Empty when no redacter changed the file. An
-    /// error means the file could not be redacted; the stream then ends with an error as well,
-    /// so that no destination keeps a partial copy.
-    redactions: RedactionRecords<'f>,
+    /// An error means the file could not be redacted; the stream then ends with an error as
+    /// well, so that no destination keeps a partial copy.
+    run: RedactionRun<'f>,
 }
 
 impl<'f> RedactStreamResult<'f> {
@@ -90,7 +95,7 @@ impl<'f> RedactStreamResult<'f> {
     fn in_parts(
         redacters: Vec<RedacterType>,
         stream: ContentStream,
-        redactions: RedactionRecords<'f>,
+        run: RedactionRun<'f>,
     ) -> Self {
         Self {
             number_of_redactions: redacters.len(),
@@ -98,26 +103,27 @@ impl<'f> RedactStreamResult<'f> {
                 applied: redacters,
                 ..RedactionSummary::default()
             },
-            output: RedactedOutput { stream, redactions },
+            output: RedactedOutput { stream, run },
         }
     }
 }
 
 impl<'f> RedactedOutput<'f> {
-    fn known(stream: ContentStream, redactions: Vec<(RedacterType, Detection)>) -> Self {
+    /// A file whose redactions were all handed over before the stream is read.
+    fn known(stream: ContentStream) -> Self {
         Self {
             stream,
-            redactions: futures::future::ready(Ok(redactions)).boxed_local(),
+            run: futures::future::ready(Ok(())).boxed_local(),
         }
     }
 
     /// Hands the stream to `consume`, which reads it to the end, and returns what `consume`
-    /// returned beside the redactions.
+    /// returned beside how the redaction ended.
     pub async fn drive<T>(
         self,
         consume: impl AsyncFnOnce(ContentStream) -> T,
-    ) -> (T, AppResult<Vec<(RedacterType, Detection)>>) {
-        futures::join!(consume(self.stream), self.redactions)
+    ) -> (T, AppResult<()>) {
+        futures::join!(consume(self.stream), self.run)
     }
 }
 
@@ -498,6 +504,7 @@ impl<'a> StreamRedacter<'a> {
         input: S,
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
+        record: &'a mut RecordRedactions<'a>,
     ) -> AppResult<RedactStreamResult<'a>> {
         let item = match redact_plan.read {
             PlannedRead::TableBatches { batch_bytes } => {
@@ -505,7 +512,13 @@ impl<'a> StreamRedacter<'a> {
                     TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
                 let first = batches.next_batch().await?;
                 if !first.is_whole_table() {
-                    return self.redact_table_in_batches(batches, first, redact_plan, file_ref);
+                    return self.redact_table_in_batches(
+                        batches,
+                        first,
+                        redact_plan,
+                        file_ref,
+                        record,
+                    );
                 }
                 Ok(first.into_item(file_ref))
             }
@@ -517,7 +530,13 @@ impl<'a> StreamRedacter<'a> {
                         Ok(self.text_redact_item(first.text, file_ref))
                     }
                     Ok(Some(first)) => {
-                        return self.redact_text_in_pieces(pieces, first, redact_plan, file_ref);
+                        return self.redact_text_in_pieces(
+                            pieces,
+                            first,
+                            redact_plan,
+                            file_ref,
+                            record,
+                        );
                     }
                     Ok(None) => {
                         return Err(AppError::SystemError {
@@ -547,7 +566,7 @@ impl<'a> StreamRedacter<'a> {
                         blocked: Some(RedactionBlocked::NotText),
                         ..RedactionSummary::default()
                     },
-                    output: RedactedOutput::known(data, Vec::new()),
+                    output: RedactedOutput::known(data),
                 });
             }
         };
@@ -681,10 +700,11 @@ impl<'a> StreamRedacter<'a> {
             }
         };
 
+        record(recorder.into_records())?;
         Ok(RedactStreamResult {
             number_of_redactions,
             summary,
-            output: RedactedOutput::known(output_stream, recorder.into_records()),
+            output: RedactedOutput::known(output_stream),
         })
     }
 
@@ -696,6 +716,7 @@ impl<'a> StreamRedacter<'a> {
         first: TextWindow,
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
+        record: &'a mut RecordRedactions<'a>,
     ) -> AppResult<RedactStreamResult<'a>> {
         let redaction = PieceRedaction::new(
             &redact_plan.supported_redacters,
@@ -713,7 +734,7 @@ impl<'a> StreamRedacter<'a> {
         Ok(RedactStreamResult::in_parts(
             redaction.redacters(),
             stream,
-            redact_windows(redaction, pieces, first, written).boxed_local(),
+            redact_windows(redaction, pieces, first, written, record).boxed_local(),
         ))
     }
 
@@ -727,6 +748,7 @@ impl<'a> StreamRedacter<'a> {
         first: TableBatch,
         redact_plan: StreamRedactPlan<'a>,
         file_ref: &FileSystemRef,
+        record: &'a mut RecordRedactions<'a>,
     ) -> AppResult<RedactStreamResult<'a>> {
         let redaction = TableRedaction::new(
             &redact_plan.supported_redacters,
@@ -747,7 +769,7 @@ impl<'a> StreamRedacter<'a> {
         Ok(RedactStreamResult::in_parts(
             redacters,
             stream,
-            redact_batches(redaction, batches, first, written).boxed_local(),
+            redact_batches(redaction, batches, first, written, record).boxed_local(),
         ))
     }
 
@@ -2268,16 +2290,41 @@ mod tests {
         );
     }
 
-    /// What a result writes and lists, read together as `cp` does.
-    async fn written_and_listed(
-        output: RedactedOutput<'_>,
-    ) -> (
-        AppResult<Vec<bytes::Bytes>>,
-        AppResult<Vec<(RedacterType, Detection)>>,
-    ) {
-        output
+    /// What redacting a file writes and lists, read together as `cp` does.
+    struct Redaction {
+        number_of_redactions: usize,
+        summary: RedactionSummary,
+        written: AppResult<Vec<bytes::Bytes>>,
+        listed: AppResult<Vec<(RedacterType, Detection)>>,
+    }
+
+    async fn redact_and_list(
+        stream_redacter: &StreamRedacter<'_>,
+        input: impl Stream<Item = AppResult<bytes::Bytes>> + Send + Sync + Unpin + 'static,
+        plan: StreamRedactPlan<'_>,
+        file_ref: &FileSystemRef,
+    ) -> AppResult<Redaction> {
+        let mut listed = Vec::new();
+        let mut record = |records| {
+            listed.extend(records);
+            Ok(())
+        };
+        let RedactStreamResult {
+            number_of_redactions,
+            summary,
+            output,
+        } = stream_redacter
+            .redact_stream(input, plan, file_ref, &mut record)
+            .await?;
+        let (written, run) = output
             .drive(async |stream| stream.try_collect().await)
-            .await
+            .await;
+        Ok(Redaction {
+            number_of_redactions,
+            summary,
+            written,
+            listed: run.map(|()| listed),
+        })
     }
 
     async fn redact(
@@ -2292,11 +2339,11 @@ mod tests {
             .create_redact_plan(redacters, file_ref)
             .await
             .unwrap();
-        let result = stream_redacter
-            .redact_stream(one_chunk(data), plan, file_ref)
+        redact_and_list(&stream_redacter, one_chunk(data), plan, file_ref)
             .await
-            .unwrap();
-        written_and_listed(result.output).await.1.unwrap()
+            .unwrap()
+            .listed
+            .unwrap()
     }
 
     fn redaction_places(
@@ -2348,16 +2395,18 @@ mod tests {
             .await
             .unwrap();
 
-        let result = stream_redacter
-            .redact_stream(one_chunk(b"Mail ana@x.io today"), plan, &file)
-            .await
-            .unwrap();
+        let result = redact_and_list(
+            &stream_redacter,
+            one_chunk(b"Mail ana@x.io today"),
+            plan,
+            &file,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.number_of_redactions, 1);
-        let (output, redactions) = written_and_listed(result.output).await;
-        assert!(redactions.unwrap().is_empty());
-        let output = output.unwrap();
-        assert_eq!(output.concat(), b"Mail [REDACTED] today");
+        assert!(result.listed.unwrap().is_empty());
+        assert_eq!(result.written.unwrap().concat(), b"Mail [REDACTED] today");
     }
 
     async fn ocr_redaction(page: Option<usize>) -> Vec<(RedacterType, Detection)> {
@@ -2671,11 +2720,15 @@ mod tests {
             .create_redact_plan(&redacters, &env_file())
             .await
             .unwrap();
-        let redacted = stream_redacter
-            .redact_stream(one_chunk(b"ADMIN_EMAIL=a@b.io"), plan, &env_file())
-            .await
-            .unwrap();
-        let output = written_and_listed(redacted.output).await.0.unwrap();
+        let redacted = redact_and_list(
+            &stream_redacter,
+            one_chunk(b"ADMIN_EMAIL=a@b.io"),
+            plan,
+            &env_file(),
+        )
+        .await
+        .unwrap();
+        let output = redacted.written.unwrap();
         assert_eq!(output.concat(), b"ADMIN_EMAIL=[REDACTED]");
 
         for data in not_text_files() {
@@ -2683,13 +2736,13 @@ mod tests {
                 .create_redact_plan(&redacters, &env_file())
                 .await
                 .unwrap();
-            let result = stream_redacter
-                .redact_stream(in_probe_chunks(&data), plan, &env_file())
-                .await
-                .unwrap();
+            let result =
+                redact_and_list(&stream_redacter, in_probe_chunks(&data), plan, &env_file())
+                    .await
+                    .unwrap();
             assert_eq!(result.number_of_redactions, 0, "{data:?}");
             assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-            let output = written_and_listed(result.output).await.0.unwrap();
+            let output = result.written.unwrap();
             assert_eq!(output.concat(), data, "the file is left as it is");
         }
     }
@@ -2707,18 +2760,18 @@ mod tests {
             .unwrap();
         let padding = "# padding\n".repeat(NOT_TEXT_PROBE_SIZE / 4);
 
-        let result = stream_redacter
-            .redact_stream(
-                in_probe_chunks(format!("{padding}ADMIN_EMAIL=a@b.io\n").as_bytes()),
-                plan,
-                &env_file(),
-            )
-            .await
-            .unwrap();
+        let result = redact_and_list(
+            &stream_redacter,
+            in_probe_chunks(format!("{padding}ADMIN_EMAIL=a@b.io\n").as_bytes()),
+            plan,
+            &env_file(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.summary.blocked, None);
         assert_eq!(result.number_of_redactions, 1);
-        let output = written_and_listed(result.output).await.0.unwrap();
+        let output = result.written.unwrap();
         assert_eq!(
             output.concat(),
             format!("{padding}ADMIN_EMAIL=[REDACTED]\n").as_bytes()
@@ -2767,13 +2820,12 @@ mod tests {
             Ok(bytes::Bytes::from_static(b"a@b.io")),
         ]);
 
-        let result = stream_redacter
-            .redact_stream(chunks, plan, &env_file())
+        let result = redact_and_list(&stream_redacter, chunks, plan, &env_file())
             .await
             .unwrap();
 
         assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
-        let output = written_and_listed(result.output).await.0.unwrap();
+        let output = result.written.unwrap();
         assert_eq!(output.concat(), b"\0heada@b.io");
     }
 
@@ -3276,8 +3328,8 @@ mod tests {
         let stream_redacter = StreamRedacter::new(options, &converters);
         let mut plan = stream_redacter.create_redact_plan(redacters, file).await?;
         plan.read = read;
-        let result = stream_redacter.redact_stream(input, plan, file).await?;
-        Ok(written_and_listed(result.output).await)
+        let result = redact_and_list(&stream_redacter, input, plan, file).await?;
+        Ok((result.written, result.listed))
     }
 
     /// Copies `content` of the file `file` in chunks of 7 bytes, so that no chunk ends where a
@@ -3843,6 +3895,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redactions_are_handed_over_a_window_at_a_time() {
+        let redacters = vec![email_rules().await];
+        let converters = FileConverters::new();
+        let options = base_options();
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let file = file_ref("app.log", mime::TEXT_PLAIN);
+        let mut plan = stream_redacter
+            .create_redact_plan(&redacters, &file)
+            .await
+            .unwrap();
+        plan.read = PlannedRead::TextPieces(PieceLayout::new(500, 300));
+        let mut handed_over = Vec::new();
+        let mut record = |records: Vec<(RedacterType, Detection)>| {
+            handed_over.push(records.len());
+            Ok(())
+        };
+
+        let RedactStreamResult { output, .. } = stream_redacter
+            .redact_stream(
+                in_chunks("Mail ana@x.io today\n".repeat(200).as_bytes(), 7),
+                plan,
+                &file,
+                &mut record,
+            )
+            .await
+            .unwrap();
+        let (written, run) = output
+            .drive(async |stream| stream.try_collect::<Vec<_>>().await)
+            .await;
+
+        written.unwrap();
+        run.unwrap();
+        assert!(handed_over.len() > 2, "{handed_over:?}");
+        assert_eq!(handed_over.iter().sum::<usize>(), 200);
+    }
+
+    #[tokio::test]
     async fn a_text_read_in_pieces_is_limited_to_the_chosen_categories() {
         let redacters = vec![secret_rules().await];
         let options = RedacterBaseOptions {
@@ -4128,16 +4217,14 @@ mod tests {
             .create_redact_plan(redacters, &file)
             .await
             .unwrap();
-        let result = stream_redacter
-            .redact_stream(in_chunks(content, 64 * 1024), plan, &file)
+        let result = redact_and_list(&stream_redacter, in_chunks(content, 64 * 1024), plan, &file)
             .await
             .unwrap();
-        let (stream, redactions) = written_and_listed(result.output).await;
-        let chunks = stream.unwrap();
+        let chunks = result.written.unwrap();
         Copied {
             chunks: chunks.len(),
             output: chunks.concat(),
-            redactions: redactions.unwrap(),
+            redactions: result.listed.unwrap(),
         }
     }
 
