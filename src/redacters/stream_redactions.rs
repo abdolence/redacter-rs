@@ -136,6 +136,8 @@ impl StreamRedactions {
         }
     }
 
+    /// A step without locations that only moves whitespace (a model dropping the final newline)
+    /// is not a redaction and is not reported, but the text can no longer be mapped through it.
     fn place_text(
         &mut self,
         mask: TextMask,
@@ -153,7 +155,12 @@ impl StreamRedactions {
                 .step(before, after, found, mask),
             _ => {
                 self.text = Placement::Whole;
-                return Ok(vec![Detection::whole(page)]);
+                let only_whitespace = before.split_whitespace().eq(after.split_whitespace());
+                return Ok(if replaced.is_none() && only_whitespace {
+                    Vec::new()
+                } else {
+                    vec![Detection::whole(page)]
+                });
             }
         };
         if placed.is_err() {
@@ -593,6 +600,22 @@ mod tests {
                 (RedacterType::LocalRules, DetectionLocation::File),
             ]
         );
+    }
+
+    #[test]
+    fn a_step_without_locations_that_changes_only_whitespace_reports_nothing() {
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::GcpVertexAi,
+            TextMask::Token,
+            None,
+            &text("Meet on 12 May 2024.\n"),
+            &text("Meet on 12 May 2024."),
+            None,
+        );
+
+        assert!(recorder.into_records().is_empty());
     }
 
     #[test]
