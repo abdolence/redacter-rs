@@ -516,6 +516,26 @@ impl Redacted {
         }
     }
 
+    /// `file_ref`'s `text` with the findings masked as `mask` says and everything else
+    /// untouched, located by the findings that were masked. Fails when a value was named but
+    /// not placed in `text`, see [`Detections::masked`].
+    pub fn masked(
+        file_ref: FileSystemRef,
+        text: &str,
+        detections: Detections,
+        redacter: RedacterType,
+        mask: TextMask,
+    ) -> AppResult<Self> {
+        let (masked, replaced) = detections.masked(text, redacter, mask)?;
+        Ok(Self::located(
+            RedacterDataItem {
+                file_ref,
+                content: RedacterDataItemContent::Value(masked),
+            },
+            replaced,
+        ))
+    }
+
     /// An item changed, or left as it was, without saying where.
     pub fn unlocated(item: RedacterDataItem) -> Self {
         Self {
@@ -791,14 +811,7 @@ impl<'a> Redacters<'a> {
         };
         let mut detections = self.detect(&input).await?;
         detections.retain_categories(redacter, categories);
-        let (masked, replaced) = detections.masked(text, redacter, self.text_mask())?;
-        Ok(Redacted::located(
-            RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(masked),
-            },
-            replaced,
-        ))
+        Redacted::masked(input.file_ref, text, detections, redacter, self.text_mask())
     }
 
     pub fn is_mime_text(mime: &Mime) -> bool {
@@ -953,6 +966,16 @@ pub trait Redacter {
     }
 }
 
+/// A call to a remote provider: it waits for its turn under the request limit, and is made
+/// again while the provider throttles it.
+async fn paced<T>(call: impl AsyncFn() -> AppResult<T>) -> AppResult<T> {
+    retrying_throttled(|| async {
+        CallPacing::wait_for_turn().await;
+        call().await
+    })
+    .await
+}
+
 impl<'a> Redacters<'a> {
     async fn redact_with_provider(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match self {
@@ -972,16 +995,6 @@ impl<'a> Redacters<'a> {
             #[cfg(feature = "local-credential-ml")]
             Redacters::LocalCredentialMl(redacter) => redacter.redact(input).await,
         }
-    }
-
-    /// `detect_with_provider` as a call to a remote provider: it waits for its turn under the
-    /// request limit, and is made again while the provider throttles it.
-    async fn detect_paced(&self, input: &RedacterDataItem) -> AppResult<Detections> {
-        retrying_throttled(|| async {
-            CallPacing::wait_for_turn().await;
-            self.detect_with_provider(input).await
-        })
-        .await
     }
 
     async fn detect_with_provider(&self, input: &RedacterDataItem) -> AppResult<Detections> {
@@ -1016,11 +1029,7 @@ impl<'a> Redacter for Redacters<'a> {
         if !self.redacter_type().is_remote() {
             return self.redact_with_provider(input).await;
         }
-        retrying_throttled(|| async {
-            CallPacing::wait_for_turn().await;
-            self.redact_with_provider(input.clone()).await
-        })
-        .await
+        paced(|| self.redact_with_provider(input.clone())).await
     }
 
     async fn redact_support(&self, file_ref: &FileSystemRef) -> AppResult<RedactSupport> {
@@ -1057,11 +1066,11 @@ impl<'a> Redacter for Redacters<'a> {
                         file_ref: input.file_ref.clone(),
                         content: RedacterDataItemContent::Value(part.to_string()),
                     };
-                    self.detect_paced(&part).await
+                    paced(|| self.detect_with_provider(&part)).await
                 })
                 .await
             }
-            _ => self.detect_paced(input).await,
+            _ => paced(|| self.detect_with_provider(input)).await,
         }
     }
 
