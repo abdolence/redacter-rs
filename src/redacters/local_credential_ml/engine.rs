@@ -4,12 +4,14 @@
 use super::error::LocalCredentialMlError;
 use super::extraction::CredentialExtractor;
 use crate::addon_store::AddonFiles;
+use crate::redacters::local_model::{
+    graph_node, load_model, load_tokenizer, read_json, LocalModelError,
+};
 use crate::redacters::text_spans::Finding;
 use crate::redacters::Score;
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -69,13 +71,14 @@ impl CredentialMlEngine {
     pub fn load(files: &AddonFiles) -> Result<Self, LocalCredentialMlError> {
         check_class_labels(&files.dir().join("config.json"))?;
         let temperature = read_temperature(&files.dir().join("policy.json"))?;
-        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"))?;
-        let model_path = files.dir().join("model.onnx");
-        let model =
-            Model::load_file(&model_path).map_err(|source| LocalCredentialMlError::ModelLoad {
-                path: model_path.display().to_string(),
-                source,
-            })?;
+        let tokenizer = load_tokenizer(
+            &files.dir().join("tokenizer.json"),
+            Some(TruncationParams {
+                max_length: MAX_LINE_TOKENS,
+                ..TruncationParams::default()
+            }),
+        )?;
+        let model = load_model(&files.dir().join("model.onnx"), "credential")?;
         let input_ids = graph_node(&model, "input_ids")?;
         let attention_mask = graph_node(&model, "attention_mask")?;
         let logits = graph_node(&model, "logits")?;
@@ -106,7 +109,7 @@ impl CredentialMlEngine {
         let encoding =
             self.tokenizer
                 .encode(line, true)
-                .map_err(|err| LocalCredentialMlError::Encode {
+                .map_err(|err| LocalModelError::Encode {
                     reason: err.to_string(),
                 })?;
         let ids = encoding
@@ -163,15 +166,6 @@ const _: fn() = || {
     assert_send_sync::<CredentialMlEngine>();
 };
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LocalCredentialMlError> {
-    let config_error = |reason: String| LocalCredentialMlError::Config {
-        path: path.display().to_string(),
-        reason,
-    };
-    let bytes = std::fs::read(path).map_err(|err| config_error(err.to_string()))?;
-    serde_json::from_slice(&bytes).map_err(|err| config_error(err.to_string()))
-}
-
 /// Checks that `config.json` names class 0 `clean` and class 1 `credential`, the order the
 /// score is computed in.
 fn check_class_labels(path: &Path) -> Result<(), LocalCredentialMlError> {
@@ -200,30 +194,6 @@ fn read_temperature(path: &Path) -> Result<Temperature, LocalCredentialMlError> 
             value,
         }
     })
-}
-
-fn load_tokenizer(path: &Path) -> Result<Tokenizer, LocalCredentialMlError> {
-    let load_error = |reason: String| LocalCredentialMlError::TokenizerLoad {
-        path: path.display().to_string(),
-        reason,
-    };
-    let mut tokenizer = Tokenizer::from_file(path).map_err(|err| load_error(err.to_string()))?;
-    tokenizer
-        .with_truncation(Some(TruncationParams {
-            max_length: MAX_LINE_TOKENS,
-            ..TruncationParams::default()
-        }))
-        .map_err(|err| load_error(err.to_string()))?;
-    tokenizer.with_padding(None);
-    Ok(tokenizer)
-}
-
-fn graph_node(model: &Model, name: &str) -> Result<NodeId, LocalCredentialMlError> {
-    model
-        .find_node(name)
-        .ok_or_else(|| LocalCredentialMlError::MissingGraphNode {
-            name: name.to_string(),
-        })
 }
 
 #[cfg(test)]
@@ -265,11 +235,15 @@ mod tests {
         let file = json_file("{}");
         assert!(matches!(
             check_class_labels(file.path()),
-            Err(LocalCredentialMlError::Config { .. })
+            Err(LocalCredentialMlError::Model(
+                LocalModelError::Config { .. }
+            ))
         ));
         assert!(matches!(
             check_class_labels(Path::new("/nonexistent/config.json")),
-            Err(LocalCredentialMlError::Config { .. })
+            Err(LocalCredentialMlError::Model(
+                LocalModelError::Config { .. }
+            ))
         ));
     }
 
