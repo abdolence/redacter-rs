@@ -18,9 +18,7 @@ use gcloud_sdk::{tonic, GoogleApi, GoogleAuthMiddleware};
 use rvstruct::ValueStruct;
 use std::collections::VecDeque;
 use std::default::Default;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{ready, Context, Poll};
 
 const GCS_GRPC_ENDPOINT: &str = "https://storage.googleapis.com";
 
@@ -320,45 +318,27 @@ impl ReadObjectVerifier {
 /// Turns the `ReadObject` response stream into the payload stream, failing it
 /// with a checksum error instead of ending normally when the data does not
 /// match what the server digested. The stream ends after its first error.
-struct VerifiedReadStream<S> {
+fn verified_read_stream<S>(
     responses: S,
-    verifier: Option<ReadObjectVerifier>,
-}
-
-impl<S> VerifiedReadStream<S> {
-    fn new(responses: S, object_name: String, metadata: &Object) -> Self {
-        Self {
-            responses,
-            verifier: Some(ReadObjectVerifier::new(object_name, metadata)),
-        }
-    }
-}
-
-impl<S> Stream for VerifiedReadStream<S>
+    object_name: String,
+    metadata: &Object,
+) -> impl Stream<Item = AppResult<Bytes>>
 where
     S: Stream<Item = Result<ReadObjectResponse, tonic::Status>> + Unpin,
 {
-    type Item = AppResult<Bytes>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = &mut *self;
-        let Some(verifier) = this.verifier.as_mut() else {
-            return Poll::Ready(None);
-        };
-        match ready!(Pin::new(&mut this.responses).poll_next(cx)) {
-            Some(Ok(response)) => Poll::Ready(Some(Ok(verifier.accept(response)))),
-            Some(Err(status)) => {
-                this.verifier = None;
-                Poll::Ready(Some(Err(status.into())))
+    let verifier = ReadObjectVerifier::new(object_name, metadata);
+    futures::stream::unfold(Some((responses, verifier)), |state| async move {
+        let (mut responses, mut verifier) = state?;
+        match responses.next().await {
+            Some(Ok(response)) => {
+                let data = verifier.accept(response);
+                Some((Ok(data), Some((responses, verifier))))
             }
-            None => Poll::Ready(
-                this.verifier
-                    .take()
-                    .and_then(|verifier| verifier.finish().err())
-                    .map(Err),
-            ),
+            Some(Err(status)) => Some((Err(status.into()), None)),
+            None => verifier.finish().err().map(|error| (Err(error), None)),
         }
-    }
+    })
+    .fuse()
 }
 
 impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
@@ -416,7 +396,11 @@ impl<'a> FileSystemConnection<'a> for GoogleCloudStorageFileSystem<'a> {
 
         Ok((
             found_file_ref,
-            Box::new(VerifiedReadStream::new(read_stream, object_name, &object)),
+            Box::new(Box::pin(verified_read_stream(
+                read_stream,
+                object_name,
+                &object,
+            ))),
         ))
     }
 
@@ -755,7 +739,7 @@ mod tests {
         metadata: &Object,
         responses: Vec<ReadObjectResponse>,
     ) -> Vec<AppResult<Bytes>> {
-        VerifiedReadStream::new(
+        verified_read_stream(
             futures::stream::iter(responses.into_iter().map(Ok)),
             "redacter/test-object.bin".to_string(),
             metadata,

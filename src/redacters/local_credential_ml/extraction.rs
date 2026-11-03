@@ -163,23 +163,9 @@ fn line_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
 
 /// The byte ranges of the whitespace-separated words of `line`.
 fn words(line: &str) -> impl Iterator<Item = Range<usize>> + '_ {
-    let mut characters = line.char_indices().peekable();
-    std::iter::from_fn(move || {
-        let start = loop {
-            let (index, character) = characters.next()?;
-            if !character.is_whitespace() {
-                break index;
-            }
-        };
-        let mut end = line.len();
-        while let Some(&(index, character)) = characters.peek() {
-            if character.is_whitespace() {
-                end = index;
-                break;
-            }
-            characters.next();
-        }
-        Some(start..end)
+    line.split_whitespace().map(|word| {
+        let start = word.as_ptr() as usize - line.as_ptr() as usize;
+        start..start + word.len()
     })
 }
 
