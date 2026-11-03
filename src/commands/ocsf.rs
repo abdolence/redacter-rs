@@ -574,13 +574,22 @@ mod tests {
     use crate::commands::scan_output::{FindingReport, ValueDisplay};
     use crate::redacters::Detection;
     use serde_json::{json, Value};
-    use std::path::MAIN_SEPARATOR_STR;
+    use std::path::{PathBuf, MAIN_SEPARATOR_STR};
     use std::time::Duration;
 
     const SCHEMA_PATH: &str = "test-fixtures/ocsf/data_security_finding-1.9.0.schema.json";
 
     fn scan_time() -> EpochMillis {
         EpochMillis::try_from(UNIX_EPOCH + Duration::from_millis(1_761_990_000_123)).unwrap()
+    }
+
+    /// A path written with `/` in the notation of the system, as `full_path` tells it.
+    fn native_path(path: &str) -> String {
+        Path::new(path)
+            .components()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn text_at(line: usize, column: usize) -> DetectionLocation {
@@ -731,7 +740,7 @@ mod tests {
                 },
                 "file": {
                     "name": "note.txt",
-                    "path": "/work/docs/note.txt",
+                    "path": native_path("/work/docs/note.txt"),
                     "type_id": 1,
                     "type": "Regular File",
                     "uri": "file:///work/docs/note.txt"
@@ -1108,8 +1117,8 @@ mod tests {
             event["file"]["path"].as_str().unwrap().to_string()
         };
 
-        assert_eq!(path_in("a/"), "/work/a/x.csv");
-        assert_eq!(path_in("b/"), "/work/b/x.csv");
+        assert_eq!(path_in("a/"), native_path("/work/a/x.csv"));
+        assert_eq!(path_in("b/"), native_path("/work/b/x.csv"));
         assert_eq!(path_in("s3://bucket/dir/"), "s3://bucket/dir/x.csv");
     }
 

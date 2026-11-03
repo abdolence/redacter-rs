@@ -44,11 +44,13 @@ jobs:
             target: aarch64-unknown-linux-gnu
             bin: redacter
             name: redacter-Linux-aarch64.tar.gz
+            qemu_platforms: arm64
           - os_name: Linux-arm
             os: ubuntu-latest
             target: arm-unknown-linux-musleabi
             bin: redacter
             name: redacter-Linux-arm-musl.tar.gz
+            qemu_platforms: arm
           - os_name: Windows-aarch64
             os: windows-latest
             target: aarch64-pc-windows-msvc
@@ -94,6 +96,13 @@ jobs:
           # The glibc baseline is that of cross's images, which a newer cross release may raise.
           cross-version: v0.2.5
           args: "--locked --release"
+      # cross runs the test binary under qemu, but the integration tests start the built binary
+      # themselves, and a process started from there is only run if the host kernel knows how.
+      - name: Register qemu binary formats
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: ${{ matrix.platform.qemu_platforms }}
+        if: ${{ matrix.platform.qemu_platforms && !matrix.platform.skip_tests }}
       - name: Run tests
         uses: houseabsolute/actions-rust-cross@v1
         with:

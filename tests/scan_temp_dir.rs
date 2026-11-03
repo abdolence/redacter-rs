@@ -1,9 +1,11 @@
 //! A scan or a copy whose findings cannot be kept in the temporary directory fails as a whole.
+//! The directory is chosen by `TMPDIR`, which only unix reads.
+
+#![cfg(unix)]
 
 use std::fs;
 use std::process::Command;
 
-#[cfg(unix)]
 #[test]
 fn a_scan_that_cannot_keep_its_findings_fails_naming_the_temporary_directory() {
     let source = tempfile::tempdir().unwrap();
@@ -27,7 +29,6 @@ fn a_scan_that_cannot_keep_its_findings_fails_naming_the_temporary_directory() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_copy_that_cannot_keep_its_report_fails_naming_the_temporary_directory() {
     let source = tempfile::tempdir().unwrap();
