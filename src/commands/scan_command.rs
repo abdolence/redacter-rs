@@ -9,8 +9,8 @@ use crate::commands::copy_output::{
 };
 use crate::commands::finding_spill::{FindingSpill, SpilledFindings};
 use crate::commands::scan_output::{
-    format_file_lines, format_scan_summary, FindingReport, ScanCommandResult, ScanFileReport,
-    ValueDisplay, SCAN_LEGEND,
+    format_file_lines, format_scan_summary, ScanCommandResult, ScanFileReport, ValueDisplay,
+    SCAN_LEGEND,
 };
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
@@ -309,16 +309,13 @@ async fn detect_in_file(
                     .iter()
                     .filter(|(_, detection)| meets_min_score(detection))
                     .count();
-                let mut window: Vec<FindingReport> = found
-                    .detections
-                    .iter()
-                    .filter(|(_, detection)| meets_min_score(detection))
-                    .map(|(redacter, detection)| {
-                        FindingReport::new(*redacter, detection, context.options.values)
-                    })
-                    .collect();
-                FindingReport::sort_by_location(&mut window);
-                findings.append(&window)
+                findings.append_window(
+                    found
+                        .detections
+                        .iter()
+                        .filter(|(_, detection)| meets_min_score(detection)),
+                    context.options.values,
+                )
             }),
     )
     .await;

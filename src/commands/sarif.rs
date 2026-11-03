@@ -596,29 +596,48 @@ impl Notification {
 mod tests {
     use super::*;
     use crate::args::RedacterType;
-    use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score, TextLines};
+    use crate::commands::finding_spill::{FindingSpill, SpilledFindings};
+    use crate::commands::scan_output::{FindingReport, ValueDisplay};
+    use crate::redacters::{
+        Category, Detection, DetectionLabel, DetectionLocation, Score, TextLines,
+    };
     use serde_json::{json, Value};
     use std::path::Path;
     use url::Url;
 
-    fn text_at(line: usize, column: usize, end_column: usize) -> Option<Place> {
-        Some(Place::Text {
+    fn text_at(line: usize, column: usize) -> DetectionLocation {
+        DetectionLocation::Text {
+            start: 0,
+            end: 0,
             line,
             column,
-            end_line: line,
-            end_column,
-        })
+        }
     }
 
-    fn email(place: Option<Place>, value: &str) -> ReportedFinding {
-        ReportedFinding::new(
-            RedacterType::LocalRules,
-            DetectionLabel::new("email"),
-            None,
-            DetectionLocation::File,
-            place,
-            value,
-        )
+    fn finding(
+        redacter: RedacterType,
+        label: &str,
+        score: Option<Score>,
+        location: DetectionLocation,
+        value: &str,
+    ) -> FindingReport {
+        let detection = Detection {
+            label: DetectionLabel::new(label),
+            location,
+            score,
+            value: value.to_string(),
+        };
+        FindingReport::new(redacter, &detection, ValueDisplay::Masked)
+    }
+
+    fn email(location: DetectionLocation, value: &str) -> FindingReport {
+        finding(RedacterType::LocalRules, "email", None, location, value)
+    }
+
+    fn found(findings: Vec<FindingReport>) -> FileOutcome {
+        let mut spilled = SpilledFindings::new(&FindingSpill::default());
+        spilled.append(&findings).unwrap();
+        FileOutcome::Findings(spilled)
     }
 
     fn artifact(path: &str, outcome: FileOutcome) -> ReportedFile {
@@ -635,10 +654,7 @@ mod tests {
 
     #[test]
     fn a_run_states_the_categories_only_when_they_limit_the_run() {
-        let artifacts = [artifact(
-            "a.txt",
-            FileOutcome::Findings(Vec::new().into_iter().collect()),
-        )];
+        let artifacts = [artifact("a.txt", found(Vec::new()))];
         let locator = ArtifactLocator::new("./", Path::new("/work"));
         let run_of = |categories: Option<&Categories>| {
             serde_json::to_value(SarifLog::try_new(&artifacts, &locator, categories).unwrap())
@@ -672,18 +688,13 @@ mod tests {
     fn a_text_finding_is_a_region_with_the_masked_value() {
         let log = log_of(&[artifact(
             "docs/note.txt",
-            FileOutcome::Findings(
-                vec![ReportedFinding::new(
-                    RedacterType::LocalNer,
-                    DetectionLabel::new("per"),
-                    Some(Score::from_static(0.75)),
-                    DetectionLocation::File,
-                    text_at(3, 15, 37),
-                    "john.smith@example.com",
-                )]
-                .into_iter()
-                .collect(),
-            ),
+            found(vec![finding(
+                RedacterType::LocalNer,
+                "per",
+                Some(Score::from_static(0.75)),
+                text_at(3, 15),
+                "john.smith@example.com",
+            )]),
         )]);
 
         assert_eq!(
@@ -733,15 +744,10 @@ mod tests {
         let detection = TextLines::new(text)
             .detection(start..text.len(), DetectionLabel::new("email"), None)
             .unwrap();
-        let finding = email(
-            Place::new(detection.location, &detection.value),
-            &detection.value,
-        );
+        let finding = email(detection.location, &detection.value);
 
-        let region = &results(&[artifact(
-            "a.txt",
-            FileOutcome::Findings(vec![finding].into_iter().collect()),
-        )])[0]["locations"][0]["physicalLocation"]["region"];
+        let region = &results(&[artifact("a.txt", found(vec![finding]))])[0]["locations"][0]
+            ["physicalLocation"]["region"];
 
         // "Grüße 😀 " is 8 characters, 9 bytes more in UTF-8 and one more in UTF-16.
         assert_eq!(
@@ -758,15 +764,10 @@ mod tests {
         let detection = TextLines::new(text)
             .detection(start..end, DetectionLabel::new("private-key"), None)
             .unwrap();
-        let finding = email(
-            Place::new(detection.location, &detection.value),
-            &detection.value,
-        );
+        let finding = email(detection.location, &detection.value);
 
-        let region = &results(&[artifact(
-            "a.txt",
-            FileOutcome::Findings(vec![finding].into_iter().collect()),
-        )])[0]["locations"][0]["physicalLocation"]["region"];
+        let region = &results(&[artifact("a.txt", found(vec![finding]))])[0]["locations"][0]
+            ["physicalLocation"]["region"];
 
         assert_eq!(
             *region,
@@ -776,12 +777,17 @@ mod tests {
 
     #[test]
     fn a_table_cell_has_no_region_and_the_message_names_the_cell() {
-        let finding = email(Some(Place::TableCell { row: 3, column: 2 }), "a@b.io");
+        let finding = email(
+            DetectionLocation::TableCell {
+                row: 3,
+                column: 2,
+                start: 0,
+                end: 0,
+            },
+            "a@b.io",
+        );
 
-        let result = &results(&[artifact(
-            "people.csv",
-            FileOutcome::Findings(vec![finding].into_iter().collect()),
-        )])[0];
+        let result = &results(&[artifact("people.csv", found(vec![finding]))])[0];
 
         assert_eq!(
             result["message"]["text"],
@@ -795,28 +801,20 @@ mod tests {
 
     #[test]
     fn an_image_or_page_has_no_region_and_the_message_gives_the_box() {
-        let boxed = Place::Image {
+        let boxed = DetectionLocation::Image {
             page: Some(2),
-            area: Some(PixelBox {
-                x1: 310.2,
-                y1: 193.0,
-                x2: 621.6,
-                y2: 218.0,
-            }),
+            x1: 310.2,
+            y1: 193.0,
+            x2: 621.6,
+            y2: 218.0,
         };
-        let page_only = Place::Image {
-            page: Some(2),
-            area: None,
-        };
-        let file_only = None;
+        let page_only = DetectionLocation::Page { page: 2 };
+        let file_only = DetectionLocation::File;
 
-        let messages: Vec<String> = [Some(boxed), Some(page_only), file_only]
+        let messages: Vec<String> = [boxed, page_only, file_only]
             .into_iter()
-            .flat_map(|place| {
-                results(&[artifact(
-                    "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "a@b.io")].into_iter().collect()),
-                )])
+            .flat_map(|location| {
+                results(&[artifact("scan.pdf", found(vec![email(location, "a@b.io")]))])
             })
             .map(|result| {
                 assert!(result["locations"][0]["physicalLocation"]["region"].is_null());
@@ -836,22 +834,11 @@ mod tests {
 
     #[test]
     fn a_finding_without_a_value_has_no_value_in_its_message() {
-        let places = [
-            Some(Place::Image {
-                page: Some(3),
-                area: None,
-            }),
-            None,
-        ];
+        let locations = [DetectionLocation::Page { page: 3 }, DetectionLocation::File];
 
-        let messages: Vec<String> = places
+        let messages: Vec<String> = locations
             .into_iter()
-            .flat_map(|place| {
-                results(&[artifact(
-                    "scan.pdf",
-                    FileOutcome::Findings(vec![email(place, "")].into_iter().collect()),
-                )])
-            })
+            .flat_map(|location| results(&[artifact("scan.pdf", found(vec![email(location, "")]))]))
             .map(|result| result["message"]["text"].as_str().unwrap().to_string())
             .collect();
 
@@ -890,18 +877,9 @@ mod tests {
 
     #[test]
     fn a_run_keeps_errors_before_warnings_up_to_the_result_limit_and_says_what_it_left_out() {
-        let per = |count: usize| -> Vec<ReportedFinding> {
+        let per = |count: usize| -> Vec<FindingReport> {
             (0..count)
-                .map(|_| {
-                    ReportedFinding::new(
-                        RedacterType::LocalNer,
-                        DetectionLabel::new("per"),
-                        None,
-                        DetectionLocation::File,
-                        text_at(1, 1, 2),
-                        "x",
-                    )
-                })
+                .map(|_| finding(RedacterType::LocalNer, "per", None, text_at(1, 1), "x"))
                 .collect()
         };
         let artifacts = vec![
@@ -911,11 +889,8 @@ mod tests {
                     unlocated_values: 1,
                 },
             ),
-            artifact(
-                "a.txt",
-                FileOutcome::Findings(per(MAX_RESULTS).into_iter().collect()),
-            ),
-            artifact("c.txt", FileOutcome::Findings(per(2).into_iter().collect())),
+            artifact("a.txt", found(per(MAX_RESULTS))),
+            artifact("c.txt", found(per(2))),
         ];
 
         let log = log_of(&artifacts);
@@ -942,25 +917,20 @@ mod tests {
 
     #[test]
     fn a_rule_with_one_result_survives_the_limit_behind_a_rule_with_many() {
-        let emails: Vec<ReportedFinding> = (0..MAX_RESULTS + 1)
-            .map(|_| email(text_at(1, 1, 2), "x"))
+        let emails: Vec<FindingReport> = (0..MAX_RESULTS + 1)
+            .map(|_| email(text_at(1, 1), "x"))
             .collect();
         let artifacts = vec![
-            artifact("a.txt", FileOutcome::Findings(emails.into_iter().collect())),
+            artifact("a.txt", found(emails)),
             artifact(
                 "b.txt",
-                FileOutcome::Findings(
-                    vec![ReportedFinding::new(
-                        RedacterType::LocalRules,
-                        DetectionLabel::new("github-token"),
-                        None,
-                        DetectionLocation::File,
-                        text_at(1, 1, 2),
-                        "y",
-                    )]
-                    .into_iter()
-                    .collect(),
-                ),
+                found(vec![finding(
+                    RedacterType::LocalRules,
+                    "github-token",
+                    None,
+                    text_at(1, 1),
+                    "y",
+                )]),
             ),
         ];
 
@@ -1022,11 +992,7 @@ mod tests {
             fingerprint(
                 &results(&[artifact(
                     "a.txt",
-                    FileOutcome::Findings(
-                        vec![email(text_at(line, 5, 27), value)]
-                            .into_iter()
-                            .collect(),
-                    ),
+                    found(vec![email(text_at(line, 5), value)]),
                 )])[0],
             )
         };
@@ -1054,23 +1020,12 @@ mod tests {
         let results = results(&[
             artifact(
                 "a.txt",
-                FileOutcome::Findings(
-                    vec![
-                        email(text_at(1, 1, 7), "a@b.io"),
-                        email(text_at(2, 1, 7), "a@d.io"),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
+                found(vec![
+                    email(text_at(1, 1), "a@b.io"),
+                    email(text_at(2, 1), "a@d.io"),
+                ]),
             ),
-            artifact(
-                "b.txt",
-                FileOutcome::Findings(
-                    vec![email(text_at(1, 1, 7), "a@b.io")]
-                        .into_iter()
-                        .collect(),
-                ),
-            ),
+            artifact("b.txt", found(vec![email(text_at(1, 1), "a@b.io")])),
         ]);
 
         let counted: Vec<String> = results
@@ -1088,25 +1043,10 @@ mod tests {
 
     #[test]
     fn rules_are_sorted_and_results_point_at_them_whatever_the_file_order() {
-        let ner = |label: &str| {
-            ReportedFinding::new(
-                RedacterType::LocalNer,
-                DetectionLabel::new(label),
-                None,
-                DetectionLocation::File,
-                text_at(1, 1, 2),
-                "x",
-            )
-        };
+        let ner = |label: &str| finding(RedacterType::LocalNer, label, None, text_at(1, 1), "x");
         let artifacts = vec![
-            artifact(
-                "a.txt",
-                FileOutcome::Findings(vec![ner("per"), ner("org")].into_iter().collect()),
-            ),
-            artifact(
-                "b.txt",
-                FileOutcome::Findings(vec![email(text_at(1, 1, 2), "x")].into_iter().collect()),
-            ),
+            artifact("a.txt", found(vec![ner("per"), ner("org")])),
+            artifact("b.txt", found(vec![email(text_at(1, 1), "x")])),
         ];
         let mut reversed = artifacts.clone();
         reversed.reverse();

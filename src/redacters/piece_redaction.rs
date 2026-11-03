@@ -12,9 +12,9 @@ use crate::file_systems::FileSystemRef;
 use crate::redacters::detection::piece_owns;
 use crate::redacters::text_changes::{OutputPosition, TextChange, TextChanges};
 use crate::redacters::{
-    Categories, ContentStream, Detection, DetectionLabel, DetectionLocation, PieceLayout, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Redacters, Score, TextLines, TextMask,
-    TextPieceLimits, TextPieces, TextPosition, TextWindow,
+    Categories, ContentStream, Detection, DetectionLabel, DetectionLocation, PieceLayout,
+    RecordRedactions, Redacter, RedacterDataItem, RedacterDataItemContent, Redacters, Score,
+    TextLines, TextMask, TextPieceLimits, TextPieces, TextPosition, TextWindow,
 };
 use crate::AppResult;
 use bytes::Bytes;
@@ -269,8 +269,9 @@ struct PendingMasks {
     findings: Vec<StepFinding>,
     redacters: Vec<RedacterType>,
     recording: bool,
-    /// What each redacter redacted, by its place in the chain.
-    redactions: Vec<Vec<(RedacterType, Detection)>>,
+    /// What the redacters redacted in the text finalised since the last `take_redactions`, in
+    /// the order of their steps in the chain.
+    redactions: Vec<(RedacterType, Detection)>,
 }
 
 impl PendingMasks {
@@ -279,7 +280,7 @@ impl PendingMasks {
             tail: String::new(),
             tail_start: TextPosition::default(),
             findings: Vec::new(),
-            redactions: redacters.iter().map(|_| Vec::new()).collect(),
+            redactions: Vec::new(),
             redacters,
             recording,
         }
@@ -334,7 +335,7 @@ impl PendingMasks {
     fn record(&mut self, limit: usize) -> AppResult<()> {
         let base = self.tail_start.offset;
         let lines = TextLines::new(&self.tail);
-        for (step, redactions) in self.redactions.iter_mut().enumerate() {
+        for step in 0..self.redacters.len() {
             let own: Vec<StepFinding> = self
                 .findings
                 .iter()
@@ -349,19 +350,20 @@ impl PendingMasks {
                     representative.score,
                 )?;
                 detection.location = detection.location.in_file(self.tail_start);
-                redactions.push((self.redacters[step], detection));
+                self.redactions.push((self.redacters[step], detection));
             }
         }
         Ok(())
     }
 
-    fn into_redactions(self) -> Vec<(RedacterType, Detection)> {
-        self.redactions.into_iter().flatten().collect()
+    /// The redactions of the text `take` has returned since the last call.
+    fn take_redactions(&mut self) -> Vec<(RedacterType, Detection)> {
+        std::mem::take(&mut self.redactions)
     }
 }
 
-/// The part of a file the stream hands the upload, and the redactions it lists, once every window
-/// is read. Stops as soon as the upload no longer takes the stream.
+/// The part of a file the stream hands the upload, and the redactions of each window, handed to
+/// `record` as the window is written. Stops as soon as the upload no longer takes the stream.
 ///
 /// The chain reads several windows at a time, and the file comes out in the order of its windows
 /// whatever the order they are read in.
@@ -373,13 +375,15 @@ pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
     pieces: TextPieces<S>,
     first: TextWindow,
     written: mpsc::Sender<AppResult<Bytes>>,
-) -> AppResult<Vec<(RedacterType, Detection)>> {
+    record: &mut RecordRedactions<'_>,
+) -> AppResult<()> {
     let mut pending = PendingMasks::new(redaction.redacters(), redaction.recording);
     let outcome: AppResult<()> = async {
         let found = pieces.read_ahead(Some(first), |window| redaction.find_in_window(window));
         futures::pin_mut!(found);
         while let Some(window) = found.try_next().await? {
             let text = pending.take(window)?;
+            record(pending.take_redactions())?;
             if !text.is_empty() && written.send(Ok(text)).await.is_err() {
                 return Ok(());
             }
@@ -387,7 +391,7 @@ pub(crate) async fn redact_windows<S: Stream<Item = AppResult<Bytes>> + Unpin>(
         Ok(())
     }
     .await;
-    end_with_error(outcome.map(|()| pending.into_redactions()), &written).await
+    end_with_error(outcome, &written).await
 }
 
 /// Passes `outcome` on. A failure first ends the stream behind `written` with the error, so that
@@ -620,7 +624,7 @@ mod tests {
         pending.take(first).unwrap();
         pending.take(second).unwrap();
 
-        let redactions = pending.into_redactions();
+        let redactions = pending.take_redactions();
         assert_eq!(redactions.len(), 1);
         let (redacter, detection) = &redactions[0];
         assert_eq!(*redacter, RedacterType::LocalRules);
@@ -649,14 +653,14 @@ mod tests {
             .take(window("0123456789abcdef", at(0, 0, 0), None, findings))
             .unwrap();
 
-        let redactions = pending.into_redactions();
+        let redactions = pending.take_redactions();
         assert_eq!(redactions.len(), 1);
         assert_eq!(redactions[0].1.label.to_string(), "short");
         assert_eq!(redactions[0].1.value, "23456789ab");
     }
 
     #[test]
-    fn redactions_are_listed_by_the_step_that_made_them_whichever_window_found_them() {
+    fn the_redactions_of_a_window_are_listed_by_step_and_the_windows_in_file_order() {
         let steps = vec![RedacterType::LocalRules, RedacterType::LocalCredentialMl];
         let mut pending = PendingMasks::new(steps, true);
         let first = window(
@@ -677,21 +681,29 @@ mod tests {
                 finding(9..11, 0, TextMask::Token, "early-second"),
             ],
         );
+        let mut labels_after = |window| {
+            pending.take(window).unwrap();
+            pending
+                .take_redactions()
+                .into_iter()
+                .map(|(redacter, detection)| (redacter, detection.label.to_string()))
+                .collect::<Vec<_>>()
+        };
 
-        pending.take(first).unwrap();
-        pending.take(second).unwrap();
+        let in_first = labels_after(first);
+        let in_second = labels_after(second);
 
-        let labels: Vec<_> = pending
-            .into_redactions()
-            .into_iter()
-            .map(|(redacter, detection)| (redacter, detection.label.to_string()))
-            .collect();
         assert_eq!(
-            labels,
+            in_first,
             vec![
                 (RedacterType::LocalRules, "early-first".to_string()),
-                (RedacterType::LocalRules, "early-second".to_string()),
                 (RedacterType::LocalCredentialMl, "late-first".to_string()),
+            ]
+        );
+        assert_eq!(
+            in_second,
+            vec![
+                (RedacterType::LocalRules, "early-second".to_string()),
                 (RedacterType::LocalCredentialMl, "late-second".to_string()),
             ]
         );

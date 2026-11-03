@@ -5,7 +5,6 @@ use crate::args::RedacterType;
 use crate::commands::finding_spill::SpilledFindings;
 use crate::commands::scan_output::mask_value;
 use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score};
-use crate::AppResult;
 use serde::{Deserialize, Serialize};
 
 /// A file of a run and what the command found in it.
@@ -19,7 +18,7 @@ pub struct ReportedFile {
 #[derive(Debug, Clone)]
 pub enum FileOutcome {
     /// The file was read. A clean file has no findings.
-    Findings(Findings),
+    Findings(SpilledFindings),
     /// The file was read and has no findings, but the redacters named values they could not
     /// place in it, so it is not known to be clean.
     Unconfirmed { unlocated_values: usize },
@@ -29,45 +28,6 @@ pub enum FileOutcome {
     Blocked { reason: String },
     /// No selected redacter reads the file.
     Unsupported { reason: String },
-}
-
-/// The findings of a file.
-#[derive(Debug, Clone)]
-pub struct Findings(Source);
-
-#[derive(Debug, Clone)]
-enum Source {
-    Held(Vec<ReportedFinding>),
-    /// Read from the spill when visited, so a file with millions of findings is never held.
-    Spilled(SpilledFindings),
-}
-
-impl FromIterator<ReportedFinding> for Findings {
-    fn from_iter<I: IntoIterator<Item = ReportedFinding>>(findings: I) -> Self {
-        Self(Source::Held(findings.into_iter().collect()))
-    }
-}
-
-impl From<SpilledFindings> for Findings {
-    fn from(findings: SpilledFindings) -> Self {
-        Self(Source::Spilled(findings))
-    }
-}
-
-impl Findings {
-    /// Calls `visit` with each finding in order. A finding that cannot be read back from the
-    /// spill is an error of the report.
-    pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {
-        match &self.0 {
-            Source::Held(findings) => findings.iter().for_each(visit),
-            Source::Spilled(findings) => {
-                for finding in findings.iter() {
-                    visit(&finding?.reported_finding());
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// One piece of sensitive data in a file. A report holds its value masked, whatever the

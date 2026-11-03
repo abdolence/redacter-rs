@@ -1,8 +1,12 @@
-//! The findings of a `scan`, kept in a temporary file so that the memory a scan needs does not
-//! grow with how much it finds. Each finding is one line of JSON; a file's findings are a range
-//! of lines that the writers of the reports, and the terminal, read back one at a time.
+//! The findings of a `scan` and the redactions of a `cp` report, kept in a temporary file so that
+//! the memory a run needs does not grow with how much it finds. Each finding is one line of JSON;
+//! a file's findings are a range of lines that the writers of the reports, and the terminal, read
+//! back one at a time.
 
-use crate::commands::scan_output::{FindingReport, FindingsByLabel};
+use crate::args::RedacterType;
+use crate::commands::findings::ReportedFinding;
+use crate::commands::scan_output::{FindingReport, FindingsByLabel, ValueDisplay};
+use crate::redacters::Detection;
 use crate::{AppError, AppResult};
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -76,6 +80,21 @@ impl SpilledFindings {
         Ok(())
     }
 
+    /// Appends the detections of one window of a file, sorted by location within the window.
+    /// Windows follow one another in the file, so the order holds across them.
+    pub fn append_window<'a>(
+        &mut self,
+        detections: impl IntoIterator<Item = &'a (RedacterType, Detection)>,
+        values: ValueDisplay,
+    ) -> AppResult<()> {
+        let mut window: Vec<FindingReport> = detections
+            .into_iter()
+            .map(|(redacter, detection)| FindingReport::new(*redacter, detection, values))
+            .collect();
+        FindingReport::sort_by_location(&mut window);
+        self.append(&window)
+    }
+
     fn write(&mut self, findings: &[FindingReport]) -> std::io::Result<()> {
         let mut guard = self.spill.locked();
         let spill = &mut *guard;
@@ -112,6 +131,15 @@ impl SpilledFindings {
     /// How many findings each label has.
     pub fn by_label(&self) -> &FindingsByLabel {
         &self.by_label
+    }
+
+    /// Calls `visit` with each finding as the SARIF and OCSF reports take it, in order. A
+    /// finding that cannot be read back is an error of the report.
+    pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {
+        for finding in self.iter() {
+            visit(&finding?.reported_finding());
+        }
+        Ok(())
     }
 
     /// Reads the findings back, one at a time. Readers are independent of one another and of

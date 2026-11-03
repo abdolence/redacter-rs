@@ -5,15 +5,16 @@ use crate::commands::copy_output::{
     CopyFileOutcome, CopySummary, NotRedactedReason, OutputStyles, RowLayout, SkipReason,
     COPY_LEGEND,
 };
+use crate::commands::finding_spill::{FindingSpill, SpilledFindings};
 use crate::commands::findings::{FileOutcome, ReportedFile};
-use crate::commands::scan_output::{FindingReport, ValueDisplay};
+use crate::commands::scan_output::ValueDisplay;
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
 use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
 use crate::redacters::{
-    CallPacing, Categories, Detection, RedacterBaseOptions, RedacterOptions, Redacters,
-    StreamRedacter,
+    CallPacing, Categories, Detection, RedactStreamResult, RedacterBaseOptions, RedacterOptions,
+    Redacters, StreamRedacter,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -24,6 +25,7 @@ use indicatif::*;
 use rvstruct::ValueStruct;
 use serde::Serialize;
 use std::error::Error;
+use std::io::Write;
 use std::time::Duration;
 
 /// What `cp` reports. Fields are only ever added, so a consumer of the JSON report can rely
@@ -44,12 +46,12 @@ pub struct CopyCommandResult {
 
 /// One file of the copy, as the JSON report lists it. The redactions come in the order a reader
 /// meets them, and their values are always masked.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CopyFileReport {
     path: String,
     mime_type: Option<String>,
     outcome: CopyFileOutcome,
-    redactions: Vec<FindingReport>,
+    redactions: SpilledFindings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -70,7 +72,7 @@ impl Serialize for CopyFileReport {
             mime_type: Option<&'a str>,
             status: CopyFileStatus,
             reason: Option<String>,
-            redactions: &'a [FindingReport],
+            redactions: &'a SpilledFindings,
         }
         let (status, reason) = match &self.outcome {
             CopyFileOutcome::Redacted { .. } => (CopyFileStatus::Redacted, None),
@@ -99,15 +101,8 @@ impl CopyFileReport {
     pub fn new(
         file_ref: &FileSystemRef,
         outcome: &CopyFileOutcome,
-        redactions: &[(RedacterType, Detection)],
+        redactions: SpilledFindings,
     ) -> Self {
-        let mut redactions: Vec<FindingReport> = redactions
-            .iter()
-            .map(|(redacter, detection)| {
-                FindingReport::new(*redacter, detection, ValueDisplay::Masked)
-            })
-            .collect();
-        FindingReport::sort_by_location(&mut redactions);
         Self {
             path: file_ref.relative_path.value().clone(),
             mime_type: file_ref.media_type.as_ref().map(ToString::to_string),
@@ -120,12 +115,7 @@ impl CopyFileReport {
     /// filter left out.
     fn reported_file(&self) -> Option<ReportedFile> {
         let outcome = match &self.outcome {
-            CopyFileOutcome::Redacted { .. } => FileOutcome::Findings(
-                self.redactions
-                    .iter()
-                    .map(FindingReport::reported_finding)
-                    .collect(),
-            ),
+            CopyFileOutcome::Redacted { .. } => FileOutcome::Findings(self.redactions.clone()),
             CopyFileOutcome::Error { message } => FileOutcome::Failed {
                 reason: message.clone(),
             },
@@ -161,17 +151,15 @@ impl CopyCommandResult {
             .collect()
     }
 
-    /// The report for people.
-    pub fn to_text(&self) -> String {
-        let categories = self
-            .categories
-            .as_ref()
-            .map(|categories| format!("Categories: {categories}\n"))
-            .unwrap_or_default();
-        format!(
-            "{categories}Files copied: {}\nFiles redacted: {}\nFiles skipped: {}\n",
-            self.files_copied, self.files_redacted, self.files_skipped
-        )
+    /// Writes the report for people.
+    pub fn write_text(&self, out: &mut dyn Write) -> AppResult<()> {
+        if let Some(categories) = &self.categories {
+            writeln!(out, "Categories: {categories}")?;
+        }
+        writeln!(out, "Files copied: {}", self.files_copied)?;
+        writeln!(out, "Files redacted: {}", self.files_redacted)?;
+        writeln!(out, "Files skipped: {}", self.files_skipped)?;
+        Ok(())
     }
 }
 
@@ -292,6 +280,7 @@ pub async fn command_copy(
     bar.enable_steady_tick(Duration::from_millis(100));
 
     let mut summary = CopySummary::default();
+    let spill = FindingSpill::default();
     let copy_result: AppResult<CopyCommandResult> = if let Some(listing) = source_listing {
         let source_files: Vec<FileSystemRef> = listing.files;
         let files_found = source_files.len();
@@ -333,6 +322,7 @@ pub async fn command_copy(
                 &file_converters,
                 &call_pacing,
                 &styles,
+                &spill,
             )
             .await?;
             match report.result {
@@ -366,6 +356,7 @@ pub async fn command_copy(
             &file_converters,
             &call_pacing,
             &styles,
+            &spill,
         )
         .await?;
         summary.count(&report.outcome);
@@ -458,7 +449,7 @@ struct UploadResult {
     result: TransferFileResult,
     outcome: CopyFileOutcome,
     /// What the redacters replaced, placed in the file as it was read.
-    redactions: Vec<(RedacterType, Detection)>,
+    redactions: SpilledFindings,
 }
 
 impl UploadResult {
@@ -466,19 +457,23 @@ impl UploadResult {
         Self {
             result,
             outcome,
-            redactions: Vec::new(),
+            redactions: SpilledFindings::default(),
         }
     }
 
     /// A file that could not be redacted: it is skipped, and the error is the file's outcome.
-    fn redaction_failed(error: &AppError) -> Self {
+    /// A report that cannot keep its redactions is the run's error, as it is for `scan`.
+    fn redaction_failed(error: AppError) -> AppResult<Self> {
+        if matches!(error, AppError::FindingSpillFailed { .. }) {
+            return Err(error);
+        }
         tracing::debug!(error = %error, source = ?error.source(), "redaction failed");
-        Self::without_redactions(
+        Ok(Self::without_redactions(
             TransferFileResult::Skipped,
             CopyFileOutcome::Error {
                 message: error.to_string(),
             },
-        )
+        ))
     }
 }
 
@@ -498,6 +493,7 @@ async fn transfer_and_redact_file<
     file_converters: &FileConverters<'a>,
     call_pacing: &Option<CallPacing>,
     styles: &OutputStyles,
+    spill: &FindingSpill,
 ) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
 
@@ -513,7 +509,7 @@ async fn transfer_and_redact_file<
         bar.inc(1);
         return Ok(TransferReport {
             result: TransferFileResult::Skipped,
-            file: CopyFileReport::new(&base_file_ref, &outcome, &[]),
+            file: CopyFileReport::new(&base_file_ref, &outcome, SpilledFindings::default()),
             outcome,
             file_size: base_file_ref.file_size,
         });
@@ -545,6 +541,7 @@ async fn transfer_and_redact_file<
                 options,
                 redacter_with_options,
                 file_converters,
+                spill,
             ),
         )
         .await?
@@ -558,7 +555,7 @@ async fn transfer_and_redact_file<
     bar.inc(1);
     Ok(TransferReport {
         result: transfer_result,
-        file: CopyFileReport::new(file_ref, &outcome, &redactions),
+        file: CopyFileReport::new(file_ref, &outcome, redactions),
         outcome,
         file_size: file_ref.file_size,
     })
@@ -601,6 +598,7 @@ async fn redact_upload_file<
     options: &CopyCommandOptions,
     redacter_with_options: &(RedacterBaseOptions, Vec<Redacters<'a>>),
     file_converters: &FileConverters<'a>,
+    spill: &FindingSpill,
 ) -> AppResult<UploadResult> {
     let (redacter_base_options, redacters) = redacter_with_options;
     let stream_redacter = StreamRedacter::new(redacter_base_options, file_converters);
@@ -614,58 +612,64 @@ async fn redact_upload_file<
         .await?;
 
     if !redact_plan.supported_redacters.is_empty() {
-        match stream_redacter
-            .redact_stream(source_reader, redact_plan, &dest_file_ref_overridden)
+        let mut redactions = SpilledFindings::new(spill);
+        let mut record = |records: Vec<(RedacterType, Detection)>| {
+            redactions.append_window(&records, ValueDisplay::Masked)
+        };
+        let RedactStreamResult {
+            number_of_redactions,
+            summary,
+            output,
+        } = match stream_redacter
+            .redact_stream(
+                source_reader,
+                redact_plan,
+                &dest_file_ref_overridden,
+                &mut record,
+            )
             .await
         {
-            Ok(redacted_result)
-                if redacted_result.number_of_redactions > 0
-                    || redacter_base_options.allow_unsupported_copies =>
-            {
-                let (uploaded, redactions) = redacted_result
-                    .output
-                    .drive(async |stream| destination_fs.upload(stream, Some(dest_file_ref)).await)
-                    .await;
-                // A text read in pieces is redacted while it is uploaded. When redaction fails
-                // it ends the stream with the error, so the upload fails as well, and the
-                // redaction error is the one that belongs to the file.
-                let redactions = match redactions {
-                    Ok(redactions) => redactions,
-                    Err(error) => return Ok(UploadResult::redaction_failed(&error)),
-                };
-                uploaded?;
-                let summary = redacted_result.summary;
-                let outcome = if !summary.applied.is_empty() {
-                    CopyFileOutcome::Redacted {
-                        redacters: summary.applied,
-                        conversion: summary.conversion,
-                    }
-                } else {
-                    CopyFileOutcome::CopiedUnredacted {
-                        reason: not_redacted_reason(summary.blocked),
-                    }
-                };
-                let result = if redacted_result.number_of_redactions > 0 {
-                    TransferFileResult::RedactedAndCopied
-                } else {
-                    TransferFileResult::Copied
-                };
-                Ok(UploadResult {
-                    result,
-                    outcome,
-                    redactions,
-                })
-            }
-            Ok(redacted_result) => Ok(UploadResult::without_redactions(
+            Ok(redacted) => redacted,
+            Err(error) => return UploadResult::redaction_failed(error),
+        };
+        if number_of_redactions == 0 && !redacter_base_options.allow_unsupported_copies {
+            return Ok(UploadResult::without_redactions(
                 TransferFileResult::Skipped,
                 CopyFileOutcome::Skipped {
-                    reason: SkipReason::NotRedacted(not_redacted_reason(
-                        redacted_result.summary.blocked,
-                    )),
+                    reason: SkipReason::NotRedacted(not_redacted_reason(summary.blocked)),
                 },
-            )),
-            Err(error) => Ok(UploadResult::redaction_failed(&error)),
+            ));
         }
+        let (uploaded, redacted) = output
+            .drive(async |stream| destination_fs.upload(stream, Some(dest_file_ref)).await)
+            .await;
+        // A text read in pieces is redacted while it is uploaded. When redaction fails it ends
+        // the stream with the error, so the upload fails as well, and the redaction error is the
+        // one that belongs to the file.
+        if let Err(error) = redacted {
+            return UploadResult::redaction_failed(error);
+        }
+        uploaded?;
+        let outcome = if !summary.applied.is_empty() {
+            CopyFileOutcome::Redacted {
+                redacters: summary.applied,
+                conversion: summary.conversion,
+            }
+        } else {
+            CopyFileOutcome::CopiedUnredacted {
+                reason: not_redacted_reason(summary.blocked),
+            }
+        };
+        let result = if number_of_redactions > 0 {
+            TransferFileResult::RedactedAndCopied
+        } else {
+            TransferFileResult::Copied
+        };
+        Ok(UploadResult {
+            result,
+            outcome,
+            redactions,
+        })
     } else if redacter_base_options.allow_unsupported_copies {
         destination_fs
             .upload(source_reader, Some(dest_file_ref))
@@ -768,7 +772,12 @@ mod tests {
     }
 
     fn report_json(outcome: &CopyFileOutcome) -> serde_json::Value {
-        serde_json::to_value(CopyFileReport::new(&report_file_ref(), outcome, &[])).unwrap()
+        serde_json::to_value(CopyFileReport::new(
+            &report_file_ref(),
+            outcome,
+            SpilledFindings::default(),
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -831,7 +840,11 @@ mod tests {
             media_type: Some(mime::TEXT_PLAIN),
             file_size: Some(10),
         };
-        CopyFileReport::new(&file_ref, outcome, redactions)
+        let mut spilled = SpilledFindings::new(&FindingSpill::default());
+        spilled
+            .append_window(redactions, ValueDisplay::Masked)
+            .unwrap();
+        CopyFileReport::new(&file_ref, outcome, spilled)
     }
 
     fn result_of(files: Vec<CopyFileReport>) -> CopyCommandResult {
@@ -850,15 +863,8 @@ mod tests {
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    FileOutcome::Findings(findings) => {
-                        let mut count = 0;
-                        findings.for_each(|_| count += 1).unwrap();
-                        if count == 0 {
-                            "clean"
-                        } else {
-                            "findings"
-                        }
-                    }
+                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    FileOutcome::Findings(_) => "findings",
                     FileOutcome::Unconfirmed { .. } => "unconfirmed",
                     FileOutcome::Failed { .. } => "failed",
                     FileOutcome::Blocked { .. } => "blocked",
@@ -1504,7 +1510,10 @@ mod tests {
             plan.blocked
         );
         let input = futures::stream::iter(vec![Ok(bytes::Bytes::from(input_bytes))]);
-        let result = stream_redacter.redact_stream(input, plan, file_ref).await?;
+        let mut ignore = |_| Ok(());
+        let result = stream_redacter
+            .redact_stream(input, plan, file_ref, &mut ignore)
+            .await?;
         assert!(
             result.number_of_redactions > 0,
             "{} should have been redacted",
