@@ -684,7 +684,6 @@ impl RedacterArgs {
             "--local-rules",
             self.local_rules.as_deref(),
             RuleGroup::all(),
-            RuleGroup::to_string,
             |group| group.category(),
         )?
         .into_iter()
@@ -848,7 +847,6 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         "--local-ner-entities",
                         self.local_ner_entities.as_deref(),
                         Entity::all(),
-                        |entity| entity.as_str().to_string(),
                         |entity| entity.category(),
                     )?
                     .into_iter()
@@ -877,7 +875,6 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                         "--local-gliner-labels",
                         self.local_gliner_labels.as_deref(),
                         default_labels(),
-                        String::clone,
                         |label| label_category(label),
                     )?;
                     Categories::ensure_finds(

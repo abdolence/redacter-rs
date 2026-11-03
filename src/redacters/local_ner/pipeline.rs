@@ -18,6 +18,12 @@ pub enum Entity {
     Loc,
 }
 
+impl std::fmt::Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl Entity {
     pub fn all() -> BTreeSet<Entity> {
         [Entity::Per, Entity::Org, Entity::Loc]
