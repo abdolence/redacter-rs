@@ -4297,7 +4297,9 @@ mod tests {
         starts.dedup_by(|later, earlier| *later < *earlier + 2 * unit);
         let mut emails = Vec::new();
         for start in starts {
-            let email = format!("planted.user.{}@example.com", emails.len() + 1);
+            // Comprehend leaves the first dot-separated label of a dotted local part out of
+            // the EMAIL span, so the address has no dots before the `@`.
+            let email = format!("planted-user-{}@example.com", emails.len() + 1);
             let padding = format!(" {SENTENCE}{SENTENCE}");
             let filled = format!("{email}{}", &padding[..2 * unit - email.len()]);
             line.replace_range(start..start + 2 * unit, &filled);
