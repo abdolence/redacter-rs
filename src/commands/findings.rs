@@ -1,10 +1,9 @@
 //! What a command found in the files of a run, at whatever precision it knows, as the report
 //! writers take it. A writer does not know the command that produced it.
 
-use crate::args::RedacterType;
+use crate::commands::copy_output::NotRedactedReason;
 use crate::commands::finding_spill::SpilledFindings;
-use crate::commands::scan_output::mask_value;
-use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::DetectionLocation;
 use serde::{Deserialize, Serialize};
 
 /// A file of a run and what the command found in it.
@@ -30,43 +29,14 @@ pub enum FileOutcome {
     Unsupported { reason: String },
 }
 
-/// One piece of sensitive data in a file. A report holds its value masked, whatever the
-/// command shows.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReportedFinding {
-    pub(super) redacter: RedacterType,
-    pub(super) label: DetectionLabel,
-    pub(super) score: Option<Score>,
-    pub(super) location: DetectionLocation,
-    /// `place` is the location in the terms of a report that cannot hold all of it; `None` when
-    /// only the file is known to hold the value.
-    pub(super) place: Option<Place>,
-    pub(super) masked_value: String,
-}
-
-impl ReportedFinding {
-    /// `value` may be the value as found: it is masked here.
-    pub fn new(
-        redacter: RedacterType,
-        label: DetectionLabel,
-        score: Option<Score>,
-        location: DetectionLocation,
-        place: Option<Place>,
-        value: &str,
-    ) -> Self {
-        Self {
-            redacter,
-            label,
-            score,
-            location,
-            place,
-            masked_value: mask_value(value),
+impl From<NotRedactedReason> for FileOutcome {
+    fn from(reason: NotRedactedReason) -> Self {
+        let detail = reason.detail().to_string();
+        if reason.needs_converter() {
+            Self::Blocked { reason: detail }
+        } else {
+            Self::Unsupported { reason: detail }
         }
-    }
-
-    /// Whether the finding is in the secrets category: a password, a key or a token.
-    pub(super) fn is_secret(&self) -> bool {
-        self.label.category(self.redacter) == Category::Secrets
     }
 }
 

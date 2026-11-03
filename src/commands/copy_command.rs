@@ -11,7 +11,7 @@ use crate::commands::scan_output::ValueDisplay;
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
-use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride};
+use crate::file_tools::{FileMatcher, FileMimeOverride};
 use crate::redacters::{
     CallPacing, Categories, Detection, RedactStreamResult, RedacterBaseOptions, RedacterOptions,
     Redacters, StreamRedacter,
@@ -119,26 +119,17 @@ impl CopyFileReport {
             CopyFileOutcome::Error { message } => FileOutcome::Failed {
                 reason: message.clone(),
             },
-            CopyFileOutcome::Copied => not_redacted_outcome(NotRedactedReason::NoRedacterApplied),
+            CopyFileOutcome::Copied => NotRedactedReason::NoRedacterApplied.into(),
             CopyFileOutcome::CopiedUnredacted { reason }
             | CopyFileOutcome::Skipped {
                 reason: SkipReason::NotRedacted(reason),
-            } => not_redacted_outcome(*reason),
+            } => (*reason).into(),
             CopyFileOutcome::Skipped { .. } => return None,
         };
         Some(ReportedFile {
             path: self.path.clone(),
             outcome,
         })
-    }
-}
-
-fn not_redacted_outcome(reason: NotRedactedReason) -> FileOutcome {
-    let detail = reason.detail().to_string();
-    if reason.needs_converter() {
-        FileOutcome::Blocked { reason: detail }
-    } else {
-        FileOutcome::Unsupported { reason: detail }
     }
 }
 
@@ -497,13 +488,7 @@ async fn transfer_and_redact_file<
 ) -> AppResult<TransferReport> {
     let (base_file_ref, source_reader) = source_fs.download(source_file_ref).await?;
 
-    let skip_reason = match options.file_matcher.matches(&base_file_ref) {
-        FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
-        FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-        // Ignore rules apply to listings only; this matcher carries none.
-        FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
-    };
-    if let Some(reason) = skip_reason {
+    if let Some(reason) = SkipReason::of_match(options.file_matcher.matches(&base_file_ref)) {
         let outcome = CopyFileOutcome::Skipped { reason };
         print_file_row(term, bar, &base_file_ref, &outcome, styles);
         bar.inc(1);

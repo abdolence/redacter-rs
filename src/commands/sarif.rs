@@ -10,8 +10,9 @@
 //! always masked here, whatever the caller passes.
 
 use crate::commands::artifact_locator::ArtifactLocator;
-use crate::commands::copy_output::escaped;
-use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
+use crate::commands::copy_output::{counted, escaped};
+use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile};
+use crate::commands::scan_output::FindingReport;
 use crate::redacters::Categories;
 use crate::AppResult;
 use serde::Serialize;
@@ -30,7 +31,7 @@ const MAX_RESULTS: usize = 5_000;
 /// The base GitHub resolves a relative `uri` against: the root of the checkout.
 const SOURCE_ROOT_ID: &str = "%SRCROOT%";
 
-impl ReportedFinding {
+impl FindingReport {
     fn rule_id(&self) -> RuleId {
         RuleId(format!(
             "{}/{}",
@@ -51,8 +52,9 @@ impl ReportedFinding {
         if let Some(place) = &self.place {
             message.push_str(&place.description());
         }
-        if !self.masked_value.is_empty() {
-            message.push_str(&format!(" Value: {}", escaped(&self.masked_value)));
+        let masked_value = self.masked_value();
+        if !masked_value.is_empty() {
+            message.push_str(&format!(" Value: {}", escaped(&masked_value)));
         }
         message
     }
@@ -208,7 +210,7 @@ struct RuleProperties {
 }
 
 impl Rule {
-    fn for_finding(finding: &ReportedFinding) -> Self {
+    fn for_finding(finding: &FindingReport) -> Self {
         let label = escaped(&finding.label.to_string());
         let help = format!(
             "The {} redacter reported data labelled `{label}`. Remove the value from the file, or \
@@ -415,8 +417,9 @@ impl SarifLog {
                             return;
                         }
                         *in_rule += 1;
+                        let masked_value = finding.masked_value();
                         let occurrence = seen
-                            .entry((rule_id.clone(), finding.masked_value.clone()))
+                            .entry((rule_id.clone(), masked_value.clone()))
                             .or_default();
                         results.push(SarifResult {
                             rule_index: 0,
@@ -429,7 +432,7 @@ impl SarifLog {
                             partial_fingerprints: Fingerprints::new(
                                 &rule_id,
                                 &location.uri,
-                                &finding.masked_value,
+                                &masked_value,
                                 *occurrence,
                             ),
                             rule_id,
@@ -450,13 +453,9 @@ impl SarifLog {
                             rule_index: 0,
                             level: Level::Warning,
                             message: format!(
-                                "{unlocated_values} {} named by the redacters could not be \
-                                 located in the file, so it may still hold sensitive data.",
-                                if *unlocated_values == 1 {
-                                    "value"
-                                } else {
-                                    "values"
-                                }
+                                "{} named by the redacters could not be located in the file, \
+                                 so it may still hold sensitive data.",
+                                counted(*unlocated_values, "value")
                             )
                             .into(),
                             partial_fingerprints: Fingerprints::new(&rule_id, &location.uri, "", 0),

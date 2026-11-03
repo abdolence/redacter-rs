@@ -15,7 +15,7 @@ use crate::commands::scan_output::{
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
-use crate::file_tools::{FileMatcher, FileMatcherResult, FileMimeOverride, IgnoreFileChoice};
+use crate::file_tools::{FileMatcher, FileMimeOverride, IgnoreFileChoice};
 use crate::redacters::{CallPacing, Detection, RedacterOptions, Redacters, Score, StreamRedacter};
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -217,13 +217,7 @@ async fn scan_file<'a, SFS: FileSystemConnection<'a>>(
                 .options
                 .file_mime_override
                 .override_for_file_ref(source_file_ref.unwrap_or(&base_file_ref).clone());
-            let skip_reason = match context.options.file_matcher.matches(&base_file_ref) {
-                FileMatcherResult::SkippedDueToSize => Some(SkipReason::OverSizeLimit),
-                FileMatcherResult::SkippedDueToName => Some(SkipReason::NameFilter),
-                // Ignore rules apply to listings only; this matcher carries none.
-                FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
-            };
-            match skip_reason {
+            match SkipReason::of_match(context.options.file_matcher.matches(&base_file_ref)) {
                 Some(reason) => ScanFileReport::not_scanned(&file_ref, reason),
                 None => detect_in_file(context, reader, &file_ref).await?,
             }
@@ -324,9 +318,7 @@ async fn detect_in_file(
             file_ref,
             SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
         ),
-        Ok(None) => {
-            ScanFileReport::scanned(file_ref, findings, unlocated).with_findings_ignored(ignored)
-        }
+        Ok(None) => ScanFileReport::scanned(file_ref, findings, unlocated, ignored),
         Err(error @ AppError::FindingSpillFailed { .. }) => return Err(error),
         Err(error) => failed_report(file_ref, &error),
     })
