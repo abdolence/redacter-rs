@@ -7,7 +7,7 @@ use super::pipeline::{
     WindowScorer, OVERLAP,
 };
 use crate::addon_store::AddonFiles;
-use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, REDACTED};
+use crate::redacters::text_spans::{merge_findings, Finding};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
@@ -102,16 +102,6 @@ impl NerEngine {
         )?;
         let words = collapse_words(text, &tokens, &tags, self.labels());
         Ok(merge_findings(merge_spans(text, &words, options)))
-    }
-
-    /// The text with every finding replaced by `[REDACTED]`, plus the findings.
-    pub fn redact_text(
-        &self,
-        text: &str,
-        options: &NerOptions,
-    ) -> Result<(String, Vec<Finding>), LocalNerError> {
-        let findings = self.find(text, options)?;
-        Ok((apply_redaction(text, &findings, REDACTED), findings))
     }
 }
 
@@ -254,6 +244,7 @@ mod tests {
     use super::*;
     use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
     use crate::redacters::local_ner::pipeline::{Entity, Tag};
+    use crate::redacters::text_spans::{apply_redaction, REDACTED};
     use crate::redacters::Score;
 
     const REAL_CONFIG: &str = r#"{
@@ -481,7 +472,7 @@ mod tests {
         assert!(found.contains(&("per", "Angela Merkel")), "{found:?}");
         assert!(found.contains(&("org", "Siemens")), "{found:?}");
         assert!(found.contains(&("loc", "München")), "{found:?}");
-        let (redacted, _) = engine.redact_text(text, &all_entities()).unwrap();
+        let redacted = apply_redaction(text, &findings, REDACTED);
         assert_eq!(redacted, "[REDACTED] besuchte [REDACTED] in [REDACTED].");
 
         // The model is multilingual: French and Spanish must work as well as German. On
@@ -527,7 +518,8 @@ mod tests {
         let text = sentence.repeat(80);
         let tokens = engine.tokenize(&text).unwrap();
         assert!(tokens.ids.len() > 1000, "{}", tokens.ids.len());
-        let (redacted, findings) = engine.redact_text(&text, &all_entities()).unwrap();
+        let findings = engine.find(&text, &all_entities()).unwrap();
+        let redacted = apply_redaction(&text, &findings, REDACTED);
         assert!(!redacted.contains("Hans Müller"), "a name survived");
         let people = findings.iter().filter(|f| f.rule.as_str() == "per").count();
         assert!(

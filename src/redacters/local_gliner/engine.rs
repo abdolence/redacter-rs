@@ -11,7 +11,7 @@ use super::pipeline::{
     WindowScorer, OVERLAP_WORDS,
 };
 use crate::addon_store::AddonFiles;
-use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, REDACTED};
+use crate::redacters::text_spans::{merge_findings, Finding};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
@@ -238,16 +238,6 @@ impl GlinerEngine {
         Ok(merge_findings(candidates_to_findings(greedy_decode(
             candidates,
         ))))
-    }
-
-    /// The text with every finding replaced by `[REDACTED]`, plus the findings.
-    pub fn redact_text(
-        &self,
-        text: &str,
-        options: &GlinerOptions,
-    ) -> Result<(String, Vec<Finding>), LocalGlinerError> {
-        let findings = self.find(text, options)?;
-        Ok((apply_redaction(text, &findings, REDACTED), findings))
     }
 }
 
