@@ -4,7 +4,6 @@
 //! back one at a time.
 
 use crate::args::RedacterType;
-use crate::commands::findings::ReportedFinding;
 use crate::commands::scan_output::{FindingReport, FindingsByLabel, ValueDisplay};
 use crate::redacters::Detection;
 use crate::{AppError, AppResult};
@@ -75,7 +74,7 @@ impl SpilledFindings {
             })?;
         self.count += findings.len();
         for finding in findings {
-            self.by_label.count(finding.label());
+            self.by_label.count(&finding.label);
         }
         Ok(())
     }
@@ -135,9 +134,9 @@ impl SpilledFindings {
 
     /// Calls `visit` with each finding as the SARIF and OCSF reports take it, in order. A
     /// finding that cannot be read back is an error of the report.
-    pub fn for_each(&self, mut visit: impl FnMut(&ReportedFinding)) -> AppResult<()> {
+    pub fn for_each(&self, mut visit: impl FnMut(&FindingReport)) -> AppResult<()> {
         for finding in self.iter() {
-            visit(&finding?.reported_finding());
+            visit(&finding?);
         }
         Ok(())
     }

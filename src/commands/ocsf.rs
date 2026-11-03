@@ -10,9 +10,11 @@
 //! always masked here, whatever the caller passes, and no hash of a value is written.
 
 use crate::commands::artifact_locator::ArtifactLocator;
+use crate::commands::copy_output::counted;
 use crate::commands::finding_spill::SpilledFindings;
-use crate::commands::findings::{FileOutcome, Place, ReportedFile, ReportedFinding};
-use crate::redacters::{DetectionLabel, DetectionLocation, Score};
+use crate::commands::findings::{FileOutcome, Place, ReportedFile};
+use crate::commands::scan_output::FindingReport;
+use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score};
 use crate::AppResult;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -267,12 +269,12 @@ impl Summary {
         findings.for_each(|finding| {
             count += 1;
             redacters.insert(finding.redacter.to_string());
-            has_secret |= finding.is_secret();
+            has_secret |= finding.label.category(finding.redacter) == Category::Secrets;
             confidence = confidence.max(finding.score.map(ConfidenceScore::from));
             let group = (
                 finding.redacter.to_string(),
                 finding.label.clone(),
-                finding.masked_value.clone(),
+                finding.masked_value(),
             );
             let index = *detail_of_group.entry(group).or_insert_with(|| {
                 details.push(DiscoveryDetail::new(finding));
@@ -309,10 +311,7 @@ impl Summary {
                 Severity::Medium
             },
             confidence,
-            message: format!(
-                "{count} sensitive {} found in {path}",
-                if count == 1 { "value" } else { "values" }
-            ),
+            message: format!("{} found in {path}", counted(count, "sensitive value")),
             title: "Sensitive data found",
             types: ["sensitive_data"],
             data_security: Some(DataSecurity {
@@ -339,13 +338,9 @@ impl Summary {
             severity: Severity::Informational,
             confidence: None,
             message: format!(
-                "In {path}, {unlocated_values} {} named by the redacters could not be located, \
+                "In {path}, {} named by the redacters could not be located, \
                  so the file may hold sensitive data",
-                if unlocated_values == 1 {
-                    "value"
-                } else {
-                    "values"
-                }
+                counted(unlocated_values, "value")
             ),
             title: "Sensitive data may be present",
             types: ["unconfirmed"],
@@ -439,14 +434,14 @@ struct DiscoveryDetail {
 }
 
 impl DiscoveryDetail {
-    fn new(finding: &ReportedFinding) -> Self {
+    fn new(finding: &FindingReport) -> Self {
         Self {
             label: finding.label.to_string(),
             count: 0,
             rule: Rule {
                 name: finding.redacter.to_string(),
             },
-            value: Some(finding.masked_value.clone()).filter(|value| !value.is_empty()),
+            value: Some(finding.masked_value()).filter(|value| !value.is_empty()),
             occurrences: Vec::new(),
         }
     }
