@@ -4140,7 +4140,6 @@ dependencies = [
  "mime_guess",
  "ocrs",
  "pdfium-render",
- "percent-encoding",
  "rand 0.10.3",
  "regex",
  "reqwest",
