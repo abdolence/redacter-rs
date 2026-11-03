@@ -214,7 +214,11 @@ impl DetectStreamResult {
                             .get(row.saturating_sub(1))
                             .and_then(|cells| cells.get(column.saturating_sub(1)))
                             .is_some_and(|cell| {
-                                has_marker_outside(cell, &findings_by_cell[&(row, column)])
+                                has_marker_outside(
+                                    cell,
+                                    0..cell.len(),
+                                    &findings_by_cell[&(row, column)],
+                                )
                             }),
                         _ => false,
                     })

@@ -394,7 +394,7 @@ pub const ALLOW_MARKER: &str = "redacter:allow";
 /// Whether [`ALLOW_MARKER`] occurs in `text[window]` clear of every range of `findings`. An
 /// occurrence that overlaps a finding is part of a value, so it cannot be used to hide that value
 /// or any other finding on the line.
-fn has_marker_clear_of(text: &str, window: Range<usize>, findings: &[Range<usize>]) -> bool {
+pub fn has_marker_outside(text: &str, window: Range<usize>, findings: &[Range<usize>]) -> bool {
     text[window.clone()]
         .match_indices(ALLOW_MARKER)
         .any(|(at, marker)| {
@@ -404,11 +404,6 @@ fn has_marker_clear_of(text: &str, window: Range<usize>, findings: &[Range<usize
                 .iter()
                 .all(|finding| end <= finding.start || start >= finding.end)
         })
-}
-
-/// Whether [`ALLOW_MARKER`] occurs in `text` clear of every range of `findings`.
-pub fn has_marker_outside(text: &str, findings: &[Range<usize>]) -> bool {
-    has_marker_clear_of(text, 0..text.len(), findings)
 }
 
 /// A text with the byte offset of each line start, so many detections are placed in it without
@@ -456,7 +451,7 @@ impl<'a> TextLines<'a> {
             .unwrap_or(self.text.len());
         let from = self.line_starts[first_line].max(self.marker_span.start);
         let to = to.min(self.marker_span.end);
-        from < to && has_marker_clear_of(self.text, from..to, findings)
+        from < to && has_marker_outside(self.text, from..to, findings)
     }
 
     /// The 0-based index of the line `offset` is on.

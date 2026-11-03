@@ -6,10 +6,6 @@ use crate::redacters::{Detection, TextLines, TextMask};
 use crate::AppResult;
 use std::ops::Range;
 
-/// The largest text whose steps are placed in the file as first read. The chain of a text
-/// keeps that text, so a larger one is reported as a whole instead.
-pub(crate) const MAX_PLACED_BYTES: usize = 16 * 1024 * 1024;
-
 /// One change a step made to a text: `input` of what it read became `output` of what it
 /// returned. Byte ranges on character boundaries.
 #[derive(Debug, Clone, PartialEq, Eq)]

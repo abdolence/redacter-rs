@@ -574,7 +574,6 @@ so is every later step on the same text or table. So is a step that changes the 
 follows a step that changed the size of the image is located at the `page` or the `file` too; the step that changed
 the size still reports its boxes.
 
-A text, or a table, of more than 16 MiB is not placed step by step: a step that changes it is located at the `file`.
 A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
 takes.
 
@@ -590,8 +589,7 @@ The output is the same as when the file is read whole, with two exceptions. A ru
 or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
 finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
 
-The 16 MiB limit above does not apply to a text read in pieces: every redaction of a large file is located, in the
-report too. The LLM redacters, `local-ner`, `local-gliner` and
+Every redaction of a large file read in pieces is located, in the report too. The LLM redacters, `local-ner`, `local-gliner` and
 `--sampling-size` read the file whole. A model read in pieces loses recall and precision on the bench, see
 [Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
@@ -640,8 +638,8 @@ one after another.
 A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
 `local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
 A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
-The output is the same as when the file is read whole. A batch is placed as a table of its own, so the
-16 MiB limit above applies to a batch and not to the file, and every redaction is located in its cell. Other redacters
+The output is the same as when the file is read whole. A batch is placed as a table of its own, and every
+redaction is located in its cell. Other redacters
 read the file whole.
 
 A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is

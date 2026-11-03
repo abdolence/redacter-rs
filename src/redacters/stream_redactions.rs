@@ -4,7 +4,7 @@
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::redacters::stream_redacter::OcrText;
-use crate::redacters::text_changes::{TextChain, MAX_PLACED_BYTES};
+use crate::redacters::text_changes::TextChain;
 use crate::redacters::{
     Categories, Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextMask,
@@ -148,7 +148,7 @@ impl StreamRedactions {
             return Ok(Vec::new());
         }
         let placed = match (&mut self.text, replaced) {
-            (Placement::Chains(chain), Some(found)) if before.len() <= MAX_PLACED_BYTES => chain
+            (Placement::Chains(chain), Some(found)) => chain
                 .get_or_insert_with(|| TextChain::new(before.to_string()))
                 .step(before, after, found, mask),
             _ => {
@@ -163,7 +163,7 @@ impl StreamRedactions {
     }
 
     /// Every changed cell is placed in its original text. A table whose cells no longer pair up
-    /// with the original's, or that is too large, is one record for the step, from then on.
+    /// with the original's is one record for the step, from then on.
     fn place_table(
         &mut self,
         mask: TextMask,
@@ -176,9 +176,7 @@ impl StreamRedactions {
             return Ok(Vec::new());
         }
         let placed = match (&mut self.cells, replaced) {
-            (Placement::Chains(chains), Some(replaced))
-                if pairs_up(before, after) && bytes_of(before) <= MAX_PLACED_BYTES =>
-            {
+            (Placement::Chains(chains), Some(replaced)) if pairs_up(before, after) => {
                 Self::place_cells(chains, mask, before, after, replaced)
             }
             _ => {
@@ -268,10 +266,6 @@ impl StreamRedactions {
             }
         }
     }
-}
-
-fn bytes_of(rows: &[Vec<String>]) -> usize {
-    rows.iter().flatten().map(String::len).sum()
 }
 
 fn pairs_up(before: &[Vec<String>], after: &[Vec<String>]) -> bool {
@@ -664,53 +658,6 @@ mod tests {
         assert_eq!(
             summary(&recorder.into_records()),
             vec![(DetectionLocation::File, "sensitive_data".into(), "")]
-        );
-    }
-
-    #[test]
-    fn a_text_over_the_size_limit_is_the_file_at_that_step_and_at_every_later_one() {
-        let padding = "x".repeat(MAX_PLACED_BYTES);
-        let original = format!("ana@x.io {padding}");
-        let after_rules = format!("[REDACTED] {padding}");
-        let after_model = format!("[REDACTED] {padding}.");
-        let mut recorder = StreamRedactions::new(true);
-
-        recorder.record(
-            RedacterType::LocalRules,
-            TextMask::Token,
-            None,
-            &text(&original),
-            &text(&after_rules),
-            Some(vec![span(&original, "ana@x.io", "email")]),
-        );
-        recorder.record(
-            RedacterType::GeminiLlm,
-            TextMask::Token,
-            None,
-            &text(&after_rules),
-            &text(&after_rules),
-            None,
-        );
-        recorder.record(
-            RedacterType::GeminiLlm,
-            TextMask::Token,
-            None,
-            &text(&after_rules),
-            &text(&after_model),
-            None,
-        );
-
-        let places: Vec<_> = recorder
-            .into_records()
-            .into_iter()
-            .map(|(redacter, detection)| (redacter, detection.location))
-            .collect();
-        assert_eq!(
-            places,
-            vec![
-                (RedacterType::LocalRules, DetectionLocation::File),
-                (RedacterType::GeminiLlm, DetectionLocation::File),
-            ]
         );
     }
 
