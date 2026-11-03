@@ -51,11 +51,6 @@ pub(crate) struct TableBatch {
 }
 
 impl TableBatch {
-    /// Whether the batch is the whole table.
-    pub fn is_whole_table(&self) -> bool {
-        self.rows_before == 0 && self.reaches_end
-    }
-
     pub fn into_item(self, file_ref: &FileSystemRef) -> RedacterDataItem {
         RedacterDataItem {
             content: RedacterDataItemContent::Table {
