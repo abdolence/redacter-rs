@@ -36,23 +36,23 @@ Each cell is recall / precision / time per file. Time per file is described unde
 
 | Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form |
 |---|---|---|---|---|
-| `local-rules` | 54% / 100% / 51 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 366 ms |
-| `local-ner` | 23% / 69% / 40 ms | 0% / 0% / 18 ms | 23% / - / 39 ms | 19% / 100% / 334 ms |
-| `local-gliner` | 100% / 94% / 443 ms | 2% / 33% / 146 ms | 55% / - / 441 ms | 88% / 100% / 658 ms |
-| `local-rules+local-ner` | 77% / 89% / 43 ms | 93% / 97% / 25 ms | 46% / - / 38 ms | 94% / 100% / 352 ms |
-| `local-rules+local-gliner` | 100% / 95% / 435 ms | 93% / 95% / 177 ms | 57% / - / 466 ms | 88% / 100% / 634 ms |
-| `local-credential-ml` | 0% / - / 77 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 389 ms |
-| `local-rules+local-credential-ml` | 54% / 100% / 30 ms | 95% / 100% / 15 ms | 25% / - / 28 ms | 62% / 100% / 340 ms |
-| `presidio` | 69% / 56% / 18 ms | 7% / 21% / 6 ms | 66% / - / 12 ms | 69% / 92% / 312 ms |
-| `gcp-dlp` | 85% / 75% / 269 ms | 41% / 100% / 84 ms | 49% / - / 72 ms | 94% / 94% / 461 ms |
-| `aws-comprehend` | 98% / 88% / 178 ms | 56% / 82% / 86 ms | 80% / - / 84 ms | 94% / 100% / 577 ms |
-| `aws-bedrock-guardrails` | 90% / 96% / 238 ms | 46% / 83% / 157 ms | 74% / - / 161 ms | 81% / 100% / 602 ms |
-| `gcp-vertex-ai` | 98% / 100% / 8.1 s | 100% / 95% / 8.2 s | 86% / - / 9.1 s | 100% / 100% / 16.3 s |
-| `aws-bedrock` | 98% / 93% / 776 ms | 93% / 59% / 554 ms | 87% / - / 583 ms | 94% / 100% / 2.1 s |
+| `local-rules` | 54% / 100% / 70 ms | 93% / 100% / 1 ms | 24% / - / under 1 ms | 62% / 100% / 306 ms |
+| `local-ner` | 23% / 69% / 41 ms | 0% / 0% / 18 ms | 23% / - / 37 ms | 19% / 100% / 327 ms |
+| `local-gliner` | 100% / 94% / 440 ms | 2% / 33% / 139 ms | 55% / - / 423 ms | 88% / 100% / 655 ms |
+| `local-rules+local-ner` | 77% / 89% / 42 ms | 93% / 97% / 19 ms | 46% / - / 38 ms | 94% / 100% / 336 ms |
+| `local-rules+local-gliner` | 100% / 95% / 433 ms | 93% / 95% / 140 ms | 57% / - / 421 ms | 88% / 100% / 610 ms |
+| `local-credential-ml` | 0% / - / 98 ms | 61% / 100% / 10 ms | 2% / - / 28 ms | 0% / - / 325 ms |
+| `local-rules+local-credential-ml` | 54% / 100% / 29 ms | 95% / 100% / 11 ms | 25% / - / 28 ms | 62% / 100% / 339 ms |
+| `presidio` | 69% / 56% / 37 ms | 7% / 21% / 4 ms | 66% / - / 11 ms | 69% / 92% / 309 ms |
+| `gcp-dlp` | 85% / 75% / 271 ms | 41% / 100% / 107 ms | 49% / - / 77 ms | 94% / 94% / 517 ms |
+| `aws-comprehend` | 98% / 88% / 173 ms | 56% / 82% / 90 ms | 80% / - / 86 ms | 94% / 100% / 518 ms |
+| `aws-bedrock-guardrails` | 90% / 96% / 263 ms | 46% / 83% / 178 ms | 74% / - / 175 ms | 81% / 100% / 542 ms |
+| `gcp-vertex-ai` | 100% / 100% / 6.1 s | 100% / 91% / 9.8 s | 84% / - / 11.3 s | 100% / 100% / 14.3 s |
+| `aws-bedrock` | 98% / 96% / 1.0 s | 88% / 69% / 660 ms | 85% / - / 704 ms | 88% / 93% / 2.8 s |
 
 PII documents is `fixtures` (8 files), Secrets in config and code is `secrets` (29 files), Public PII sample is `public` (200 records) and Scanned form is `images` (a PNG and a PDF of one form). See [Datasets](#datasets).
 
-The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How the numbers were measured](#how-the-numbers-were-measured).
+The `aws-bedrock` cell for `secrets` and the `gcp-vertex-ai` cell for `public` are from the re-runs described under [How the numbers were measured](#how-the-numbers-were-measured). One file of the `gcp-vertex-ai` cell for `public` failed in both passes and counts as not found.
 
 ## PII documents
 
@@ -69,11 +69,11 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 | `gcp-dlp` | 85% | 75% | 11/13 | 18/18 | 5/8 | 2/2 | 2/2 | 3/4 | 0/1 | 0/31 |
 | `aws-comprehend` | 98% | 88% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 4/4 | 0/1 | 5/31 |
 | `aws-bedrock-guardrails` | 90% | 96% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 0/4 | 0/1 | 1/31 |
-| `gcp-vertex-ai` | 98% | 100% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 4/4 | 0/1 | 0/31 |
-| `aws-bedrock` | 98% | 93% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 4/4 | 0/1 | 3/31 |
+| `gcp-vertex-ai` | 100% | 100% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 4/4 | 1/1 | 0/31 |
+| `aws-bedrock` | 98% | 96% | 13/13 | 18/18 | 8/8 | 2/2 | 2/2 | 4/4 | 0/1 | 1/31 |
 
 - `local-rules` found all 18 contact values and none of the 13 person values. `local-ner` found 10 of the 13 person values and none of the contact values;
-- the single `other` value was found by the two GLiNER rows only;
+- the single `other` value was found by the two GLiNER rows and `gcp-vertex-ai` only;
 - `aws-bedrock-guardrails` found none of the 4 dates of birth.
 
 ## Secrets in config and code
@@ -91,8 +91,8 @@ The `gcp-vertex-ai` cell for `fixtures` is from the re-run described under [How 
 | `gcp-dlp` | 41% | 100% | 17/41 | 0/19 |
 | `aws-comprehend` | 56% | 82% | 23/41 | 2/19 |
 | `aws-bedrock-guardrails` | 46% | 83% | 19/41 | 2/19 |
-| `gcp-vertex-ai` | 100% | 95% | 41/41 | 1/19 |
-| `aws-bedrock` | 93% | 59% | 38/41 | 11/19 |
+| `gcp-vertex-ai` | 100% | 91% | 41/41 | 1/19 |
+| `aws-bedrock` | 88% | 69% | 36/41 | 10/19 |
 
 - `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
 - `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
@@ -114,10 +114,10 @@ Recall only, since the annotation does not list everything sensitive.
 | `gcp-dlp` | 49% | 219/244 | 160/161 | 27/57 | 2/187 | 12/126 | 31/31 | 4/33 | 8/82 | 15/60 |
 | `aws-comprehend` | 80% | 240/244 | 161/161 | 39/57 | 85/187 | 116/126 | 31/31 | 23/33 | 82/82 | 9/60 |
 | `aws-bedrock-guardrails` | 74% | 236/244 | 160/161 | 44/57 | 55/187 | 114/126 | 0/31 | 23/33 | 82/82 | 10/60 |
-| `gcp-vertex-ai` | 86% | 239/244 | 161/161 | 46/57 | 186/187 | 126/126 | 31/31 | 27/33 | 15/82 | 11/60 |
-| `aws-bedrock` | 87% | 232/244 | 161/161 | 45/57 | 187/187 | 125/126 | 31/31 | 31/33 | 36/82 | 6/60 |
+| `gcp-vertex-ai` | 84% | 239/244 | 160/161 | 34/57 | 184/187 | 120/126 | 31/31 | 25/33 | 15/82 | 16/60 |
+| `aws-bedrock` | 85% | 232/244 | 161/161 | 40/57 | 183/187 | 124/126 | 31/31 | 31/33 | 27/82 | 4/60 |
 
-- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 38 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 27;
+- on `credential`, `local-credential-ml` found 6 of the 33 and no other local redacter found any, where `local-rules` found 38 of the 41 in `secrets`. `aws-bedrock` found 31 and `gcp-vertex-ai` 25;
 - every redacter found all 31 dates of birth except `local-ner` and `aws-bedrock-guardrails`, which found none.
 
 ## Scanned form
@@ -138,7 +138,7 @@ The truth is 16 boxes, so one box is about 6 percentage points of recall (derive
 | `aws-comprehend` | 94% | 100% | 3/4 | 4/4 | 2/2 | 2/2 | 2/2 | 2/2 | 0/2 |
 | `aws-bedrock-guardrails` | 81% | 100% | 3/4 | 4/4 | 2/2 | 2/2 | 2/2 | 0/2 | 0/2 |
 | `gcp-vertex-ai` | 100% | 100% | 4/4 | 4/4 | 2/2 | 2/2 | 2/2 | 2/2 | 0/2 |
-| `aws-bedrock` | 94% | 100% | 3/4 | 4/4 | 2/2 | 2/2 | 2/2 | 2/2 | 0/2 |
+| `aws-bedrock` | 88% | 93% | 3/4 | 4/4 | 2/2 | 2/2 | 1/2 | 2/2 | 0/2 |
 
 - the 94% of `local-rules+local-ner` against the 88% of `local-gliner` is one box of 16.
 
@@ -150,19 +150,19 @@ The whole run over the 200 files of `public`:
 
 | Redacter | Whole run on public PII sample |
 |---|---|
-| `local-rules` | 62 ms |
-| `local-ner` | 7.9 s |
-| `local-gliner` | 1 min 28 s |
-| `local-rules+local-ner` | 7.8 s |
-| `local-rules+local-gliner` | 1 min 33 s |
-| `local-credential-ml` | 5.7 s |
-| `local-rules+local-credential-ml` | 5.8 s |
-| `presidio` | 2.6 s |
-| `gcp-dlp` | 14.5 s |
-| `aws-comprehend` | 17.0 s |
-| `aws-bedrock-guardrails` | 32.3 s |
-| `gcp-vertex-ai` | 30 min 12 s |
-| `aws-bedrock` | 1 min 57 s |
+| `local-rules` | 61 ms |
+| `local-ner` | 7.6 s |
+| `local-gliner` | 1 min 25 s |
+| `local-rules+local-ner` | 7.7 s |
+| `local-rules+local-gliner` | 1 min 24 s |
+| `local-credential-ml` | 5.6 s |
+| `local-rules+local-credential-ml` | 5.7 s |
+| `presidio` | 2.4 s |
+| `gcp-dlp` | 15.4 s |
+| `aws-comprehend` | 17.3 s |
+| `aws-bedrock-guardrails` | 35.2 s |
+| `gcp-vertex-ai` | 37 min 45 s |
+| `aws-bedrock` | 2 min 21 s |
 
 Public PII sample is `public`: 200 records of synthetic personal data.
 
@@ -190,11 +190,11 @@ The cloud redacters are billed for what they read. Pricing is on the providers' 
 - the `secrets` corpus is synthetic: the values are made up;
 - the `local-credential-ml` rows are one run each of the default configuration, with the threshold 0.74. Every word of a flagged line with a digit or one of the symbols `!@#%^&*+=?~` is redacted, and no dataset here is built to test what that takes along;
 - `fixtures` has 8 files and `images` has 2 files and 16 boxes, so a difference of a few points is a few values;
-- each cell is one run, and an LLM redacter can answer differently for the same files: the re-run of the `gcp-vertex-ai` cell for `fixtures` differed in precision and in keep hits, see [How the numbers were measured](#how-the-numbers-were-measured);
-- the `local-rules` time on `fixtures` (412 ms for the run, 51 ms per file) is from the first scan of the first run. It is higher than the times of `local-ner` (40 ms) and `local-rules+local-ner` (43 ms) on the same files;
-- the `local-credential-ml` time on `fixtures` (616 ms for the run, 77 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (30 ms) on the same files;
+- each cell is one run, and an LLM redacter can answer differently for the same files: the passes of the `aws-bedrock` cell for `secrets` and of the `gcp-vertex-ai` cell for `public` differed in a few findings, see [How the numbers were measured](#how-the-numbers-were-measured);
+- the `local-rules` time on `fixtures` (561 ms for the run, 70 ms per file) is from the first scan of the first run. It is higher than the times of `local-ner` (41 ms) and `local-rules+local-ner` (42 ms) on the same files;
+- the `local-credential-ml` time on `fixtures` (784 ms for the run, 98 ms per file) is from the first scan of the run. It is higher than the time of `local-rules+local-credential-ml` (29 ms) on the same files;
 - every redacter ran with its default configuration: the default label lists and rules of the local redacters, Presidio's default recognizers, and the default model of the LLM redacters (`publishers/google/models/gemini-3.8-flash` on Vertex AI, Amazon Nova 2 Lite on Bedrock). A tuned configuration, such as more labels for `local-gliner`, a custom info type list for `gcp-dlp` or your own `local-rules` rules, changes the numbers;
-- `aws-bedrock-guardrails` ran with a [guardrail](../README.md#aws-bedrock-guardrails) that has all 31 built-in PII types set to anonymise;
+- `aws-bedrock-guardrails` ran with a [guardrail](../README.md#aws-bedrock-guardrails) that has all 31 built-in PII types set to anonymise, at its default of one request in flight. The throttling count comes from separate scans, see [How the numbers were measured](#how-the-numbers-were-measured);
 - times are from one machine and one network;
 - `fixtures` is the only dataset with deliberately multilingual text, in German, French and Spanish. `aws-comprehend` reads English text only.
 
@@ -211,15 +211,15 @@ A whole read with 7 to 200 leading words added to each document moves the result
 
 ## How the numbers were measured
 
-- commit `2390a25` of this repository, release build;
-- the `local-credential-ml` rows come from a later run, in the same way: commit `c71f738`, release build, the same machine, on 2026-11-01;
-- the `secrets` cells of the local redacters and their chains come from a run on commit `19874f5` (the `generic-api-key` rule), in the same way;
-- a Mac mini with an Apple M6 chip, on 2026-11-01. The cloud services were called from that machine;
-- the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, and a third `aws-bedrock-guardrails` and `aws-bedrock`;
-- the re-run repeated the `gcp-vertex-ai` cell for `fixtures`, because 1 of its 8 files failed in the first run, which counts as not found. The first run gave 77% recall, 95% precision, 2 of 31 keep strings hit and 6.8 s per file. The re-run had no failed file and gave 98%, 100%, 0 of 31 and 8.1 s, and its numbers are used;
-- the `gcp-vertex-ai` and `aws-bedrock` rows predate the list of labels that the LLM redacters now offer the model, so they were measured with the earlier detection prompt;
+- commit `3a089bb` of this repository, release build, for every row;
+- a Mac mini with an Apple M6 chip, on 2026-11-03. The cloud services were called from that machine;
+- the first run covers the local redacters and their chains, `presidio`, `gcp-dlp` and `gcp-vertex-ai`; a second run covers `aws-comprehend`, a third `aws-bedrock-guardrails` and `aws-bedrock`, and a fourth the `local-credential-ml` rows. The AWS runs followed each other, one request at a time;
+- each cell is one pass, repeated only where a file failed, which counts as not found:
+  - `aws-bedrock` on `secrets`: 1 of 29 files failed in the third run and in the first re-run, which gave 90% recall, 67% precision and 10 of 19 keep strings hit both times. The second re-run had no failed file and gave 88%, 69%, 10 of 19 and 660 ms per file, and its numbers are used;
+  - `gcp-vertex-ai` on `public`: 1 of 200 files failed in the first run, which gave 84% recall, 24 of 33 secrets and 11.5 s per file. The re-run failed 1 file again and gave 84%, 25 of 33 and 11.3 s, and its numbers are used. The file that fails was not identified;
 - Presidio is the analyzer image 2.2.366 from `ghcr.io/data-privacy-stack`, run as a container on the same machine;
-- no file failed, was blocked or was unsupported in any cell used here.
+- no file failed, was blocked or was unsupported in any other cell used here;
+- `aws-bedrock-guardrails` ran at its default of one request in flight. The harness does not keep the log of a scan, so the throttling was counted in separate scans of the same datasets with `RUST_LOG=aws_smithy_runtime=debug`, one request per file, in the region and with the guardrail of the third run. The 200 files of `public` made 200 requests, each answered on the first attempt, and none was classified as throttled or retried. `secrets` (29 requests), `fixtures` (8) and `images` (2) gave the same count. The scan of `public` took 175 ms per file in the third run, and its 200 files hold 274 text units of 1000 characters, about 8 a second against the 75 a second that some Regions allow.
 
 ## Reproducing
 
@@ -262,9 +262,9 @@ BENCH_DLP_OUT=run-3 \
 cargo test --release --test bench_dlp -- --ignored --nocapture
 ```
 
-The re-run is run 1 with `BENCH_DLP_PROVIDERS=gcp-vertex-ai` and `BENCH_DLP_DATASETS=fixtures`.
+A re-run of one cell is the run it repeats with `BENCH_DLP_PROVIDERS` and `BENCH_DLP_DATASETS` set to that redacter and dataset: `gcp-vertex-ai` on `public` from run 1, `aws-bedrock` on `secrets` from run 3.
 
-The `local-credential-ml` rows are run 4, on commit `c71f738`:
+The `local-credential-ml` rows are run 4:
 
 ```sh
 BENCH_DLP_DATASETS=fixtures,secrets,public,images \
@@ -275,4 +275,17 @@ cargo test --release --test bench_dlp -- --ignored --nocapture
 
 The figures at the threshold 0.50 add `BENCH_DLP_SCAN_ARGS="--local-credential-ml-min-score 0.5"` and `BENCH_DLP_DATASETS=secrets`.
 
-Each run writes `summary.md` and `results.json` to its `BENCH_DLP_OUT` directory.
+Each run writes `summary.md` and `results.json` to its `BENCH_DLP_OUT` directory, and the files of each dataset to `datasets/<dataset>` under it.
+
+The throttling count of `aws-bedrock-guardrails` comes from a scan of one of those directories, logged to a file:
+
+```sh
+RUST_LOG=aws_smithy_runtime=debug redacter scan run-3/datasets/public -d aws-bedrock-guardrails \
+  --aws-region eu-north-1 --aws-bedrock-guardrail-id <guardrail-id> --aws-bedrock-guardrail-version DRAFT \
+  --report-file report.json 2> scan.log
+
+grep -c "beginning attempt #" scan.log
+grep -c "ThrottlingError" scan.log
+```
+
+The first count is the attempts, which equals the requests when none was retried. The second is the attempts that AWS answered with a throttling error.
