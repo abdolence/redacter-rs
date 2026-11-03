@@ -1,6 +1,12 @@
 use super::{apply_redaction, Finding, REDACTED};
-use crate::redacters::Detection;
+use crate::args::RedacterType;
+use crate::errors::AppError;
+use crate::redacters::{
+    Detection, Detections, Redacted, RedacterDataItem, RedacterDataItemContent,
+};
+use crate::reporter::AppReporter;
 use crate::AppResult;
+use rvstruct::ValueStruct;
 
 /// The findings in one table cell, with offsets into the cell. Only a blank cell is skipped,
 /// so that digit-only values such as phone and card numbers reach the model; a provider that
@@ -38,6 +44,71 @@ where
         find_in(&format!("{prefix}{cell}"))?
     };
     Ok(shift_into_cell(scored, prefix.len()))
+}
+
+impl RedacterDataItemContent {
+    /// Redacts the text, or every table cell, in which `find_text` or `find_cell(headers,
+    /// column, cell)` reports a finding, and returns the findings as detections located in the
+    /// content. Everything else stays byte for byte. Images and PDFs are not text:
+    /// `unsupported_content`.
+    pub fn redacted_with(
+        self,
+        find_text: impl FnOnce(&str) -> AppResult<Vec<Finding>>,
+        mut find_cell: impl FnMut(&[String], usize, &str) -> AppResult<Vec<Finding>>,
+    ) -> AppResult<(Self, Vec<Detection>)> {
+        match self {
+            Self::Value(text) => {
+                let findings = find_text(&text)?;
+                let redacted = apply_redaction(&text, &findings, REDACTED);
+                Ok((
+                    Self::Value(redacted),
+                    Detection::in_text(&text, findings)?.found,
+                ))
+            }
+            Self::Table { headers, rows } => {
+                let (rows, found) =
+                    redact_rows(rows, |column, cell| find_cell(&headers, column, cell))?;
+                Ok((Self::Table { headers, rows }, found))
+            }
+            Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
+        }
+    }
+
+    /// The detections `find_text` or `find_cell(headers, column, cell)` report in the content,
+    /// which is left as it is.
+    pub fn detected_with(
+        &self,
+        find_text: impl FnOnce(&str) -> AppResult<Vec<Finding>>,
+        mut find_cell: impl FnMut(&[String], usize, &str) -> AppResult<Vec<Finding>>,
+    ) -> AppResult<Detections> {
+        match self {
+            Self::Value(text) => Detection::in_text(text, find_text(text)?),
+            Self::Table { headers, rows } => {
+                Detection::in_table_cells(rows, |column, cell| find_cell(headers, column, cell))
+            }
+            Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
+        }
+    }
+}
+
+impl Redacted {
+    /// `item` with the findings a local redacter replaced, which are reported at debug level
+    /// under the name of `redacter`.
+    pub fn located_by_local(
+        item: RedacterDataItem,
+        replaced: Vec<Detection>,
+        reporter: &AppReporter<'_>,
+        redacter: RedacterType,
+    ) -> Self {
+        if !replaced.is_empty() {
+            reporter.report_debug(format!(
+                "{redacter}: {} finding(s) in {}",
+                replaced.len(),
+                item.file_ref.relative_path.value()
+            ));
+        }
+        Self::located(item, replaced)
+    }
 }
 
 /// Redacts every table cell that `find_in(column, cell)` reports a finding in, leaving

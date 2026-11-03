@@ -1,7 +1,7 @@
 use super::error::LocalRulesError;
 use super::user_rules::{UserMatcher, UserRule};
 use super::validators::Validator;
-use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, RuleName, REDACTED};
+use crate::redacters::text_spans::{merge_findings, Finding, RuleName};
 use crate::redacters::Category;
 use clap::ValueEnum;
 use regex::{Match, Regex, RegexBuilder};
@@ -403,17 +403,21 @@ impl RuleSet {
         }
         merge_findings(findings)
     }
-
-    pub fn redact(&self, text: &str) -> (String, Vec<Finding>) {
-        let findings = self.find(text);
-        (apply_redaction(text, &findings, REDACTED), findings)
-    }
 }
 
 #[cfg(test)]
 pub(super) mod test_support {
     use super::{compile, RuleGroup, RuleSet, RuleSpec};
+    use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
     use std::sync::OnceLock;
+
+    impl RuleSet {
+        /// The text with every finding replaced by `[REDACTED]`, plus the findings.
+        pub(super) fn redact(&self, text: &str) -> (String, Vec<Finding>) {
+            let findings = self.find(text);
+            (apply_redaction(text, &findings, REDACTED), findings)
+        }
+    }
 
     /// Every built-in group, compiled once per test binary: the table is large and the
     /// per-rule tests below call this hundreds of times.

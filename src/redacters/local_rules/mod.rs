@@ -15,16 +15,13 @@ pub(crate) use validators::quoted_credential_value;
 pub use user_rules::UserMatcher;
 
 use crate::args::RedacterType;
-use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::table_cells::redact_rows;
 use crate::redacters::{
-    text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, TextMask, TextPieceLimits,
+    text_or_table_support, Detections, RedactSupport, Redacted, Redacter, RedacterDataItem,
+    TextMask, TextPieceLimits,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
-use rvstruct::ValueStruct;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -60,33 +57,14 @@ impl<'a> LocalRulesRedacter<'a> {
 
 impl<'a> Redacter for LocalRulesRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        let (content, replaced) = match input.content {
-            RedacterDataItemContent::Value(text) => {
-                let (redacted, findings) = self.rules.redact(&text);
-                let replaced = Detection::in_text(&text, findings)?.found;
-                (RedacterDataItemContent::Value(redacted), replaced)
-            }
-            RedacterDataItemContent::Table { headers, rows } => {
-                let (rows, replaced) = redact_rows(rows, |_, cell| Ok(self.rules.find(cell)))?;
-                (RedacterDataItemContent::Table { headers, rows }, replaced)
-            }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(AppError::unsupported_content())
-            }
-        };
-        if !replaced.is_empty() {
-            self.reporter.report_debug(format!(
-                "local-rules: {} finding(s) in {}",
-                replaced.len(),
-                input.file_ref.relative_path.value()
-            ));
-        }
-        Ok(Redacted::located(
-            RedacterDataItem {
-                content,
-                file_ref: input.file_ref,
-            },
+        let RedacterDataItem { content, file_ref } = input;
+        let find = |text: &str| Ok(self.rules.find(text));
+        let (content, replaced) = content.redacted_with(find, |_, _, cell| find(cell))?;
+        Ok(Redacted::located_by_local(
+            RedacterDataItem { content, file_ref },
             replaced,
+            self.reporter,
+            self.redacter_type(),
         ))
     }
 
@@ -95,15 +73,8 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
-        match &input.content {
-            RedacterDataItemContent::Value(text) => Detection::in_text(text, self.rules.find(text)),
-            RedacterDataItemContent::Table { rows, .. } => {
-                Detection::in_table_cells(rows, |_, cell| Ok::<_, AppError>(self.rules.find(cell)))
-            }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::unsupported_content())
-            }
-        }
+        let find = |text: &str| Ok(self.rules.find(text));
+        input.content.detected_with(find, |_, _, cell| find(cell))
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -126,7 +97,7 @@ mod tests {
     use crate::redacters::test_support::{
         TEST_DOCUMENTS_DIR, TEST_DOCUMENT_SAMPLE_EMAIL, TEST_DOCUMENT_SAMPLE_PHONE,
     };
-    use crate::redacters::{DetectionLabel, DetectionLocation};
+    use crate::redacters::{Detection, DetectionLabel, DetectionLocation, RedacterDataItemContent};
     use console::Term;
 
     fn redacter<'a>(reporter: &'a AppReporter<'a>) -> LocalRulesRedacter<'a> {
