@@ -1192,7 +1192,7 @@ mod tests {
         );
         assert_eq!(
             uri("docs/", "a[1]^|.txt"),
-            ("docs/a[1]^|.txt".to_string(), source_root)
+            ("docs/a%5B1%5D%5E%7C.txt".to_string(), source_root)
         );
         // Outside of the working directory the path is a full URI.
         assert_eq!(

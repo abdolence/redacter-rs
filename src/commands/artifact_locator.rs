@@ -1,7 +1,25 @@
 //! Where the files of a source are, as the report writers name them.
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use std::path::{Component, Path, PathBuf};
-use url::Url;
+
+/// Characters that cannot appear in a URI path segment as they are.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// Where the files of a source are, for the report writers.
 ///
@@ -132,13 +150,15 @@ fn lexically_normal(path: &Path) -> PathBuf {
 }
 
 fn encoded_path(path: &Path) -> String {
-    let mut url = Url::parse("file:///").expect("a constant URL parses");
-    url.path_segments_mut()
-        .expect("a file URL has path segments")
-        .extend(path.components().filter_map(|component| match component {
-            Component::Normal(segment) => Some(segment.to_string_lossy()),
-            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy()),
-            Component::RootDir | Component::CurDir | Component::ParentDir => None,
-        }));
-    url.path().trim_start_matches('/').to_string()
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => {
+                Some(utf8_percent_encode(&segment.to_string_lossy(), PATH_SEGMENT).to_string())
+            }
+            Component::ParentDir => Some("..".to_string()),
+            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_string()),
+            Component::RootDir | Component::CurDir => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
