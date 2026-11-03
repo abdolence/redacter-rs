@@ -520,7 +520,7 @@ impl<'a> StreamRedacter<'a> {
                 let mut batches =
                     TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
                 let first = batches.next_batch().await?;
-                if first.rows_before != 0 || !first.reaches_end {
+                if !first.is_whole_table() {
                     return self.redact_table_in_batches(
                         batches,
                         first,
@@ -535,10 +535,7 @@ impl<'a> StreamRedacter<'a> {
                 let unsupported = redact_plan.read_unsupported_as_text;
                 let pieces = Self::text_pieces(input, layout, unsupported);
                 match Self::first_window(pieces, unsupported).await? {
-                    Ok((first, _)) if first.is_whole_text() => {
-                        Ok(self.text_redact_item(first.text, file_ref))
-                    }
-                    Ok((first, pieces)) => {
+                    Ok((first, pieces)) if !first.is_whole_text() => {
                         return self.redact_text_in_pieces(
                             pieces,
                             first,
@@ -547,7 +544,7 @@ impl<'a> StreamRedacter<'a> {
                             record,
                         );
                     }
-                    Err(unread) => Err(unread),
+                    window => window.map(|(first, _)| self.text_redact_item(first.text, file_ref)),
                 }
             }
             PlannedRead::Whole => {

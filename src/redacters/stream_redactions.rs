@@ -29,8 +29,8 @@ pub(crate) struct StreamRedactions {
 /// The chains that place the steps of one kind of content, until a step cannot be placed: a
 /// redacter that does not say where it replaced, or that replaced more than it said. A later
 /// step cannot be mapped through that one, so from then on every step is the whole.
-enum Placement<Chains> {
-    Chains(Chains),
+enum Placement<Tracked> {
+    Chains(Tracked),
     Whole,
 }
 

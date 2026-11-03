@@ -12,8 +12,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::local_model::run_blocking;
-use crate::redacters::text_spans::table_cells::{find_in_cell, TableColumn};
-use crate::redacters::text_spans::Finding;
+use crate::redacters::text_spans::table_cells::find_in_cell;
 use crate::redacters::{
     text_or_table_support, Detections, RedactSupport, Redacted, Redacter, RedacterDataItem, Score,
     TextMask, TextPieceLimits,
@@ -57,30 +56,15 @@ impl<'a> LocalCredentialMlRedacter<'a> {
     }
 }
 
-/// The findings in a text, or in a table cell scored behind its column header.
-fn find(
-    engine: &CredentialMlEngine,
-    min_score: Score,
-    column: Option<TableColumn<'_>>,
-    text: &str,
-) -> AppResult<Vec<Finding>> {
-    match column {
-        None => engine.find(text, min_score).map_err(AppError::from),
-        Some(TableColumn { headers, column }) => {
-            find_in_cell(headers, column, text, &mut |scored| {
-                engine.find(scored, min_score)
-            })
-            .map_err(AppError::from)
-        }
-    }
-}
-
 impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let RedacterDataItem { content, file_ref } = input;
         let (content, replaced) =
             run_blocking(&self.engine, &self.min_score, move |engine, min_score| {
-                content.redacted_with(|column, text| find(engine, *min_score, column, text))
+                content.redacted_with(|column, text| {
+                    find_in_cell(column, text, &mut |scored| engine.find(scored, *min_score))
+                        .map_err(AppError::from)
+                })
             })
             .await?;
         Ok(Redacted::located_by_local(
@@ -98,7 +82,10 @@ impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         let content = input.content.clone();
         run_blocking(&self.engine, &self.min_score, move |engine, min_score| {
-            content.detected_with(|column, text| find(engine, *min_score, column, text))
+            content.detected_with(|column, text| {
+                find_in_cell(column, text, &mut |scored| engine.find(scored, *min_score))
+                    .map_err(AppError::from)
+            })
         })
         .await
     }

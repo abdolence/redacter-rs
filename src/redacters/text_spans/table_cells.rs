@@ -8,11 +8,12 @@ use crate::reporter::AppReporter;
 use crate::AppResult;
 use rvstruct::ValueStruct;
 
-/// The findings in one table cell, with offsets into the cell. Only a blank cell is skipped,
-/// so that digit-only values such as phone and card numbers reach the model; a provider that
-/// can rule out more cells does so before calling this.
+/// The findings in a text, or in one table cell, with offsets into that text or cell. `column`
+/// is `None` for a text, which `find_in` searches as given. Only a blank cell is skipped, so
+/// that digit-only values such as phone and card numbers reach the model; a provider that can
+/// rule out more cells does so before calling this.
 ///
-/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
+/// A cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a model reads a one-word cell better as a sentence. The prefix is scoring
 /// context only: `shift_into_cell` maps the findings back onto the cell, so no header text
 /// can reach a redacted cell or a detection.
@@ -22,15 +23,17 @@ use rvstruct::ValueStruct;
     feature = "local-credential-ml"
 ))]
 pub fn find_in_cell<F, E>(
-    headers: &[String],
-    column: usize,
-    cell: &str,
+    column: Option<TableColumn<'_>>,
+    text: &str,
     find_in: &mut F,
 ) -> Result<Vec<Finding>, E>
 where
     F: FnMut(&str) -> Result<Vec<Finding>, E>,
 {
-    if cell.trim().is_empty() {
+    let Some(TableColumn { headers, column }) = column else {
+        return find_in(text);
+    };
+    if text.trim().is_empty() {
         return Ok(Vec::new());
     }
     // A row wider than the header list, or an empty header, leaves the cell alone.
@@ -39,9 +42,9 @@ where
         _ => String::new(),
     };
     let scored = if prefix.is_empty() {
-        find_in(cell)?
+        find_in(text)?
     } else {
-        find_in(&format!("{prefix}{cell}"))?
+        find_in(&format!("{prefix}{text}"))?
     };
     Ok(shift_into_cell(scored, prefix.len()))
 }

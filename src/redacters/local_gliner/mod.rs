@@ -13,8 +13,7 @@ use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::local_model::run_blocking;
-use crate::redacters::text_spans::table_cells::{find_in_cell, TableColumn};
-use crate::redacters::text_spans::Finding;
+use crate::redacters::text_spans::table_cells::find_in_cell;
 use crate::redacters::{
     text_or_table_support, Detections, RedactSupport, Redacted, Redacter, RedacterDataItem, Score,
     TextMask,
@@ -86,30 +85,15 @@ impl<'a> LocalGlinerRedacter<'a> {
     }
 }
 
-/// The findings in a text, or in a table cell scored behind its column header.
-fn find(
-    engine: &GlinerEngine,
-    options: &GlinerOptions,
-    column: Option<TableColumn<'_>>,
-    text: &str,
-) -> AppResult<Vec<Finding>> {
-    match column {
-        None => engine.find(text, options).map_err(AppError::from),
-        Some(TableColumn { headers, column }) => {
-            find_in_cell(headers, column, text, &mut |scored| {
-                engine.find(scored, options)
-            })
-            .map_err(AppError::from)
-        }
-    }
-}
-
 impl<'a> Redacter for LocalGlinerRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let RedacterDataItem { content, file_ref } = input;
         let (content, replaced) =
             run_blocking(&self.engine, &self.options, move |engine, options| {
-                content.redacted_with(|column, text| find(engine, options, column, text))
+                content.redacted_with(|column, text| {
+                    find_in_cell(column, text, &mut |scored| engine.find(scored, options))
+                        .map_err(AppError::from)
+                })
             })
             .await?;
         Ok(Redacted::located_by_local(
@@ -127,7 +111,10 @@ impl<'a> Redacter for LocalGlinerRedacter<'a> {
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         let content = input.content.clone();
         run_blocking(&self.engine, &self.options, move |engine, options| {
-            content.detected_with(|column, text| find(engine, options, column, text))
+            content.detected_with(|column, text| {
+                find_in_cell(column, text, &mut |scored| engine.find(scored, options))
+                    .map_err(AppError::from)
+            })
         })
         .await
     }
@@ -146,8 +133,8 @@ mod tests {
     use super::*;
     use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
-    use crate::redacters::text_spans::table_cells::redact_rows;
-    use crate::redacters::text_spans::RuleName;
+    use crate::redacters::text_spans::table_cells::{redact_rows, TableColumn};
+    use crate::redacters::text_spans::{Finding, RuleName};
     use crate::redacters::{Detection, DetectionLabel, DetectionLocation, RedacterDataItemContent};
     use console::Term;
     use mime::Mime;
@@ -217,10 +204,17 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         let mut replies = replies.into_iter();
         let (rows, detections) = redact_rows(rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                seen.push(text.to_string());
-                Ok::<_, LocalGlinerError>(replies.next().unwrap_or_default())
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    seen.push(text.to_string());
+                    Ok::<_, LocalGlinerError>(replies.next().unwrap_or_default())
+                },
+            )
             .map_err(AppError::from)
         })
         .unwrap();
@@ -237,13 +231,20 @@ mod tests {
             vec!["2".to_string(), "Akira".to_string()],
         ];
         let detections = Detection::in_table_cells(&rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                Ok::<_, LocalGlinerError>(if text == "name: Akira" {
-                    vec![finding(6, 11)]
-                } else {
-                    Vec::new()
-                })
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    Ok::<_, LocalGlinerError>(if text == "name: Akira" {
+                        vec![finding(6, 11)]
+                    } else {
+                        Vec::new()
+                    })
+                },
+            )
         })
         .unwrap()
         .found;
@@ -279,10 +280,17 @@ mod tests {
         ];
         let mut seen: Vec<String> = Vec::new();
         let (redacted, detections) = redact_rows(rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                seen.push(text.to_string());
-                Ok::<_, LocalGlinerError>(vec![finding(text.len() - 5, text.len())])
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    seen.push(text.to_string());
+                    Ok::<_, LocalGlinerError>(vec![finding(text.len() - 5, text.len())])
+                },
+            )
             .map_err(AppError::from)
         })
         .unwrap();
