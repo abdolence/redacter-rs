@@ -4,7 +4,7 @@
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::redacters::stream_redacter::OcrText;
-use crate::redacters::text_changes::{TextChain, MAX_DIFFED_BYTES, TEXT_DIFF_TIME_LIMIT};
+use crate::redacters::text_changes::{TextChain, MAX_PLACED_BYTES};
 use crate::redacters::{
     Categories, Detection, DetectionLabel, DetectionLocation, Redacted, Redacter, RedacterDataItem,
     RedacterDataItemContent, Redacters, TextMask,
@@ -13,20 +13,25 @@ use crate::AppResult;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::ops::Range;
-use std::time::Instant;
 
 /// What the stream keeps of one file across the steps that redact it, so that each step is
 /// reported where it sits in the file as first read. A step that cannot be placed is reported
 /// as a whole instead, and never fails the copy.
 pub(crate) struct StreamRedactions {
     recording: bool,
-    text: Option<TextChain>,
-    cells: BTreeMap<CellPosition, TextChain>,
-    text_placed_as_whole: bool,
-    table_placed_as_whole: bool,
+    text: Placement<Option<TextChain>>,
+    cells: Placement<BTreeMap<CellPosition, TextChain>>,
     /// The pixel size of each image as first seen, by PDF page; `None` is an image file.
     image_sizes: BTreeMap<Option<usize>, ImageSize>,
     records: Vec<(RedacterType, Detection)>,
+}
+
+/// The chains that place the steps of one kind of content, until a step cannot be placed: a
+/// redacter that does not say where it replaced, or that replaced more than it said. A later
+/// step cannot be mapped through that one, so from then on every step is the whole.
+enum Placement<Chains> {
+    Chains(Chains),
+    Whole,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,10 +50,8 @@ impl StreamRedactions {
     pub(crate) fn new(recording: bool) -> Self {
         Self {
             recording,
-            text: None,
-            cells: BTreeMap::new(),
-            text_placed_as_whole: false,
-            table_placed_as_whole: false,
+            text: Placement::Chains(None),
+            cells: Placement::Chains(BTreeMap::new()),
             image_sizes: BTreeMap::new(),
             records: Vec::new(),
         }
@@ -115,15 +118,14 @@ impl StreamRedactions {
         output: &RedacterDataItemContent,
         replaced: Option<Vec<Detection>>,
     ) -> AppResult<Vec<Detection>> {
-        let deadline = Instant::now() + TEXT_DIFF_TIME_LIMIT;
         match (input, output) {
             (RedacterDataItemContent::Value(before), RedacterDataItemContent::Value(after)) => {
-                self.place_text(mask, page, before, after, replaced.as_deref(), deadline)
+                self.place_text(mask, page, before, after, replaced.as_deref())
             }
             (
                 RedacterDataItemContent::Table { rows: before, .. },
                 RedacterDataItemContent::Table { rows: after, .. },
-            ) => self.place_table(mask, page, before, after, replaced, deadline),
+            ) => self.place_table(mask, page, before, after, replaced),
             (
                 RedacterDataItemContent::Image { data: before, .. },
                 RedacterDataItemContent::Image { data: after, .. },
@@ -141,27 +143,27 @@ impl StreamRedactions {
         before: &str,
         after: &str,
         replaced: Option<&[Detection]>,
-        deadline: Instant,
     ) -> AppResult<Vec<Detection>> {
         if before == after {
             return Ok(Vec::new());
         }
-        if self.text_placed_as_whole || before.len() > MAX_DIFFED_BYTES {
-            self.text_placed_as_whole = true;
-            return Ok(vec![Detection::whole(page)]);
+        let placed = match (&mut self.text, replaced) {
+            (Placement::Chains(chain), Some(found)) if before.len() <= MAX_PLACED_BYTES => chain
+                .get_or_insert_with(|| TextChain::new(before.to_string()))
+                .step(before, after, found, mask),
+            _ => {
+                self.text = Placement::Whole;
+                return Ok(vec![Detection::whole(page)]);
+            }
+        };
+        if placed.is_err() {
+            self.text = Placement::Whole;
         }
-        let chain = self
-            .text
-            .get_or_insert_with(|| TextChain::new(before.to_string()));
-        match replaced {
-            Some(found) => chain.step_masked(before, after, found, mask, deadline),
-            None => chain.step(before, after, &[], deadline),
-        }
+        placed
     }
 
     /// Every changed cell is placed in its original text. A table whose cells no longer pair up
-    /// with the original's, or that is too large to compare, is one record for the step, from
-    /// then on.
+    /// with the original's, or that is too large, is one record for the step, from then on.
     fn place_table(
         &mut self,
         mask: TextMask,
@@ -169,29 +171,42 @@ impl StreamRedactions {
         before: &[Vec<String>],
         after: &[Vec<String>],
         replaced: Option<Vec<Detection>>,
-        deadline: Instant,
     ) -> AppResult<Vec<Detection>> {
         if before == after {
             return Ok(Vec::new());
         }
-        if self.table_placed_as_whole
-            || !pairs_up(before, after)
-            || bytes_of(before) > MAX_DIFFED_BYTES
-        {
-            self.table_placed_as_whole = true;
-            return Ok(vec![Detection::whole(page)]);
+        let placed = match (&mut self.cells, replaced) {
+            (Placement::Chains(chains), Some(replaced))
+                if pairs_up(before, after) && bytes_of(before) <= MAX_PLACED_BYTES =>
+            {
+                Self::place_cells(chains, mask, before, after, replaced)
+            }
+            _ => {
+                self.cells = Placement::Whole;
+                return Ok(vec![Detection::whole(page)]);
+            }
+        };
+        if placed.is_err() {
+            self.cells = Placement::Whole;
         }
+        placed
+    }
 
-        let located = replaced.is_some();
+    fn place_cells(
+        chains: &mut BTreeMap<CellPosition, TextChain>,
+        mask: TextMask,
+        before: &[Vec<String>],
+        after: &[Vec<String>],
+        replaced: Vec<Detection>,
+    ) -> AppResult<Vec<Detection>> {
         let mut found_by_cell: BTreeMap<CellPosition, Vec<Detection>> = BTreeMap::new();
-        for detection in replaced.unwrap_or_default() {
+        for detection in replaced {
             if let Some(position) = CellPosition::of(&detection.location) {
                 found_by_cell.entry(position).or_default().push(detection);
             }
         }
 
         let mut placed = Vec::new();
-        let mut failure = None;
         for (row, (cells_before, cells_after)) in before.iter().zip(after).enumerate() {
             for (column, (cell_before, cell_after)) in
                 cells_before.iter().zip(cells_after).enumerate()
@@ -201,31 +216,18 @@ impl StreamRedactions {
                 }
                 let position = CellPosition { row, column };
                 let found = found_by_cell.remove(&position).unwrap_or_default();
-                // Every changed cell takes its step, even after a failure, or the cell's
-                // later steps would be mapped through a chain that skipped one.
-                let chain = self
-                    .cells
+                let in_cell = chains
                     .entry(position)
-                    .or_insert_with(|| TextChain::new(cell_before.clone()));
-                let step = if located {
-                    chain.step_masked(cell_before, cell_after, &found, mask, deadline)
-                } else {
-                    chain.step(cell_before, cell_after, &found, deadline)
-                };
-                match step {
-                    Ok(in_cell) => placed.extend(
-                        in_cell
-                            .into_iter()
-                            .map(|detection| position.locate(detection)),
-                    ),
-                    Err(error) => failure = failure.or(Some(error)),
-                }
+                    .or_insert_with(|| TextChain::new(cell_before.clone()))
+                    .step(cell_before, cell_after, &found, mask)?;
+                placed.extend(
+                    in_cell
+                        .into_iter()
+                        .map(|detection| position.locate(detection)),
+                );
             }
         }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(placed),
-        }
+        Ok(placed)
     }
 
     /// The boxes a redacter returned, when they are in the pixels of the image as first seen;
@@ -537,12 +539,12 @@ mod tests {
             Some(vec![span(original, "ana@x.io", "email")]),
         );
         recorder.record(
-            RedacterType::GeminiLlm,
+            RedacterType::LocalNer,
             TextMask::Token,
             None,
             &text(after_rules),
             &text(after_model),
-            None,
+            Some(vec![span(after_rules, "Ana Lima", "name")]),
         );
 
         let records = recorder.into_records();
@@ -551,13 +553,50 @@ mod tests {
                 .iter()
                 .map(|(redacter, _)| *redacter)
                 .collect::<Vec<_>>(),
-            vec![RedacterType::LocalRules, RedacterType::GeminiLlm]
+            vec![RedacterType::LocalRules, RedacterType::LocalNer]
         );
         assert_eq!(
             summary(&records),
             vec![
                 (text_at(5, 13, 1, 6), "email".into(), "ana@x.io"),
-                (text_at(19, 27, 1, 20), "sensitive_data".into(), "Ana Lima"),
+                (text_at(19, 27, 1, 20), "name".into(), "Ana Lima"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_without_locations_is_the_file_and_so_is_every_step_after_it() {
+        let original = "Mail ana@x.io, ask Ana Lima.";
+        let after_model = "Mail [REDACTED], ask Ana Lima.";
+        let after_rules = "Mail [REDACTED], ask [REDACTED].";
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::GeminiLlm,
+            TextMask::Token,
+            None,
+            &text(original),
+            &text(after_model),
+            None,
+        );
+        recorder.record(
+            RedacterType::LocalRules,
+            TextMask::Token,
+            None,
+            &text(after_model),
+            &text(after_rules),
+            Some(vec![span(after_model, "Ana Lima", "name")]),
+        );
+
+        assert_eq!(
+            recorder
+                .into_records()
+                .into_iter()
+                .map(|(redacter, detection)| (redacter, detection.location))
+                .collect::<Vec<_>>(),
+            vec![
+                (RedacterType::GeminiLlm, DetectionLocation::File),
+                (RedacterType::LocalRules, DetectionLocation::File),
             ]
         );
     }
@@ -582,7 +621,7 @@ mod tests {
                 )
                 .unwrap(),
         ];
-        let masked = Detection::mask(&original, &found, TextMask::Token);
+        let masked = Detection::mask(&original, &found, TextMask::Token).unwrap();
         let mut recorder = StreamRedactions::new(true);
 
         recorder.record(
@@ -608,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn a_step_whose_output_is_not_its_masked_values_is_placed_by_comparing_its_texts() {
+    fn a_step_whose_output_is_not_its_masked_values_is_the_file() {
         let original = "Mail ana@x.io, ask Ana Lima.";
         let rewritten = "Mail [REDACTED], ask Ana Lima.";
         let mut recorder = StreamRedactions::new(true);
@@ -624,13 +663,13 @@ mod tests {
 
         assert_eq!(
             summary(&recorder.into_records()),
-            vec![(text_at(5, 13, 1, 6), "email".into(), "ana@x.io")]
+            vec![(DetectionLocation::File, "sensitive_data".into(), "")]
         );
     }
 
     #[test]
-    fn a_text_too_large_to_compare_is_the_file_at_that_step_and_at_every_later_one() {
-        let padding = "x".repeat(MAX_DIFFED_BYTES);
+    fn a_text_over_the_size_limit_is_the_file_at_that_step_and_at_every_later_one() {
+        let padding = "x".repeat(MAX_PLACED_BYTES);
         let original = format!("ana@x.io {padding}");
         let after_rules = format!("[REDACTED] {padding}");
         let after_model = format!("[REDACTED] {padding}.");
@@ -679,6 +718,15 @@ mod tests {
     fn a_table_is_placed_by_cell_and_keeps_the_label_of_the_detection() {
         let input = table(&[&["id", "contact"], &["John Smith", "j@x.io"]]);
         let output = table(&[&["id", "contact"], &["[REDACTED]", "[REDACTED]"]]);
+        let person = Detection::in_table_cell(
+            1,
+            0,
+            "John Smith",
+            0..10,
+            DetectionLabel::new("person"),
+            None,
+        )
+        .unwrap();
         let email =
             Detection::in_table_cell(1, 1, "j@x.io", 0..6, DetectionLabel::new("email"), None)
                 .unwrap();
@@ -690,7 +738,7 @@ mod tests {
             None,
             &input,
             &output,
-            Some(vec![email]),
+            Some(vec![person, email]),
         );
 
         let cell = |row, column, end| DetectionLocation::TableCell {
@@ -702,9 +750,32 @@ mod tests {
         assert_eq!(
             summary(&recorder.into_records()),
             vec![
-                (cell(2, 1, 10), "sensitive_data".into(), "John Smith"),
+                (cell(2, 1, 10), "person".into(), "John Smith"),
                 (cell(2, 2, 6), "email".into(), "j@x.io"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_table_step_without_locations_is_the_file() {
+        let mut recorder = StreamRedactions::new(true);
+
+        recorder.record(
+            RedacterType::GcpDlp,
+            TextMask::Token,
+            Some(2),
+            &table(&[&["id", "contact"], &["John Smith", "j@x.io"]]),
+            &table(&[&["id", "contact"], &["[REDACTED]", "[REDACTED]"]]),
+            None,
+        );
+
+        assert_eq!(
+            summary(&recorder.into_records()),
+            vec![(
+                DetectionLocation::Page { page: 2 },
+                "sensitive_data".into(),
+                ""
+            )]
         );
     }
 

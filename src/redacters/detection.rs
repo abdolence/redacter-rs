@@ -3,7 +3,8 @@
 
 use crate::args::RedacterType;
 use crate::errors::AppError;
-use crate::redacters::text_spans::{merge_findings, replace_findings, Finding, RuleName};
+use crate::redacters::piece_redaction::{mask_ranges, merge, StepFinding};
+use crate::redacters::text_spans::{Finding, RuleName};
 #[cfg(feature = "local-ner")]
 use crate::redacters::Entity;
 use crate::redacters::{
@@ -172,7 +173,7 @@ impl Detections {
                 count: self.unlocated.len(),
             });
         }
-        Ok((Detection::mask(text, &self.found, mask), self.found))
+        Ok((Detection::mask(text, &self.found, mask)?, self.found))
     }
 }
 
@@ -612,25 +613,29 @@ impl Detection {
         Ok(Detections { found, unlocated })
     }
 
+    /// The findings of `detections` that point into a text, for a step that masks as `mask`.
+    pub(crate) fn findings(detections: &[Self], mask: TextMask) -> Vec<StepFinding> {
+        detections
+            .iter()
+            .filter_map(|detection| {
+                Some(StepFinding {
+                    range: detection.location.byte_range()?,
+                    step: 0,
+                    mask,
+                    label: detection.label.clone(),
+                    score: detection.score,
+                })
+            })
+            .collect()
+    }
+
     /// `text` with every text range of `detections` replaced as `mask` says. Ranges may
     /// overlap or arrive in any order; overlapping ranges are masked as one, and
-    /// `TextMask::Label` names the label of the one that starts first.
-    pub(crate) fn mask(text: &str, detections: &[Self], mask: TextMask) -> String {
-        let findings = detections
-            .iter()
-            .filter_map(|detection| match detection.location {
-                DetectionLocation::Text { start, end, .. } if start < end => Some(Finding {
-                    start,
-                    end,
-                    rule: RuleName::new(&detection.label.0),
-                    score: None,
-                }),
-                _ => None,
-            })
-            .collect();
-        replace_findings(text, &merge_findings(findings), |finding, original| {
-            mask.replacement(&finding.rule, original)
-        })
+    /// `TextMask::Label` names the label of the one that starts first. Fails when a range is
+    /// not in `text`.
+    pub(crate) fn mask(text: &str, detections: &[Self], mask: TextMask) -> AppResult<String> {
+        let findings = Self::findings(detections, mask);
+        Ok(mask_ranges(text, 0, &merge(&findings), &findings)?.0)
     }
 }
 
@@ -1101,7 +1106,8 @@ mod tests {
                 detection("Keller: zoe"),
             ],
             TextMask::EveryCharacter,
-        );
+        )
+        .unwrap();
 
         assert_eq!(masked, "Grüße, XXXXXXXXXXXXXXXXXXXXXXXXXXX");
     }
@@ -1165,15 +1171,15 @@ mod tests {
         ];
 
         assert_eq!(
-            Detection::mask(text, &detections, TextMask::Token),
+            Detection::mask(text, &detections, TextMask::Token).unwrap(),
             "[REDACTED] wrote to [REDACTED]"
         );
         assert_eq!(
-            Detection::mask(text, &detections, TextMask::EveryCharacter),
+            Detection::mask(text, &detections, TextMask::EveryCharacter).unwrap(),
             "XXX wrote to XXXXXXXXXXXXXXX"
         );
         assert_eq!(
-            Detection::mask(text, &detections, TextMask::Label),
+            Detection::mask(text, &detections, TextMask::Label).unwrap(),
             "{NAME} wrote to {EMAIL}"
         );
     }

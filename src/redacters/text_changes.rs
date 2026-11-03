@@ -1,22 +1,14 @@
-//! Where a redaction chain changed a text, found by diffing each step's input against its
-//! output, and mapped back to the text as first read.
+//! Where a redaction chain changed a text, mapped back to the text as first read.
 
 use crate::errors::AppError;
 use crate::redacters::piece_redaction::{mask_ranges, merge, StepFinding};
-use crate::redacters::{Detection, DetectionLabel, Score, TextLines, TextMask};
+use crate::redacters::{Detection, TextLines, TextMask};
 use crate::AppResult;
-use similar::{capture_diff_slices_deadline, Algorithm, DiffTag};
 use std::ops::Range;
-use std::time::{Duration, Instant};
 
-/// How long one step's diff may run before it settles for coarser changes.
-pub(crate) const TEXT_DIFF_TIME_LIMIT: Duration = Duration::from_secs(5);
-
-/// The largest text a step is compared on. The time limit bounds the diff's time and not its
-/// memory, which grows with the number of pieces on both sides: 50 to 100 times the text in
-/// bytes, so the largest text compared peaks between 0.8 GB (a sparse log) and 1.7 GB
-/// (punctuation-dense text with a finding on every line).
-pub(crate) const MAX_DIFFED_BYTES: usize = 16 * 1024 * 1024;
+/// The largest text whose steps are placed in the file as first read. The chain of a text
+/// keeps that text, so a larger one is reported as a whole instead.
+pub(crate) const MAX_PLACED_BYTES: usize = 16 * 1024 * 1024;
 
 /// One change a step made to a text: `input` of what it read became `output` of what it
 /// returned. Byte ranges on character boundaries.
@@ -41,73 +33,6 @@ pub(crate) enum OutputPosition {
 pub(crate) struct TextChanges(Vec<TextChange>);
 
 impl TextChanges {
-    /// The changes from `input` to `output`. Both are cut into runs of letters and digits, runs
-    /// of whitespace and single other characters, so that two values in one minified line, or
-    /// in one URL, are two changes. Each change is then narrowed by the characters its two
-    /// sides share at both ends, which keeps `hunter2` out of `password=hunter2` and finds a
-    /// number inside a run of Japanese text.
-    ///
-    /// Past `deadline` the diff is coarser, and still covers everything that changed.
-    pub(crate) fn between(input: &str, output: &str, deadline: Instant) -> Self {
-        if input == output {
-            return Self(Vec::new());
-        }
-        let old = Tokens::new(input);
-        let new = Tokens::new(output);
-        let operations = capture_diff_slices_deadline(
-            Algorithm::Myers,
-            &old.pieces,
-            &new.pieces,
-            Some(deadline),
-        );
-
-        let mut unequal: Vec<(Range<usize>, Range<usize>)> = Vec::new();
-        for operation in operations {
-            let (tag, old_tokens, new_tokens) = operation.as_tag_tuple();
-            if tag == DiffTag::Equal {
-                continue;
-            }
-            let (old_range, new_range) = (old.byte_range(old_tokens), new.byte_range(new_tokens));
-            match unequal.last_mut() {
-                Some((last_old, last_new))
-                    if last_old.end == old_range.start && last_new.end == new_range.start =>
-                {
-                    last_old.end = old_range.end;
-                    last_new.end = new_range.end;
-                }
-                _ => unequal.push((old_range, new_range)),
-            }
-        }
-
-        Self(
-            unequal
-                .into_iter()
-                .filter_map(|(old_range, new_range)| {
-                    TextChange::narrowed(input, output, old_range, new_range)
-                })
-                .collect(),
-        )
-    }
-
-    /// The changes from masking `found` in `input` as `mask` says, when that gives `output`;
-    /// `None` when it gives anything else, or when a detection does not fit `input`.
-    fn masked(input: &str, output: &str, found: &[Detection], mask: TextMask) -> Option<Self> {
-        let findings: Vec<StepFinding> = found
-            .iter()
-            .filter_map(|detection| {
-                Some(StepFinding {
-                    range: detection.location.byte_range()?,
-                    step: 0,
-                    mask,
-                    label: detection.label.clone(),
-                    score: detection.score,
-                })
-            })
-            .collect();
-        let (masked, changes) = mask_ranges(input, 0, &merge(&findings), &findings).ok()?;
-        (masked == output).then_some(changes)
-    }
-
     /// The changes of a step whose replacements are all known. Both ranges of every change are
     /// on character boundaries, and the changes are in order and apart on both sides.
     pub(crate) fn new(changes: Vec<TextChange>) -> Self {
@@ -169,144 +94,13 @@ impl TextChanges {
             None => position,
         }
     }
-
-    /// The input range of every change that replaced something other than whitespace, trimmed
-    /// of the whitespace at both ends. A reflow and a pure insertion are changes, and are not
-    /// redactions.
-    fn redactions<'a>(&'a self, input: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
-        self.0.iter().filter_map(|change| {
-            let replaced = &input[change.input.clone()];
-            let trimmed = replaced.trim();
-            let start = change.input.start + (replaced.len() - replaced.trim_start().len());
-            (!trimmed.is_empty()).then(|| start..start + trimmed.len())
-        })
-    }
 }
 
-impl TextChange {
-    fn narrowed(input: &str, output: &str, old: Range<usize>, new: Range<usize>) -> Option<Self> {
-        let (replaced, replacement) = (&input[old.clone()], &output[new.clone()]);
-        let same_start = shared_length(replaced.chars(), replacement.chars());
-        let same_end = shared_length(
-            replaced[same_start..].chars().rev(),
-            replacement[same_start..].chars().rev(),
-        );
-        let change = Self {
-            input: old.start + same_start..old.end - same_end,
-            output: new.start + same_start..new.end - same_end,
-        };
-        (!change.input.is_empty() || !change.output.is_empty()).then_some(change)
-    }
-}
-
-fn shared_length(a: impl Iterator<Item = char>, b: impl Iterator<Item = char>) -> usize {
-    a.zip(b)
-        .take_while(|(a, b)| a == b)
-        .map(|(character, _)| character.len_utf8())
-        .sum()
-}
-
-struct Tokens<'a> {
-    pieces: Vec<&'a str>,
-    /// The byte offset of every piece, then the length of the text.
-    starts: Vec<usize>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TokenClass {
-    Word,
-    Space,
-    Other,
-}
-
-impl TokenClass {
-    fn of(character: char) -> Self {
-        if character.is_alphanumeric() {
-            Self::Word
-        } else if character.is_whitespace() {
-            Self::Space
-        } else {
-            Self::Other
-        }
-    }
-}
-
-impl<'a> Tokens<'a> {
-    fn new(text: &'a str) -> Self {
-        let mut pieces = Vec::new();
-        let mut starts = Vec::new();
-        let mut characters = text.char_indices().peekable();
-        while let Some((start, first)) = characters.next() {
-            let class = TokenClass::of(first);
-            let mut end = start + first.len_utf8();
-            if class != TokenClass::Other {
-                while let Some(&(next, character)) = characters.peek() {
-                    if TokenClass::of(character) != class {
-                        break;
-                    }
-                    end = next + character.len_utf8();
-                    characters.next();
-                }
-            }
-            pieces.push(&text[start..end]);
-            starts.push(start);
-        }
-        starts.push(text.len());
-        Self { pieces, starts }
-    }
-
-    fn byte_range(&self, tokens: Range<usize>) -> Range<usize> {
-        self.starts[tokens.start]..self.starts[tokens.end]
-    }
-}
-
-/// The steps one text went through in a redaction chain, so each step's changes are placed in
-/// the text as first read.
+/// The steps one text went through in a redaction chain, so each step's redactions are placed
+/// in the text as first read.
 pub(crate) struct TextChain {
     original: String,
     steps: Vec<TextChanges>,
-}
-
-struct Located<'a> {
-    range: Range<usize>,
-    detection: &'a Detection,
-    /// The place in the step's list, which settles a tie between equal overlaps.
-    order: usize,
-}
-
-/// A step's detections in the original text, sorted by start so that those near a range are
-/// found by search. Comparing each change with every detection is quadratic, and a log with
-/// hundreds of thousands of redactions never finishes.
-struct LocatedDetections<'a> {
-    sorted: Vec<Located<'a>>,
-    /// `reach[i]` is the greatest end among `sorted[..=i]`.
-    reach: Vec<usize>,
-}
-
-impl<'a> LocatedDetections<'a> {
-    fn new(mut sorted: Vec<Located<'a>>) -> Self {
-        sorted.sort_by_key(|located| located.range.start);
-        let reach = sorted
-            .iter()
-            .scan(0, |reach, located| {
-                *reach = (*reach).max(located.range.end);
-                Some(*reach)
-            })
-            .collect();
-        Self { sorted, reach }
-    }
-
-    fn overlapping<'s>(&'s self, range: &'s Range<usize>) -> impl Iterator<Item = &'s Located<'a>> {
-        let starting_before_end = self
-            .sorted
-            .partition_point(|located| located.range.start < range.end);
-        let reaching_start = self.reach.partition_point(|&reach| reach <= range.start);
-        self.sorted
-            .get(reaching_start..starting_before_end)
-            .unwrap_or_default()
-            .iter()
-            .filter(move |located| overlap(&located.range, range) > 0)
-    }
 }
 
 impl TextChain {
@@ -317,109 +111,51 @@ impl TextChain {
         }
     }
 
-    /// What one step replaced, placed in the original text and labelled. `found` holds the
-    /// step's detections located in `input`: text ranges, or the ranges of the one cell this
-    /// chain covers. Every returned detection has a `DetectionLocation::Text` in the original
-    /// and its value copied from it.
+    /// The values `found` in `input`, which a redacter masked as `mask` says to give `output`,
+    /// placed in the original text, merged where they overlap and labelled as the mask was.
+    /// A value that starts inside an earlier mask, or ends inside one, takes in the whole of
+    /// the value that mask replaced. Every returned detection has a `DetectionLocation::Text`
+    /// in the original and its value copied from it.
     ///
-    /// A change takes the label and score of the detection that overlaps it most, and widens
-    /// to the union with every detection that overlaps it, so a mask that shares a character
-    /// with its value, or a placeholder that splits a value in two, still reports the whole
-    /// value. A change no detection overlaps is [`DetectionLabel::unclassified`]; a detection
-    /// that overlaps no change is dropped, since the copy does not differ there.
-    ///
-    /// `output` must be the `input` of the next call. The step counts in the chain also when
-    /// it returns an error.
+    /// `output` must be the `input` of the next call. Fails, leaving the chain as it was, when
+    /// masking `found` does not give `output`, so the changes of the step are not known, or
+    /// when a detection does not fit `input`.
     pub(crate) fn step(
         &mut self,
         input: &str,
         output: &str,
         found: &[Detection],
-        deadline: Instant,
-    ) -> AppResult<Vec<Detection>> {
-        let changes = TextChanges::between(input, output, deadline);
-        self.place_step(input, changes, found)
-    }
-
-    /// [`step`](Self::step) for a redacter that replaced exactly the values `found` locates,
-    /// each with the look `mask` gives it. When masking `input` that way gives `output`, the
-    /// changes are those masks and not a diff, which can line a mask up with the characters it
-    /// shares with its value and with the text next to it. Otherwise the step falls back to the
-    /// diff.
-    pub(crate) fn step_masked(
-        &mut self,
-        input: &str,
-        output: &str,
-        found: &[Detection],
         mask: TextMask,
-        deadline: Instant,
     ) -> AppResult<Vec<Detection>> {
-        let changes = TextChanges::masked(input, output, found, mask)
-            .unwrap_or_else(|| TextChanges::between(input, output, deadline));
-        self.place_step(input, changes, found)
-    }
-
-    fn place_step(
-        &mut self,
-        input: &str,
-        changes: TextChanges,
-        found: &[Detection],
-    ) -> AppResult<Vec<Detection>> {
-        let placed = self.place(input, &changes, found);
-        self.steps.push(changes);
-        placed
-    }
-
-    fn place(
-        &self,
-        input: &str,
-        changes: &TextChanges,
-        found: &[Detection],
-    ) -> AppResult<Vec<Detection>> {
-        let located = found
-            .iter()
-            .filter_map(|detection| Some((detection.location.byte_range()?, detection)))
-            .enumerate()
-            .map(|(order, (range, detection))| {
-                if input.get(range.clone()).is_none() {
-                    return Err(AppError::DetectionOutsideContent {
-                        start: range.start,
-                        end: range.end,
-                    });
-                }
-                Ok(Located {
-                    range: self.to_original(range),
-                    detection,
-                    order,
-                })
-            })
-            .collect::<AppResult<Vec<_>>>()
-            .map(LocatedDetections::new)?;
-
-        let mut spans: Vec<Span> = changes
-            .redactions(input)
-            .map(|range| self.to_original(range))
-            .filter(|range| !range.is_empty())
-            .map(|change| Span::widened_by(change, &located))
-            .collect();
-        spans.sort_by_key(|span| (span.range.start, span.range.end));
-
-        let mut merged: Vec<Span> = Vec::new();
-        for span in spans {
-            match merged.last_mut() {
-                Some(last) if span.range.start < last.range.end => last.absorb(span),
-                _ => merged.push(span),
-            }
+        let findings = Detection::findings(found, mask);
+        let (masked, changes) = mask_ranges(input, 0, &merge(&findings), &findings)?;
+        if masked != output {
+            return Err(AppError::SystemError {
+                message: "A redaction step is not the masking of the values it found".to_string(),
+            });
         }
 
-        let lines = TextLines::new(&self.original);
-        merged
+        let in_original: Vec<StepFinding> = findings
             .into_iter()
-            .map(|span| {
-                let (label, score) = span.label(&located);
-                lines.detection(span.range, label, score)
+            .map(|finding| StepFinding {
+                range: self.to_original(finding.range.clone()),
+                ..finding
             })
-            .collect()
+            .collect();
+        let lines = TextLines::new(&self.original);
+        let placed = merge(&in_original)
+            .into_iter()
+            .map(|united| {
+                let representative = &in_original[united.representative];
+                lines.detection(
+                    united.range,
+                    representative.label.clone(),
+                    representative.score,
+                )
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        self.steps.push(changes);
+        Ok(placed)
     }
 
     fn to_original(&self, range: Range<usize>) -> Range<usize> {
@@ -430,65 +166,10 @@ impl TextChain {
     }
 }
 
-/// One redaction in the original text: the ranges the changes cover, and the range they
-/// widen to with the detections that overlap them.
-struct Span {
-    range: Range<usize>,
-    changes: Vec<Range<usize>>,
-}
-
-impl Span {
-    fn widened_by(change: Range<usize>, located: &LocatedDetections) -> Self {
-        let range = located
-            .overlapping(&change)
-            .fold(change.clone(), |range, candidate| {
-                range.start.min(candidate.range.start)..range.end.max(candidate.range.end)
-            });
-        Self {
-            range,
-            changes: vec![change],
-        }
-    }
-
-    fn absorb(&mut self, other: Self) {
-        self.range.end = self.range.end.max(other.range.end);
-        self.changes.extend(other.changes);
-    }
-
-    /// The label and score of the detection that overlaps the most: the change when the span
-    /// is one change, the whole span when changes were joined. The first detection wins a tie.
-    fn label(&self, located: &LocatedDetections) -> (DetectionLabel, Option<Score>) {
-        let measured = match self.changes.as_slice() {
-            [change] => change,
-            _ => &self.range,
-        };
-        located
-            .overlapping(measured)
-            .max_by_key(|candidate| {
-                (
-                    overlap(&candidate.range, measured),
-                    std::cmp::Reverse(candidate.order),
-                )
-            })
-            .map_or((DetectionLabel::unclassified(), None), |best| {
-                (best.detection.label.clone(), best.detection.score)
-            })
-    }
-}
-
-fn overlap(a: &Range<usize>, b: &Range<usize>) -> usize {
-    a.end.min(b.end).saturating_sub(a.start.max(b.start))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::AppError;
-    use crate::redacters::{DetectionLabel, DetectionLocation, Score, TextLines};
-
-    fn deadline() -> Instant {
-        Instant::now() + TEXT_DIFF_TIME_LIMIT
-    }
+    use crate::redacters::{DetectionLabel, DetectionLocation, Score};
 
     fn score(value: f32) -> Score {
         Score::try_from(value).unwrap()
@@ -519,8 +200,13 @@ mod tests {
             .collect()
     }
 
-    fn step_once(input: &str, output: &str, found: &[Detection]) -> AppResult<Vec<Detection>> {
-        TextChain::new(input.to_string()).step(input, output, found, deadline())
+    fn step_once(
+        input: &str,
+        output: &str,
+        found: &[Detection],
+        mask: TextMask,
+    ) -> AppResult<Vec<Detection>> {
+        TextChain::new(input.to_string()).step(input, output, found, mask)
     }
 
     #[test]
@@ -534,7 +220,7 @@ mod tests {
             found(input, phone.clone(), "phone-international", None),
         ];
 
-        let records = step_once(input, output, &detections).unwrap();
+        let records = step_once(input, output, &detections, TextMask::Token).unwrap();
 
         assert_eq!(
             placed(&records),
@@ -559,155 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn a_value_inside_a_longer_token_is_narrowed_by_the_shared_prefix_and_suffix() {
-        let input = "password=hunter2";
-        let output = "password=[REDACTED]";
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(9..16, "sensitive_data".to_string(), "hunter2")]
-        );
-    }
-
-    #[test]
-    fn a_run_without_separators_is_narrowed_to_the_changed_characters() {
-        let input = "電話は09012345678です";
-        let output = "電話は[REDACTED]です";
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(
-                range_of(input, "09012345678"),
-                "sensitive_data".to_string(),
-                "09012345678"
-            )]
-        );
-    }
-
-    #[test]
-    fn ranges_stay_on_character_boundaries_and_columns_count_characters() {
-        let input = "Grüße 😀 ana@x.io ÜberAnna";
-        let output = "Grüße 😀 [REDACTED] Über[REDACTED]";
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![
-                (
-                    range_of(input, "ana@x.io"),
-                    "sensitive_data".to_string(),
-                    "ana@x.io"
-                ),
-                (
-                    range_of(input, "Anna"),
-                    "sensitive_data".to_string(),
-                    "Anna"
-                ),
-            ]
-        );
-        assert!(matches!(
-            records[0].location,
-            DetectionLocation::Text { column: 9, .. }
-        ));
-    }
-
-    #[test]
-    fn a_whitespace_only_change_is_not_a_redaction_but_still_shifts_later_positions() {
-        let input = r#"{"user": "Ana Lima", "phone": "+44 20 7946 0958"}"#;
-        let output = "{\n  \"user\": \"[REDACTED]\", \"phone\": \"[REDACTED]\"}";
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![
-                (10..18, "sensitive_data".to_string(), "Ana Lima"),
-                (31..47, "sensitive_data".to_string(), "+44 20 7946 0958"),
-            ]
-        );
-    }
-
-    #[test]
-    fn two_values_in_one_minified_json_line_are_placed_separately() {
-        let input = r#"{"name":"John Smith","email":"j@x.io"}"#;
-        let output = r#"{"name":"[REDACTED]","email":"[REDACTED]"}"#;
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![
-                (
-                    range_of(input, "John Smith"),
-                    "sensitive_data".to_string(),
-                    "John Smith"
-                ),
-                (
-                    range_of(input, "j@x.io"),
-                    "sensitive_data".to_string(),
-                    "j@x.io"
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_step_that_changes_nothing_reports_nothing() {
-        let text = "nothing to hide";
-        let detections = [found(text, 0..7, "word", None)];
-
-        assert!(step_once(text, text, &detections).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_later_step_is_placed_in_the_original_past_an_earlier_replacement() {
-        let original = "Mail ana@x.io, ask Ana Lima.";
-        let after_rules = "Mail [REDACTED], ask Ana Lima.";
-        let after_model = "Mail [REDACTED], ask [REDACTED].";
-        let mut chain = TextChain::new(original.to_string());
-
-        let first = chain
-            .step(
-                original,
-                after_rules,
-                &[found(
-                    original,
-                    range_of(original, "ana@x.io"),
-                    "email",
-                    None,
-                )],
-                deadline(),
-            )
-            .unwrap();
-        let second = chain
-            .step(after_rules, after_model, &[], deadline())
-            .unwrap();
-
-        assert_eq!(
-            placed(&first),
-            vec![(5..13, "email".to_string(), "ana@x.io")]
-        );
-        assert_eq!(
-            placed(&second),
-            vec![(19..27, "sensitive_data".to_string(), "Ana Lima")]
-        );
-        assert!(matches!(
-            second[0].location,
-            DetectionLocation::Text {
-                line: 1,
-                column: 20,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn a_later_change_covering_an_earlier_replacement_widens_to_its_original_range() {
+    fn a_later_value_covering_an_earlier_mask_widens_to_the_value_the_mask_replaced() {
         let original = "Ask Dr. Jane Roe now";
         let after_rules = "Ask Dr. Jane [REDACTED] now";
         let after_ner = "Ask Dr. [REDACTED] now";
@@ -718,7 +256,7 @@ mod tests {
                 original,
                 after_rules,
                 &[found(original, range_of(original, "Roe"), "surname", None)],
-                deadline(),
+                TextMask::Token,
             )
             .unwrap();
         let second = chain
@@ -726,7 +264,7 @@ mod tests {
                 after_rules,
                 after_ner,
                 &[found(after_rules, 8..23, "PER", Some(score(0.9)))],
-                deadline(),
+                TextMask::Token,
             )
             .unwrap();
 
@@ -737,15 +275,16 @@ mod tests {
     }
 
     #[test]
-    fn a_change_takes_the_label_and_score_of_the_detection_it_overlaps_most() {
+    fn overlapping_values_are_one_record_with_the_label_and_score_of_the_first_and_longest() {
         let input = "call Ana Lima now";
         let output = "call [REDACTED] now";
         let detections = [
-            found(input, 5..8, "first-name", Some(score(0.5))),
+            found(input, 9..13, "last-name", None),
+            found(input, 5..9, "first-name", None),
             found(input, 5..13, "person", Some(score(0.9))),
         ];
 
-        let records = step_once(input, output, &detections).unwrap();
+        let records = step_once(input, output, &detections, TextMask::Token).unwrap();
 
         assert_eq!(
             placed(&records),
@@ -755,93 +294,26 @@ mod tests {
     }
 
     #[test]
-    fn equal_overlaps_go_to_the_detection_listed_first_wherever_it_starts() {
-        let input = "call Ana Lima now";
-        let output = "call [REDACTED] now";
-        let detections = [
-            found(input, 9..13, "last-name", None),
-            found(input, 5..9, "first-name", None),
-        ];
-
-        let records = step_once(input, output, &detections).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(5..13, "last-name".to_string(), "Ana Lima")]
-        );
-    }
-
-    #[test]
-    fn a_detection_reaching_far_past_many_others_still_labels_a_change_beyond_them() {
-        let input = "a@x.io b@x.io c@x.io d@x.io";
-        let output = "[REDACTED] [REDACTED] [REDACTED] [REDACTED]";
-        let detections = [
-            found(input, 0..6, "email", None),
-            found(input, 7..13, "email", None),
-            found(input, 14..20, "email", None),
-            found(input, 21..27, "email", None),
-            found(input, 0..27, "document", None),
-        ];
-
-        let records = step_once(input, output, &detections).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(0..27, "document".to_string(), input)]
-        );
-    }
-
-    #[test]
-    fn a_change_no_detection_overlaps_is_unclassified_and_unscored() {
-        let input = "call Ana Lima now";
-        let output = "call [REDACTED] now";
-
-        let records = step_once(input, output, &[]).unwrap();
-
-        assert_eq!(records[0].label, DetectionLabel::unclassified());
-        assert_eq!(records[0].score, None);
-    }
-
-    #[test]
-    fn a_detection_the_output_does_not_reflect_is_not_reported() {
+    fn a_step_whose_output_is_not_its_masked_values_fails_without_joining_the_chain() {
         let input = "Ana Lima and Bo Li";
-        let output = "[REDACTED] and Bo Li";
-        let detections = [
-            found(input, range_of(input, "Ana Lima"), "person", None),
-            found(input, range_of(input, "Bo Li"), "person", None),
-        ];
+        let mut chain = TextChain::new(input.to_string());
 
-        let records = step_once(input, output, &detections).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(0..8, "person".to_string(), "Ana Lima")]
+        let result = chain.step(
+            input,
+            "[REDACTED] and Bo Li",
+            &[
+                found(input, range_of(input, "Ana Lima"), "person", None),
+                found(input, range_of(input, "Bo Li"), "person", None),
+            ],
+            TextMask::Token,
         );
+
+        assert!(matches!(result, Err(AppError::SystemError { .. })));
+        assert!(chain.steps.is_empty());
     }
 
     #[test]
-    fn a_mask_sharing_the_values_first_character_is_widened_back_by_the_detection() {
-        let input = "Contact Xavier Lee at x.lee@example.org";
-        let output = "Contact XXXXXXXXXX at XXXXXXXXXXXXXXXXX";
-        let detections = [
-            found(input, 8..18, "NAME", Some(score(0.99))),
-            found(input, 22..39, "EMAIL", Some(score(0.95))),
-        ];
-
-        let records = step_once(input, output, &detections).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![
-                (8..18, "NAME".to_string(), "Xavier Lee"),
-                (22..39, "EMAIL".to_string(), "x.lee@example.org"),
-            ]
-        );
-        assert_eq!(records[0].score, Some(score(0.99)));
-    }
-
-    #[test]
-    fn changes_split_at_punctuation_the_placeholder_shares_are_joined_by_the_detection() {
+    fn a_label_mask_is_placed_with_columns_counted_in_characters() {
         let input = "Order AB-1234 for John Müller.";
         let output = "Order {order-id} for {NAME}.";
         let detections = [
@@ -849,7 +321,7 @@ mod tests {
             found(input, range_of(input, "John Müller"), "NAME", None),
         ];
 
-        let records = step_once(input, output, &detections).unwrap();
+        let records = step_once(input, output, &detections, TextMask::Label).unwrap();
 
         assert_eq!(
             placed(&records),
@@ -862,21 +334,6 @@ mod tests {
             records[1].location,
             DetectionLocation::Text { column: 19, .. }
         ));
-    }
-
-    #[test]
-    fn detections_in_a_table_cell_label_the_changes_of_that_cell() {
-        let cell = "John Smith";
-        let detection =
-            Detection::in_table_cell(0, 1, cell, 0..10, DetectionLabel::new("person"), None)
-                .unwrap();
-
-        let records = step_once(cell, "[REDACTED]", &[detection]).unwrap();
-
-        assert_eq!(
-            placed(&records),
-            vec![(0..10, "person".to_string(), "John Smith")]
-        );
     }
 
     #[test]
@@ -894,71 +351,12 @@ mod tests {
             value: String::new(),
         };
 
-        let result = step_once(input, "sh[REDACTED]", &[detection]);
+        let result = step_once(input, "sh[REDACTED]", &[detection], TextMask::Token);
 
         assert!(matches!(
             result,
             Err(AppError::DetectionOutsideContent { start: 2, end: 40 })
         ));
-    }
-
-    #[test]
-    fn with_a_deadline_already_past_every_change_is_still_covered() {
-        let values: Vec<String> = (0..3000)
-            .map(|number| format!("user{number}@x.io"))
-            .collect();
-        let input = values
-            .iter()
-            .map(|value| format!("id={value};"))
-            .collect::<String>();
-        let output = values
-            .iter()
-            .map(|_| "id=[REDACTED];".to_string())
-            .collect::<String>();
-
-        let records = TextChain::new(input.clone())
-            .step(&input, &output, &[], Instant::now())
-            .unwrap();
-
-        let spans = placed(&records);
-        let mut offset = 0;
-        for value in &values {
-            let start = offset + "id=".len();
-            let end = start + value.len();
-            offset = end + ";".len();
-            assert!(
-                spans
-                    .iter()
-                    .any(|(span, _, _)| span.start <= start && end <= span.end),
-                "{value} is not covered"
-            );
-        }
-    }
-
-    #[test]
-    fn applying_the_changes_to_the_input_gives_the_output() {
-        let pairs = [
-            ("", "added"),
-            ("removed", ""),
-            ("a b c", "a  c"),
-            ("Grüße 😀 ana", "Grüße [X]"),
-            ("x=1;y=2;z=3", "x=[R];y=2;z=[R]"),
-            ("same", "same"),
-        ];
-        for (input, output) in pairs {
-            let changes = TextChanges::between(input, output, deadline());
-
-            let mut rebuilt = String::new();
-            let mut cursor = 0;
-            for change in &changes.0 {
-                rebuilt.push_str(&input[cursor..change.input.start]);
-                rebuilt.push_str(&output[change.output.clone()]);
-                cursor = change.input.end;
-            }
-            rebuilt.push_str(&input[cursor..]);
-
-            assert_eq!(rebuilt, output, "{input:?} to {output:?}");
-        }
     }
 
     #[test]
@@ -996,14 +394,12 @@ mod tests {
 
     #[test]
     fn a_range_ending_inside_a_change_widens_to_the_changes_whole_input() {
-        let input = "key=secret-value end";
-        let output = "key=[REDACTED] end";
-        let changes = TextChanges::between(input, output, deadline());
+        let changes = TextChanges::new(vec![TextChange {
+            input: 4..16,
+            output: 4..14,
+        }]);
 
-        let start_inside = changes.to_input(7..output.len());
-        let end_inside = changes.to_input(0..8);
-
-        assert_eq!(start_inside, 4..input.len());
-        assert_eq!(end_inside, 0..input.find(" end").unwrap());
+        assert_eq!(changes.to_input(7..18), 4..20);
+        assert_eq!(changes.to_input(0..8), 0..16);
     }
 }

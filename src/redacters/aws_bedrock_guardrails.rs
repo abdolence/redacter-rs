@@ -633,7 +633,7 @@ mod tests {
             panic!("a text is expected");
         };
         assert_eq!(
-            Detection::mask(text, &detections.found, redacter.text_mask()),
+            Detection::mask(text, &detections.found, redacter.text_mask()).unwrap(),
             anonymised
         );
     }
