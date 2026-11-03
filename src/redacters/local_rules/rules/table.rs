@@ -1032,7 +1032,7 @@ const RULES: &[RuleSpec] = &[
 #[cfg(test)]
 mod tests {
     use super::super::super::validators::MONTHS;
-    use super::super::test_support::{all_rules, assert_redacts, assert_untouched};
+    use super::super::test_support::{all_rules, assert_redacts, assert_untouched, redact};
 
     /// Strings no built-in rule may touch: order and epoch numbers, timestamps, versions,
     /// amounts, dates without a birth keyword, and checksum-failing neighbours.
@@ -1483,7 +1483,7 @@ mod tests {
                 let input = postcodes.join(separator);
                 let expected = ["[REDACTED]"; 5].join(separator);
                 assert_eq!(
-                    all_rules().redact(&input).0,
+                    redact(all_rules(), &input).0,
                     expected,
                     "{rule} separated by {separator:?}"
                 );
@@ -1521,8 +1521,8 @@ mod tests {
         // patterns match the identical span, so the merge must keep exactly one finding,
         // and which rule's name wins must not change between runs.
         let text = "id 010101-0189 done";
-        let (first_text, first_findings) = all_rules().redact(text);
-        let (second_text, second_findings) = all_rules().redact(text);
+        let (first_text, first_findings) = redact(all_rules(), text);
+        let (second_text, second_findings) = redact(all_rules(), text);
         assert_eq!(first_text, "id [REDACTED] done");
         assert_eq!(first_findings.len(), 1, "{first_findings:?}");
         assert_eq!(
@@ -1541,8 +1541,8 @@ mod tests {
         // day 01, citizenship digit 1, Luhn check digit 9 over all 13 digits): both rules'
         // patterns match the identical span, so `jmbg`, declared first, must win.
         let text = "id 0101010003149 done";
-        let (first_text, first_findings) = all_rules().redact(text);
-        let (second_text, second_findings) = all_rules().redact(text);
+        let (first_text, first_findings) = redact(all_rules(), text);
+        let (second_text, second_findings) = redact(all_rules(), text);
         assert_eq!(first_text, "id [REDACTED] done");
         assert_eq!(first_findings.len(), 1, "{first_findings:?}");
         assert_eq!(

@@ -411,12 +411,10 @@ pub(super) mod test_support {
     use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
     use std::sync::OnceLock;
 
-    impl RuleSet {
-        /// The text with every finding replaced by `[REDACTED]`, plus the findings.
-        pub(super) fn redact(&self, text: &str) -> (String, Vec<Finding>) {
-            let findings = self.find(text);
-            (apply_redaction(text, &findings, REDACTED), findings)
-        }
+    /// The text with every finding of `rules` replaced by `[REDACTED]`, plus the findings.
+    pub(super) fn redact(rules: &RuleSet, text: &str) -> (String, Vec<Finding>) {
+        let findings = rules.find(text);
+        (apply_redaction(text, &findings, REDACTED), findings)
     }
 
     /// Every built-in group, compiled once per test binary: the table is large and the
@@ -427,7 +425,7 @@ pub(super) mod test_support {
     }
 
     pub(super) fn redact_all(text: &str) -> String {
-        all_rules().redact(text).0
+        redact(all_rules(), text).0
     }
 
     pub(super) fn assert_redacts(text: &str, expected: &str) {
@@ -1147,7 +1145,7 @@ mod tests {
 
     #[test]
     fn overlapping_rules_replace_once() {
-        let (redacted, findings) = all_rules().redact("GB82WEST12345698765432");
+        let (redacted, findings) = redact(all_rules(), "GB82WEST12345698765432");
         assert_eq!(redacted, "[REDACTED]");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule.as_str(), "iban");
@@ -1165,7 +1163,7 @@ mod tests {
         let mut groups = RuleGroup::all();
         groups.remove(&RuleGroup::Email);
         let rules = RuleSet::new(&groups).unwrap();
-        assert_eq!(rules.redact("a@b.io").0, "a@b.io");
+        assert_eq!(redact(&rules, "a@b.io").0, "a@b.io");
     }
 
     #[test]
@@ -1194,7 +1192,7 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        let (redacted, findings) = rules.redact("badge EMP-123456 issued");
+        let (redacted, findings) = redact(&rules, "badge EMP-123456 issued");
         assert_eq!(redacted, "badge [REDACTED] issued");
         assert_eq!(findings[0].rule.as_str(), "employee-id");
     }
@@ -1208,10 +1206,10 @@ mod tests {
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
-            rules.redact("project BLUEBIRD and kestrel").0,
+            redact(&rules, "project BLUEBIRD and kestrel").0,
             "project [REDACTED] and [REDACTED]"
         );
-        assert_eq!(rules.redact("bluebirds fly").0, "bluebirds fly");
+        assert_eq!(redact(&rules, "bluebirds fly").0, "bluebirds fly");
     }
 
     #[test]
@@ -1222,7 +1220,7 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        assert_eq!(rules.redact("a.b axb").0, "[REDACTED] axb");
+        assert_eq!(redact(&rules, "a.b axb").0, "[REDACTED] axb");
     }
 
     #[test]
@@ -1234,7 +1232,7 @@ mod tests {
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
-            rules.redact("wear a #tag today").0,
+            redact(&rules, "wear a #tag today").0,
             "wear a [REDACTED] today"
         );
     }
@@ -1247,7 +1245,10 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        assert_eq!(rules.redact("we use C++ here").0, "we use [REDACTED] here");
+        assert_eq!(
+            redact(&rules, "we use C++ here").0,
+            "we use [REDACTED] here"
+        );
     }
 
     #[test]
@@ -1258,7 +1259,7 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        assert_eq!(rules.redact("#tag #tag").0, "[REDACTED] [REDACTED]");
+        assert_eq!(redact(&rules, "#tag #tag").0, "[REDACTED] [REDACTED]");
     }
 
     #[test]
@@ -1269,8 +1270,8 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        assert_eq!(rules.redact("hashtags").0, "hashtags");
-        assert_eq!(rules.redact("tag_line").0, "tag_line");
+        assert_eq!(redact(&rules, "hashtags").0, "hashtags");
+        assert_eq!(redact(&rules, "tag_line").0, "tag_line");
     }
 
     #[test]
@@ -1281,7 +1282,7 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        assert_eq!(rules.redact("#tagline").0, "[REDACTED]");
+        assert_eq!(redact(&rules, "#tagline").0, "[REDACTED]");
     }
 
     #[test]
@@ -1306,10 +1307,10 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
-        let (redacted, findings) = rules.redact("xyz");
+        let (redacted, findings) = redact(&rules, "xyz");
         assert_eq!(redacted, "xyz");
         assert!(findings.is_empty(), "{findings:?}");
-        assert_eq!(rules.redact("aaa xyz").0, "[REDACTED] xyz");
+        assert_eq!(redact(&rules, "aaa xyz").0, "[REDACTED] xyz");
     }
 
     #[test]
@@ -1320,10 +1321,10 @@ mod tests {
             case_insensitive: false,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("tag")]).unwrap();
-        assert_eq!(rules.redact("étag").0, "étag");
-        assert_eq!(rules.redact("tagé").0, "tagé");
+        assert_eq!(redact(&rules, "étag").0, "étag");
+        assert_eq!(redact(&rules, "tagé").0, "tagé");
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("étag")]).unwrap();
-        assert_eq!(rules.redact("étag").0, "[REDACTED]");
+        assert_eq!(redact(&rules, "étag").0, "[REDACTED]");
     }
 
     #[test]
