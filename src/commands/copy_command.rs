@@ -111,6 +111,10 @@ impl CopyFileReport {
         }
     }
 
+    fn failed(&self) -> bool {
+        matches!(self.outcome, CopyFileOutcome::Error { .. })
+    }
+
     /// The file for the SARIF and OCSF reports, or `None` for a file the size limit or the name
     /// filter left out.
     fn reported_file(&self) -> Option<ReportedFile> {
@@ -140,6 +144,12 @@ impl CopyCommandResult {
             .iter()
             .filter_map(CopyFileReport::reported_file)
             .collect()
+    }
+
+    /// The process exit code: 1 when a file ended in an error and so is missing from the
+    /// destination, 0 otherwise. A skipped file, or one copied as it is, is not a failure.
+    pub fn exit_code(&self) -> i32 {
+        i32::from(self.files.iter().any(CopyFileReport::failed))
     }
 
     /// Writes the report for people.

@@ -55,7 +55,9 @@ pub fn resolve_addons_dir(
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum CliCommand {
-    #[command(about = "Copy and redact files from source to destination")]
+    #[command(
+        about = "Copy and redact files from source to destination. Exits with 0 on success, 1 when a file fails or on errors"
+    )]
     Cp {
         #[arg(
             help = "Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers"
