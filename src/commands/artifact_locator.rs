@@ -27,11 +27,11 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
 /// directory, and each writer may also ask for the form it needs.
 #[derive(Debug, Clone)]
 pub struct ArtifactLocator {
-    pub(super) base: LocatorBase,
+    base: LocatorBase,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum LocatorBase {
+enum LocatorBase {
     Local {
         source: PathBuf,
         is_dir: bool,
@@ -60,7 +60,7 @@ impl ArtifactLocator {
                 Some(path) => LocatorBase::Local {
                     is_dir: path.ends_with('/') || Path::new(path).is_dir(),
                     source: PathBuf::from(path),
-                    working_dir: working_dir.to_path_buf(),
+                    working_dir: lexically_normal(working_dir),
                 },
                 None => LocatorBase::Remote {
                     joins_paths: source.starts_with("zip://") || source.ends_with('/'),
@@ -78,7 +78,10 @@ impl ArtifactLocator {
                 source,
                 is_dir,
                 working_dir,
-            } => file_uri(working_dir, &local_file(source, *is_dir, path)),
+            } => format!(
+                "file:///{}",
+                encoded_path(&local_path(source, *is_dir, working_dir, path))
+            ),
             LocatorBase::Remote {
                 source,
                 joins_paths,
@@ -100,31 +103,39 @@ impl ArtifactLocator {
                 source,
                 is_dir,
                 working_dir,
-            } => lexically_normal(&working_dir.join(local_file(source, *is_dir, path)))
+            } => local_path(source, *is_dir, working_dir, path)
                 .to_string_lossy()
                 .into_owned(),
             LocatorBase::Remote { .. } => self.full_uri(path),
         }
     }
-}
 
-pub(super) fn local_file(source: &Path, is_dir: bool, path: &str) -> PathBuf {
-    if is_dir {
-        source.join(path)
-    } else {
-        source.to_path_buf()
+    /// The URI of a local file below the working directory, relative to it. `None` for a file
+    /// outside it and for a file of a remote source, which only a full URI names.
+    pub fn relative_uri(&self, path: &str) -> Option<String> {
+        let LocatorBase::Local {
+            source,
+            is_dir,
+            working_dir,
+        } = &self.base
+        else {
+            return None;
+        };
+        local_path(source, *is_dir, working_dir, path)
+            .strip_prefix(working_dir)
+            .ok()
+            .map(encoded_path)
     }
 }
 
-/// The `file:` URI of `path`, which may be relative to `working_dir`.
-pub(super) fn file_uri(working_dir: &Path, path: &Path) -> String {
-    format!(
-        "file:///{}",
-        encoded_path(&lexically_normal(&working_dir.join(path)))
-    )
+/// The path of a file of a local source, made absolute by `working_dir` and free of `.` and `..`
+/// components without asking the file system.
+fn local_path(source: &Path, is_dir: bool, working_dir: &Path, path: &str) -> PathBuf {
+    let file = working_dir.join(source);
+    lexically_normal(&if is_dir { file.join(path) } else { file })
 }
 
-pub(super) fn lexically_normal(path: &Path) -> PathBuf {
+fn lexically_normal(path: &Path) -> PathBuf {
     let mut normal = PathBuf::new();
     for component in path.components() {
         match component {
@@ -138,7 +149,7 @@ pub(super) fn lexically_normal(path: &Path) -> PathBuf {
     normal
 }
 
-pub(super) fn encoded_path(path: &Path) -> String {
+fn encoded_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(segment) => {

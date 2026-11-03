@@ -9,9 +9,7 @@
 //! finding has an exact place in a text. SARIF ends up in GitHub's UI and API, so a value is
 //! always masked here, whatever the caller passes.
 
-use crate::commands::artifact_locator::{
-    encoded_path, file_uri, lexically_normal, local_file, ArtifactLocator, LocatorBase,
-};
+use crate::commands::artifact_locator::ArtifactLocator;
 use crate::commands::copy_output::escaped;
 use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile, ReportedFinding};
 use crate::redacters::Categories;
@@ -19,7 +17,6 @@ use crate::AppResult;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
 
 const SARIF_SCHEMA: &str =
     "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
@@ -104,43 +101,6 @@ impl Place {
                     (None, None) => String::new(),
                 }
             }
-        }
-    }
-}
-
-/// The locations a SARIF log gives: GitHub links a local file relative to the working
-/// directory with the base `%SRCROOT%`, which is the checkout root when the command runs in a
-/// workflow. A path outside the working directory, and a file of a remote source, are written
-/// as a full URI.
-impl ArtifactLocator {
-    fn locate(&self, path: &str) -> ArtifactLocation {
-        match &self.base {
-            LocatorBase::Local {
-                source,
-                is_dir,
-                working_dir,
-            } => {
-                let full = lexically_normal(&local_file(source, *is_dir, path));
-                let from_working_dir = if full.is_absolute() {
-                    full.strip_prefix(working_dir).ok().map(Path::to_path_buf)
-                } else {
-                    Some(full.clone())
-                };
-                match from_working_dir {
-                    Some(relative) if !relative.starts_with("..") => ArtifactLocation {
-                        uri: encoded_path(&relative),
-                        uri_base_id: Some(SOURCE_ROOT_ID),
-                    },
-                    _ => ArtifactLocation {
-                        uri: file_uri(working_dir, &full),
-                        uri_base_id: None,
-                    },
-                }
-            }
-            LocatorBase::Remote { .. } => ArtifactLocation {
-                uri: self.full_uri(path),
-                uri_base_id: None,
-            },
         }
     }
 }
@@ -351,6 +311,24 @@ struct ArtifactLocation {
     uri_base_id: Option<&'static str>,
 }
 
+impl ArtifactLocation {
+    /// GitHub links a local file relative to the working directory with the base `%SRCROOT%`,
+    /// which is the checkout root when the command runs in a workflow. A file outside the
+    /// working directory, and a file of a remote source, are written as a full URI.
+    fn of(locator: &ArtifactLocator, path: &str) -> Self {
+        match locator.relative_uri(path) {
+            Some(uri) => Self {
+                uri,
+                uri_base_id: Some(SOURCE_ROOT_ID),
+            },
+            None => Self {
+                uri: locator.full_uri(path),
+                uri_base_id: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Region {
@@ -422,7 +400,7 @@ impl SarifLog {
         let mut result_count = 0;
         let mut notifications = Vec::new();
         for artifact in artifacts {
-            let location = locator.locate(&artifact.path);
+            let location = ArtifactLocation::of(locator, &artifact.path);
             match &artifact.outcome {
                 FileOutcome::Findings(findings) => {
                     let mut seen: BTreeMap<(RuleId, String), usize> = BTreeMap::new();
@@ -620,6 +598,8 @@ mod tests {
     use crate::args::RedacterType;
     use crate::redacters::{Category, DetectionLabel, DetectionLocation, Score, TextLines};
     use serde_json::{json, Value};
+    use std::path::Path;
+    use url::Url;
 
     fn text_at(line: usize, column: usize, end_column: usize) -> Option<Place> {
         Some(Place::Text {
@@ -1171,7 +1151,7 @@ mod tests {
         std::fs::write(dir.join("a b.txt"), "").unwrap();
         let working_dir = tmp.path();
         let uri = |source: &str, path: &str| {
-            let location = ArtifactLocator::new(source, working_dir).locate(path);
+            let location = ArtifactLocation::of(&ArtifactLocator::new(source, working_dir), path);
             (location.uri, location.uri_base_id)
         };
         let source_root = Some(SOURCE_ROOT_ID);
@@ -1210,14 +1190,17 @@ mod tests {
             uri("docs/", "é.txt"),
             ("docs/%C3%A9.txt".to_string(), source_root)
         );
+        assert_eq!(
+            uri("docs/", "a[1]^|.txt"),
+            ("docs/a%5B1%5D%5E%7C.txt".to_string(), source_root)
+        );
         // Outside of the working directory the path is a full URI.
         assert_eq!(
             uri("../other/", "a.txt"),
             (
-                format!(
-                    "file:///{}/other/a.txt",
-                    encoded_path(working_dir.parent().unwrap())
-                ),
+                Url::from_file_path(working_dir.parent().unwrap().join("other/a.txt"))
+                    .unwrap()
+                    .to_string(),
                 None
             )
         );
@@ -1226,7 +1209,8 @@ mod tests {
     #[test]
     fn locations_of_a_remote_source_are_full_uris() {
         let uri = |source: &str, path: &str| {
-            let location = ArtifactLocator::new(source, Path::new("/work")).locate(path);
+            let location =
+                ArtifactLocation::of(&ArtifactLocator::new(source, Path::new("/work")), path);
             (location.uri, location.uri_base_id)
         };
 
