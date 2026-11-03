@@ -121,14 +121,7 @@ impl Categories {
         values: &[T],
         category: impl Fn(&T) -> Category,
     ) -> Result<(), CategoriesError> {
-        match values.iter().find(|value| !self.contains(category(value))) {
-            Some(value) => Err(CategoriesError::ValueOutside {
-                option,
-                value: value.to_string(),
-                category: category(value),
-            }),
-            None => Ok(()),
-        }
+        self.check_named(option, values, T::to_string, category)
     }
 
     /// `defaults` without those outside the chosen categories.
@@ -141,6 +134,61 @@ impl Categories {
             .into_iter()
             .filter(|value| self.contains(category(value)))
             .collect()
+    }
+
+    /// The values `option` works on: those the user `named`, checked against `categories` when
+    /// they limit anything, else the `defaults`, narrowed to `categories` when they limit
+    /// anything. `name` spells a value in the error of one outside.
+    pub fn narrow<T: Clone>(
+        categories: Option<&Self>,
+        option: &'static str,
+        named: Option<&[T]>,
+        defaults: impl IntoIterator<Item = T>,
+        name: impl Fn(&T) -> String,
+        category: impl Fn(&T) -> Category,
+    ) -> Result<Vec<T>, CategoriesError> {
+        match (named, categories) {
+            (Some(named), Some(categories)) => {
+                categories.check_named(option, named, name, category)?;
+                Ok(named.to_vec())
+            }
+            (Some(named), None) => Ok(named.to_vec()),
+            (None, Some(categories)) => Ok(categories.filter(defaults, category)),
+            (None, None) => Ok(defaults.into_iter().collect()),
+        }
+    }
+
+    /// Fails with [`CategoriesError::NothingToFind`] when `categories` limit anything and
+    /// `redacter` is left with nothing to find (`finds_any` is false) in them.
+    pub fn ensure_finds(
+        categories: Option<&Self>,
+        redacter: RedacterType,
+        finds_any: bool,
+    ) -> Result<(), CategoriesError> {
+        match categories {
+            Some(categories) if !finds_any => Err(CategoriesError::NothingToFind {
+                redacter,
+                categories: categories.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    fn check_named<T>(
+        &self,
+        option: &'static str,
+        values: &[T],
+        name: impl Fn(&T) -> String,
+        category: impl Fn(&T) -> Category,
+    ) -> Result<(), CategoriesError> {
+        match values.iter().find(|value| !self.contains(category(value))) {
+            Some(value) => Err(CategoriesError::ValueOutside {
+                option,
+                value: name(value),
+                category: category(value),
+            }),
+            None => Ok(()),
+        }
     }
 }
 

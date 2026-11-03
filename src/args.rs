@@ -655,15 +655,11 @@ impl RedacterArgs {
             None => GcpDlpRedacter::default_info_types(),
         };
         built_in_info_types.extend(extra_built_in.iter().cloned());
-        if let Some(categories) = categories {
-            if built_in_info_types.is_empty() && stored.is_empty() {
-                return Err(CategoriesError::NothingToFind {
-                    redacter: RedacterType::GcpDlp,
-                    categories: categories.clone(),
-                }
-                .into());
-            }
-        }
+        Categories::ensure_finds(
+            categories,
+            RedacterType::GcpDlp,
+            !built_in_info_types.is_empty() || !stored.is_empty(),
+        )?;
         Ok(GcpDlpRedacterOptions {
             project_id: project_id.clone(),
             built_in_info_types,
@@ -683,102 +679,31 @@ impl RedacterArgs {
         for path in self.local_rules_file.iter().flatten() {
             file_rules.extend(crate::redacters::load_rules_file(path)?);
         }
-        let mut groups: BTreeSet<RuleGroup> = match (&self.local_rules, categories) {
-            (Some(enabled), Some(categories)) => {
-                categories.check("--local-rules", enabled, |group| group.category())?;
-                enabled.iter().copied().collect()
-            }
-            (Some(enabled), None) => enabled.iter().copied().collect(),
-            (None, Some(categories)) => categories
-                .filter(RuleGroup::all(), |group| group.category())
-                .into_iter()
-                .collect(),
-            (None, None) => RuleGroup::all(),
-        };
+        let mut groups: BTreeSet<RuleGroup> = Categories::narrow(
+            categories,
+            "--local-rules",
+            self.local_rules.as_deref(),
+            RuleGroup::all(),
+            RuleGroup::to_string,
+            |group| group.category(),
+        )?
+        .into_iter()
+        .collect();
         if let Some(categories) = categories {
             let inline_names: Vec<_> = inline_rules.iter().map(|rule| &rule.name).collect();
             let file_names: Vec<_> = file_rules.iter().map(|rule| &rule.name).collect();
             categories.check("--local-rule", &inline_names, |_| Category::Other)?;
             categories.check("--local-rules-file", &file_names, |_| Category::Other)?;
-            let finds_nothing = groups.iter().all(|group| *group == RuleGroup::Custom)
-                && inline_rules.is_empty()
-                && file_rules.is_empty();
-            if finds_nothing {
-                return Err(CategoriesError::NothingToFind {
-                    redacter: RedacterType::LocalRules,
-                    categories: categories.clone(),
-                }
-                .into());
-            }
         }
+        let finds_any = groups.iter().any(|group| *group != RuleGroup::Custom)
+            || !inline_rules.is_empty()
+            || !file_rules.is_empty();
+        Categories::ensure_finds(categories, RedacterType::LocalRules, finds_any)?;
         for group in self.local_rules_disable.iter().flatten() {
             groups.remove(group);
         }
         let user_rules = inline_rules.into_iter().chain(file_rules).collect();
         Ok(LocalRulesRedacterOptions { groups, user_rules })
-    }
-
-    #[cfg(feature = "local-ner")]
-    fn local_ner_entities(
-        &self,
-        categories: Option<&Categories>,
-    ) -> Result<BTreeSet<Entity>, AppError> {
-        let entities: BTreeSet<Entity> = match (&self.local_ner_entities, categories) {
-            (Some(named), Some(categories)) => {
-                let names: Vec<&str> = named.iter().map(|entity| entity.as_str()).collect();
-                categories.check("--local-ner-entities", &names, |name| {
-                    Entity::label_category(name)
-                })?;
-                named.iter().copied().collect()
-            }
-            (Some(named), None) => named.iter().copied().collect(),
-            (None, Some(categories)) => categories
-                .filter(Entity::all(), |entity| entity.category())
-                .into_iter()
-                .collect(),
-            (None, None) => Entity::all(),
-        };
-        match categories {
-            Some(categories) if entities.is_empty() => Err(CategoriesError::NothingToFind {
-                redacter: RedacterType::LocalNer,
-                categories: categories.clone(),
-            }
-            .into()),
-            _ => Ok(entities),
-        }
-    }
-
-    #[cfg(feature = "local-gliner")]
-    fn local_gliner_labels(
-        &self,
-        categories: Option<&Categories>,
-    ) -> Result<Vec<String>, AppError> {
-        use crate::redacters::local_gliner::labels::{
-            default_labels, label_category, DEFAULT_LABELS,
-        };
-        let labels: Vec<String> = match (&self.local_gliner_labels, categories) {
-            (Some(named), Some(categories)) => {
-                categories.check("--local-gliner-labels", named, |label| {
-                    label_category(label)
-                })?;
-                named.clone()
-            }
-            (Some(named), None) => named.clone(),
-            (None, Some(categories)) => categories
-                .filter(DEFAULT_LABELS, |(_, category)| *category)
-                .into_iter()
-                .map(|(label, _)| label.to_string())
-                .collect(),
-            (None, None) => default_labels(),
-        };
-        match categories {
-            Some(categories) if labels.is_empty() => Err(CategoriesError::NothingToFind {
-                redacter: RedacterType::LocalGliner,
-                categories: categories.clone(),
-            }
-            .into()),
-            _ => Ok(labels),
-        }
     }
 }
 
@@ -808,15 +733,11 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     }),
                 },
                 RedacterType::AwsComprehend => {
-                    if let Some(categories) = categories {
-                        if !AwsComprehendRedacter::finds_any_of(categories) {
-                            return Err(CategoriesError::NothingToFind {
-                                redacter: options,
-                                categories: categories.clone(),
-                            }
-                            .into());
-                        }
-                    }
+                    Categories::ensure_finds(
+                        categories,
+                        options,
+                        categories.is_none_or(AwsComprehendRedacter::finds_any_of),
+                    )?;
                     Ok(RedacterProviderOptions::AwsComprehend(
                         crate::redacters::AwsComprehendRedacterOptions {
                             region: self.aws_region.clone().map(aws_config::Region::new),
@@ -922,7 +843,21 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                     .map(RedacterProviderOptions::LocalRules),
                 #[cfg(feature = "local-ner")]
                 RedacterType::LocalNer => {
-                    let entities = self.local_ner_entities(categories)?;
+                    let entities: BTreeSet<Entity> = Categories::narrow(
+                        categories,
+                        "--local-ner-entities",
+                        self.local_ner_entities.as_deref(),
+                        Entity::all(),
+                        |entity| entity.as_str().to_string(),
+                        |entity| entity.category(),
+                    )?
+                    .into_iter()
+                    .collect();
+                    Categories::ensure_finds(
+                        categories,
+                        RedacterType::LocalNer,
+                        !entities.is_empty(),
+                    )?;
                     LocalNerRedacterOptions::validated(entities, self.local_ner_min_score)
                         .map(RedacterProviderOptions::LocalNer)
                         .map_err(|err| AppError::RedacterConfigError {
@@ -936,7 +871,20 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 }),
                 #[cfg(feature = "local-gliner")]
                 RedacterType::LocalGliner => {
-                    let labels = self.local_gliner_labels(categories)?;
+                    use crate::redacters::local_gliner::labels::{default_labels, label_category};
+                    let labels = Categories::narrow(
+                        categories,
+                        "--local-gliner-labels",
+                        self.local_gliner_labels.as_deref(),
+                        default_labels(),
+                        String::clone,
+                        |label| label_category(label),
+                    )?;
+                    Categories::ensure_finds(
+                        categories,
+                        RedacterType::LocalGliner,
+                        !labels.is_empty(),
+                    )?;
                     LocalGlinerRedacterOptions::validated(labels, self.local_gliner_min_score)
                         .map(RedacterProviderOptions::LocalGliner)
                         .map_err(|err| AppError::RedacterConfigError {
@@ -950,13 +898,11 @@ impl TryInto<RedacterOptions> for RedacterArgs {
                 }),
                 #[cfg(feature = "local-credential-ml")]
                 RedacterType::LocalCredentialMl => {
-                    if let Some(categories) = categories.filter(|c| !c.contains(Category::Secrets)) {
-                        return Err(CategoriesError::NothingToFind {
-                            redacter: options,
-                            categories: categories.clone(),
-                        }
-                        .into());
-                    }
+                    Categories::ensure_finds(
+                        categories,
+                        options,
+                        categories.is_none_or(|c| c.contains(Category::Secrets)),
+                    )?;
                     Ok(RedacterProviderOptions::LocalCredentialMl(
                         LocalCredentialMlRedacterOptions {
                             min_score: self.local_credential_ml_min_score,
