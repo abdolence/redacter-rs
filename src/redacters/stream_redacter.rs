@@ -17,12 +17,13 @@ use crate::redacters::{
 };
 use crate::AppResult;
 use futures::future::LocalBoxFuture;
-use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
+use futures::{FutureExt, Stream, TryStreamExt};
 use image::ImageFormat;
 use mime::Mime;
 use rvstruct::ValueStruct;
 use std::collections::HashMap;
 use std::ops::Range;
+use tokio::sync::mpsc;
 
 /// The conversion the content went through before it was redacted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,19 +92,23 @@ pub struct RedactedOutput<'f> {
 }
 
 impl<'f> RedactStreamResult<'f> {
-    /// The result of a file redacted part by part as its stream is read.
+    /// The result of a file redacted part by part as its stream is read. `run` is given the
+    /// sender that the redacted parts are written to.
     fn in_parts(
         redacters: Vec<RedacterType>,
-        stream: ContentStream,
-        run: RedactionRun<'f>,
+        run: impl FnOnce(mpsc::Sender<AppResult<bytes::Bytes>>) -> RedactionRun<'f>,
     ) -> Self {
+        let (written, stream) = written_windows();
         Self {
             number_of_redactions: redacters.len(),
             summary: RedactionSummary {
                 applied: redacters,
                 ..RedactionSummary::default()
             },
-            output: RedactedOutput { stream, run },
+            output: RedactedOutput {
+                stream,
+                run: run(written),
+            },
         }
     }
 }
@@ -511,7 +516,7 @@ impl<'a> StreamRedacter<'a> {
                 let mut batches =
                     TableBatches::new(input, self.redacter_base_options, batch_bytes).await?;
                 let first = batches.next_batch().await?;
-                if !first.is_whole_table() {
+                if first.rows_before != 0 || !first.reaches_end {
                     return self.redact_table_in_batches(
                         batches,
                         first,
@@ -524,12 +529,12 @@ impl<'a> StreamRedacter<'a> {
             }
             PlannedRead::TextPieces(layout) => {
                 let unsupported = redact_plan.read_unsupported_as_text;
-                let mut pieces = Self::text_pieces(input, layout, unsupported);
-                match pieces.next_window().await {
-                    Ok(Some(first)) if first.is_whole_text() => {
+                let pieces = Self::text_pieces(input, layout, unsupported);
+                match Self::first_window(pieces, unsupported).await? {
+                    Ok((first, _)) if first.is_whole_text() => {
                         Ok(self.text_redact_item(first.text, file_ref))
                     }
-                    Ok(Some(first)) => {
+                    Ok((first, pieces)) => {
                         return self.redact_text_in_pieces(
                             pieces,
                             first,
@@ -538,13 +543,7 @@ impl<'a> StreamRedacter<'a> {
                             record,
                         );
                     }
-                    Ok(None) => {
-                        return Err(AppError::SystemError {
-                            message: "A text has no first window".to_string(),
-                        });
-                    }
-                    Err(error) if unsupported && error.is_not_text() => Err(pieces.into_unread()?),
-                    Err(error) => return Err(error),
+                    Err(unread) => Err(unread),
                 }
             }
             PlannedRead::Whole => {
@@ -730,11 +729,9 @@ impl<'a> StreamRedacter<'a> {
             read = ?redact_plan.read,
             "redacting in pieces"
         );
-        let (written, stream) = written_windows();
         Ok(RedactStreamResult::in_parts(
             redaction.redacters(),
-            stream,
-            redact_windows(redaction, pieces, first, written, record).boxed_local(),
+            |written| redact_windows(redaction, pieces, first, written, record).boxed_local(),
         ))
     }
 
@@ -765,12 +762,9 @@ impl<'a> StreamRedacter<'a> {
             read = ?redact_plan.read,
             "redacting a table in batches"
         );
-        let (written, stream) = written_windows();
-        Ok(RedactStreamResult::in_parts(
-            redacters,
-            stream,
-            redact_batches(redaction, batches, first, written, record).boxed_local(),
-        ))
+        Ok(RedactStreamResult::in_parts(redacters, |written| {
+            redact_batches(redaction, batches, first, written, record).boxed_local()
+        }))
     }
 
     /// What the redacters of `plan` find in the file, read as `redact_stream` reads it. Every
@@ -908,6 +902,27 @@ impl<'a> StreamRedacter<'a> {
         }
     }
 
+    /// The first window of `pieces` and the pieces after it. When the file is read as text only
+    /// on its content, `unsupported_as_text`, and the first window is not text, the input comes
+    /// back unread for a caller that leaves the file as it is.
+    async fn first_window<
+        S: Stream<Item = AppResult<bytes::Bytes>> + Unpin + Send + Sync + 'static,
+    >(
+        mut pieces: TextPieces<S>,
+        unsupported_as_text: bool,
+    ) -> AppResult<Result<(TextWindow, TextPieces<S>), ContentStream>> {
+        match pieces.next_window().await {
+            Ok(Some(first)) => Ok(Ok((first, pieces))),
+            Ok(None) => Err(AppError::SystemError {
+                message: "A text has no first window".to_string(),
+            }),
+            Err(error) if unsupported_as_text && error.is_not_text() => {
+                Ok(Err(pieces.into_unread()?))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// What `redacters` find in the text `input` holds, read in pieces of `layout`. A text that
     /// fits in one window is read whole, as `detect_stream` reads any other file.
     ///
@@ -937,7 +952,8 @@ impl<'a> StreamRedacter<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let (is_whole, window_end) = (window.is_whole_text(), window.end());
+            let is_whole = window.is_whole_text();
+            let window_end = window.start.offset + window.text.len();
             let whole_lines = window.whole_lines();
             let (piece, start) = (window.piece, window.start);
             let item = RedacterDataItem {
@@ -1101,34 +1117,11 @@ impl<'a> StreamRedacter<'a> {
         redact_plan: &StreamRedactPlan<'a>,
     ) -> AppResult<Result<RedacterDataItem, ContentStream>> {
         if redact_plan.read_unsupported_as_text {
-            let mut input = input;
-            let mut head = Vec::new();
-            let mut head_size = 0;
-            let mut has_nul = false;
-            while head_size < NOT_TEXT_PROBE_SIZE && !has_nul {
-                let Some(chunk) = input.try_next().await? else {
-                    break;
-                };
-                head_size += chunk.len();
-                has_nul = chunk.contains(&0);
-                head.push(chunk);
-            }
-            if has_nul {
-                return Ok(Err(Box::new(
-                    futures::stream::iter(head.into_iter().map(Ok)).chain(input),
-                )));
-            }
-            head.extend(input.try_collect::<Vec<_>>().await?);
-            let bytes = match String::from_utf8(head.concat()) {
-                Ok(text) if !text.contains('\0') => {
-                    return Ok(Ok(self.text_redact_item(text, file_ref)));
-                }
-                Ok(text) => text.into_bytes(),
-                Err(error) => error.into_bytes(),
-            };
-            return Ok(Err(Box::new(futures::stream::iter(vec![Ok(
-                bytes::Bytes::from(bytes),
-            )]))));
+            let whole_text = PieceLayout::new(usize::MAX, NOT_TEXT_PROBE_SIZE);
+            let pieces = Self::text_pieces(input, whole_text, true);
+            return Ok(Self::first_window(pieces, true)
+                .await?
+                .map(|(whole, _)| self.text_redact_item(whole.text, file_ref)));
         }
         let item = match file_ref.media_type {
             Some(ref mime)
@@ -2706,6 +2699,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a@b.io"]
         );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_file_read_whole_is_text_exactly_when_it_is_read_in_pieces() {
+        let converters = FileConverters::new();
+        let redacters = vec![email_rules().await];
+        let mut options = base_options();
+        options.unsupported_as_text = true;
+        options.sampling_size = Some(1024 * 1024);
+        let stream_redacter = StreamRedacter::new(&options, &converters);
+        let mut long_text = "# padding\n".repeat(NOT_TEXT_PROBE_SIZE / 4);
+        long_text.push_str("ADMIN_EMAIL=a@b.io\n");
+        let texts = ["ADMIN_EMAIL=a@b.io\n".to_string(), String::new(), long_text];
+
+        for text in texts {
+            let plan = stream_redacter
+                .create_redact_plan(&redacters, &env_file())
+                .await
+                .unwrap();
+            assert_eq!(plan.read, PlannedRead::Whole);
+            let result = redact_and_list(
+                &stream_redacter,
+                in_probe_chunks(text.as_bytes()),
+                plan,
+                &env_file(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.summary.blocked, None);
+            assert_eq!(
+                result.written.unwrap().concat(),
+                text.replace("a@b.io", "[REDACTED]").into_bytes()
+            );
+        }
+        for data in not_text_files() {
+            let plan = stream_redacter
+                .create_redact_plan(&redacters, &env_file())
+                .await
+                .unwrap();
+            let result =
+                redact_and_list(&stream_redacter, in_probe_chunks(&data), plan, &env_file())
+                    .await
+                    .unwrap();
+            assert_eq!(result.number_of_redactions, 0, "{data:?}");
+            assert_eq!(result.summary.blocked, Some(RedactionBlocked::NotText));
+            assert_eq!(result.written.unwrap().concat(), data);
+        }
     }
 
     #[tokio::test]
