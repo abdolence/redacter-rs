@@ -1050,7 +1050,11 @@ mod tests {
         assert_eq!(ndjson.lines().count(), 1);
         assert_eq!(
             event["file"]["path"],
-            format!("{}/note.txt", source.path().display())
+            source
+                .path()
+                .join("note.txt")
+                .to_string_lossy()
+                .into_owned()
         );
         assert_eq!(
             event["data_security"]["discovery_details"][0]["occurrences"],
