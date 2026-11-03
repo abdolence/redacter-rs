@@ -15,9 +15,7 @@ pub enum AppError {
     UnknownRedacter { redacter_type: String },
     #[error("Input/output error")]
     InputOutputError(#[from] std::io::Error),
-    #[error(
-        "The findings of the scan cannot be kept in a temporary file in '{directory}': {source}"
-    )]
+    #[error("The findings cannot be kept in a temporary file in '{directory}': {source}")]
     FindingSpillFailed {
         directory: String,
         #[source]
