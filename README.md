@@ -598,16 +598,16 @@ redaction of a large file is located, in the report too. The LLM redacters, `loc
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB.
 
-With `--report-file`, the redactions of a copy are kept in a temporary file instead of in memory, the one `scan` keeps
+With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one `scan` keeps
 its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends, however it
 ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to it stops with
 an error that names the directory.
 
 The memory the redactions need depends on the allocator. `cp -d local-rules --report-file r.json` on a 23 MB log with
-700 000 redactions peaks near 125 MB with `MallocSpaceEfficient=1` in the environment, and near 309 MB without it on
-macOS, whose default allocator keeps freed memory. Without the temporary file the same copy peaks near 312 MB and
-454 MB. With `MallocSpaceEfficient=1` the peak is near 121 MB at 200 000 redactions and near 125 MB at 400 000.
-The copy takes about 17% more time. Building the SARIF report keeps at most 5000 results in memory, and building the
+700 000 redactions peaks near 118 MiB with `MallocSpaceEfficient=1` in the environment, and near 317 MiB without it on
+macOS, whose default allocator keeps freed memory. With `MallocSpaceEfficient=1` the peak is near 114 MiB at
+200 000 redactions and near 118 MiB at 400 000. The temporary file adds 10 to 20% to the time of that copy.
+Building the SARIF report keeps at most 5000 results in memory, and building the
 OCSF report keeps an event for each file.
 
 `aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
