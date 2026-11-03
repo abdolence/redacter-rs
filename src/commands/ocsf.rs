@@ -575,6 +575,9 @@ struct FindingExtras {
 mod tests {
     use super::*;
     use crate::args::RedacterType;
+    use crate::commands::finding_spill::FindingSpill;
+    use crate::commands::scan_output::{FindingReport, ValueDisplay};
+    use crate::redacters::Detection;
     use serde_json::{json, Value};
     use std::path::MAIN_SEPARATOR_STR;
     use std::time::Duration;
@@ -619,18 +622,17 @@ mod tests {
         score: Option<f32>,
         location: DetectionLocation,
         value: &str,
-    ) -> ReportedFinding {
-        ReportedFinding::new(
-            redacter,
-            DetectionLabel::new(label),
-            score.map(|score| Score::try_from(score).unwrap()),
+    ) -> FindingReport {
+        let detection = Detection {
+            label: DetectionLabel::new(label),
             location,
-            Place::new(location, value),
-            value,
-        )
+            score: score.map(|score| Score::try_from(score).unwrap()),
+            value: value.to_string(),
+        };
+        FindingReport::new(redacter, &detection, ValueDisplay::Masked)
     }
 
-    fn email(location: DetectionLocation, value: &str) -> ReportedFinding {
+    fn email(location: DetectionLocation, value: &str) -> FindingReport {
         finding(RedacterType::LocalRules, "email", None, location, value)
     }
 
@@ -641,8 +643,10 @@ mod tests {
         }
     }
 
-    fn found(path: &str, findings: Vec<ReportedFinding>) -> ReportedFile {
-        file(path, FileOutcome::Findings(findings.into_iter().collect()))
+    fn found(path: &str, findings: Vec<FindingReport>) -> ReportedFile {
+        let mut spilled = SpilledFindings::new(&FindingSpill::default());
+        spilled.append(&findings).unwrap();
+        file(path, FileOutcome::Findings(spilled))
     }
 
     fn ndjson_in(source: &str, files: &[ReportedFile]) -> String {
@@ -878,7 +882,7 @@ mod tests {
     #[test]
     fn an_event_lists_a_capped_number_of_findings_of_a_detail_and_counts_them_all() {
         let repeated = MAX_LISTED_FINDINGS_PER_DETAIL + 5;
-        let mut findings: Vec<ReportedFinding> = (1..=repeated)
+        let mut findings: Vec<FindingReport> = (1..=repeated)
             .map(|line| email(text_at(line, 1), "a@b.io"))
             .collect();
         findings.push(email(text_at(repeated + 1, 1), "c@d.io"));
@@ -963,7 +967,7 @@ mod tests {
             "AKIAIOSFODNN7EXAMPLE",
         );
         let personal = email(DetectionLocation::File, "a@b.io");
-        let severity_of = |findings: Vec<ReportedFinding>| {
+        let severity_of = |findings: Vec<FindingReport>| {
             let event = event_of(found("a.txt", findings));
             (event["severity_id"].clone(), event["severity"].clone())
         };

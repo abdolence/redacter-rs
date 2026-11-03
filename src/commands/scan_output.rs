@@ -137,19 +137,6 @@ impl FindingReport {
         })
     }
 
-    /// A finding of a report test, with the place the test chose.
-    #[cfg(test)]
-    pub(super) fn of_reported(finding: &ReportedFinding) -> Self {
-        Self {
-            redacter: finding.redacter,
-            label: finding.label.clone(),
-            score: finding.score,
-            location: finding.location,
-            place: finding.place,
-            value: finding.masked_value.clone(),
-        }
-    }
-
     /// The finding for the SARIF and OCSF reports, which mask the value whatever the report
     /// holds.
     pub(super) fn reported_finding(&self) -> ReportedFinding {

@@ -7,7 +7,7 @@ use crate::commands::copy_output::{
 };
 use crate::commands::finding_spill::{FindingSpill, SpilledFindings};
 use crate::commands::findings::{FileOutcome, ReportedFile};
-use crate::commands::scan_output::{FindingReport, ValueDisplay};
+use crate::commands::scan_output::ValueDisplay;
 use crate::errors::AppError;
 use crate::file_converters::FileConverters;
 use crate::file_systems::{DetectFileSystem, FileSystemConnection, FileSystemRef};
@@ -613,8 +613,9 @@ async fn redact_upload_file<
 
     if !redact_plan.supported_redacters.is_empty() {
         let mut redactions = SpilledFindings::new(spill);
-        let mut record =
-            |records: Vec<(RedacterType, Detection)>| append_redactions(&mut redactions, &records);
+        let mut record = |records: Vec<(RedacterType, Detection)>| {
+            redactions.append_window(&records, ValueDisplay::Masked)
+        };
         let RedactStreamResult {
             number_of_redactions,
             summary,
@@ -687,20 +688,6 @@ async fn redact_upload_file<
             },
         ))
     }
-}
-
-/// Appends the redactions of a window of a file to its report, masked and in the order a reader
-/// meets them. Windows follow one another in the file, so the order holds across them.
-fn append_redactions(
-    findings: &mut SpilledFindings,
-    redactions: &[(RedacterType, Detection)],
-) -> AppResult<()> {
-    let mut window: Vec<FindingReport> = redactions
-        .iter()
-        .map(|(redacter, detection)| FindingReport::new(*redacter, detection, ValueDisplay::Masked))
-        .collect();
-    FindingReport::sort_by_location(&mut window);
-    findings.append(&window)
 }
 
 /// Why redaction did not happen, defaulting to "no redacter applied" when the
@@ -854,7 +841,9 @@ mod tests {
             file_size: Some(10),
         };
         let mut spilled = SpilledFindings::new(&FindingSpill::default());
-        append_redactions(&mut spilled, redactions).unwrap();
+        spilled
+            .append_window(redactions, ValueDisplay::Masked)
+            .unwrap();
         CopyFileReport::new(&file_ref, outcome, spilled)
     }
 
@@ -874,15 +863,8 @@ mod tests {
             .into_iter()
             .map(|artifact| {
                 let outcome = match artifact.outcome {
-                    FileOutcome::Findings(findings) => {
-                        let mut count = 0;
-                        findings.for_each(|_| count += 1).unwrap();
-                        if count == 0 {
-                            "clean"
-                        } else {
-                            "findings"
-                        }
-                    }
+                    FileOutcome::Findings(findings) if findings.is_empty() => "clean",
+                    FileOutcome::Findings(_) => "findings",
                     FileOutcome::Unconfirmed { .. } => "unconfirmed",
                     FileOutcome::Failed { .. } => "failed",
                     FileOutcome::Blocked { .. } => "blocked",

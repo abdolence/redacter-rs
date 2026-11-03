@@ -3,8 +3,10 @@
 //! a file's findings are a range of lines that the writers of the reports, and the terminal, read
 //! back one at a time.
 
+use crate::args::RedacterType;
 use crate::commands::findings::ReportedFinding;
-use crate::commands::scan_output::{FindingReport, FindingsByLabel};
+use crate::commands::scan_output::{FindingReport, FindingsByLabel, ValueDisplay};
+use crate::redacters::Detection;
 use crate::{AppError, AppResult};
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -78,6 +80,21 @@ impl SpilledFindings {
         Ok(())
     }
 
+    /// Appends the detections of one window of a file, sorted by location within the window.
+    /// Windows follow one another in the file, so the order holds across them.
+    pub fn append_window<'a>(
+        &mut self,
+        detections: impl IntoIterator<Item = &'a (RedacterType, Detection)>,
+        values: ValueDisplay,
+    ) -> AppResult<()> {
+        let mut window: Vec<FindingReport> = detections
+            .into_iter()
+            .map(|(redacter, detection)| FindingReport::new(*redacter, detection, values))
+            .collect();
+        FindingReport::sort_by_location(&mut window);
+        self.append(&window)
+    }
+
     fn write(&mut self, findings: &[FindingReport]) -> std::io::Result<()> {
         let mut guard = self.spill.locked();
         let spill = &mut *guard;
@@ -137,20 +154,6 @@ impl SpilledFindings {
             line: Vec::new(),
             failed: false,
         }
-    }
-}
-
-/// The findings that report tests spell out, in a spill of their own.
-#[cfg(test)]
-impl FromIterator<ReportedFinding> for SpilledFindings {
-    fn from_iter<I: IntoIterator<Item = ReportedFinding>>(findings: I) -> Self {
-        let findings: Vec<_> = findings
-            .into_iter()
-            .map(|finding| FindingReport::of_reported(&finding))
-            .collect();
-        let mut spilled = Self::new(&FindingSpill::default());
-        spilled.append(&findings).unwrap();
-        spilled
     }
 }
 
