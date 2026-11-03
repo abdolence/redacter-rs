@@ -46,19 +46,34 @@ where
     Ok(shift_into_cell(scored, prefix.len()))
 }
 
+/// Where a text being searched sits in a table: its column, and the headers of all columns.
+/// Only the model redacters read it, so a build without them never reads the fields.
+#[cfg_attr(
+    not(any(
+        feature = "local-ner",
+        feature = "local-gliner",
+        feature = "local-credential-ml"
+    )),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy)]
+pub struct TableColumn<'a> {
+    pub headers: &'a [String],
+    pub column: usize,
+}
+
 impl RedacterDataItemContent {
-    /// Redacts the text, or every table cell, in which `find_text` or `find_cell(headers,
-    /// column, cell)` reports a finding, and returns the findings as detections located in the
-    /// content. Everything else stays byte for byte. Images and PDFs are not text:
+    /// Redacts the text, or every table cell, in which `find(column, text)` reports a finding,
+    /// and returns the findings as detections located in the content. `column` is `None` for a
+    /// text. Everything else stays byte for byte. Images and PDFs are not text:
     /// `unsupported_content`.
     pub fn redacted_with(
         self,
-        find_text: impl FnOnce(&str) -> AppResult<Vec<Finding>>,
-        mut find_cell: impl FnMut(&[String], usize, &str) -> AppResult<Vec<Finding>>,
+        mut find: impl FnMut(Option<TableColumn<'_>>, &str) -> AppResult<Vec<Finding>>,
     ) -> AppResult<(Self, Vec<Detection>)> {
         match self {
             Self::Value(text) => {
-                let findings = find_text(&text)?;
+                let findings = find(None, &text)?;
                 let redacted = apply_redaction(&text, &findings, REDACTED);
                 Ok((
                     Self::Value(redacted),
@@ -66,26 +81,32 @@ impl RedacterDataItemContent {
                 ))
             }
             Self::Table { headers, rows } => {
-                let (rows, found) =
-                    redact_rows(rows, |column, cell| find_cell(&headers, column, cell))?;
+                let (rows, found) = redact_rows(rows, |column, cell| {
+                    find(
+                        Some(TableColumn {
+                            headers: &headers,
+                            column,
+                        }),
+                        cell,
+                    )
+                })?;
                 Ok((Self::Table { headers, rows }, found))
             }
             Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }
 
-    /// The detections `find_text` or `find_cell(headers, column, cell)` report in the content,
-    /// which is left as it is.
+    /// The detections `find(column, text)` reports in the content, which is left as it is.
+    /// `column` is `None` for a text.
     pub fn detected_with(
         &self,
-        find_text: impl FnOnce(&str) -> AppResult<Vec<Finding>>,
-        mut find_cell: impl FnMut(&[String], usize, &str) -> AppResult<Vec<Finding>>,
+        mut find: impl FnMut(Option<TableColumn<'_>>, &str) -> AppResult<Vec<Finding>>,
     ) -> AppResult<Detections> {
         match self {
-            Self::Value(text) => Detection::in_text(text, find_text(text)?),
-            Self::Table { headers, rows } => {
-                Detection::in_table_cells(rows, |column, cell| find_cell(headers, column, cell))
-            }
+            Self::Value(text) => Detection::in_text(text, find(None, text)?),
+            Self::Table { headers, rows } => Detection::in_table_cells(rows, |column, cell| {
+                find(Some(TableColumn { headers, column }), cell)
+            }),
             Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
         }
     }

@@ -58,8 +58,7 @@ impl<'a> LocalRulesRedacter<'a> {
 impl<'a> Redacter for LocalRulesRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let RedacterDataItem { content, file_ref } = input;
-        let find = |text: &str| Ok(self.rules.find(text));
-        let (content, replaced) = content.redacted_with(find, |_, _, cell| find(cell))?;
+        let (content, replaced) = content.redacted_with(|_, text| Ok(self.rules.find(text)))?;
         Ok(Redacted::located_by_local(
             RedacterDataItem { content, file_ref },
             replaced,
@@ -73,8 +72,9 @@ impl<'a> Redacter for LocalRulesRedacter<'a> {
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
-        let find = |text: &str| Ok(self.rules.find(text));
-        input.content.detected_with(find, |_, _, cell| find(cell))
+        input
+            .content
+            .detected_with(|_, text| Ok(self.rules.find(text)))
     }
 
     fn redacter_type(&self) -> RedacterType {
