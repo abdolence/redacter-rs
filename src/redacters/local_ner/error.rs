@@ -12,10 +12,6 @@ pub enum LocalNerError {
     UnknownLabel { label: String },
     #[error("model config has an invalid id2label table: {reason}")]
     InvalidLabels { reason: String },
-    #[error("model inference failed: {reason}")]
-    Inference { reason: String },
-    #[error("model output has shape {actual}, expected {expected}")]
-    OutputShape { expected: String, actual: String },
     #[error("no entity types selected for the local-ner redacter; valid values: per, org, loc")]
     NoEntities,
 }

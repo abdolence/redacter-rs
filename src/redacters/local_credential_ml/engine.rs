@@ -4,6 +4,7 @@
 use super::error::LocalCredentialMlError;
 use super::extraction::CredentialExtractor;
 use crate::addon_store::AddonFiles;
+use crate::args::RedacterType;
 use crate::redacters::local_model::{
     graph_node, load_model, load_tokenizer, read_json, LocalModelError,
 };
@@ -78,7 +79,10 @@ impl CredentialMlEngine {
                 ..TruncationParams::default()
             }),
         )?;
-        let model = load_model(&files.dir().join("model.onnx"), "credential")?;
+        let model = load_model(
+            &files.dir().join("model.onnx"),
+            RedacterType::LocalCredentialMl,
+        )?;
         let input_ids = graph_node(&model, "input_ids")?;
         let attention_mask = graph_node(&model, "attention_mask")?;
         let logits = graph_node(&model, "logits")?;
@@ -116,7 +120,7 @@ impl CredentialMlEngine {
             .get_ids()
             .iter()
             .map(|&id| {
-                i32::try_from(id).map_err(|_| LocalCredentialMlError::Inference {
+                i32::try_from(id).map_err(|_| LocalModelError::Inference {
                     reason: format!("token id {id} does not fit the model's int32 input"),
                 })
             })
@@ -134,22 +138,23 @@ impl CredentialMlEngine {
                 [self.logits],
                 None,
             )
-            .map_err(|err| LocalCredentialMlError::Inference {
+            .map_err(|err| LocalModelError::Inference {
                 reason: err.to_string(),
             })?;
         let output: NdTensor<f32, 2> =
             output
                 .try_into()
-                .map_err(|err| LocalCredentialMlError::OutputShape {
+                .map_err(|err| LocalModelError::OutputShape {
                     expected: "a rank-2 f32 tensor".to_string(),
                     actual: format!("{err:?}"),
                 })?;
         let [batch, classes] = output.shape();
         if batch != 1 || classes != 2 {
-            return Err(LocalCredentialMlError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: "[1, 2]".to_string(),
                 actual: format!("[{batch}, {classes}]"),
-            });
+            }
+            .into());
         }
         // Class 0 is `clean`, class 1 `credential` (checked against `config.json` at load);
         // the softmax of two classes is a sigmoid of their difference.

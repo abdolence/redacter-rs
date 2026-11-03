@@ -1,5 +1,6 @@
 //! Loading and running the rten models behind the local redacters.
 
+use crate::args::RedacterType;
 use crate::AppResult;
 use rten::{Model, NodeId};
 use serde::de::DeserializeOwned;
@@ -12,9 +13,9 @@ use tokenizers::{Tokenizer, TruncationParams};
 /// names what was wrong: the file, the graph node or the token.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalModelError {
-    #[error("cannot load {model} model {path}: {source}")]
+    #[error("cannot load {redacter} model {path}: {source}")]
     ModelLoad {
-        model: &'static str,
+        redacter: RedacterType,
         path: String,
         #[source]
         source: rten::LoadError,
@@ -29,6 +30,10 @@ pub enum LocalModelError {
     MissingSpecialToken { token: String },
     #[error("cannot tokenize the text: {reason}")]
     Encode { reason: String },
+    #[error("model inference failed: {reason}")]
+    Inference { reason: String },
+    #[error("model output has shape {actual}, expected {expected}")]
+    OutputShape { expected: String, actual: String },
 }
 
 impl LocalModelError {
@@ -46,10 +51,10 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LocalModelError>
     serde_json::from_slice(&bytes).map_err(|err| LocalModelError::config(path, err))
 }
 
-/// Loads an ONNX model; `model` names it in the error.
-pub fn load_model(path: &Path, model: &'static str) -> Result<Model, LocalModelError> {
+/// Loads an ONNX model; `redacter` names its owner in the error.
+pub fn load_model(path: &Path, redacter: RedacterType) -> Result<Model, LocalModelError> {
     Model::load_file(path).map_err(|source| LocalModelError::ModelLoad {
-        model,
+        redacter,
         path: path.display().to_string(),
         source,
     })

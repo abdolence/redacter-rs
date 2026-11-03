@@ -11,10 +11,6 @@ pub enum LocalCredentialMlError {
     ClassLabels { path: String, actual: String },
     #[error("{path} gives the temperature {value}, which is not a positive number")]
     InvalidTemperature { path: String, value: f32 },
-    #[error("model inference failed: {reason}")]
-    Inference { reason: String },
-    #[error("model output has shape {actual}, expected {expected}")]
-    OutputShape { expected: String, actual: String },
     #[error("model produced the score {value}, which is not between 0 and 1")]
     InvalidScore { value: f32 },
     #[error("cannot compile the rules that place a credential on a line: {0}")]

@@ -11,6 +11,7 @@ use super::pipeline::{
     WindowScorer, OVERLAP_WORDS,
 };
 use crate::addon_store::AddonFiles;
+use crate::args::RedacterType;
 use crate::redacters::local_model::{
     graph_node, load_model, load_tokenizer, read_json, special_token, LocalModelError,
 };
@@ -122,7 +123,7 @@ impl GlinerEngine {
         let sep = special_token(&tokenizer, "[SEP]")?;
         let ent = special_token(&tokenizer, &config.ent_token)?;
         let gliner_sep = special_token(&tokenizer, &config.sep_token)?;
-        let model = load_model(&files.dir().join("model.onnx"), "GLiNER")?;
+        let model = load_model(&files.dir().join("model.onnx"), RedacterType::LocalGliner)?;
         Ok(Self {
             input_ids: graph_node(&model, "input_ids")?,
             attention_mask: graph_node(&model, "attention_mask")?,
@@ -240,23 +241,24 @@ impl WindowScorer for GlinerEngine {
                 [self.logits],
                 None,
             )
-            .map_err(|err| LocalGlinerError::Inference {
+            .map_err(|err| LocalModelError::Inference {
                 reason: err.to_string(),
             })?;
 
         let output: NdTensor<f32, 4> =
             output
                 .try_into()
-                .map_err(|err| LocalGlinerError::OutputShape {
+                .map_err(|err| LocalModelError::OutputShape {
                     expected: "a rank-4 f32 tensor".to_string(),
                     actual: format!("{err:?}"),
                 })?;
         let [batch, num_words, max_width, out_labels] = output.shape();
         if batch != 1 || num_words != inputs.num_words || out_labels != num_labels {
-            return Err(LocalGlinerError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: format!("[1, {}, _, {num_labels}]", inputs.num_words),
                 actual: format!("[{batch}, {num_words}, {max_width}, {out_labels}]"),
-            });
+            }
+            .into());
         }
         Ok(Logits {
             num_words,

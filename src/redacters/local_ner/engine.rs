@@ -7,6 +7,7 @@ use super::pipeline::{
     WindowScorer, OVERLAP,
 };
 use crate::addon_store::AddonFiles;
+use crate::args::RedacterType;
 use crate::redacters::local_model::{
     graph_node, load_model, load_tokenizer, read_json, special_token, LocalModelError,
 };
@@ -41,7 +42,10 @@ impl NerEngine {
         let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"), None)?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
-        let model = load_model(&files.dir().join("model_uint8.onnx"), "NER")?;
+        let model = load_model(
+            &files.dir().join("model_uint8.onnx"),
+            RedacterType::LocalNer,
+        )?;
         let input_ids = graph_node(&model, "input_ids")?;
         let attention_mask = graph_node(&model, "attention_mask")?;
         let logits = model.output_ids().first().copied().ok_or_else(|| {
@@ -113,7 +117,7 @@ impl WindowScorer for NerEngine {
         let n = ids_with_cls_sep.len();
         let mut input = Vec::with_capacity(n);
         for &id in ids_with_cls_sep {
-            input.push(i32::try_from(id).map_err(|_| LocalNerError::Inference {
+            input.push(i32::try_from(id).map_err(|_| LocalModelError::Inference {
                 reason: format!("token id {id} does not fit the model's int32 input"),
             })?);
         }
@@ -129,22 +133,23 @@ impl WindowScorer for NerEngine {
                 [self.logits],
                 None,
             )
-            .map_err(|err| LocalNerError::Inference {
+            .map_err(|err| LocalModelError::Inference {
                 reason: err.to_string(),
             })?;
         let output: NdTensor<f32, 3> =
             output
                 .try_into()
-                .map_err(|err| LocalNerError::OutputShape {
+                .map_err(|err| LocalModelError::OutputShape {
                     expected: "a rank-3 f32 tensor".to_string(),
                     actual: format!("{err:?}"),
                 })?;
         let [batch, rows, cols] = output.shape();
         if batch != 1 {
-            return Err(LocalNerError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: format!("[1, {n}, {}]", self.labels.len()),
                 actual: format!("[{batch}, {rows}, {cols}]"),
-            });
+            }
+            .into());
         }
         Ok(Logits {
             rows,

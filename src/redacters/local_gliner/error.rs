@@ -6,10 +6,6 @@ use crate::redacters::local_model::LocalModelError;
 pub enum LocalGlinerError {
     #[error(transparent)]
     Model(#[from] LocalModelError),
-    #[error("model inference failed: {reason}")]
-    Inference { reason: String },
-    #[error("model output has shape {actual}, expected {expected}")]
-    OutputShape { expected: String, actual: String },
     #[error("no labels given to the local-gliner redacter")]
     NoLabels,
     #[error("local-gliner label is empty or all whitespace")]
