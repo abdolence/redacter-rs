@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokenizers::{Tokenizer, TruncationParams};
 
-/// Failures of loading a model and its files, shared by the local redacters. Every variant
-/// names what was wrong: the file, the graph node or the token.
+/// Failures of loading and running the models of the local redacters. Every variant names what
+/// was wrong: the file, the graph node, the token, the text or the output shape.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalModelError {
     #[error("cannot load {redacter} model {path}: {source}")]

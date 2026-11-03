@@ -568,11 +568,12 @@ How exactly a redaction is located depends on the redacter and the content:
 | Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode, or in the default `auto` mode when the native edit is not available |
 | Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode, or in the `auto` mode when the native edit succeeds |
 
-A redaction located at the `file`, or at the `page` of a PDF, has the label `sensitive_data`, no score and no value.
-Each step of `gcp-dlp`, or of an LLM redacter without `--categories`, on a text or a table is one such redaction, and
-so is every later step on the same text or table. So is a step that changes the shape of a table. An image step that
-follows a step that changed the size of the image is located at the `page` or the `file` too; the step that changed
-the size still reports its boxes.
+A text or table redaction located at the `file`, or at the `page` of a PDF, has the label `sensitive_data`, no score and
+no value. Each step of `gcp-dlp`, or of an LLM redacter without `--categories`, on a text or a table that changes more
+than whitespace is one such redaction, and so is every later step on the same text or table. So is a step that changes
+the shape of a table. The boxes of an image step that follows a step that changed the size of the image are located at
+the `page` or the `file` too, and keep their label, score and value; the step that changed the size still reports its
+boxes.
 
 A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
 takes.
@@ -589,23 +590,23 @@ The output is the same as when the file is read whole, with two exceptions. A ru
 or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
 finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
 
-Every redaction of a large file read in pieces is located, in the report too. The LLM redacters, `local-ner`, `local-gliner` and
-`--sampling-size` read the file whole. A model read in pieces loses recall and precision on the bench, see
-[Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
+Every redaction of a large file read in pieces is located, in the report too. The LLM redacters, `local-ner`,
+`local-gliner` and `--sampling-size` read the file whole. A model read in pieces loses recall and precision on the
+bench, see [Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
 its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB.
 
-With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one `scan` keeps
-its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends, however it
-ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to it stops with
-an error that names the directory.
+With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one
+`scan` keeps its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends,
+however it ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to
+it stops with an error that names the directory.
 
 The memory the redactions need depends on the allocator. `cp -d local-rules --report-file r.json` on a 23 MB log with
 700 000 redactions peaks near 118 MiB with `MallocSpaceEfficient=1` in the environment, and near 317 MiB without it on
 macOS, whose default allocator keeps freed memory. With `MallocSpaceEfficient=1` the peak is near 114 MiB at
 200 000 redactions and near 118 MiB at 400 000. The temporary file adds 10 to 20% to the time of that copy.
-Building the SARIF report keeps at most 5000 results in memory, and building the
+Building the SARIF report keeps at most 5000 results for each rule in memory, and building the
 OCSF report keeps an event for each file.
 
 `aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
