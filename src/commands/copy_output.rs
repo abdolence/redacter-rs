@@ -8,6 +8,7 @@
 use crate::addon_store::Addon;
 use crate::args::RedacterType;
 use crate::file_converters::FileConverters;
+use crate::file_tools::FileMatcherResult;
 use crate::redacters::{Categories, RedactionBlocked, RedactionConversion};
 use console::{pad_str, Alignment, Style};
 
@@ -271,6 +272,17 @@ impl NotRedactedReason {
 }
 
 impl SkipReason {
+    /// Why the matcher leaves the file out, or `None` for a file it lets through. Ignore rules
+    /// apply to listings only, so `SkippedDueToIgnore` does not skip a file the source handed
+    /// over.
+    pub(crate) fn of_match(result: FileMatcherResult) -> Option<Self> {
+        match result {
+            FileMatcherResult::SkippedDueToSize => Some(Self::OverSizeLimit),
+            FileMatcherResult::SkippedDueToName => Some(Self::NameFilter),
+            FileMatcherResult::Matched | FileMatcherResult::SkippedDueToIgnore => None,
+        }
+    }
+
     pub(crate) fn detail(&self) -> &'static str {
         match self {
             SkipReason::OverSizeLimit => "over size limit",
@@ -290,10 +302,7 @@ pub fn format_outcome_detail(outcome: &CopyFileOutcome) -> String {
             let mut parts: Vec<String> = redacters.iter().map(|r| r.to_string()).collect();
             match conversion {
                 Some(RedactionConversion::PdfToImages { pages, ocr }) => {
-                    parts.push(format!(
-                        "pdf → {pages} {}",
-                        if *pages == 1 { "image" } else { "images" }
-                    ));
+                    parts.push(format!("pdf → {}", counted(*pages, "image")));
                     if *ocr {
                         parts.push("ocr".to_string());
                     }
@@ -457,6 +466,15 @@ pub fn format_legend(entries: &[(&str, &str)], styles: &OutputStyles) -> String 
                 .join("   "),
         )
         .to_string()
+}
+
+/// `count` and `noun` in the singular or plural: `1 file`, `2 files`.
+pub(crate) fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Text from a scanned file or a model, or a name in the source, for a terminal or a text

@@ -1,12 +1,19 @@
 use super::{apply_redaction, Finding, REDACTED};
-use crate::redacters::Detection;
+use crate::args::RedacterType;
+use crate::errors::AppError;
+use crate::redacters::{
+    Detection, Detections, Redacted, RedacterDataItem, RedacterDataItemContent,
+};
+use crate::reporter::AppReporter;
 use crate::AppResult;
+use rvstruct::ValueStruct;
 
-/// The findings in one table cell, with offsets into the cell. Only a blank cell is skipped,
-/// so that digit-only values such as phone and card numbers reach the model; a provider that
-/// can rule out more cells does so before calling this.
+/// The findings in a text, or in one table cell, with offsets into that text or cell. `column`
+/// is `None` for a text, which `find_in` searches as given. Only a blank cell is skipped, so
+/// that digit-only values such as phone and card numbers reach the model; a provider that can
+/// rule out more cells does so before calling this.
 ///
-/// The cell is scored with its column header in front of it, `"city: Madrid"` rather than
+/// A cell is scored with its column header in front of it, `"city: Madrid"` rather than
 /// `"Madrid"`: a model reads a one-word cell better as a sentence. The prefix is scoring
 /// context only: `shift_into_cell` maps the findings back onto the cell, so no header text
 /// can reach a redacted cell or a detection.
@@ -16,15 +23,17 @@ use crate::AppResult;
     feature = "local-credential-ml"
 ))]
 pub fn find_in_cell<F, E>(
-    headers: &[String],
-    column: usize,
-    cell: &str,
+    column: Option<TableColumn<'_>>,
+    text: &str,
     find_in: &mut F,
 ) -> Result<Vec<Finding>, E>
 where
     F: FnMut(&str) -> Result<Vec<Finding>, E>,
 {
-    if cell.trim().is_empty() {
+    let Some(TableColumn { headers, column }) = column else {
+        return find_in(text);
+    };
+    if text.trim().is_empty() {
         return Ok(Vec::new());
     }
     // A row wider than the header list, or an empty header, leaves the cell alone.
@@ -33,11 +42,97 @@ where
         _ => String::new(),
     };
     let scored = if prefix.is_empty() {
-        find_in(cell)?
+        find_in(text)?
     } else {
-        find_in(&format!("{prefix}{cell}"))?
+        find_in(&format!("{prefix}{text}"))?
     };
     Ok(shift_into_cell(scored, prefix.len()))
+}
+
+/// Where a text being searched sits in a table: its column, and the headers of all columns.
+/// Only the model redacters read it, so a build without them never reads the fields.
+#[cfg_attr(
+    not(any(
+        feature = "local-ner",
+        feature = "local-gliner",
+        feature = "local-credential-ml"
+    )),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy)]
+pub struct TableColumn<'a> {
+    pub headers: &'a [String],
+    pub column: usize,
+}
+
+impl RedacterDataItemContent {
+    /// Redacts the text, or every table cell, in which `find(column, text)` reports a finding,
+    /// and returns the findings as detections located in the content. `column` is `None` for a
+    /// text. Everything else stays byte for byte. Images and PDFs are not text:
+    /// `unsupported_content`.
+    pub fn redacted_with(
+        self,
+        mut find: impl FnMut(Option<TableColumn<'_>>, &str) -> AppResult<Vec<Finding>>,
+    ) -> AppResult<(Self, Vec<Detection>)> {
+        match self {
+            Self::Value(text) => {
+                let findings = find(None, &text)?;
+                let redacted = apply_redaction(&text, &findings, REDACTED);
+                Ok((
+                    Self::Value(redacted),
+                    Detection::in_text(&text, findings)?.found,
+                ))
+            }
+            Self::Table { headers, rows } => {
+                let (rows, found) = redact_rows(rows, |column, cell| {
+                    find(
+                        Some(TableColumn {
+                            headers: &headers,
+                            column,
+                        }),
+                        cell,
+                    )
+                })?;
+                Ok((Self::Table { headers, rows }, found))
+            }
+            Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
+        }
+    }
+
+    /// The detections `find(column, text)` reports in the content, which is left as it is.
+    /// `column` is `None` for a text.
+    pub fn detected_with(
+        &self,
+        mut find: impl FnMut(Option<TableColumn<'_>>, &str) -> AppResult<Vec<Finding>>,
+    ) -> AppResult<Detections> {
+        match self {
+            Self::Value(text) => Detection::in_text(text, find(None, text)?),
+            Self::Table { headers, rows } => Detection::in_table_cells(rows, |column, cell| {
+                find(Some(TableColumn { headers, column }), cell)
+            }),
+            Self::Image { .. } | Self::Pdf { .. } => Err(AppError::unsupported_content()),
+        }
+    }
+}
+
+impl Redacted {
+    /// `item` with the findings a local redacter replaced, which are reported at debug level
+    /// under the name of `redacter`.
+    pub fn located_by_local(
+        item: RedacterDataItem,
+        replaced: Vec<Detection>,
+        reporter: &AppReporter<'_>,
+        redacter: RedacterType,
+    ) -> Self {
+        if !replaced.is_empty() {
+            reporter.report_debug(format!(
+                "{redacter}: {} finding(s) in {}",
+                replaced.len(),
+                item.file_ref.relative_path.value()
+            ));
+        }
+        Self::located(item, replaced)
+    }
 }
 
 /// Redacts every table cell that `find_in(column, cell)` reports a finding in, leaving

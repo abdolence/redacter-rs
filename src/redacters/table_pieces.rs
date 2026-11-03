@@ -10,8 +10,8 @@ use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::piece_redaction::end_with_error;
 use crate::redacters::{
-    Detection, DetectionLocation, RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent,
-    Redacters, StreamRedactions,
+    Detection, DetectionLocation, RecordRedactions, RedacterBaseOptions, RedacterDataItem,
+    RedacterDataItemContent, Redacters, StreamRedactions,
 };
 use crate::AppResult;
 use bytes::Bytes;
@@ -204,8 +204,8 @@ impl DetectionLocation {
 }
 
 /// Redacts the batches of a table one after the other and hands the CSV of each to `written`,
-/// then returns what the redacters redacted in the table, a batch after another. `first` is the
-/// batch `batches` read first.
+/// handing what the redacters redacted in each batch to `record`. `first` is the batch `batches`
+/// read first.
 ///
 /// When a batch cannot be read or redacted, the stream ends with the error, so that the
 /// destination does not keep the part of the table it was given.
@@ -214,14 +214,14 @@ pub(crate) async fn redact_batches<S: Stream<Item = AppResult<Bytes>> + Send + U
     mut batches: TableBatches<S>,
     first: TableBatch,
     written: mpsc::Sender<AppResult<Bytes>>,
-) -> AppResult<Vec<(RedacterType, Detection)>> {
-    let mut redactions = Vec::new();
+    record: &mut RecordRedactions<'_>,
+) -> AppResult<()> {
     let outcome: AppResult<()> = async {
         let mut batch = first;
         loop {
             let reaches_end = batch.reaches_end;
             let (csv, redacted) = redaction.redact_batch(batch).await?;
-            redactions.extend(redacted);
+            record(redacted)?;
             if written.send(Ok(csv)).await.is_err() || reaches_end {
                 return Ok(());
             }
@@ -229,7 +229,7 @@ pub(crate) async fn redact_batches<S: Stream<Item = AppResult<Bytes>> + Send + U
         }
     }
     .await;
-    end_with_error(outcome.map(|()| redactions), &written).await
+    end_with_error(outcome, &written).await
 }
 
 /// The CSV of a table, written with the delimiter the table is read with. The header record is

@@ -250,25 +250,6 @@ impl<'a> PresidioRedacter<'a> {
             .collect()
     }
 
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        let text_content = match input.content {
-            RedacterDataItemContent::Value(content) => Ok(content),
-            _ => Err(AppError::SystemError {
-                message: "Unsupported item for text redacting".to_string(),
-            }),
-        }?;
-
-        let detections = self.detect_text(&text_content).await?;
-        let redacted_text_content = Detection::mask(&text_content, &detections, self.text_mask());
-        Ok(Redacted::located(
-            RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(redacted_text_content),
-            },
-            detections,
-        ))
-    }
-
     pub async fn redact_image_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let redact_url = self.presidio_options.image_redact_url.as_ref().ok_or(
             AppError::RedacterConfigError {
@@ -319,7 +300,13 @@ impl<'a> PresidioRedacter<'a> {
 impl<'a> Redacter for PresidioRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
-            RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
+            RedacterDataItemContent::Value(text) => Redacted::masked(
+                input.file_ref,
+                text,
+                self.detect_text(text).await?.into(),
+                self.redacter_type(),
+                self.text_mask(),
+            ),
             RedacterDataItemContent::Image { .. } => self.redact_image_file(input).await,
             RedacterDataItemContent::Table { .. } | RedacterDataItemContent::Pdf { .. } => {
                 Err(AppError::unsupported_content())

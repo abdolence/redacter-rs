@@ -142,6 +142,43 @@ impl Categories {
             .filter(|value| self.contains(category(value)))
             .collect()
     }
+
+    /// The values `option` works on: those the user `named`, checked against `categories` when
+    /// they limit anything, else the `defaults`, narrowed to `categories` when they limit
+    /// anything.
+    pub fn narrow<T: Clone + Display>(
+        categories: Option<&Self>,
+        option: &'static str,
+        named: Option<&[T]>,
+        defaults: impl IntoIterator<Item = T>,
+        category: impl Fn(&T) -> Category,
+    ) -> Result<Vec<T>, CategoriesError> {
+        match (named, categories) {
+            (Some(named), Some(categories)) => {
+                categories.check(option, named, category)?;
+                Ok(named.to_vec())
+            }
+            (Some(named), None) => Ok(named.to_vec()),
+            (None, Some(categories)) => Ok(categories.filter(defaults, category)),
+            (None, None) => Ok(defaults.into_iter().collect()),
+        }
+    }
+
+    /// Fails with [`CategoriesError::NothingToFind`] when `categories` limit anything and
+    /// `redacter` is left with nothing to find (`finds_any` is false) in them.
+    pub fn ensure_finds(
+        categories: Option<&Self>,
+        redacter: RedacterType,
+        finds_any: bool,
+    ) -> Result<(), CategoriesError> {
+        match categories {
+            Some(categories) if !finds_any => Err(CategoriesError::NothingToFind {
+                redacter,
+                categories: categories.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Display for Categories {

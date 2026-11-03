@@ -16,7 +16,7 @@ include = [
     "README.md",
     "LICENSE",
 ]
-rust-version = "1.94.0"
+rust-version = "1.94.1"
 keywords = ["redact", "pii", "secrets", "dlp", "scan"]
 categories = ["command-line-utilities"]
 description = "Detect & Redact cli tool to find sensitive data in files, such as personal information (PII), passwords and API keys, and to securely copy and redact files removing it, across various filesystems."
@@ -111,7 +111,6 @@ reqwest = { version = "0.13", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.10"
-similar = "3.2"
 pdfium-render = { version = "0.9", default-features = false, features = [
     "pdfium_8125",
     "thread_safe",

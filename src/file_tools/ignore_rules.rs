@@ -24,14 +24,15 @@ impl IgnoreFileChoice {
     pub fn load(&self, source_directory: Option<&Path>) -> AppResult<Option<IgnoreRules>> {
         match self {
             Self::Disabled => Ok(None),
-            Self::Explicit(path) => IgnoreRules::from_file(path).map(Some),
+            Self::Explicit(path) => IgnoreRules::build(path, None).map(Some),
             Self::SourceRoot => {
                 let path = match source_directory {
                     Some(directory) => directory.join(IGNORE_FILE_NAME),
                     None => return Ok(None),
                 };
                 if path.is_file() {
-                    IgnoreRules::from_source_root_file(&path).map(Some)
+                    // The ignore file is never a file to scan.
+                    IgnoreRules::build(&path, Some(&format!("/{IGNORE_FILE_NAME}"))).map(Some)
                 } else {
                     Ok(None)
                 }
@@ -49,17 +50,7 @@ impl IgnoreFileChoice {
 pub struct IgnoreRules(Gitignore);
 
 impl IgnoreRules {
-    /// The rules of the ignore file at `path`.
-    fn from_file(path: &Path) -> AppResult<Self> {
-        Self::build(path, None)
-    }
-
-    /// The rules of the `.redacterignore` at the root of the source it applies to. The file is
-    /// ignored too, since it is never a file to scan.
-    fn from_source_root_file(path: &Path) -> AppResult<Self> {
-        Self::build(path, Some(&format!("/{IGNORE_FILE_NAME}")))
-    }
-
+    /// The rules of the ignore file at `path`, with `implicit_pattern` ahead of its patterns.
     fn build(path: &Path, implicit_pattern: Option<&str>) -> AppResult<Self> {
         let mut builder = GitignoreBuilder::new("");
         if let Some(pattern) = implicit_pattern {
@@ -102,7 +93,7 @@ mod tests {
         let dir = tempfile::TempDir::with_prefix("ignore_rules").unwrap();
         let file = dir.path().join(IGNORE_FILE_NAME);
         std::fs::write(&file, text).unwrap();
-        IgnoreRules::from_file(&file)
+        IgnoreRules::build(&file, None)
     }
 
     fn rules(text: &str) -> IgnoreRules {

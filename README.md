@@ -561,22 +561,22 @@ How exactly a redaction is located depends on the redacter and the content:
 
 | Content | Location | Redacters |
 |---|---|---|
-| Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails`, `gcp-dlp` and the LLM redacters return only the new text, so the span is found by comparing the text before and after |
-| Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml` and `gcp-dlp`; other redacters read a CSV file as text |
+| Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails` does when its answer gives readable locations; the LLM redacters do with `--categories` |
+| Text rewritten by the redacter | The `file` | `gcp-dlp`, the LLM redacters without `--categories`, and `aws-bedrock-guardrails` when its answer gives no readable locations return only the new text |
+| Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner` and `local-credential-ml`. `gcp-dlp` reports a table at the `file`; other redacters read a CSV file as text |
 | Image or PDF page read with OCR | Page and box in pixels, around the words OCR blacked out | Any redacter that reads text |
 | Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode, or in the default `auto` mode when the native edit is not available |
 | Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode, or in the `auto` mode when the native edit succeeds |
 
-`gcp-dlp` and the LLM redacters do not name what they replaced in text, so such a redaction has the label
-`sensitive_data` and no score. A step that changes the shape of a table is located at the `file`, or at the `page`
-of a PDF. So is an image step that follows a step that changed the size of the image; the step that changed the size
-still reports its boxes.
+A text or table redaction located at the `file`, or at the `page` of a PDF, has the label `sensitive_data`, no score and
+no value. Each step of `gcp-dlp`, or of an LLM redacter without `--categories`, on a text or a table that changes more
+than whitespace is one such redaction, and so is every later step on the same text or table. So is a step that changes
+the shape of a table. The boxes of an image step that follows a step that changed the size of the image are located at
+the `page` or the `file` too, and keep their label, score and value; the step that changed the size still reports its
+boxes.
 
-The before and after of a step are compared only for a text, or a table, of up to 16 MiB. The comparison takes 50 to 100
-times the size of the text in memory, so a larger one is not compared: a step that changes it is located at the `file`.
-With a report, a 16 MiB sparse log peaks near 0.8 GB of memory, a 15 MiB CSV near 1.13 GB, and 16 MiB of
-punctuation-dense text with an email on every line near 1.66 GB. The same copy without `--report-file`, or with
-`--report-format text`, compares nothing and takes what a copy without reports takes.
+A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
+takes.
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
@@ -590,14 +590,24 @@ The output is the same as when the file is read whole, with two exceptions. A ru
 or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
 finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
 
-A text read in pieces is not compared before and after, so the 16 MiB limit above does not apply to it and every
-redaction of a large file is located, in the report too. The LLM redacters, `local-ner`, `local-gliner` and
-`--sampling-size` read the file whole. A model read in pieces loses recall and precision on the bench, see
-[Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
+Every redaction of a large file read in pieces is located, in the report too. The LLM redacters, `local-ner`,
+`local-gliner` and `--sampling-size` read the file whole. A model read in pieces loses recall and precision on the
+bench, see [Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
 more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
-its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB. With a report,
-the redactions are kept in memory until it is written.
+its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB.
+
+With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one
+`scan` keeps its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends,
+however it ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to
+it stops with an error that names the directory.
+
+The memory the redactions need depends on the allocator. `cp -d local-rules --report-file r.json` on a 23 MB log with
+700 000 redactions peaks near 118 MiB with `MallocSpaceEfficient=1` in the environment, and near 317 MiB without it on
+macOS, whose default allocator keeps freed memory. With `MallocSpaceEfficient=1` the peak is near 114 MiB at
+200 000 redactions and near 118 MiB at 400 000. The temporary file adds 10 to 20% to the time of that copy.
+Building the SARIF report keeps at most 5000 results for each rule in memory, and building the
+OCSF report keeps an event for each file.
 
 `aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
 request of the provider, where it fails otherwise. A text that fits in one request is sent as it is and redacted by the
@@ -629,8 +639,8 @@ one after another.
 A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
 `local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
 A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
-The output is the same as when the file is read whole. A batch is compared before and after as a table of its own, so the
-16 MiB limit above applies to a batch and not to the file, and every redaction is located in its cell. Other redacters
+The output is the same as when the file is read whole. A batch is placed as a table of its own, and every
+redaction is located in its cell. Other redacters
 read the file whole.
 
 A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is

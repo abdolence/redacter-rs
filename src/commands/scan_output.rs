@@ -7,11 +7,11 @@
 
 use crate::args::{FailOn, RedacterType};
 use crate::commands::copy_output::{
-    escaped, format_file_row, format_legend, OutputStyles, RowLayout, RowOutcome, SkipReason,
-    GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
+    counted, escaped, format_file_row, format_legend, OutputStyles, RowLayout, RowOutcome,
+    SkipReason, GLYPH_ERROR, GLYPH_OK, GLYPH_SKIPPED,
 };
 use crate::commands::finding_spill::SpilledFindings;
-use crate::commands::findings::{FileOutcome, Findings, Place, ReportedFile, ReportedFinding};
+use crate::commands::findings::{FileOutcome, Place, ReportedFile};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
 use crate::AppResult;
@@ -79,15 +79,15 @@ enum ScanFileStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FindingReport {
-    redacter: RedacterType,
-    label: DetectionLabel,
-    score: Option<Score>,
-    location: DetectionLocation,
+    pub(super) redacter: RedacterType,
+    pub(super) label: DetectionLabel,
+    pub(super) score: Option<Score>,
+    pub(super) location: DetectionLocation,
     value: String,
     /// Where the finding is for the SARIF and OCSF reports, which also need where a range ends.
     /// Not part of the JSON report. `None` when the location is the file as a whole.
     #[serde(skip)]
-    place: Option<Place>,
+    pub(super) place: Option<Place>,
 }
 
 impl FindingReport {
@@ -105,8 +105,10 @@ impl FindingReport {
         }
     }
 
-    pub(super) fn label(&self) -> &DetectionLabel {
-        &self.label
+    /// The value masked, which is what the SARIF and OCSF reports hold whatever `--show-values`
+    /// asked of the other reports.
+    pub(super) fn masked_value(&self) -> String {
+        mask_value(&self.value)
     }
 
     /// Writes the finding as one JSON value, with the place that the JSON report leaves out.
@@ -135,19 +137,6 @@ impl FindingReport {
             place,
             value,
         })
-    }
-
-    /// The finding for the SARIF and OCSF reports, which mask the value whatever the report
-    /// holds.
-    pub(super) fn reported_finding(&self) -> ReportedFinding {
-        ReportedFinding::new(
-            self.redacter,
-            self.label.clone(),
-            self.score,
-            self.location,
-            self.place,
-            &self.value,
-        )
     }
 
     /// Orders findings as a reader meets them; findings at the same place keep the order they
@@ -203,17 +192,12 @@ impl ScanFileReport {
         file_ref: &FileSystemRef,
         findings: SpilledFindings,
         unlocated_values: usize,
+        findings_ignored: usize,
     ) -> Self {
         Self {
             unlocated_values,
-            ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
-        }
-    }
-
-    pub fn with_findings_ignored(self, findings_ignored: usize) -> Self {
-        Self {
             findings_ignored,
-            ..self
+            ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
         }
     }
 
@@ -255,7 +239,7 @@ impl ScanFileReport {
             ScanFileStatus::Scanned if self.is_unconfirmed() => FileOutcome::Unconfirmed {
                 unlocated_values: self.unlocated_values,
             },
-            ScanFileStatus::Scanned => FileOutcome::Findings(Findings::from(self.findings.clone())),
+            ScanFileStatus::Scanned => FileOutcome::Findings(self.findings.clone()),
             ScanFileStatus::Failed => FileOutcome::Failed { reason },
             ScanFileStatus::Blocked => FileOutcome::Blocked { reason },
             ScanFileStatus::Unsupported => FileOutcome::Unsupported { reason },
@@ -327,14 +311,6 @@ impl ScanFileReport {
             unlocated_values: 0,
             findings_ignored: 0,
         }
-    }
-}
-
-fn counted(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
     }
 }
 
@@ -662,7 +638,7 @@ mod tests {
         unlocated_values: usize,
     ) -> ScanFileReport {
         FindingReport::sort_by_location(&mut findings);
-        ScanFileReport::scanned(file_ref, spilled_findings(&findings), unlocated_values)
+        ScanFileReport::scanned(file_ref, spilled_findings(&findings), unlocated_values, 0)
     }
 
     fn to_text(result: &ScanCommandResult) -> String {
@@ -1384,24 +1360,23 @@ mod tests {
     #[test]
     fn the_summary_counts_what_the_ignore_rules_left_out() {
         let mut result = ScanCommandResult::default();
-        result.push(
-            scanned(
-                &file_ref("config.txt", mime::TEXT_PLAIN),
-                vec![finding(
-                    "email",
-                    DetectionLocation::Text {
-                        start: 5,
-                        end: 11,
-                        line: 1,
-                        column: 6,
-                    },
-                    None,
-                    "a@b.io",
-                )],
-                0,
-            )
-            .with_findings_ignored(2),
+        let mut file = scanned(
+            &file_ref("config.txt", mime::TEXT_PLAIN),
+            vec![finding(
+                "email",
+                DetectionLocation::Text {
+                    start: 5,
+                    end: 11,
+                    line: 1,
+                    column: 6,
+                },
+                None,
+                "a@b.io",
+            )],
+            0,
         );
+        file.findings_ignored = 2;
+        result.push(file);
         result.files_ignored = 3;
 
         assert_eq!(

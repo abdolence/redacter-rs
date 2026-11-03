@@ -184,10 +184,6 @@ impl TextWindow {
         self.start.offset == 0 && self.reaches_end
     }
 
-    pub fn end(&self) -> usize {
-        self.start.offset + self.text.len()
-    }
-
     /// The bytes of `text` that hold only whole lines of the file: a window that starts or ends
     /// inside a line leaves that line's part out.
     pub fn whole_lines(&self) -> Range<usize> {
@@ -309,7 +305,9 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
 
         self.next_piece_start = piece_end;
         self.finished = last_piece;
-        self.drop_before(keep_from);
+        let dropped = keep_from - self.buffer_start.offset;
+        self.buffer_start = self.position_of(keep_from);
+        self.buffer.drain(..dropped);
         Ok(Some(window))
     }
 
@@ -411,8 +409,15 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
     /// Reads until a byte at `position` exists, or the input ends.
     async fn is_end_of_text(&mut self, position: usize) -> AppResult<bool> {
         while position >= self.buffer_end() {
-            if !self.read_more().await? {
+            if self.input_ended {
                 return Ok(true);
+            }
+            match self.input.try_next().await? {
+                Some(chunk) => {
+                    self.buffer.extend_from_slice(&chunk);
+                    self.check_probe(chunk.len())?;
+                }
+                None => self.input_ended = true,
             }
         }
         Ok(false)
@@ -420,21 +425,6 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
 
     fn buffer_end(&self) -> usize {
         self.buffer_start.offset + self.buffer.len()
-    }
-
-    async fn read_more(&mut self) -> AppResult<bool> {
-        while !self.input_ended {
-            match self.input.try_next().await? {
-                Some(chunk) if chunk.is_empty() => {}
-                Some(chunk) => {
-                    self.buffer.extend_from_slice(&chunk);
-                    self.check_probe(chunk.len())?;
-                    return Ok(true);
-                }
-                None => self.input_ended = true,
-            }
-        }
-        Ok(false)
     }
 
     /// Fails on a NUL byte in the part of the last `chunk_len` bytes read that the probe covers.
@@ -457,12 +447,6 @@ impl<S: Stream<Item = AppResult<Bytes>> + Unpin> TextPieces<S> {
     fn position_of(&self, offset: usize) -> TextPosition {
         self.buffer_start
             .after(&self.buffer[..offset - self.buffer_start.offset])
-    }
-
-    fn drop_before(&mut self, offset: usize) {
-        let local = offset - self.buffer_start.offset;
-        self.buffer_start = self.position_of(offset);
-        self.buffer.drain(..local);
     }
 }
 
@@ -616,9 +600,8 @@ mod tests {
                     );
                     next_piece = found.piece.end;
                     assert!(found.start.offset <= found.piece.start);
-                    assert_eq!(
-                        &text[found.start.offset..found.end()],
-                        found.text,
+                    assert!(
+                        text[found.start.offset..].starts_with(&found.text),
                         "{text:?}: the window is the text it starts at"
                     );
                     let before = &text[..found.start.offset];

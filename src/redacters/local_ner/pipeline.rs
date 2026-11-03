@@ -2,6 +2,7 @@
 //! rule is tested with hand-built tokens and fake logits.
 
 use super::error::LocalNerError;
+use crate::redacters::local_model::LocalModelError;
 use crate::redacters::text_spans::{Finding, RuleName};
 use crate::redacters::{Category, Score};
 use clap::ValueEnum;
@@ -16,6 +17,12 @@ pub enum Entity {
     Per,
     Org,
     Loc,
+}
+
+impl std::fmt::Display for Entity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl Entity {
@@ -246,7 +253,7 @@ pub fn tag_tokens(
             || logits.cols != n_labels
             || logits.data.len() != logits.rows * logits.cols
         {
-            return Err(LocalNerError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: format!("[{}, {n_labels}]", ids.len()),
                 actual: format!(
                     "[{}, {}] with {} values",
@@ -254,7 +261,8 @@ pub fn tag_tokens(
                     logits.cols,
                     logits.data.len()
                 ),
-            });
+            }
+            .into());
         }
         // Row 0 is `[CLS]`, so the first kept token sits at `keep_from - start + 1`.
         let first_row = window.keep_from - window.start + 1;
@@ -266,14 +274,15 @@ pub fn tag_tokens(
             *slot = Some(TokenTag { label, score });
         }
     }
-    tags.into_iter()
+    Ok(tags
+        .into_iter()
         .enumerate()
         .map(|(index, tag)| {
-            tag.ok_or_else(|| LocalNerError::Inference {
+            tag.ok_or_else(|| LocalModelError::Inference {
                 reason: format!("token {index} was not covered by any window"),
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?)
 }
 
 /// A word with the label of its first subword and byte offsets on char boundaries.
@@ -709,7 +718,13 @@ mod tests {
         let mut scorer = FakeScorer::new(vec![O; 3]);
         scorer.cols = 8;
         let err = tag_tokens(&tokens, &scorer, CLS, SEP, 10, 4, 9).unwrap_err();
-        assert!(matches!(err, LocalNerError::OutputShape { .. }), "{err}");
+        assert!(
+            matches!(
+                err,
+                LocalNerError::Model(LocalModelError::OutputShape { .. })
+            ),
+            "{err}"
+        );
     }
 
     #[test]

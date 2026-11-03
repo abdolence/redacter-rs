@@ -12,17 +12,17 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
-use crate::redacters::text_spans::table_cells::{self, redact_rows};
+use crate::redacters::local_model::run_blocking;
+use crate::redacters::text_spans::table_cells::{self, TableColumn};
 use crate::redacters::text_spans::Finding;
 use crate::redacters::{
-    text_or_table_support, Detection, Detections, RedactSupport, Redacted, Redacter,
-    RedacterDataItem, RedacterDataItemContent, Score, TextMask,
+    text_or_table_support, Detections, RedactSupport, Redacted, Redacter, RedacterDataItem, Score,
+    TextMask,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
 use engine::NerEngine;
 use pipeline::NerOptions;
-use rvstruct::ValueStruct;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -45,25 +45,24 @@ impl LocalNerRedacterOptions {
     }
 }
 
-/// The findings in one table cell, with offsets into the cell. A cell without a letter cannot
-/// hold a name and never reaches the model: the predicate is "holds no letter", not "is a
-/// number", and the model would cost a tokenizer pass and a forward pass to find nothing.
+/// The findings in a text, or in one table cell, with offsets into it. A cell without a letter
+/// cannot hold a name and never reaches the model: the predicate is "holds no letter", not "is
+/// a number", and the model would cost a tokenizer pass and a forward pass to find nothing.
 ///
 /// A one-word cell gives the model no sentence, and it tags a bare city as `O` at every score
 /// floor, so the cell is scored behind its column header as `"city: Madrid"`.
 fn find_in_cell<F>(
-    headers: &[String],
-    column: usize,
-    cell: &str,
+    column: Option<TableColumn<'_>>,
+    text: &str,
     find_in: &mut F,
 ) -> Result<Vec<Finding>, LocalNerError>
 where
     F: FnMut(&str) -> Result<Vec<Finding>, LocalNerError>,
 {
-    if !cell.chars().any(char::is_alphabetic) {
+    if column.is_some() && !text.chars().any(char::is_alphabetic) {
         return Ok(Vec::new());
     }
-    table_cells::find_in_cell(headers, column, cell, find_in)
+    table_cells::find_in_cell(column, text, find_in)
 }
 
 /// Offline NER redacter. The engine is loaded once per run and shared through an `Arc`, so
@@ -96,67 +95,24 @@ impl<'a> LocalNerRedacter<'a> {
             reporter,
         })
     }
-
-    /// Runs `work` on the blocking pool with a shared handle to the engine.
-    async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&NerEngine, &NerOptions) -> AppResult<T> + Send + 'static,
-    {
-        let engine = Arc::clone(&self.engine);
-        let options = self.options.clone();
-        let result = tokio::task::spawn_blocking(move || work(&engine, &options))
-            .await
-            .map_err(|err| LocalNerError::InferenceTask {
-                reason: err.to_string(),
-            })?;
-        result
-    }
 }
 
 impl<'a> Redacter for LocalNerRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        let (content, replaced) = match input.content {
-            RedacterDataItemContent::Value(text) => {
-                let (redacted, replaced) = self
-                    .run_blocking(move |engine, options| {
-                        let (redacted, findings) = engine.redact_text(&text, options)?;
-                        Ok((redacted, Detection::in_text(&text, findings)?.found))
-                    })
-                    .await?;
-                (RedacterDataItemContent::Value(redacted), replaced)
-            }
-            RedacterDataItemContent::Table { headers, rows } => {
-                let (headers, rows, replaced) = self
-                    .run_blocking(move |engine, options| {
-                        let (rows, replaced) = redact_rows(rows, |column, cell| {
-                            find_in_cell(&headers, column, cell, &mut |text| {
-                                engine.find(text, options)
-                            })
-                            .map_err(AppError::from)
-                        })?;
-                        Ok((headers, rows, replaced))
-                    })
-                    .await?;
-                (RedacterDataItemContent::Table { headers, rows }, replaced)
-            }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                return Err(AppError::unsupported_content())
-            }
-        };
-        if !replaced.is_empty() {
-            self.reporter.report_debug(format!(
-                "local-ner: {} finding(s) in {}",
-                replaced.len(),
-                input.file_ref.relative_path.value()
-            ));
-        }
-        Ok(Redacted::located(
-            RedacterDataItem {
-                content,
-                file_ref: input.file_ref,
-            },
+        let RedacterDataItem { content, file_ref } = input;
+        let (content, replaced) =
+            run_blocking(&self.engine, &self.options, move |engine, options| {
+                content.redacted_with(|column, text| {
+                    find_in_cell(column, text, &mut |scored| engine.find(scored, options))
+                        .map_err(AppError::from)
+                })
+            })
+            .await?;
+        Ok(Redacted::located_by_local(
+            RedacterDataItem { content, file_ref },
             replaced,
+            self.reporter,
+            self.redacter_type(),
         ))
     }
 
@@ -165,29 +121,14 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
     }
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
-        match &input.content {
-            RedacterDataItemContent::Value(text) => {
-                let text = text.clone();
-                self.run_blocking(move |engine, options| {
-                    Detection::in_text(&text, engine.find(&text, options)?)
-                })
-                .await
-            }
-            RedacterDataItemContent::Table { headers, rows } => {
-                let (headers, rows) = (headers.clone(), rows.clone());
-                self.run_blocking(move |engine, options| {
-                    Detection::in_table_cells(&rows, |column, cell| {
-                        find_in_cell(&headers, column, cell, &mut |text| {
-                            engine.find(text, options)
-                        })
-                    })
-                })
-                .await
-            }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {
-                Err(AppError::unsupported_content())
-            }
-        }
+        let content = input.content.clone();
+        run_blocking(&self.engine, &self.options, move |engine, options| {
+            content.detected_with(|column, text| {
+                find_in_cell(column, text, &mut |scored| engine.find(scored, options))
+                    .map_err(AppError::from)
+            })
+        })
+        .await
     }
 
     fn redacter_type(&self) -> RedacterType {
@@ -204,8 +145,9 @@ mod tests {
     use super::*;
     use crate::addon_store::AddonStoreOptions;
     use crate::redacters::test_support::TEST_DOCUMENTS_DIR;
+    use crate::redacters::text_spans::table_cells::redact_rows;
     use crate::redacters::text_spans::RuleName;
-    use crate::redacters::{DetectionLabel, DetectionLocation};
+    use crate::redacters::{Detection, DetectionLabel, DetectionLocation, RedacterDataItemContent};
     use console::Term;
     use mime::Mime;
 
@@ -263,10 +205,17 @@ mod tests {
         let mut seen: Vec<String> = Vec::new();
         let mut replies = replies.into_iter();
         let (rows, detections) = redact_rows(rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                seen.push(text.to_string());
-                Ok(replies.next().unwrap_or_default())
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    seen.push(text.to_string());
+                    Ok(replies.next().unwrap_or_default())
+                },
+            )
             .map_err(AppError::from)
         })
         .unwrap();
@@ -291,10 +240,17 @@ mod tests {
         ];
         let mut seen: Vec<String> = Vec::new();
         let (redacted, detections) = redact_rows(rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                seen.push(text.to_string());
-                Ok(vec![finding(text.len() - 5, text.len())])
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    seen.push(text.to_string());
+                    Ok(vec![finding(text.len() - 5, text.len())])
+                },
+            )
             .map_err(AppError::from)
         })
         .unwrap();
@@ -384,13 +340,20 @@ mod tests {
             vec!["2".to_string(), "Rainy".to_string()],
         ];
         let detections = Detection::in_table_cells(&rows, |column, cell| {
-            find_in_cell(&headers, column, cell, &mut |text| {
-                Ok(if text == "city: Madrid" {
-                    vec![finding(6, 12)]
-                } else {
-                    Vec::new()
-                })
-            })
+            find_in_cell(
+                Some(TableColumn {
+                    headers: &headers,
+                    column,
+                }),
+                cell,
+                &mut |text| {
+                    Ok(if text == "city: Madrid" {
+                        vec![finding(6, 12)]
+                    } else {
+                        Vec::new()
+                    })
+                },
+            )
         })
         .unwrap()
         .found;

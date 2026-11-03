@@ -96,25 +96,6 @@ impl<'a> AwsComprehendRedacter<'a> {
         let client = aws_sdk_comprehend::Client::new(&shared_config);
         Ok(Self { client, reporter })
     }
-
-    pub async fn redact_text_file(&self, input: RedacterDataItem) -> AppResult<Redacted> {
-        let text_content = match input.content {
-            RedacterDataItemContent::Value(content) => Ok(content),
-            _ => Err(AppError::SystemError {
-                message: "Unsupported item for text redacting".to_string(),
-            }),
-        }?;
-
-        let detections = self.detect_text(&text_content).await?;
-        let redacted_content = Detection::mask(&text_content, &detections, self.text_mask());
-        Ok(Redacted::located(
-            RedacterDataItem {
-                file_ref: input.file_ref,
-                content: RedacterDataItemContent::Value(redacted_content),
-            },
-            detections,
-        ))
-    }
 }
 
 impl<'a> AwsComprehendRedacter<'a> {
@@ -173,7 +154,13 @@ impl<'a> AwsComprehendRedacter<'a> {
 impl<'a> Redacter for AwsComprehendRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         match &input.content {
-            RedacterDataItemContent::Value(_) => self.redact_text_file(input).await,
+            RedacterDataItemContent::Value(text) => Redacted::masked(
+                input.file_ref,
+                text,
+                self.detect_text(text).await?.into(),
+                self.redacter_type(),
+                self.text_mask(),
+            ),
             RedacterDataItemContent::Table { .. }
             | RedacterDataItemContent::Image { .. }
             | RedacterDataItemContent::Pdf { .. } => Err(AppError::unsupported_content()),

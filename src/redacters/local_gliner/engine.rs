@@ -11,7 +11,11 @@ use super::pipeline::{
     WindowScorer, OVERLAP_WORDS,
 };
 use crate::addon_store::AddonFiles;
-use crate::redacters::text_spans::{apply_redaction, merge_findings, Finding, REDACTED};
+use crate::args::RedacterType;
+use crate::redacters::local_model::{
+    graph_node, load_model, load_tokenizer, read_json, special_token, LocalModelError,
+};
+use crate::redacters::text_spans::{merge_findings, Finding};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
@@ -30,30 +34,25 @@ struct GlinerConfigValues {
     sep_token: String,
 }
 
-fn read_config(path: &Path) -> Result<GlinerConfigValues, LocalGlinerError> {
-    let config_error = |reason: String| LocalGlinerError::Config {
-        path: path.display().to_string(),
-        reason,
-    };
-    let bytes = std::fs::read(path).map_err(|err| config_error(err.to_string()))?;
-    let config: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|err| config_error(err.to_string()))?;
+fn read_config(path: &Path) -> Result<GlinerConfigValues, LocalModelError> {
+    let config_error = |reason: String| LocalModelError::config(path, reason);
+    let config: serde_json::Value = read_json(path)?;
 
-    let field_usize = |name: &str| -> Result<usize, LocalGlinerError> {
+    let field_usize = |name: &str| -> Result<usize, LocalModelError> {
         config
             .get(name)
             .and_then(|value| value.as_u64())
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| config_error(format!("no {name} number")))
     };
-    let field_str = |name: &str| -> Result<String, LocalGlinerError> {
+    let field_str = |name: &str| -> Result<String, LocalModelError> {
         config
             .get(name)
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .ok_or_else(|| config_error(format!("no {name} string")))
     };
-    let expect_str = |name: &str, expected: &str| -> Result<(), LocalGlinerError> {
+    let expect_str = |name: &str, expected: &str| -> Result<(), LocalModelError> {
         let actual = field_str(name)?;
         if actual != expected {
             return Err(config_error(format!(
@@ -93,38 +92,6 @@ fn read_config(path: &Path) -> Result<GlinerConfigValues, LocalGlinerError> {
     })
 }
 
-/// Loads `tokenizer.json` with truncation and padding turned off. The pipeline windows the
-/// word stream itself and needs every word: a `truncation` block left in the file would cut
-/// each text at one window and copy the rest of it unredacted.
-fn load_tokenizer(path: &Path) -> Result<Tokenizer, LocalGlinerError> {
-    let load_error = |reason: String| LocalGlinerError::TokenizerLoad {
-        path: path.display().to_string(),
-        reason,
-    };
-    let mut tokenizer = Tokenizer::from_file(path).map_err(|err| load_error(err.to_string()))?;
-    tokenizer
-        .with_truncation(None)
-        .map_err(|err| load_error(err.to_string()))?;
-    tokenizer.with_padding(None);
-    Ok(tokenizer)
-}
-
-fn special_token(tokenizer: &Tokenizer, token: &str) -> Result<u32, LocalGlinerError> {
-    tokenizer
-        .token_to_id(token)
-        .ok_or_else(|| LocalGlinerError::MissingSpecialToken {
-            token: token.to_string(),
-        })
-}
-
-fn graph_node(model: &Model, name: &str) -> Result<NodeId, LocalGlinerError> {
-    model
-        .find_node(name)
-        .ok_or_else(|| LocalGlinerError::MissingGraphNode {
-            name: name.to_string(),
-        })
-}
-
 /// The loaded model, tokenizer and config. `Send + Sync`: rten's `Model::run` and the
 /// tokenizer's `encode` take `&self`, so one engine behind an `Arc` serves every file.
 pub struct GlinerEngine {
@@ -151,17 +118,12 @@ impl GlinerEngine {
     /// directory. Every missing or unexpected piece is a typed error naming it.
     pub fn load(files: &AddonFiles) -> Result<Self, LocalGlinerError> {
         let config = read_config(&files.dir().join("gliner_config.json"))?;
-        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"))?;
+        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"), None)?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
         let ent = special_token(&tokenizer, &config.ent_token)?;
         let gliner_sep = special_token(&tokenizer, &config.sep_token)?;
-        let model_path = files.dir().join("model.onnx");
-        let model =
-            Model::load_file(&model_path).map_err(|source| LocalGlinerError::ModelLoad {
-                path: model_path.display().to_string(),
-                source,
-            })?;
+        let model = load_model(&files.dir().join("model.onnx"), RedacterType::LocalGliner)?;
         Ok(Self {
             input_ids: graph_node(&model, "input_ids")?,
             attention_mask: graph_node(&model, "attention_mask")?,
@@ -186,13 +148,13 @@ impl GlinerEngine {
     /// in the Python processor is equivalent to encoding each pre-split word on its own, since
     /// the tokenizer's Metaspace pre-tokenizer is configured with `prepend_scheme: always`.
     fn subtoken_ids(&self, text: &str) -> Result<Vec<u32>, LocalGlinerError> {
-        self.tokenizer
-            .encode(text, false)
-            .map(|encoding| encoding.get_ids().to_vec())
-            .map_err(|err| LocalGlinerError::Encode {
-                text: text.to_string(),
-                reason: err.to_string(),
-            })
+        let encoding =
+            self.tokenizer
+                .encode(text, false)
+                .map_err(|err| LocalModelError::Encode {
+                    reason: err.to_string(),
+                })?;
+        Ok(encoding.get_ids().to_vec())
     }
 
     /// Byte spans of the selected labels, merged and sorted.
@@ -239,16 +201,6 @@ impl GlinerEngine {
             candidates,
         ))))
     }
-
-    /// The text with every finding replaced by `[REDACTED]`, plus the findings.
-    pub fn redact_text(
-        &self,
-        text: &str,
-        options: &GlinerOptions,
-    ) -> Result<(String, Vec<Finding>), LocalGlinerError> {
-        let findings = self.find(text, options)?;
-        Ok((apply_redaction(text, &findings, REDACTED), findings))
-    }
 }
 
 /// `local_gliner::mod::LocalGlinerRedacter` shares one engine across `spawn_blocking` calls
@@ -289,23 +241,24 @@ impl WindowScorer for GlinerEngine {
                 [self.logits],
                 None,
             )
-            .map_err(|err| LocalGlinerError::Inference {
+            .map_err(|err| LocalModelError::Inference {
                 reason: err.to_string(),
             })?;
 
         let output: NdTensor<f32, 4> =
             output
                 .try_into()
-                .map_err(|err| LocalGlinerError::OutputShape {
+                .map_err(|err| LocalModelError::OutputShape {
                     expected: "a rank-4 f32 tensor".to_string(),
                     actual: format!("{err:?}"),
                 })?;
         let [batch, num_words, max_width, out_labels] = output.shape();
         if batch != 1 || num_words != inputs.num_words || out_labels != num_labels {
-            return Err(LocalGlinerError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: format!("[1, {}, _, {num_labels}]", inputs.num_words),
                 actual: format!("[{batch}, {num_words}, {max_width}, {out_labels}]"),
-            });
+            }
+            .into());
         }
         Ok(Logits {
             num_words,
@@ -354,7 +307,7 @@ mod tests {
         let file = config_file(r#"{"max_len": 384}"#);
         let err = read_config(file.path()).unwrap_err();
         match &err {
-            LocalGlinerError::Config { path, reason } => {
+            LocalModelError::Config { path, reason } => {
                 assert_eq!(path, &file.path().display().to_string());
                 assert!(reason.contains("max_width"), "{reason}");
             }
@@ -364,7 +317,7 @@ mod tests {
         let missing = Path::new("/nonexistent/gliner_config.json");
         assert!(matches!(
             read_config(missing).unwrap_err(),
-            LocalGlinerError::Config { .. }
+            LocalModelError::Config { .. }
         ));
     }
 
@@ -374,7 +327,7 @@ mod tests {
         let file = config_file(&json);
         let err = read_config(file.path()).unwrap_err();
         match &err {
-            LocalGlinerError::Config { reason, .. } => {
+            LocalModelError::Config { reason, .. } => {
                 assert!(reason.contains("span_mode"), "{reason}");
                 assert!(reason.contains("markerV0"), "{reason}");
             }
@@ -388,59 +341,8 @@ mod tests {
         let file = config_file(&json);
         assert!(matches!(
             read_config(file.path()).unwrap_err(),
-            LocalGlinerError::Config { .. }
+            LocalModelError::Config { .. }
         ));
-    }
-
-    /// A tokenizer.json carrying a `truncation` block, the shape a legacy or hand-placed copy
-    /// can still have: one word per token, and every text cut at 8 tokens unless the loader
-    /// turns truncation off.
-    fn truncating_tokenizer_file() -> tempfile::NamedTempFile {
-        let vocab: String = (0..40)
-            .map(|id| format!("\"w{id}\": {id}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let json = format!(
-            r#"{{
-  "version": "1.0",
-  "truncation": {{"direction": "Right", "max_length": 8, "strategy": "LongestFirst", "stride": 0}},
-  "padding": null,
-  "added_tokens": [],
-  "normalizer": null,
-  "pre_tokenizer": {{"type": "Whitespace"}},
-  "post_processor": null,
-  "decoder": null,
-  "model": {{"type": "WordLevel", "vocab": {{{vocab}, "[UNK]": 40}}, "unk_token": "[UNK]"}}
-}}"#
-        );
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), json).unwrap();
-        file
-    }
-
-    #[test]
-    fn the_loaded_tokenizer_never_truncates_a_long_text() {
-        let file = truncating_tokenizer_file();
-        let tokenizer = load_tokenizer(file.path()).unwrap();
-        let text: Vec<String> = (0..30).map(|id| format!("w{id}")).collect();
-        let text = text.join(" ");
-        let encoding = tokenizer.encode(text.as_str(), false).unwrap();
-        assert_eq!(
-            encoding.get_ids().len(),
-            30,
-            "the truncation block in the file must be turned off at load"
-        );
-    }
-
-    #[test]
-    fn a_missing_tokenizer_file_names_itself() {
-        let err = load_tokenizer(Path::new("/nonexistent/tokenizer.json")).unwrap_err();
-        match &err {
-            LocalGlinerError::TokenizerLoad { path, .. } => {
-                assert_eq!(path, "/nonexistent/tokenizer.json")
-            }
-            other => panic!("expected TokenizerLoad, got {other}"),
-        }
     }
 
     use crate::addon_store::{Addon, AddonStore, AddonStoreOptions};
