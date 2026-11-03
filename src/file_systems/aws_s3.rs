@@ -155,7 +155,11 @@ impl PartBuffer {
 
     fn part_size(&self) -> usize {
         if self.growing {
-            self.base_part_size << (self.parts_cut / PARTS_PER_DOUBLING)
+            // Saturates because the doubling exhausts a 32-bit `usize` before the part limit,
+            // and a part size must never wrap to zero, which would cut no part at all.
+            let doublings = u32::try_from(self.parts_cut / PARTS_PER_DOUBLING).unwrap_or(u32::MAX);
+            self.base_part_size
+                .saturating_mul(2_usize.saturating_pow(doublings))
         } else {
             self.base_part_size
         }
@@ -591,12 +595,12 @@ mod tests {
     #[test]
     fn unknown_length_doubles_the_part_size_to_stay_within_the_part_limit() {
         let mut parts = PartBuffer::new(None);
-        let mut capacity = 0;
+        let mut capacity = 0_u64;
         for parts_cut in 0..MAX_PARTS {
             parts.parts_cut = parts_cut;
-            capacity += parts.part_size();
+            capacity += u64::try_from(parts.part_size()).unwrap();
         }
-        assert!(capacity > 5 * 1024 * 1024 * 1024 * 1024);
+        assert!(capacity > 5 * 1024_u64.pow(4));
 
         parts.parts_cut = PARTS_PER_DOUBLING - 1;
         assert_eq!(parts.part_size(), DEFAULT_PART_SIZE);
