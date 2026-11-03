@@ -626,8 +626,8 @@ pub struct RedacterBaseOptions {
     /// The categories `scan` reports and `cp` redacts; every category when `None`.
     pub categories: Option<Categories>,
     /// Record where each redaction sits in the file, for a report that lists them. Recording
-    /// keeps the content of every step and compares it with the next, so a copy that writes no
-    /// such report leaves it off.
+    /// keeps a copy of each text as first read, so a copy that writes no such report leaves it
+    /// off.
     pub list_redactions: bool,
 }
 

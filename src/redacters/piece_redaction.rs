@@ -39,10 +39,10 @@ pub(crate) struct StepFinding {
 /// Findings that overlap, as one range to mask.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MergedRange {
-    range: Range<usize>,
+    pub(crate) range: Range<usize>,
     /// The finding whose mask the range takes: the latest step among the findings that make it,
     /// and among those the one that starts first and reaches furthest.
-    representative: usize,
+    pub(crate) representative: usize,
 }
 
 /// The findings united where they overlap, in order of position. Findings that only touch stay
