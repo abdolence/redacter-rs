@@ -353,16 +353,10 @@ mod tests {
         }
     }
 
-    /// A terminal that writes to `/dev/null`, so the rows of a scan do not land in the output
+    /// A terminal whose buffer is never flushed, so the rows of a scan do not land in the output
     /// of the test run.
     fn silent_term() -> Term {
-        Term::read_write_pair(
-            std::fs::File::open("/dev/null").unwrap(),
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open("/dev/null")
-                .unwrap(),
-        )
+        Term::buffered_stdout()
     }
 
     #[cfg(unix)]
