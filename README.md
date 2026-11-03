@@ -594,18 +594,16 @@ Every redaction of a large file read in pieces is located, in the report too. Th
 `local-gliner` and `--sampling-size` read the file whole. A model read in pieces loses recall and precision on the
 bench, see [Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
 `cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
-more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB, because
-its allocator keeps freed memory; with `MallocSpaceEfficient=1` in the environment it peaks near 88 MiB.
+more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB in 0.21.
+The system allocator of macOS keeps freed memory, so the peak it reports can be several times what the run needs.
 
 With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one
 `scan` keeps its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends,
 however it ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to
 it stops with an error that names the directory.
 
-The memory the redactions need depends on the allocator. `cp -d local-rules --report-file r.json` on a 23 MB log with
-700 000 redactions peaks near 118 MiB with `MallocSpaceEfficient=1` in the environment, and near 317 MiB without it on
-macOS, whose default allocator keeps freed memory. With `MallocSpaceEfficient=1` the peak is near 114 MiB at
-200 000 redactions and near 118 MiB at 400 000. The temporary file adds 10 to 20% to the time of that copy.
+`cp -d local-rules --report-file r.json` on a 23 MB log with 700 000 redactions peaks near 317 MiB on macOS. The
+temporary file adds 10 to 20% to the time of that copy.
 Building the SARIF report keeps at most 5000 results for each rule in memory, and building the
 OCSF report keeps an event for each file.
 
@@ -1150,26 +1148,26 @@ sensitive values that it found) and the time per file on `public`. A `+` joins r
 | Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form | Per file on public PII sample |
 |---|---|---|---|---|---|
 | `local-rules` | 54% | 93% | 24% | 62% | under 1 ms |
-| `local-ner` | 23% | 0% | 23% | 19% | 39 ms |
-| `local-gliner` | 100% | 2% | 55% | 88% | 441 ms |
+| `local-ner` | 23% | 0% | 23% | 19% | 37 ms |
+| `local-gliner` | 100% | 2% | 55% | 88% | 423 ms |
 | `local-rules+local-ner` | 77% | 93% | 46% | 94% | 38 ms |
-| `local-rules+local-gliner` | 100% | 93% | 57% | 88% | 466 ms |
-| `local-credential-ml` | 0% | 61% | 1% | 0% | 38 ms |
-| `local-rules+local-credential-ml` | 54% | 95% | 24% | 62% | 38 ms |
-| `presidio` | 69% | 7% | 66% | 69% | 12 ms |
-| `gcp-dlp` | 85% | 41% | 49% | 94% | 72 ms |
-| `aws-comprehend` | 98% | 56% | 80% | 94% | 84 ms |
-| `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 161 ms |
-| `gcp-vertex-ai` | 98% | 100% | 86% | 100% | 9.1 s |
-| `aws-bedrock` | 98% | 93% | 87% | 94% | 583 ms |
+| `local-rules+local-gliner` | 100% | 93% | 57% | 88% | 421 ms |
+| `local-credential-ml` | 0% | 61% | 2% | 0% | 28 ms |
+| `local-rules+local-credential-ml` | 54% | 95% | 25% | 62% | 28 ms |
+| `presidio` | 69% | 7% | 66% | 69% | 11 ms |
+| `gcp-dlp` | 85% | 41% | 49% | 94% | 77 ms |
+| `aws-comprehend` | 98% | 56% | 80% | 94% | 86 ms |
+| `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 175 ms |
+| `gcp-vertex-ai` | 100% | 100% | 84% | 100% | 11.3 s |
+| `aws-bedrock` | 98% | 88% | 85% | 88% | 704 ms |
 
 PII documents is `fixtures`: 8 text files with personal data in several formats and languages. Secrets in config and code is `secrets`: 29 files with 41 planted passwords, keys and tokens. Public PII sample is `public`: 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0), synthetic personal data. Scanned form is `images`: a PNG and a PDF of one customer form.
 
-Measured on commit `2390a25` on an Apple M6 Mac mini. The time per file includes the start of the process and the load of the
-models. The `local-credential-ml` rows come from a later run, on commit `c71f738`, with the same datasets. The `Secrets in config and code` column of the local rows and their chains comes from a run on commit `19874f5`. `gemini-llm` and `open-ai-llm` were not measured.
+Measured on commit `3a089bb` on an Apple M6 Mac mini. The time per file includes the start of the process and the load of the
+models. `gemini-llm` and `open-ai-llm` were not measured.
 
 For secrets, `local-rules` found 93% at 1 ms per file, `local-rules+local-credential-ml` 95%, and `gcp-vertex-ai` found all of them. For personal information
-in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (87%), `gcp-vertex-ai` (86%)
+in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (85%), `gcp-vertex-ai` (84%)
 and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
 find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
 
@@ -1444,11 +1442,8 @@ directory, has no name, is removed when the scan ends, however it ends, and on U
 It holds values masked, or as found with `--show-values`, and takes about 200 bytes of disk for each finding. A scan that
 cannot write to it stops with an error that names the directory.
 
-The memory the findings need depends on the allocator. `scan -d local-rules --report-file r.json` on an 88 MB log with
-2.4 million findings peaks near 72 MB with `MallocSpaceEfficient=1` in the environment, and near 910 MB without it on
-macOS, whose default allocator keeps freed memory. 0.21 peaks near 1.4 GB
-with `MallocSpaceEfficient=1` and near 1.6 GB without it, on the same log. The scan takes about 15% more time than in
-0.21. The SARIF report still lists at most 5000 results, and building it keeps at most that many in memory. Building the
+`scan -d local-rules --report-file r.json` on an 88 MB log with 2.4 million findings peaks near 910 MB on macOS, where
+0.21 peaks near 1.6 GB on the same log. The scan takes about 15% more time than in 0.21. The SARIF report still lists at most 5000 results, and building it keeps at most that many in memory. Building the
 OCSF report keeps an event for each file.
 
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
@@ -1892,7 +1887,7 @@ cloud](#local-or-cloud-quality-versus-performance). The image rows measure the c
 
 For the most protection, you can use multiple DLP providers, see [Multiple redacters](#multiple-redacters).
 
-For secrets, `gcp-vertex-ai` found all 41 planted secrets, `local-rules+local-credential-ml` 39, and `aws-bedrock` and `local-rules` 38. `aws-comprehend`,
+For secrets, `gcp-vertex-ai` found all 41 planted secrets, `local-rules+local-credential-ml` 39, `local-rules` 38 and `aws-bedrock` 36. `aws-comprehend`,
 `aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, `local-credential-ml` alone 25, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
 AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS keys, PINs and usernames only.
 
