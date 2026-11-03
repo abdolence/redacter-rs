@@ -12,6 +12,7 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::redacters::local_model::run_blocking;
 use crate::redacters::text_spans::table_cells::{self, TableColumn};
 use crate::redacters::text_spans::Finding;
 use crate::redacters::{
@@ -95,22 +96,6 @@ impl<'a> LocalNerRedacter<'a> {
             reporter,
         })
     }
-
-    /// Runs `work` on the blocking pool with a shared handle to the engine.
-    async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&NerEngine, &NerOptions) -> AppResult<T> + Send + 'static,
-    {
-        let engine = Arc::clone(&self.engine);
-        let options = self.options.clone();
-        let result = tokio::task::spawn_blocking(move || work(&engine, &options))
-            .await
-            .map_err(|err| LocalNerError::InferenceTask {
-                reason: err.to_string(),
-            })?;
-        result
-    }
 }
 
 /// The findings in a text, or in a table cell scored behind its column header.
@@ -134,8 +119,8 @@ fn find(
 impl<'a> Redacter for LocalNerRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let RedacterDataItem { content, file_ref } = input;
-        let (content, replaced) = self
-            .run_blocking(move |engine, options| {
+        let (content, replaced) =
+            run_blocking(&self.engine, &self.options, move |engine, options| {
                 content.redacted_with(|column, text| find(engine, options, column, text))
             })
             .await?;
@@ -153,7 +138,7 @@ impl<'a> Redacter for LocalNerRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         let content = input.content.clone();
-        self.run_blocking(move |engine, options| {
+        run_blocking(&self.engine, &self.options, move |engine, options| {
             content.detected_with(|column, text| find(engine, options, column, text))
         })
         .await

@@ -11,6 +11,7 @@ use crate::addon_store::{Addon, AddonStore};
 use crate::args::RedacterType;
 use crate::errors::AppError;
 use crate::file_systems::FileSystemRef;
+use crate::redacters::local_model::run_blocking;
 use crate::redacters::text_spans::table_cells::{find_in_cell, TableColumn};
 use crate::redacters::text_spans::Finding;
 use crate::redacters::{
@@ -54,21 +55,6 @@ impl<'a> LocalCredentialMlRedacter<'a> {
             reporter,
         })
     }
-
-    /// Runs `work` on the blocking pool with a shared handle to the engine.
-    async fn run_blocking<T, F>(&self, work: F) -> AppResult<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&CredentialMlEngine, Score) -> AppResult<T> + Send + 'static,
-    {
-        let engine = Arc::clone(&self.engine);
-        let min_score = self.min_score;
-        tokio::task::spawn_blocking(move || work(&engine, min_score))
-            .await
-            .map_err(|err| LocalCredentialMlError::InferenceTask {
-                reason: err.to_string(),
-            })?
-    }
 }
 
 /// The findings in a text, or in a table cell scored behind its column header.
@@ -92,9 +78,9 @@ fn find(
 impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
     async fn redact(&self, input: RedacterDataItem) -> AppResult<Redacted> {
         let RedacterDataItem { content, file_ref } = input;
-        let (content, replaced) = self
-            .run_blocking(move |engine, min_score| {
-                content.redacted_with(|column, text| find(engine, min_score, column, text))
+        let (content, replaced) =
+            run_blocking(&self.engine, &self.min_score, move |engine, min_score| {
+                content.redacted_with(|column, text| find(engine, *min_score, column, text))
             })
             .await?;
         Ok(Redacted::located_by_local(
@@ -111,8 +97,8 @@ impl<'a> Redacter for LocalCredentialMlRedacter<'a> {
 
     async fn detect(&self, input: &RedacterDataItem) -> AppResult<Detections> {
         let content = input.content.clone();
-        self.run_blocking(move |engine, min_score| {
-            content.detected_with(|column, text| find(engine, min_score, column, text))
+        run_blocking(&self.engine, &self.min_score, move |engine, min_score| {
+            content.detected_with(|column, text| find(engine, *min_score, column, text))
         })
         .await
     }

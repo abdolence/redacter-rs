@@ -36,6 +36,13 @@ pub use gemini_llm::*;
 mod local_rules;
 pub use local_rules::*;
 
+#[cfg(any(
+    feature = "local-ner",
+    feature = "local-gliner",
+    feature = "local-credential-ml"
+))]
+mod local_model;
+
 #[cfg(feature = "local-ner")]
 pub(crate) mod local_ner;
 #[cfg(feature = "local-ner")]

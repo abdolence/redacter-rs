@@ -7,6 +7,10 @@ use super::pipeline::{
     WindowScorer, OVERLAP,
 };
 use crate::addon_store::AddonFiles;
+use crate::args::RedacterType;
+use crate::redacters::local_model::{
+    graph_node, load_model, load_tokenizer, read_json, special_token, LocalModelError,
+};
 use crate::redacters::text_spans::{merge_findings, Finding};
 use rten::{Model, NodeId};
 use rten_tensor::prelude::*;
@@ -35,24 +39,20 @@ impl NerEngine {
     /// directory. Every missing piece is a typed error naming it.
     pub fn load(files: &AddonFiles) -> Result<Self, LocalNerError> {
         let (labels, body) = read_config(&files.dir().join("config.json"))?;
-        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"))?;
+        let tokenizer = load_tokenizer(&files.dir().join("tokenizer.json"), None)?;
         let cls = special_token(&tokenizer, "[CLS]")?;
         let sep = special_token(&tokenizer, "[SEP]")?;
-        let model_path = files.dir().join("model_uint8.onnx");
-        let model = Model::load_file(&model_path).map_err(|source| LocalNerError::ModelLoad {
-            path: model_path.display().to_string(),
-            source,
-        })?;
+        let model = load_model(
+            &files.dir().join("model_uint8.onnx"),
+            RedacterType::LocalNer,
+        )?;
         let input_ids = graph_node(&model, "input_ids")?;
         let attention_mask = graph_node(&model, "attention_mask")?;
-        let logits =
-            model
-                .output_ids()
-                .first()
-                .copied()
-                .ok_or_else(|| LocalNerError::MissingGraphNode {
-                    name: "<first output>".to_string(),
-                })?;
+        let logits = model.output_ids().first().copied().ok_or_else(|| {
+            LocalModelError::MissingGraphNode {
+                name: "<first output>".to_string(),
+            }
+        })?;
         Ok(Self {
             model,
             tokenizer,
@@ -72,12 +72,12 @@ impl NerEngine {
 
     /// Byte-offset tokens of `text`, without special tokens.
     pub fn tokenize(&self, text: &str) -> Result<TokenizedText, LocalNerError> {
-        let encoding = self
-            .tokenizer
-            .encode(text, false)
-            .map_err(|err| LocalNerError::Encode {
-                reason: err.to_string(),
-            })?;
+        let encoding =
+            self.tokenizer
+                .encode(text, false)
+                .map_err(|err| LocalModelError::Encode {
+                    reason: err.to_string(),
+                })?;
         Ok(TokenizedText {
             ids: encoding.get_ids().to_vec(),
             offsets: encoding.get_offsets().to_vec(),
@@ -117,7 +117,7 @@ impl WindowScorer for NerEngine {
         let n = ids_with_cls_sep.len();
         let mut input = Vec::with_capacity(n);
         for &id in ids_with_cls_sep {
-            input.push(i32::try_from(id).map_err(|_| LocalNerError::Inference {
+            input.push(i32::try_from(id).map_err(|_| LocalModelError::Inference {
                 reason: format!("token id {id} does not fit the model's int32 input"),
             })?);
         }
@@ -133,22 +133,23 @@ impl WindowScorer for NerEngine {
                 [self.logits],
                 None,
             )
-            .map_err(|err| LocalNerError::Inference {
+            .map_err(|err| LocalModelError::Inference {
                 reason: err.to_string(),
             })?;
         let output: NdTensor<f32, 3> =
             output
                 .try_into()
-                .map_err(|err| LocalNerError::OutputShape {
+                .map_err(|err| LocalModelError::OutputShape {
                     expected: "a rank-3 f32 tensor".to_string(),
                     actual: format!("{err:?}"),
                 })?;
         let [batch, rows, cols] = output.shape();
         if batch != 1 {
-            return Err(LocalNerError::OutputShape {
+            return Err(LocalModelError::OutputShape {
                 expected: format!("[1, {n}, {}]", self.labels.len()),
                 actual: format!("[{batch}, {rows}, {cols}]"),
-            });
+            }
+            .into());
         }
         Ok(Logits {
             rows,
@@ -160,13 +161,8 @@ impl WindowScorer for NerEngine {
 
 /// Reads `id2label` and `max_position_embeddings` from `config.json`.
 fn read_config(path: &Path) -> Result<(LabelSet, usize), LocalNerError> {
-    let config_error = |reason: String| LocalNerError::Config {
-        path: path.display().to_string(),
-        reason,
-    };
-    let bytes = std::fs::read(path).map_err(|err| config_error(err.to_string()))?;
-    let config: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|err| config_error(err.to_string()))?;
+    let config_error = |reason: String| LocalModelError::config(path, reason);
+    let config: serde_json::Value = read_json(path)?;
     let id2label = config
         .get("id2label")
         .and_then(|value| value.as_object())
@@ -201,42 +197,10 @@ fn read_config(path: &Path) -> Result<(LabelSet, usize), LocalNerError> {
         return Err(config_error(format!(
             "max_position_embeddings {max_positions} leaves {body} tokens per window, which is \
              not more than the {OVERLAP}-token window overlap"
-        )));
+        ))
+        .into());
     }
     Ok((labels, body))
-}
-
-/// Loads `tokenizer.json` with truncation and padding turned off. The pipeline windows the
-/// token stream itself and needs every token of the text: a `truncation` block left in the
-/// file — the copies next to the binary and the legacy directories are checked against
-/// nothing — would cut each text at one window and copy the rest of it unredacted.
-fn load_tokenizer(path: &Path) -> Result<Tokenizer, LocalNerError> {
-    let load_error = |reason: String| LocalNerError::TokenizerLoad {
-        path: path.display().to_string(),
-        reason,
-    };
-    let mut tokenizer = Tokenizer::from_file(path).map_err(|err| load_error(err.to_string()))?;
-    tokenizer
-        .with_truncation(None)
-        .map_err(|err| load_error(err.to_string()))?;
-    tokenizer.with_padding(None);
-    Ok(tokenizer)
-}
-
-fn special_token(tokenizer: &Tokenizer, token: &str) -> Result<u32, LocalNerError> {
-    tokenizer
-        .token_to_id(token)
-        .ok_or_else(|| LocalNerError::MissingSpecialToken {
-            token: token.to_string(),
-        })
-}
-
-fn graph_node(model: &Model, name: &str) -> Result<NodeId, LocalNerError> {
-    model
-        .find_node(name)
-        .ok_or_else(|| LocalNerError::MissingGraphNode {
-            name: name.to_string(),
-        })
 }
 
 #[cfg(test)]
@@ -290,7 +254,7 @@ mod tests {
         let file = config_file(r#"{"max_position_embeddings": 512}"#);
         let err = read_config(file.path()).unwrap_err();
         match &err {
-            LocalNerError::Config { path, reason } => {
+            LocalNerError::Model(LocalModelError::Config { path, reason }) => {
                 assert_eq!(path, &file.path().display().to_string());
                 assert!(reason.contains("id2label"), "{reason}");
             }
@@ -300,14 +264,14 @@ mod tests {
         let file = config_file(r#"{"id2label": {"0": "O"}}"#);
         let err = read_config(file.path()).unwrap_err();
         assert!(
-            matches!(&err, LocalNerError::Config { reason, .. } if reason.contains("max_position_embeddings")),
+            matches!(&err, LocalNerError::Model(LocalModelError::Config { reason, .. }) if reason.contains("max_position_embeddings")),
             "{err}"
         );
 
         let file = config_file(r#"{"id2label": {"0": "O"}, "max_position_embeddings": 2}"#);
         assert!(matches!(
             read_config(file.path()).unwrap_err(),
-            LocalNerError::Config { .. }
+            LocalNerError::Model(LocalModelError::Config { .. })
         ));
 
         let file = config_file(
@@ -321,64 +285,8 @@ mod tests {
         let missing = Path::new("/nonexistent/config.json");
         assert!(matches!(
             read_config(missing).unwrap_err(),
-            LocalNerError::Config { .. }
+            LocalNerError::Model(LocalModelError::Config { .. })
         ));
-    }
-
-    /// A tokenizer.json carrying a `truncation` block, the shape a legacy or hand-placed
-    /// copy can still have: one word per token, and every text cut at 8 tokens unless the
-    /// loader turns truncation off.
-    fn truncating_tokenizer_file() -> tempfile::NamedTempFile {
-        let vocab: String = (0..40)
-            .map(|id| format!("\"w{id}\": {id}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let json = format!(
-            r#"{{
-  "version": "1.0",
-  "truncation": {{"direction": "Right", "max_length": 8, "strategy": "LongestFirst", "stride": 0}},
-  "padding": null,
-  "added_tokens": [],
-  "normalizer": null,
-  "pre_tokenizer": {{"type": "Whitespace"}},
-  "post_processor": null,
-  "decoder": null,
-  "model": {{"type": "WordLevel", "vocab": {{{vocab}, "[UNK]": 40}}, "unk_token": "[UNK]"}}
-}}"#
-        );
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), json).unwrap();
-        file
-    }
-
-    /// The pipeline windows the token stream itself and needs every token: a tokenizer that
-    /// truncates would hand it the first window of a long text and the rest would be copied
-    /// out unredacted, with nothing in the output saying so.
-    #[test]
-    fn the_loaded_tokenizer_never_truncates_a_long_text() {
-        let file = truncating_tokenizer_file();
-        let tokenizer = load_tokenizer(file.path()).unwrap();
-        let text: Vec<String> = (0..30).map(|id| format!("w{id}")).collect();
-        let text = text.join(" ");
-        let encoding = tokenizer.encode(text.as_str(), false).unwrap();
-        assert_eq!(
-            encoding.get_ids().len(),
-            30,
-            "the truncation block in the file must be turned off at load"
-        );
-        assert_eq!(encoding.get_ids().first(), Some(&0));
-        assert_eq!(encoding.get_ids().last(), Some(&29));
-    }
-
-    #[test]
-    fn a_missing_tokenizer_file_names_itself() {
-        let err = load_tokenizer(Path::new("/nonexistent/tokenizer.json")).unwrap_err();
-        match &err {
-            LocalNerError::TokenizerLoad { path, .. } => {
-                assert_eq!(path, "/nonexistent/tokenizer.json")
-            }
-            other => panic!("expected TokenizerLoad, got {other}"),
-        }
     }
 
     /// A window no longer than the overlap between two windows never advances, so a config
@@ -389,7 +297,7 @@ mod tests {
             config_file(r#"{"id2label": {"0": "O", "1": "B-PER"}, "max_position_embeddings": 32}"#);
         let err = read_config(file.path()).unwrap_err();
         match &err {
-            LocalNerError::Config { reason, .. } => {
+            LocalNerError::Model(LocalModelError::Config { reason, .. }) => {
                 assert!(reason.contains("max_position_embeddings 32"), "{reason}");
                 assert!(reason.contains("30 tokens per window"), "{reason}");
                 assert!(reason.contains("64"), "{reason}");
