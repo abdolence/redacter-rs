@@ -736,6 +736,42 @@ mod tests {
     }
 
     #[test]
+    fn prose_and_identifiers_after_a_key_name_are_not_keys() {
+        for line in [
+            "Tink-written keysets on the Cloud KMS key, ChaCha20-Poly1305. Tink-written",
+            "One loader name set for local private keys in both specs: `from_pkcs8_der`, `from_env`",
+            "| `Aes256KeyWrap` | the key algorithm: KEY_ALG_RSA_1024 |",
+            "operations, which must suit the key type: `RsaOaepSha256` for RSA keys,\n  `Aes256KeyWrap` (`A256KW`) for AES keys.",
+            r#"kms_aead_mode="keyring", kms_aead_operation="encrypt", kms_aead_purpose="randomized""#,
+        ] {
+            assert_untouched(line);
+        }
+    }
+
+    #[test]
+    fn random_values_after_a_key_name_are_found_in_each_separator_form() {
+        for (line, value) in [
+            (r#"signing_key = "HP5YS7VR0GCE""#, "HP5YS7VR0GCE"),
+            ("license_key: vsgm-6vh4-hwnx-zkxt", "vsgm-6vh4-hwnx-zkxt"),
+            ("credentials=live_0crm1svz", "live_0crm1svz"),
+            (
+                r#"os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")"#,
+                "Zq8Lw3Tn5VxB7mRc",
+            ),
+        ] {
+            assert_redacts(line, &line.replacen(value, "[REDACTED]", 1));
+        }
+    }
+
+    #[test]
+    fn aligned_assignments_are_found() {
+        assert_redacts(
+            "region            = \"eu-north-1\"\nsigning_key       = \"Zq8Lw3Tn5VxB7mRc\"",
+            "region            = \"eu-north-1\"\nsigning_key       = \"[REDACTED]\"",
+        );
+    }
+
+    #[test]
     fn secrets() {
         assert_redacts("key AKIAIOSFODNN7EXAMPLE", "key [REDACTED]");
         assert_redacts("AIzaSyA1234567890abcdefghijklmnopqrstuv", "[REDACTED]");

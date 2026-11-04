@@ -100,7 +100,7 @@ Passwords and keys in `key=value` lines, vendor API keys and tokens, authorizati
 | `sendgrid-key` | SendGrid API key (`SG.`, 20 characters or more, `.`, 40 characters or more) | no | no | `SG.abcdefghijklmnopqrst.abcdefghijklmnopqrstuvwxyz0123456789ABCD` (synthetic) |
 | `huggingface-token` | Hugging Face access token (`hf_` and 30 letters or digits or more) | no | no | `hf_abcdefghijklmnopqrstuvwxyzABCD` (synthetic) |
 | `discord-bot-token` | Discord bot token: three base64url parts of 24 to 26, 6 and 27 or more characters, the first starting with `M`, `N` or `O` | no | no | `MTAwMDAwMDAwMDAwMDAwMDAw.G1aB2c.abcdefghijklmnopqrstuvwxyz0` (synthetic) |
-| `generic-api-key` | Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`; ported from the `generic-api-key` rule of gitleaks | yes (entropy above 3.5 bits per character, not letters only, no stopword) | yes | `access_token = "k8Jd2Lw9QzX7vNb3RtY5"` (synthetic) |
+| `generic-api-key` | Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`, followed by `=`, `:`, `=>` or a similar separator, with no other word in between (a `,` only before a quote); ported from the `generic-api-key` rule of gitleaks | yes (entropy above 3.5 bits per character, a digit or one of `!@#%^&*+=?~`, no stopword) | yes | `access_token = "k8Jd2Lw9QzX7vNb3RtY5"` (synthetic) |
 
 ## `us-identifiers`
 

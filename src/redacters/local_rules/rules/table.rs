@@ -470,15 +470,22 @@ const RULES: &[RuleSpec] = &[
         group: RuleGroup::Secrets,
         capture_group: 1,
         validator: Some((
-            "entropy above 3.5 bits per character, not letters only, no stopword",
+            "entropy above 3.5 bits per character, a digit or one of `!@#%^&*+=?~`, no stopword",
             validators::generic_api_key_value,
         )),
         keyword: true,
-        description: "Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`; ported from the `generic-api-key` rule of gitleaks",
+        description: "Value of 10 to 150 characters after a key name holding `key`, `secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`, followed by `=`, `:`, `=>` or a similar separator, with no other word in between (a `,` only before a quote); ported from the `generic-api-key` rule of gitleaks",
         example: Example::Synthetic("access_token = \"k8Jd2Lw9QzX7vNb3RtY5\""),
         // The classes are written out in ASCII, as RE2 reads `\w` and `\s`: the Unicode `\w`
         // repeated 150 times exceeds the regex size limit.
-        pattern: r#"(?i)[0-9A-Za-z_.-]{0,50}?(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t0-9A-Za-z_.-]{0,20})[\t\n\f\r '"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\t\n\f\r =]{0,5}([0-9A-Za-z_.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\t\n\f\r ;]|\\[nr]|$)"#,
+        //
+        // Gitleaks lets the key name run on into further words and accepts a bare `,` as the
+        // separator. Both match prose (`the key algorithm: KEY_ALG_RSA_1024`, `the key,
+        // ChaCha20-Poly1305.`, `kms_aead_mode="keyring", kms_aead_operation="encrypt"`), where no
+        // check of the value tells a name from a random key. So only blanks may stand between the
+        // key name and the separator (aligned assignments pad with up to 20), and a `,` counts
+        // only before the quote that opens the value, as in `getenv("API_KEY", "value")`.
+        pattern: r#"(?i)[0-9A-Za-z_.-]{0,50}?(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)[0-9A-Za-z_.-]{0,20}[ \t]{0,20}[\t\n\f\r '"]{0,3}(?:(?:=|>|:{1,3}=|\|\||:|=>|\?=)[\x60'"\t\n\f\r =]{0,5}|,[ \t]*['"])([0-9A-Za-z_.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\x60'"\t\n\f\r ;]|\\[nr]|$)"#,
     },
     RuleSpec {
         name: "us-ssn",
