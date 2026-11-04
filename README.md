@@ -1125,9 +1125,10 @@ line is rated only when there is something to redact:
   other symbols (`-`, `.`, `/`, `:`, `_` and `$`) do not count, so `api.example.com` is left alone and
   `correct-horse-battery-staple` is never found by this step. A word is split at a redaction marker that an
   earlier redacter left; the marker is never a value, and the text on either side of it can be;
-- the name that an assignment or declaration gives (`API_KEY2 =`, `sha256:`, a JSON key), a Rust reference or type
-  (`&str`, `&[u8; 32]`), a `#define` and the code in front of a string (`String::from(`, `r#`) are never values.
-  In a quoted string the value is the string. A secret that starts with `&` (`PASS=&x9Lq2`) is still found;
+- the name that an assignment or declaration gives (`API_KEY2 =`, `sha256:`), a quoted JSON key (`{"kid": "..."}`),
+  a Rust reference or type (`&str`, `&[u8`), a `#define` opening the line and the code in front of a string
+  (`String::from(`, `r#`) are not taken for values. In a quoted string the value is the string. A secret that starts
+  with `&` and holds a digit or a symbol (`PASS=&x9Lq2`) is still found;
 - a line with no value is not rated.
 
 A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
@@ -1154,6 +1155,10 @@ Limits:
   finds both, which is why it is chained;
 - every word with a digit or one of `!@#%^&*+=?~` on a flagged line is redacted, so a host name, an IP address or
   a date next to the password is redacted too;
+- the placement of words does not find a secret where a name or a JSON key would stand (`k8Jd2Lw9: service-a`,
+  `{"k8Jd2Lw9": "prod"}`), a word of letters only after `&` or `#` that is not a `key=value` pair
+  (`password: &hunter`, `#hunter is the password`), and the part of a password that has letters only after a `"`
+  inside it (`x9#"Lq` leaves `Lq`). A `\` at either end of a secret is left out of the value;
 - it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
 - on 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly
   all of them test data that holds passwords and tokens;

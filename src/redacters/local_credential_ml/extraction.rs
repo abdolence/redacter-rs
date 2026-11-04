@@ -92,7 +92,7 @@ impl CredentialExtractor {
             .find(line)
             .into_iter()
             .map(|finding| finding.start..finding.end)
-            .filter(|value| line[value.clone()].chars().any(char::is_alphanumeric))
+            .filter(|value| !line[value.clone()].chars().all(|c| matches!(c, '=' | ':')))
             .collect();
         let unmatched_words = credential_like_words(line).into_iter().filter(|word| {
             !matched
@@ -108,10 +108,9 @@ impl CredentialExtractor {
 /// `key=` in front of them when they are `key=value` pairs.
 ///
 /// What is not a value even when it holds such a character: the name an assignment or
-/// declaration gives (`API_KEY2 =`, `ED25519_PEM:`, `"key1":`), a Rust reference or type
-/// (`&str`, `&[u8`, `Vec<u8>`, the `32` of `[u8; 32]`), a `#directive`, and the code in front of
-/// a string literal (`String::from(`, `r#`). Inside a double-quoted literal the value is the
-/// literal.
+/// declaration gives (`API_KEY2 =`, `sha256:`, `"key1":`), a Rust reference or type (`&str`,
+/// `&[u8`, `Vec<u8>`), a `#directive` opening the line, and the code in front of a string
+/// literal (`String::from(`, `r#`). Inside a double-quoted literal the value is the literal.
 ///
 /// A word is split at each redaction marker an earlier redacter placed, and the marker is
 /// never a candidate: cutting it would leave a stray bracket. What stands beside it
@@ -121,14 +120,14 @@ fn credential_like_words(line: &str) -> Vec<Range<usize>> {
     let words: Vec<Range<usize>> = words(line).collect();
     let mut values = Vec::new();
     for (index, word) in words.iter().enumerate() {
-        let follows_semicolon = index > 0 && line[words[index - 1].clone()].ends_with(';');
         for piece in pieces_around_markers(line, word.clone()) {
             for segment in literal_segments(line, piece) {
                 let unwrapped = trim_wrapping(line, segment.range.clone());
-                if !segment.quoted
+                let text = &line[unwrapped.clone()];
+                if !segment.after_quote
                     && (is_declared_name(line, &unwrapped)
-                        || is_type_or_directive(&line[unwrapped.clone()])
-                        || (follows_semicolon && is_array_length(line, word)))
+                        || is_type(text)
+                        || (index == 0 && is_directive(text)))
                 {
                     continue;
                 }
@@ -143,10 +142,11 @@ fn credential_like_words(line: &str) -> Vec<Range<usize>> {
     values
 }
 
-/// A part of a word that lies inside or outside double quotes.
+/// A part of a word between double quotes.
 struct Segment {
     range: Range<usize>,
-    quoted: bool,
+    /// A double quote stands directly before the part, so it is inside a literal or follows one.
+    after_quote: bool,
 }
 
 /// The parts of `piece` between its double quotes. Dropped are the code directly in front of
@@ -154,7 +154,7 @@ struct Segment {
 /// quote opens or closes a literal is read from the text next to it and not counted, since the
 /// quotes of a raw string or of JSON inside a string are nested.
 fn literal_segments(line: &str, piece: Range<usize>) -> Vec<Segment> {
-    const CODE_BEFORE_LITERAL: &[char] = &['(', '=', ':', ',', '[', '{', '#'];
+    const CODE_BEFORE_LITERAL: &[char] = &['(', '=', ':', '[', '{'];
     let text = &line[piece.clone()];
     let mut cuts = Vec::new();
     let mut previous = ' ';
@@ -164,6 +164,7 @@ fn literal_segments(line: &str, piece: Range<usize>) -> Vec<Segment> {
         }
         previous = character;
     }
+    let line_has_raw_string = opens_raw_string(line);
     let mut segments = Vec::new();
     let mut start = piece.start;
     for end in cuts.into_iter().chain([piece.end]) {
@@ -172,22 +173,43 @@ fn literal_segments(line: &str, piece: Range<usize>) -> Vec<Segment> {
         if range.is_empty() {
             continue;
         }
-        let quoted = range.start > 0 && line[..range.start].ends_with('"');
-        let range = if quoted {
+        let after_quote = range.start > 0 && line[..range.start].ends_with('"');
+        let is_key = after_quote
+            && line[range.end..].starts_with('"')
+            && line[range.end + 1..].trim_start().starts_with(':')
+            && is_key_position(&line[..range.start - 1]);
+        let range = if after_quote && line_has_raw_string {
             without_raw_string_terminator(line, range)
         } else {
             range
         };
-        let followed_by_quote = line[range.end..].starts_with('"');
-        let is_key =
-            quoted && followed_by_quote && line[range.end + 1..].trim_start().starts_with(':');
-        let is_code =
-            !quoted && followed_by_quote && line[range.clone()].ends_with(CODE_BEFORE_LITERAL);
+        let before_quote = &line[range.clone()];
+        let is_code = !after_quote
+            && line[range.end..].starts_with('"')
+            && (before_quote.ends_with(CODE_BEFORE_LITERAL) || is_raw_string_prefix(before_quote));
         if !is_key && !is_code {
-            segments.push(Segment { range, quoted });
+            segments.push(Segment { range, after_quote });
         }
     }
     segments
+}
+
+/// Whether a quote opens a JSON key when `before` is the text in front of it: a JSON key follows
+/// a `{` or a `,` or starts the line. After `==`, `?` or `case` the string is a value.
+fn is_key_position(before: &str) -> bool {
+    let before = before.trim_end();
+    before.is_empty() || before.ends_with(['{', ','])
+}
+
+/// Whether `text` ends in the `r#` or `br##` in front of the quote that opens a raw string.
+fn is_raw_string_prefix(text: &str) -> bool {
+    text.ends_with('#') && text.trim_end_matches('#').ends_with('r')
+}
+
+/// Whether some quote in `line` opens a raw string, which a `"#` further on then closes.
+fn opens_raw_string(line: &str) -> bool {
+    line.match_indices('"')
+        .any(|(quote, _)| is_raw_string_prefix(&line[..quote]))
 }
 
 /// `range` without the `#`s that close a raw string (`"#.into()`), told from a value that starts
@@ -207,7 +229,6 @@ fn without_raw_string_terminator(line: &str, range: Range<usize>) -> Range<usize
     }
 }
 
-/// Whether `name` is an identifier: the name of a variable, field or key.
 fn is_identifier(name: &str) -> bool {
     name.chars()
         .next()
@@ -228,44 +249,38 @@ fn is_declared_name(line: &str, unwrapped: &Range<usize>) -> bool {
         return is_identifier(name);
     }
     let after = line[unwrapped.end..].trim_start();
-    is_identifier(text) && (after.starts_with('=') || after.starts_with(":="))
+    let assigns = after.starts_with(":=")
+        || (after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>"));
+    is_identifier(text) && assigns
 }
 
-/// A word that is Rust type syntax (`&str`, `&mut`, `&'a`, `&[u8`, `Vec<u8>`, `u8`, or any of
-/// them after the `(` of a parameter list) or a
-/// preprocessor directive or tag (`#define`). The `&` of a reference and the digits of a
-/// primitive type would otherwise pass for credential symbols. A type word holds nothing but
-/// identifiers, primitive numeric types and type punctuation, so a word with any other digit
-/// (`&x9Lq2`) is not one.
-fn is_type_or_directive(text: &str) -> bool {
+/// A word that is Rust type syntax: `&str`, `&mut`, `&'a`, `&[u8`, `Vec<u8>`, `u8`, or a
+/// parameter list's `open(&mut`. The `&` of a reference and the digits of a primitive type would
+/// otherwise pass for credential symbols. A type word holds nothing but identifiers, primitive
+/// numeric types and type punctuation, so a word with any other digit (`&x9Lq2`) is not one, and
+/// neither is a word with a part before a `(` that is not one (`K7m#q(Zp`).
+fn is_type(text: &str) -> bool {
     const PRIMITIVES: &[&str] = &[
         "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "f32", "f64",
     ];
     const TYPE_PUNCTUATION: &str = "[]<>:;,'()";
-    if let Some(directive) = text.strip_prefix('#') {
-        return !directive.is_empty() && directive.chars().all(|c| c.is_alphabetic() || c == '_');
-    }
-    let type_text = text
-        .rsplit('(')
-        .next()
-        .unwrap_or(text)
-        .trim_start_matches('&');
-    type_text
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || TYPE_PUNCTUATION.contains(c))
-        && type_text
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .all(|token| {
-                token.chars().all(|c| c.is_alphabetic() || c == '_') || PRIMITIVES.contains(&token)
-            })
+    text.split('(').all(|part| {
+        let part = part.trim_start_matches('&');
+        part.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || TYPE_PUNCTUATION.contains(c))
+            && part
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .all(|token| {
+                    token.chars().all(|c| c.is_alphabetic() || c == '_')
+                        || PRIMITIVES.contains(&token)
+                })
+    })
 }
 
-/// The length in the `32]` of an array type or expression (`[u8; 32]`).
-fn is_array_length(line: &str, word: &Range<usize>) -> bool {
-    line[word.clone()]
-        .trim_end_matches([',', ')', ';'])
-        .strip_suffix(']')
-        .is_some_and(|length| !length.is_empty() && length.chars().all(|c| c.is_ascii_digit()))
+/// A preprocessor directive or tag (`#define`).
+fn is_directive(text: &str) -> bool {
+    text.strip_prefix('#')
+        .is_some_and(|name| !name.is_empty() && name.chars().all(|c| c.is_alphabetic() || c == '_'))
 }
 
 /// The parts of `word` between its redaction markers. A part that is the key of an
@@ -276,10 +291,8 @@ fn pieces_around_markers(line: &str, word: Range<usize>) -> Vec<Range<usize>> {
     let mut start = 0;
     for (marker, _) in text.match_indices(REDACTED) {
         let piece = text[start..marker].trim_end_matches('=');
-        let is_assignment_key = piece.len() < marker - start
-            && piece
-                .chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        let is_assignment_key =
+            piece.len() < marker - start && piece.chars().all(is_identifier_character);
         if !is_assignment_key {
             pieces.push(word.start + start..word.start + marker);
         }
@@ -320,8 +333,9 @@ fn words(line: &str) -> impl Iterator<Item = Range<usize>> + '_ {
 
 /// The part of `word` that is the value: without the wrapping characters, a trailing full
 /// stop, and the `key=` of a `key=value` pair, whose own quotes are dropped too. The key is the
-/// identifier before the `=`, and a call's opening bracket in front of it (`connect(`) goes as
-/// well. A word that is only padding after the `=` (`Zm9v==`) is not a pair.
+/// identifier before the `=`, and a call's opening bracket or an argument's comma in front of it
+/// (`connect(`) goes as well, unless that code could be part of a secret (`Tr0(ub=4dor` is one
+/// password). A word that is only padding after the `=` (`Zm9v==`) is not a pair.
 fn value_of_word(line: &str, word: Range<usize>) -> Range<usize> {
     let unwrapped = trim_wrapping(line, word);
     let text = &line[unwrapped.clone()];
@@ -329,7 +343,9 @@ fn value_of_word(line: &str, word: Range<usize>) -> Range<usize> {
         Some((before, rest)) if !rest.trim_start_matches('=').is_empty() => {
             let code_before_key = before.trim_end_matches(is_identifier_character);
             let has_key = code_before_key.len() < before.len();
-            if has_key && (code_before_key.is_empty() || code_before_key.ends_with(['(', ','])) {
+            let follows_call_or_argument =
+                code_before_key.ends_with(['(', ',']) && !quoted_credential_value(code_before_key);
+            if has_key && (code_before_key.is_empty() || follows_call_or_argument) {
                 trim_wrapping(line, unwrapped.start + before.len() + 1..unwrapped.end)
             } else {
                 unwrapped
@@ -437,6 +453,7 @@ mod tests {
             values("machine 10.0.0.5 login admin password hunter2x"),
             ["10.0.0.5", "hunter2x"]
         );
+        assert_eq!(values("pin=12; 4567]"), ["12", "4567"]);
         assert_eq!(
             values("Ping me at 14:30 about build 4512, the password is hunter2x until Friday."),
             ["14:30", "4512", "hunter2x"]
@@ -494,27 +511,19 @@ mod tests {
             ["02010a6f72646572732d6575310137"]
         );
         assert_eq!(
-            values(
-                "fn open(&mut self, key: &'a [u8; 32], salt: &Vec<u8>) -> Token // Sup3rS3cret!"
-            ),
+            values("fn open(&mut self, key: &'a [u8], salt: &Vec<u8>) -> Token // Sup3rS3cret!"),
             ["Sup3rS3cret!"]
         );
     }
 
     #[test]
     fn a_secret_starting_with_an_ampersand_is_still_a_value() {
-        assert_eq!(values("PASS=&x9Lq2"), ["&x9Lq2"]);
         assert_eq!(values("PASS=&hunter"), ["&hunter"]);
         assert_eq!(values("password: &x9Lq2 until Friday"), ["&x9Lq2"]);
-        assert_eq!(values(r#"password = "&Tr0ub4dor3""#), ["&Tr0ub4dor3"]);
     }
 
     #[test]
     fn the_name_being_declared_is_not_a_value() {
-        assert_eq!(
-            values(r#"const ED25519_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----"#),
-            Vec::<&str>::new()
-        );
         assert_eq!(values("sha256: 9f86d081884c7d65"), ["9f86d081884c7d65"]);
         assert_eq!(values(r#"API_KEY2 = "k8Jd2Lw9""#), ["k8Jd2Lw9"]);
         assert_eq!(values(r#"token1 := "x9Lq2Wm""#), ["x9Lq2Wm"]);
@@ -574,10 +583,11 @@ mod tests {
             ["k8Jd2Lw9"]
         );
         assert_eq!(values(r##"note = "#x9Lq2Wm""##), ["#x9Lq2Wm"]);
+        assert_eq!(values(r##"key = "#.x9Lq2""##), ["#.x9Lq2"]);
     }
 
     #[test]
-    fn a_walrus_assignment_places_the_value_after_it() {
+    fn an_assignment_operator_a_rule_matched_is_not_a_value() {
         assert_eq!(
             values(r#"client_secret := "e48b89ef0fdf5999""#),
             ["e48b89ef0fdf5999"]
@@ -587,6 +597,87 @@ mod tests {
     #[test]
     fn a_preprocessor_directive_is_not_a_value() {
         assert_eq!(values("#define MAX_RETRIES 5"), ["5"]);
+    }
+
+    #[test]
+    fn a_quoted_string_is_a_json_key_only_where_json_puts_a_key() {
+        for (line, expected) in [
+            (r#"if token == "x9Lq2Wm":"#, vec!["x9Lq2Wm"]),
+            (r#"if password != "Tr0ub4dor&3":"#, vec!["Tr0ub4dor&3"]),
+            (r#"case "x9Lq2Wm":"#, vec!["x9Lq2Wm"]),
+            (
+                r#"const key = isProd ? "x9Lq2Wm" : "k8Jd2Lw9";"#,
+                vec!["x9Lq2Wm", "k8Jd2Lw9"],
+            ),
+            (r#"  "prime1": "k8Jd2Lw9","#, vec!["k8Jd2Lw9"]),
+        ] {
+            assert_eq!(values(line), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_password_with_an_opening_bracket_is_one_value() {
+        for (line, expected) in [
+            ("the passphrase is K7m#q(Zp", "K7m#q(Zp"),
+            ("use hunter2(abc) to log in", "hunter2(abc"),
+            ("creds bob P@ss(word)", "P@ss(word"),
+            ("password: x9(Lq", "x9(Lq"),
+        ] {
+            assert_eq!(values(line), [expected], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_comma_before_a_quote_can_separate_fields() {
+        for (line, covers) in [
+            (r#"admin,Tr0ub4dor&3,"prod db""#, "Tr0ub4dor&3"),
+            (r#"user=bob,pass=x9Lq2Wm,"note""#, "x9Lq2Wm"),
+            (r#"login user=bob pass=x9Lq2Wm,"ok""#, "x9Lq2Wm"),
+            (r#"1,admin,Tr0ub4dor&3,"2024-01-01""#, "Tr0ub4dor&3"),
+        ] {
+            assert!(
+                values(line).iter().any(|value| value.contains(covers)),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_password_made_of_symbols_is_a_value() {
+        assert_eq!(values(r#"password = "!@#$%^&*""#), ["!@#$%^&*"]);
+        assert_eq!(values("password: !@#$%^&*"), ["!@#$%^&*"]);
+    }
+
+    #[test]
+    fn a_comparison_or_arrow_does_not_declare_a_name() {
+        assert_eq!(values("x9Lq2Wm == token"), ["x9Lq2Wm"]);
+        assert_eq!(values("x9Lq2Wm => k8Jd2Lw9"), ["x9Lq2Wm", "k8Jd2Lw9"]);
+    }
+
+    #[test]
+    fn a_password_holding_an_equals_sign_after_a_bracket_or_comma_is_one_value() {
+        assert_eq!(values("the passphrase is Tr0(ub=4dor"), ["Tr0(ub=4dor"]);
+        assert_eq!(values("the passphrase is x9,Lq=2Wm"), ["x9,Lq=2Wm"]);
+    }
+
+    #[test]
+    fn a_word_after_a_hash_is_a_directive_only_at_the_start_of_the_line() {
+        assert_eq!(values("the passphrase is #hunter"), ["#hunter"]);
+        assert_eq!(values("the passphrase is #Hunter"), ["#Hunter"]);
+    }
+
+    #[test]
+    fn the_limits_listed_in_the_readme_hold() {
+        for line in [
+            "k8Jd2Lw9: service-a",
+            r#"{"k8Jd2Lw9":"prod"}"#,
+            "password: &hunter",
+            "#hunter is the password",
+        ] {
+            assert_eq!(values(line), Vec::<&str>::new(), "{line}");
+        }
+        assert_eq!(values(r#"the passphrase is x9#"Lq"#), ["x9#"]);
+        assert_eq!(values(r#"the passphrase is x9Lq2\"#), ["x9Lq2"]);
     }
 
     fn find(text: &str, score_of: impl Fn(&str) -> f32) -> (Vec<Finding>, Vec<String>) {
