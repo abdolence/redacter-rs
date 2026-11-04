@@ -736,8 +736,25 @@ mod tests {
     }
 
     #[test]
+    fn the_aws_documentation_examples_are_not_secrets() {
+        assert_untouched("key AKIAIOSFODNN7EXAMPLE");
+        assert_untouched("key ASIAIOSFODNN7EXAMPLE");
+        assert_untouched("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+        assert_redacts(concat!("key AKI", "AIOSFODNN7EXAMPLF"), "key [REDACTED]");
+    }
+
+    #[test]
+    fn prose_and_identifiers_after_a_key_name_are_not_keys() {
+        assert_untouched(
+            "Tink-written keysets on the Cloud KMS key, ChaCha20-Poly1305. Tink-written",
+        );
+        assert_untouched("One loader name set for local private keys in both specs: `from_pkcs8_der`, `from_env`");
+        assert_untouched("| `Aes256KeyWrap` | the key algorithm: KEY_ALG_RSA_1024 |");
+    }
+
+    #[test]
     fn secrets() {
-        assert_redacts("key AKIAIOSFODNN7EXAMPLE", "key [REDACTED]");
+        assert_redacts(concat!("key AKI", "AABCDEFGHIJKLMNOP"), "key [REDACTED]");
         assert_redacts("AIzaSyA1234567890abcdefghijklmnopqrstuv", "[REDACTED]");
         assert_untouched("AIzaSyA-1234567890abcdefghijklmnopqrstuvw");
         assert_redacts("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "[REDACTED]");
@@ -756,15 +773,15 @@ mod tests {
             "[REDACTED]\nafter",
         );
         assert_redacts(
-            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "aws_secret_access_key = qT7vZc2LpXr9/Nd4MhK8sWb3aYeU5oGj1FiR6xQz",
             "aws_secret_access_key = [REDACTED]",
         );
         assert_redacts(
-            "\"aws_secret_access_key\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKE/\"",
+            "\"aws_secret_access_key\": \"qT7vZc2LpXr9/Nd4MhK8sWb3aYeU5oGj1FiR6xQ/\"",
             "\"aws_secret_access_key\": \"[REDACTED]\"",
         );
         assert_redacts(
-            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKE/",
+            "aws_secret_access_key = qT7vZc2LpXr9/Nd4MhK8sWb3aYeU5oGj1FiR6xQ/",
             "aws_secret_access_key = [REDACTED]",
         );
         assert_redacts(

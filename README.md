@@ -950,6 +950,11 @@ Some values are taken for references or placeholders and left alone:
   `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
   and digits, as in `abcdefgh1234.ijklmnop5678`.
 
+The example credentials of the AWS documentation are not reported by any rule: an access key id that ends in `EXAMPLE`,
+such as `AKIAIOSFODNN7EXAMPLE`, and a 40-character secret access key that ends in `EXAMPLEKEY`. The `generic-api-key`
+rule leaves out a value that is made only of words and numbers, such as the cipher name `ChaCha20-Poly1305` or the
+identifier `from_pkcs8_der`, since its key name also matches in prose.
+
 Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
 such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`;
 a password written in a sentence; and a quoted value that does not close on its line, such as `password = "Sup3rS3cret1`
@@ -1135,8 +1140,7 @@ The benchmark is in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 Limits:
 
 - the model rates a line on its own, without the lines around it, and reads the first 128 tokens of a line;
-- it rates the AWS documentation example keys and `password: value` lines with a plain value low. `local-rules`
-  finds both, which is why it is chained;
+- it rates `password: value` lines with a plain value low. `local-rules` finds those, which is why it is chained;
 - every word with a digit or one of `!@#%^&*+=?~` on a flagged line is redacted, so a host name, an IP address or
   a date next to the password is redacted too;
 - it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
@@ -1577,7 +1581,7 @@ starts to the line where it ends. The marker is matched as a substring, so it si
 uses:
 
 ```
-API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
+API_KEY=ASIAABCDEFGHIJKLMNOP # redacter:allow
 ```
 
 A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:

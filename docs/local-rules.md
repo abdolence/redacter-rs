@@ -77,8 +77,8 @@ Passwords and keys in `key=value` lines, vendor API keys and tokens, authorizati
 
 | Rule | Description | Validator | Keyword | Example |
 |---|---|---|---|---|
-| `aws-access-key` | AWS access key id (`AKIA` or `ASIA` and 16 characters) | no | no | `AKIAIOSFODNN7EXAMPLE` (synthetic) |
-| `aws-secret-key` | AWS secret access key: 40 characters within 20 characters of the words `aws` and `secret` | no | yes | `aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (synthetic) |
+| `aws-access-key` | AWS access key id (`AKIA` or `ASIA` and 16 characters) | yes (not an AWS documentation example) | no | `ASIAABCDEFGHIJKLMNOP` (synthetic) |
+| `aws-secret-key` | AWS secret access key: 40 characters within 20 characters of the words `aws` and `secret` | yes (not an AWS documentation example) | yes | `aws_secret_access_key = qT7vZc2LpXr9/Nd4MhK8sWb3aYeU5oGj1FiR6xQz` (synthetic) |
 | `gcp-api-key` | Google API key (`AIza` and 35 characters) | no | no | `AIzaSyA1234567890abcdefghijklmnopqrstuv` (synthetic) |
 | `github-token` | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`) | no | no | `ghp_abcdefghijklmnopqrstuvwxyz0123456789` (synthetic) |
 | `slack-token` | Slack token (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`) | no | no | `xoxb-123456789012-abcdefghij` (synthetic) |

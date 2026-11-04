@@ -105,13 +105,25 @@ pub fn phone_national_digits(value: &str) -> bool {
     phone_digit_count(value, 9)
 }
 
-/// A quoted credential value has a digit or one of `!@#%^&*+=?~`. Words alone (`required`,
-/// `changeme`, `SlackApiToken`) are what code puts after `password =` and `token:`, so a
-/// letters-only passphrase is the price of not reporting them.
+/// Whether `value` is not one of the example credentials of the AWS documentation: an access key
+/// id that ends in `EXAMPLE` (`AKIAIOSFODNN7EXAMPLE`) or a 40-character secret access key that
+/// ends in `EXAMPLEKEY` (`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`). AWS issues random keys, so
+/// a real one never ends that way. Gitleaks allows the same values.
+pub fn not_aws_documentation_example(value: &str) -> bool {
+    let access_key_id = value.len() == 20 && value.ends_with("EXAMPLE");
+    let secret_access_key = value.len() == 40 && value.ends_with("EXAMPLEKEY");
+    !(access_key_id || secret_access_key)
+}
+
+/// A quoted credential value has a digit or one of `!@#%^&*+=?~`, and is not an example of the
+/// AWS documentation. Words alone (`required`, `changeme`, `SlackApiToken`) are what code puts
+/// after `password =` and `token:`, so a letters-only passphrase is the price of not reporting
+/// them.
 pub fn quoted_credential_value(value: &str) -> bool {
     value
         .chars()
         .any(|c| c.is_ascii_digit() || "!@#%^&*+=?~".contains(c))
+        && not_aws_documentation_example(value)
 }
 
 /// An unquoted credential value is at least 8 characters long, passes the quoted check and is

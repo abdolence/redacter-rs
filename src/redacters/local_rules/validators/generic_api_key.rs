@@ -18,7 +18,50 @@ const STOPWORDS: &str = include_str!("generic_api_key_stopwords.txt");
 /// of letters only and contains no stopword. The value is ASCII, which is what the pattern
 /// captures.
 pub fn generic_api_key_value(value: &str) -> bool {
-    shannon_entropy(value) > MIN_ENTROPY && quoted_credential_value(value) && !has_stopword(value)
+    shannon_entropy(value) > MIN_ENTROPY
+        && quoted_credential_value(value)
+        && !has_stopword(value)
+        && !is_name(value)
+}
+
+/// Whether `value` is a cipher, identifier or file name: every run of letters in it is a
+/// word, and there is at least one. The key name of the pattern also matches in prose
+/// (`the Cloud KMS key, ChaCha20-Poly1305.`), where the next token is a name, and names
+/// are made of words and numbers. A random key has short runs of letters, which no word
+/// fits. A value of hex digits only is a digest or a hex-encoded key, whose runs of `a` to `f`
+/// would pass for words.
+fn is_name(value: &str) -> bool {
+    let is_hex = value
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() || !byte.is_ascii_alphanumeric());
+    if is_hex {
+        return false;
+    }
+    let mut runs = value
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|run| !run.is_empty())
+        .peekable();
+    runs.peek().is_some() && runs.all(is_word_run)
+}
+
+/// A run of letters that is upper case (`KEY`), or a sequence of words: lower case ones of two
+/// letters or more, or a capital and two lower case letters or more (`pkcs`, `ChaCha`).
+fn is_word_run(run: &str) -> bool {
+    if run.len() >= 2 && run.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return true;
+    }
+    let mut rest = run;
+    while !rest.is_empty() {
+        let word = rest
+            .strip_prefix(|c: char| c.is_ascii_uppercase())
+            .unwrap_or(rest);
+        let lowercase = word.bytes().take_while(u8::is_ascii_lowercase).count();
+        if lowercase < 2 {
+            return false;
+        }
+        rest = &word[lowercase..];
+    }
+    true
 }
 
 fn has_stopword(value: &str) -> bool {
@@ -55,7 +98,7 @@ mod tests {
 
     #[test]
     fn a_stopword_inside_the_value_drops_it() {
-        assert!(generic_api_key_value("abc123pro456xyz"));
+        assert!(generic_api_key_value("x9Kq2pro7Zw4mT"));
         assert!(!generic_api_key_value("x9Kq2proc7Zw4mT"));
         assert!(!generic_api_key_value("x9Kq2PROC7Zw4mT"));
     }
@@ -63,5 +106,32 @@ mod tests {
     #[test]
     fn letters_only_values_are_dropped() {
         assert!(!generic_api_key_value("kJhGfDsAqWeRtYuIoP"));
+    }
+
+    #[test]
+    fn a_value_made_of_words_and_numbers_is_a_name_and_not_a_key() {
+        for name in [
+            "ChaCha20-Poly1305.",
+            "from_pkcs8_der",
+            "Aes256KeyWrap",
+            "KEY_ALG_RSA_1024",
+            "kms_aead_operation=",
+            "123456789/env",
+        ] {
+            assert!(!generic_api_key_value(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_random_value_stays_a_key() {
+        for key in [
+            "k8Jd2Lw9QzX7vNb3RtY5",
+            "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",
+            "tkn_9fK2mXv7LqPz4RtWb8Yc",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(generic_api_key_value(key), "{key}");
+        }
     }
 }

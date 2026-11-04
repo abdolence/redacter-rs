@@ -172,20 +172,20 @@ const RULES: &[RuleSpec] = &[
         name: "aws-access-key",
         group: RuleGroup::Secrets,
         capture_group: 0,
-        validator: None,
+        validator: Some(("not an AWS documentation example", validators::not_aws_documentation_example)),
         keyword: false,
         description: "AWS access key id (`AKIA` or `ASIA` and 16 characters)",
-        example: Example::Synthetic("AKIAIOSFODNN7EXAMPLE"),
+        example: Example::Synthetic("ASIAABCDEFGHIJKLMNOP"),
         pattern: r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
     },
     RuleSpec {
         name: "aws-secret-key",
         group: RuleGroup::Secrets,
         capture_group: 1,
-        validator: None,
+        validator: Some(("not an AWS documentation example", validators::not_aws_documentation_example)),
         keyword: true,
         description: "AWS secret access key: 40 characters within 20 characters of the words `aws` and `secret`",
-        example: Example::Synthetic("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+        example: Example::Synthetic("aws_secret_access_key = qT7vZc2LpXr9/Nd4MhK8sWb3aYeU5oGj1FiR6xQz"),
         // Tighter than the spec, which asks only for a 40-character value near the word
         // `secret`: any `secret=<40 chars>` matches base64-looking build hashes and generic
         // application secrets, so `aws` is required nearby as well.
