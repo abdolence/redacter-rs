@@ -950,20 +950,29 @@ Some values are taken for references or placeholders and left alone:
   `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
   and digits, as in `abcdefgh1234.ijklmnop5678`.
 
-The example credentials of the AWS documentation are not reported by any rule: an access key id that ends in `EXAMPLE`,
-such as `AKIAIOSFODNN7EXAMPLE`, and a 40-character secret access key that ends in `EXAMPLEKEY`. The `generic-api-key`
-rule leaves out a value that is made only of words and numbers, such as the cipher name `ChaCha20-Poly1305` or the
-identifier `from_pkcs8_der`, since its key name also matches in prose.
+The example credentials of the AWS documentation, the access key id `AKIAIOSFODNN7EXAMPLE` and the secret access key
+`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, are skipped by the `aws-access-key`, `aws-secret-key`, `generic-api-key` and
+`secret-assignment` rules. `authorization-header` and `url-credentials` still report them. Any other value is judged
+on its own, so a password such as `MyCompany2024EXAMPLE` is reported.
+
+The `generic-api-key` rule, taken from gitleaks, reports a random-looking value after a key name that holds `key`,
+`secret`, `token`, `auth`, `access`, `api`, `credential` or `creds`, as in `license_key: vsgm-6vh4-hwnx-zkxt`. The
+separator (`=`, `:`, `=>` and similar) follows the key name directly, and a comma separates only before the quote that
+opens the value, as in `os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")`. Gitleaks also accepts blanks and a bare comma
+there, and reports prose such as `the key, ChaCha20-Poly1305.` or `the key algorithm: KEY_ALG_RSA_1024`.
 
 Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
 such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`;
-a password written in a sentence; and a quoted value that does not close on its line, such as `password = "Sup3rS3cret1`
-at a cut-off line end, a YAML `>-` block or a `"""` triple-quoted string.
+a password written in a sentence; a `generic-api-key` value after words or a bare comma, such as
+`the signing key is: Zq8Lw3Tn5VxB7mRc` or `signing_key,Zq8Lw3Tn5VxB7mRc`; and a quoted value that does not close on
+its line, such as `password = "Sup3rS3cret1` at a cut-off line end, a YAML `>-` block or a `"""` triple-quoted string.
 
 Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
 `secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
 after such a key, such as `token: v2-beta-channel`; and a file path after such a key, such as
 `PWD=/home/runner/work/app2` or `secret: /run/secrets/db_password1`, because one base64 secret in 64 starts with `/`.
+The `generic-api-key` rule also reports a cipher or identifier name directly after a key name and a separator, such as
+`the cipher key: ChaCha20-Poly1305`.
 
 Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
 with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of

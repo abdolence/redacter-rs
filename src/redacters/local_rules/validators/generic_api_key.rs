@@ -18,75 +18,7 @@ const STOPWORDS: &str = include_str!("generic_api_key_stopwords.txt");
 /// of letters only and contains no stopword. The value is ASCII, which is what the pattern
 /// captures.
 pub fn generic_api_key_value(value: &str) -> bool {
-    shannon_entropy(value) > MIN_ENTROPY
-        && quoted_credential_value(value)
-        && !has_stopword(value)
-        && !is_name(value)
-}
-
-/// The longest segment mixing letters and digits that still reads as a name, by the case of its
-/// letters. A lower case segment has no word boundaries to check, so a random lower case key
-/// (`key-3ax6xnjp29jd6fds4gc373sgvjxteol0`) passes for words and numbers unless its length
-/// rules it out; names such as `pkcs8` or `sha256` are short.
-const MAX_LOWER_CASE_NAME_SEGMENT: usize = 8;
-const MAX_MIXED_CASE_NAME_SEGMENT: usize = 13;
-
-/// Whether `value` is a cipher, identifier or file name: every segment between separators is
-/// made of words and numbers, and there is at least one letter. The key name of the pattern
-/// also matches in prose (`the Cloud KMS key, ChaCha20-Poly1305.`), where the next token is a
-/// name. A value of hex digits only is a digest or a hex-encoded key, whose runs of `a` to `f`
-/// would pass for words.
-fn is_name(value: &str) -> bool {
-    let is_hex = value
-        .bytes()
-        .all(|byte| byte.is_ascii_hexdigit() || !byte.is_ascii_alphanumeric());
-    if is_hex || !value.bytes().any(|byte| byte.is_ascii_alphabetic()) {
-        return false;
-    }
-    value
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .all(is_name_segment)
-}
-
-/// A segment of letters and digits is a name when it is short enough for its case and each run
-/// of letters in it is a word.
-fn is_name_segment(segment: &str) -> bool {
-    let has_letters = segment.bytes().any(|byte| byte.is_ascii_alphabetic());
-    let has_digits = segment.bytes().any(|byte| byte.is_ascii_digit());
-    if has_letters && has_digits {
-        let longest = if segment.bytes().any(|byte| byte.is_ascii_uppercase()) {
-            MAX_MIXED_CASE_NAME_SEGMENT
-        } else {
-            MAX_LOWER_CASE_NAME_SEGMENT
-        };
-        if segment.len() > longest {
-            return false;
-        }
-    }
-    segment
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .filter(|run| !run.is_empty())
-        .all(is_word_run)
-}
-
-/// A run of letters that is upper case (`KEY`), or a sequence of words: lower case ones of two
-/// letters or more, or a capital and two lower case letters or more (`pkcs`, `ChaCha`).
-fn is_word_run(run: &str) -> bool {
-    if run.len() >= 2 && run.bytes().all(|byte| byte.is_ascii_uppercase()) {
-        return true;
-    }
-    let mut rest = run;
-    while !rest.is_empty() {
-        let word = rest
-            .strip_prefix(|c: char| c.is_ascii_uppercase())
-            .unwrap_or(rest);
-        let lowercase = word.bytes().take_while(u8::is_ascii_lowercase).count();
-        if lowercase < 2 {
-            return false;
-        }
-        rest = &word[lowercase..];
-    }
-    true
+    shannon_entropy(value) > MIN_ENTROPY && quoted_credential_value(value) && !has_stopword(value)
 }
 
 fn has_stopword(value: &str) -> bool {
@@ -123,7 +55,7 @@ mod tests {
 
     #[test]
     fn a_stopword_inside_the_value_drops_it() {
-        assert!(generic_api_key_value("x9Kq2pro7Zw4mT"));
+        assert!(generic_api_key_value("abc123pro456xyz"));
         assert!(!generic_api_key_value("x9Kq2proc7Zw4mT"));
         assert!(!generic_api_key_value("x9Kq2PROC7Zw4mT"));
     }
@@ -131,39 +63,5 @@ mod tests {
     #[test]
     fn letters_only_values_are_dropped() {
         assert!(!generic_api_key_value("kJhGfDsAqWeRtYuIoP"));
-    }
-
-    #[test]
-    fn a_value_made_of_words_and_numbers_is_a_name_and_not_a_key() {
-        for name in [
-            "ChaCha20-Poly1305.",
-            "from_pkcs8_der",
-            "Aes256KeyWrap",
-            "KEY_ALG_RSA_1024",
-            "kms_aead_operation=",
-            "123456789/env",
-        ] {
-            assert!(!generic_api_key_value(name), "{name}");
-        }
-    }
-
-    #[test]
-    fn a_random_value_stays_a_key() {
-        let dropped: Vec<&str> = [
-            "k8Jd2Lw9QzX7vNb3RtY5",
-            "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",
-            "tkn_9fK2mXv7LqPz4RtWb8Yc",
-            "123e4567-e89b-12d3-a456-426614174000",
-            "0123456789abcdef0123456789abcdef",
-            "key-3ax6xnjp29jd6fds4gc373sgvjxteol0",
-            "rff5uqlp3ony7qac",
-            "7pkoj58azs50hgvnvckt",
-            "gfstsyj2dcsew5hemdj64lnkhato8jcb",
-            "0boyvjpt1uqz7nhh0jtuqqbkwxmj8ujystaenqka",
-        ]
-        .into_iter()
-        .filter(|key| !generic_api_key_value(key))
-        .collect();
-        assert_eq!(dropped, Vec::<&str>::new());
     }
 }

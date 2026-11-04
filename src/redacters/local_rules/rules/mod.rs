@@ -737,19 +737,93 @@ mod tests {
 
     #[test]
     fn the_aws_documentation_examples_are_not_secrets() {
-        assert_untouched("key AKIAIOSFODNN7EXAMPLE");
-        assert_untouched("key ASIAIOSFODNN7EXAMPLE");
-        assert_untouched("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+        for line in [
+            "key AKIAIOSFODNN7EXAMPLE",
+            "aws_access_key_id = AKIAIOSFODNN7EXAMPLE",
+            "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            r#"{"aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}"#,
+            r#"secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY""#,
+            r#"license_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY""#,
+        ] {
+            assert_untouched(line);
+        }
+        assert_redacts(
+            r#"password = "MyCompany2024EXAMPLE""#,
+            r#"password = "[REDACTED]""#,
+        );
         assert_redacts(concat!("key AKI", "AIOSFODNN7EXAMPLF"), "key [REDACTED]");
     }
 
     #[test]
-    fn prose_and_identifiers_after_a_key_name_are_not_keys() {
-        assert_untouched(
-            "Tink-written keysets on the Cloud KMS key, ChaCha20-Poly1305. Tink-written",
+    fn authorization_headers_and_url_credentials_still_report_the_aws_examples() {
+        for line in [
+            "Authorization: Bearer wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "s3://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI%2FK7MDENG%2FbPxRfiCYEXAMPLEKEY@examplebucket/backups",
+        ] {
+            assert_ne!(redact_all(line), line, "{line}");
+        }
+    }
+
+    #[test]
+    fn generic_api_key_limits_are_the_documented_ones() {
+        for line in [
+            "the signing key is: Zq8Lw3Tn5VxB7mRc",
+            "signing_key,Zq8Lw3Tn5VxB7mRc",
+        ] {
+            assert_untouched(line);
+        }
+        assert_redacts(
+            "the cipher key: ChaCha20-Poly1305",
+            "the cipher key: [REDACTED]",
         );
-        assert_untouched("One loader name set for local private keys in both specs: `from_pkcs8_der`, `from_env`");
-        assert_untouched("| `Aes256KeyWrap` | the key algorithm: KEY_ALG_RSA_1024 |");
+    }
+
+    #[test]
+    fn prose_and_identifiers_after_a_key_name_are_not_keys() {
+        for line in [
+            "Tink-written keysets on the Cloud KMS key, ChaCha20-Poly1305. Tink-written",
+            "One loader name set for local private keys in both specs: `from_pkcs8_der`, `from_env`",
+            "| `Aes256KeyWrap` | the key algorithm: KEY_ALG_RSA_1024 |",
+            "operations, which must suit the key type: `RsaOaepSha256` for RSA keys,\n  `Aes256KeyWrap` (`A256KW`) for AES keys.",
+            r#"kms_aead_mode="keyring", kms_aead_operation="encrypt", kms_aead_purpose="randomized""#,
+        ] {
+            assert_untouched(line);
+        }
+    }
+
+    #[test]
+    fn random_values_after_a_key_name_are_found_in_every_shape() {
+        let mut missed = Vec::new();
+        for (line, value) in [
+            (r#"signing_key = "HP5YS7VR0GCE""#, "HP5YS7VR0GCE"),
+            (r#"totp_key = "WJTA6CZM3SNV""#, "WJTA6CZM3SNV"),
+            (r#"signing_key = "ORV1WQ8kxGip""#, "ORV1WQ8kxGip"),
+            (
+                r#"encryption_key = "VSGM-6VH4-HWNX-ZKXT""#,
+                "VSGM-6VH4-HWNX-ZKXT",
+            ),
+            ("license_key: vsgm-6vh4-hwnx-zkxt", "vsgm-6vh4-hwnx-zkxt"),
+            (
+                r#"master_key = "lkkymhdmdsrz_70330717""#,
+                "lkkymhdmdsrz_70330717",
+            ),
+            ("credentials=live_0crm1svz", "live_0crm1svz"),
+            (
+                r#"refresh_key = "tkn_abcdefghijklmnopqrstuvwxyz_12345""#,
+                "tkn_abcdefghijklmnopqrstuvwxyz_12345",
+            ),
+            (
+                r#"os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")"#,
+                "Zq8Lw3Tn5VxB7mRc",
+            ),
+        ] {
+            let expected = line.replacen(value, "[REDACTED]", 1);
+            let actual = redact_all(line);
+            if actual != expected {
+                missed.push(format!("{line}\n    actual: {actual}"));
+            }
+        }
+        assert!(missed.is_empty(), "{}", missed.join("\n"));
     }
 
     #[test]

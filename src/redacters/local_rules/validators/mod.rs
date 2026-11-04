@@ -105,14 +105,15 @@ pub fn phone_national_digits(value: &str) -> bool {
     phone_digit_count(value, 9)
 }
 
-/// Whether `value` is not one of the example credentials of the AWS documentation: an access key
-/// id that ends in `EXAMPLE` (`AKIAIOSFODNN7EXAMPLE`) or a 40-character secret access key that
-/// ends in `EXAMPLEKEY` (`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`). AWS issues random keys, so
-/// a real one never ends that way. Gitleaks allows the same values.
+const AWS_DOCUMENTATION_EXAMPLES: [&str; 2] = [
+    "AKIAIOSFODNN7EXAMPLE",
+    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+];
+
+/// Whether `value` is not one of the two example credentials of the AWS documentation. They
+/// are matched whole: any other value, whatever it ends with, may be a real credential.
 pub fn not_aws_documentation_example(value: &str) -> bool {
-    let access_key_id = value.len() == 20 && value.ends_with("EXAMPLE");
-    let secret_access_key = value.len() == 40 && value.ends_with("EXAMPLEKEY");
-    !(access_key_id || secret_access_key)
+    !AWS_DOCUMENTATION_EXAMPLES.contains(&value)
 }
 
 /// A quoted credential value has a digit or one of `!@#%^&*+=?~`, and is not an example of the
@@ -226,5 +227,14 @@ mod tests {
         assert!(!ipv4("192.168.0.300"));
         assert!(ipv6("2001:db8::1"));
         assert!(!ipv6("2001:db8:::1"));
+    }
+
+    #[test]
+    fn only_the_aws_documentation_examples_are_excluded() {
+        assert!(!not_aws_documentation_example("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!not_aws_documentation_example(
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        ));
+        assert!(not_aws_documentation_example("MyCompany2024EXAMPLE"));
     }
 }
