@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt::Display;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::str::FromStr;
 
 /// The provider's own name for the kind of data it found: `email` from local-rules,
@@ -391,52 +391,60 @@ impl Display for DetectionLocation {
 /// comment syntax the file uses.
 pub const ALLOW_MARKER: &str = "redacter:allow";
 
-/// The text that opens a region of a text in which every finding is ignored. It does not act as
-/// [`ALLOW_MARKER`] on its own line.
+/// The text that opens a region of a text in which every finding is ignored. It is not
+/// [`ALLOW_MARKER`]: it does not ignore a finding on its own line.
 pub const ALLOW_BEGIN_MARKER: &str = "redacter:allow-begin";
 
-/// The text that closes the region [`ALLOW_BEGIN_MARKER`] opened. It does not act as
-/// [`ALLOW_MARKER`] on its own line.
+/// The text that closes the region [`ALLOW_BEGIN_MARKER`] opened. It is not [`ALLOW_MARKER`]:
+/// it does not ignore a finding on its own line.
 pub const ALLOW_END_MARKER: &str = "redacter:allow-end";
+
+/// What an occurrence of the text [`ALLOW_MARKER`] is, as the text after it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AllowMarker {
+    /// [`ALLOW_MARKER`] itself, which ignores the findings that cover its line.
+    Inline,
+    /// [`ALLOW_BEGIN_MARKER`].
+    Begin,
+    /// [`ALLOW_END_MARKER`].
+    End,
+}
+
+/// The markers in `text[window]`, in the order they stand, each with the byte offset it starts
+/// at. An occurrence that overlaps a range of `findings` is part of a value, so it is left out:
+/// a value cannot be used to hide itself or any other finding on the line.
+pub(crate) fn markers_outside<'t>(
+    text: &'t str,
+    window: Range<usize>,
+    findings: &'t [Range<usize>],
+) -> impl Iterator<Item = (usize, AllowMarker)> + 't {
+    let offset = window.start;
+    text[window]
+        .match_indices(ALLOW_MARKER)
+        .filter_map(move |(at, found)| {
+            let start = offset + at;
+            let end = start + found.len();
+            let is_clear = findings
+                .iter()
+                .all(|finding| end <= finding.start || start >= finding.end);
+            let rest = &text[start..];
+            let kind = if rest.starts_with(ALLOW_BEGIN_MARKER) {
+                AllowMarker::Begin
+            } else if rest.starts_with(ALLOW_END_MARKER) {
+                AllowMarker::End
+            } else {
+                AllowMarker::Inline
+            };
+            is_clear.then_some((start, kind))
+        })
+}
 
 /// Whether [`ALLOW_MARKER`] occurs in `text[window]` clear of every range of `findings`. An
 /// occurrence that overlaps a finding is part of a value, so it cannot be used to hide that value
-/// or any other finding on the line. An occurrence that starts [`ALLOW_BEGIN_MARKER`] or
-/// [`ALLOW_END_MARKER`] does not count.
+/// or any other finding on the line. [`ALLOW_BEGIN_MARKER`] and [`ALLOW_END_MARKER`] do not
+/// count.
 pub fn has_marker_outside(text: &str, window: Range<usize>, findings: &[Range<usize>]) -> bool {
-    marker_occurrences(text, window, ALLOW_MARKER)
-        .filter(|marker| {
-            let rest = &text[marker.start..];
-            !rest.starts_with(ALLOW_BEGIN_MARKER) && !rest.starts_with(ALLOW_END_MARKER)
-        })
-        .any(|marker| is_clear_of(&marker, findings))
-}
-
-/// Whether `block_marker`, [`ALLOW_BEGIN_MARKER`] or [`ALLOW_END_MARKER`], occurs in
-/// `text[window]` clear of every range of `findings`, as [`has_marker_outside`] reads it.
-pub(crate) fn has_block_marker_outside(
-    text: &str,
-    window: Range<usize>,
-    block_marker: &'static str,
-    findings: &[Range<usize>],
-) -> bool {
-    marker_occurrences(text, window, block_marker).any(|marker| is_clear_of(&marker, findings))
-}
-
-fn marker_occurrences<'t>(
-    text: &'t str,
-    window: Range<usize>,
-    marker: &'static str,
-) -> impl Iterator<Item = Range<usize>> + 't {
-    text[window.clone()]
-        .match_indices(marker)
-        .map(move |(at, found)| window.start + at..window.start + at + found.len())
-}
-
-fn is_clear_of(marker: &Range<usize>, findings: &[Range<usize>]) -> bool {
-    findings
-        .iter()
-        .all(|finding| marker.end <= finding.start || marker.start >= finding.end)
+    markers_outside(text, window, findings).any(|(_, marker)| marker == AllowMarker::Inline)
 }
 
 /// A text with the byte offset of each line start, so many detections are placed in it without
@@ -475,16 +483,20 @@ impl<'a> TextLines<'a> {
     /// Whether [`ALLOW_MARKER`] stands, clear of every range of `findings`, on a line that
     /// `range` covers: from the line it starts on to the line it ends on.
     pub fn has_marker_beside(&self, range: Range<usize>, findings: &[Range<usize>]) -> bool {
-        let first_line = self.line_of(range.start);
-        let last_line = self.line_of(range.end.saturating_sub(1).max(range.start));
+        let lines = self.line_span(range);
         let to = self
             .line_starts
-            .get(last_line + 1)
+            .get(lines.end() + 1)
             .copied()
             .unwrap_or(self.text.len());
-        let from = self.line_starts[first_line].max(self.marker_span.start);
+        let from = self.line_starts[*lines.start()].max(self.marker_span.start);
         let to = to.min(self.marker_span.end);
         from < to && has_marker_outside(self.text, from..to, findings)
+    }
+
+    /// The 0-based indices of the first and the last line that `range` covers.
+    pub fn line_span(&self, range: Range<usize>) -> RangeInclusive<usize> {
+        self.line_of(range.start)..=self.line_of(range.end.saturating_sub(1).max(range.start))
     }
 
     /// The 0-based index of the line `offset` is on.

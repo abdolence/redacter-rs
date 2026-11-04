@@ -13,7 +13,7 @@ use crate::commands::artifact_locator::ArtifactLocator;
 use crate::commands::copy_output::{counted, escaped};
 use crate::commands::findings::{FileOutcome, PixelBox, Place, ReportedFile};
 use crate::commands::scan_output::FindingReport;
-use crate::redacters::Categories;
+use crate::redacters::{AllowMarkerWarning, Categories};
 use crate::AppResult;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -71,9 +71,9 @@ impl Place {
                 ..
             } => Some(Region {
                 start_line: line,
-                start_column: column,
-                end_line,
-                end_column,
+                start_column: Some(column),
+                end_line: Some(end_line),
+                end_column: Some(end_column),
             }),
             Self::TableCell { .. } | Self::Image { .. } => None,
         }
@@ -335,9 +335,13 @@ impl ArtifactLocation {
 #[serde(rename_all = "camelCase")]
 struct Region {
     start_line: usize,
-    start_column: usize,
-    end_line: usize,
-    end_column: usize,
+    /// Left out for a region of whole lines, as SARIF reads a region with only `startLine`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_column: Option<usize>,
 }
 
 /// What GitHub tells one alert from another across uploads. It is the only fingerprint GitHub
@@ -403,6 +407,13 @@ impl SarifLog {
         let mut notifications = Vec::new();
         for artifact in artifacts {
             let location = ArtifactLocation::of(locator, &artifact.path);
+            for warning in &artifact.marker_warnings {
+                notifications.push(Notification::marker_warning(
+                    artifact,
+                    warning,
+                    location.clone(),
+                ));
+            }
             match &artifact.outcome {
                 FileOutcome::Findings(findings) => {
                     let mut seen: BTreeMap<(RuleId, String), usize> = BTreeMap::new();
@@ -577,6 +588,25 @@ impl Notification {
         }
     }
 
+    /// The warning about a block marker of the file, placed on the line of the marker.
+    fn marker_warning(
+        artifact: &ReportedFile,
+        warning: &AllowMarkerWarning,
+        location: ArtifactLocation,
+    ) -> Self {
+        let region = Region {
+            start_line: warning.line,
+            start_column: None,
+            end_line: None,
+            end_column: None,
+        };
+        Self {
+            level: Level::Warning,
+            message: format!("{}: {warning}", artifact.path).into(),
+            locations: vec![Location::of(location, Some(region))],
+        }
+    }
+
     fn new(
         level: Level,
         artifact: &ReportedFile,
@@ -643,6 +673,7 @@ mod tests {
         ReportedFile {
             path: path.to_string(),
             outcome,
+            marker_warnings: Vec::new(),
         }
     }
 

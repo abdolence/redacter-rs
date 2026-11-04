@@ -1619,14 +1619,30 @@ does not count either.
 - in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
   lines;
 - on a line longer than about 4 MiB, in a file read in pieces, the marker is not read;
-- a line with `redacter:allow-begin` or `redacter:allow-end` is not an inline marker, see [Block markers](#block-markers);
+- `redacter:allow-begin` and `redacter:allow-end` are not inline markers, see [Block markers](#block-markers);
 - an image or a PDF page has no place for the marker, so the findings in them are always reported;
 - `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
 
 #### Block markers
 
-`redacter:allow-begin` and `redacter:allow-end` ignore every finding between them. They are for a value that has no
-line to hold the inline marker, such as a private key inside a string literal:
+`redacter:allow-begin` and `redacter:allow-end` ignore every finding on the lines between them. The inline marker has to
+stand on a line of the finding. A region is for a value that has no such line to spare, such as a key in a Markdown code
+block, where a marker would show in the rendered page, and for a place that holds several values, such as a fixture,
+where a marker on each line is noise.
+
+In Markdown the markers sit in HTML comments:
+
+````markdown
+<!-- redacter:allow-begin -->
+```text
+-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ+...
+-----END PRIVATE KEY-----
+```
+<!-- redacter:allow-end -->
+````
+
+In source code they sit in a comment above and below the value:
 
 ```rust
 // redacter:allow-begin
@@ -1636,34 +1652,58 @@ MC4CAQAwBQYDK2VwBCIEIJ+...
 // redacter:allow-end
 ```
 
-In Markdown the markers sit in HTML comments, `<!-- redacter:allow-begin -->` and `<!-- redacter:allow-end -->`. Like
-the inline marker, they are matched as substrings, in whatever comment syntax the file uses.
+Like the inline marker, they are matched as substrings, in whatever comment syntax the file uses.
 
 Be aware that a region ignores real secrets added inside it later, and nothing reports them. Keep regions small, around
 the one value they are for, and review a change that touches one.
 
-- A region runs from the start of the begin line to the end of the end line, so the marker lines are inside it. A finding
-  is ignored when it lies entirely in a region. One that starts before the begin line, or ends after the end line, is
-  reported;
-- the block markers do not act as the inline marker on their own line, so `a@b.io # redacter:allow-begin` does not
-  ignore the address. The inline marker keeps working on any line, inside a region or outside;
-- a marker inside the value of a finding does not count, as for the inline marker;
+On a marker line, only the inline marker ignores a finding. Here `a@b.io` is reported and `c@d.io` is ignored, and in the
+second example both are ignored, since the inline marker stands beside the begin:
+
+```
+a@b.io # redacter:allow-begin
+c@d.io
+# redacter:allow-end
+
+a@b.io redacter:allow redacter:allow-begin
+c@d.io
+# redacter:allow-end
+```
+
+The markers of a line are read in the order they stand, so an end before a begin closes a region and opens the next one:
+
+```
+# redacter:allow-begin
+first value
+# redacter:allow-end redacter:allow-begin
+second value
+# redacter:allow-end
+```
+
+- A region is the lines between the begin line and the end line, not including them. A finding is ignored when it lies
+  entirely in a region. One that starts on the begin line, or ends on the end line, is reported;
+- a marker inside the value of a finding does not count, as for the inline marker. With `--categories`, a value of a
+  category that is not selected is not a finding, so a marker inside it counts, for both forms of the marker;
 - the ignored findings are counted in `findings_ignored`, as for the inline marker. `--min-score` is applied first;
 - block markers apply to text. A CSV table read by cell has no region, an image or a PDF page has no place for the
   markers, and `cp` redacts everything.
 
 A marker that does not pair up gives a warning with the line of the marker, and never hides a finding:
 
-- a begin with no end after it ignores nothing. Without this a forgotten end marker would hide the rest of the file;
-- an end with no begin before it is ignored;
-- a begin inside a region that is already open is ignored, and the region keeps its first begin.
+- a begin with no end after it has no effect, so a forgotten end marker does not hide the rest of the file;
+- an end with no begin before it has no effect;
+- a begin inside a region that is already open has no effect, and the region keeps its first begin.
 
-The warnings are shown under the row of the file in the terminal and in the `marker_warnings` of the file in the JSON
-report. SARIF and OCSF reports do not carry them. They do not change the exit code.
+The warnings are listed in the order of the file. They are shown under the row of the file in the terminal and in the
+text report, and are the `marker_warnings` of the file in the JSON report. In a SARIF report each is a warning in the
+notifications of the run, on the line of the marker. OCSF reports do not carry them. The warnings do not change the exit
+code. With `--sampling-size`, a begin with no end in the sample gets no warning, as the sample can end inside a region.
 
-In a file read in pieces, a region can start in any earlier piece, but a finding is ignored only when its end marker lies
-within the text read with the piece of the finding: the piece and the context after it, 64 KiB for `local-rules` and
-`local-credential-ml`, 1 KiB for the cloud providers. A finding with its end marker further away is reported.
+A file larger than one request is read in pieces: about 3.9 MiB for `local-rules` and `local-credential-ml`, and the
+request size of the provider less its context for the cloud providers. When several redacters are selected, the pieces
+fit all of them. A block marker is read with the piece it starts in, on a line of any length. A region can start in an
+earlier piece than a finding, but a finding is ignored only when the end marker lies in the piece of the finding or in
+an earlier one. A finding with its end marker in a later piece is reported.
 
 ### Exit codes
 

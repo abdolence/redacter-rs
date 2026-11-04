@@ -192,24 +192,22 @@ pub struct ScanFileReport {
 impl ScanFileReport {
     /// A scanned file. Its findings are in the order of the windows it was read in, sorted by
     /// location within a window, so a value over 64 KiB that crosses the end of a window is
-    /// listed after the later findings of the window before it.
+    /// listed after the later findings of the window before it. Its `marker_warnings` are put
+    /// in the order of the file.
     pub fn scanned(
         file_ref: &FileSystemRef,
         findings: SpilledFindings,
         unlocated_values: usize,
         findings_ignored: usize,
+        mut marker_warnings: Vec<AllowMarkerWarning>,
     ) -> Self {
+        // The warning of a begin without an end comes last from the read of the file.
+        marker_warnings.sort_by_key(|warning| warning.line);
         Self {
             unlocated_values,
             findings_ignored,
-            ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
-        }
-    }
-
-    pub fn with_marker_warnings(self, marker_warnings: Vec<AllowMarkerWarning>) -> Self {
-        Self {
             marker_warnings,
-            ..self
+            ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
         }
     }
 
@@ -260,6 +258,7 @@ impl ScanFileReport {
         Some(ReportedFile {
             path: self.path.clone(),
             outcome,
+            marker_warnings: self.marker_warnings.clone(),
         })
     }
 
@@ -465,7 +464,9 @@ pub fn format_file_lines<'a>(
     let warnings = file.marker_warnings.iter().map(|warning| {
         Ok(format!(
             "    {}",
-            styles.unconfirmed.apply_to(format!("warning: {warning}"))
+            styles
+                .unconfirmed
+                .apply_to(format_args!("warning: {warning}"))
         ))
     });
     Ok(std::iter::once(Ok(row))
@@ -659,7 +660,13 @@ mod tests {
         unlocated_values: usize,
     ) -> ScanFileReport {
         FindingReport::sort_by_location(&mut findings);
-        ScanFileReport::scanned(file_ref, spilled_findings(&findings), unlocated_values, 0)
+        ScanFileReport::scanned(
+            file_ref,
+            spilled_findings(&findings),
+            unlocated_values,
+            0,
+            Vec::new(),
+        )
     }
 
     fn to_text(result: &ScanCommandResult) -> String {
@@ -800,6 +807,65 @@ mod tests {
                 assert!(!report.contains(hidden), "{values:?}: {report}");
             }
         }
+    }
+
+    fn with_marker_warnings(marker_warnings: Vec<AllowMarkerWarning>) -> ScanFileReport {
+        ScanFileReport::scanned(
+            &file_ref("notes.txt", mime::TEXT_PLAIN),
+            spilled_findings(&[]),
+            0,
+            0,
+            marker_warnings,
+        )
+    }
+
+    #[test]
+    fn marker_warnings_are_listed_in_the_order_of_the_file() {
+        let file = with_marker_warnings(vec![
+            AllowMarkerWarning {
+                problem: AllowMarkerProblem::NestedBegin,
+                line: 3,
+            },
+            AllowMarkerWarning {
+                problem: AllowMarkerProblem::UnclosedBegin,
+                line: 1,
+            },
+        ]);
+
+        let written = serde_json::to_value(&file).unwrap();
+
+        assert_eq!(
+            written["marker_warnings"],
+            serde_json::json!([
+                {"problem": "unclosed_begin", "line": 1},
+                {"problem": "nested_begin", "line": 3},
+            ])
+        );
+    }
+
+    #[test]
+    fn a_marker_warning_is_a_notification_with_the_line_in_the_sarif_report() {
+        let mut result = ScanCommandResult::default();
+        result.push(with_marker_warnings(vec![AllowMarkerWarning {
+            problem: AllowMarkerProblem::StrayEnd,
+            line: 4,
+        }]));
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+
+        let log = serde_json::to_value(
+            SarifLog::try_new(&result.reported_files(), &locator, None).unwrap(),
+        )
+        .unwrap();
+
+        let invocation = &log["runs"][0]["invocations"][0];
+        let notification = &invocation["toolExecutionNotifications"][0];
+        assert_eq!(notification["level"], "warning");
+        assert_eq!(
+            notification["locations"][0]["physicalLocation"]["region"]["startLine"],
+            4
+        );
+        assert_eq!(invocation["executionSuccessful"], true);
+        assert!(log["runs"][0]["results"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1380,11 +1446,10 @@ mod tests {
 
     #[test]
     fn a_marker_warning_is_listed_under_the_row_of_its_file() {
-        let file = scanned(&file_ref("notes.txt", mime::TEXT_PLAIN), Vec::new(), 0)
-            .with_marker_warnings(vec![AllowMarkerWarning {
-                problem: AllowMarkerProblem::UnclosedBegin,
-                line: 2,
-            }]);
+        let file = with_marker_warnings(vec![AllowMarkerWarning {
+            problem: AllowMarkerProblem::UnclosedBegin,
+            line: 2,
+        }]);
 
         let lines = file_lines(&file, RowLayout::for_terminal(100), &OutputStyles::plain());
 

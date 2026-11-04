@@ -320,8 +320,9 @@ async fn detect_in_file(
             file_ref,
             SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
         ),
-        Ok(None) => ScanFileReport::scanned(file_ref, findings, unlocated, ignored)
-            .with_marker_warnings(marker_warnings),
+        Ok(None) => {
+            ScanFileReport::scanned(file_ref, findings, unlocated, ignored, marker_warnings)
+        }
         Err(error @ AppError::FindingSpillFailed { .. }) => return Err(error),
         Err(error) => failed_report(file_ref, &error),
     })
@@ -529,20 +530,6 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(written["findings_ignored"], 1);
-    }
-
-    #[tokio::test]
-    async fn a_region_is_left_out_of_the_findings_and_counted() {
-        let dir = tempfile::TempDir::with_prefix("scan_allow_region").unwrap();
-        std::fs::write(
-            dir.path().join("config.txt"),
-            "mail a@b.io\n# redacter:allow-begin\nmock c@d.io\n# redacter:allow-end\n",
-        )
-        .unwrap();
-
-        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
-
-        assert_eq!((result.findings, result.findings_ignored), (1, 1));
     }
 
     #[tokio::test]

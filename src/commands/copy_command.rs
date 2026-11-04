@@ -133,6 +133,7 @@ impl CopyFileReport {
         Some(ReportedFile {
             path: self.path.clone(),
             outcome,
+            marker_warnings: Vec::new(),
         })
     }
 }
