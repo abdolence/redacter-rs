@@ -15,4 +15,6 @@ pub enum LocalCredentialMlError {
     InvalidScore { value: f32 },
     #[error("cannot compile the rules that place a credential on a line: {0}")]
     Rules(#[from] LocalRulesError),
+    #[error("cannot compile the patterns that recognise public material: {0}")]
+    PublicMaterialPatterns(#[from] regex::Error),
 }

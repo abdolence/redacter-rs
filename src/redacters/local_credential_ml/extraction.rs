@@ -3,6 +3,7 @@
 //! `local-rules` secret rules and, failing those, from every credential-like word of the line.
 
 use super::error::LocalCredentialMlError;
+use super::public_material::PublicMaterial;
 use crate::redacters::quoted_credential_value;
 use crate::redacters::text_spans::{merge_findings, Finding, RuleName, REDACTED};
 use crate::redacters::{RuleSet, Score};
@@ -19,6 +20,7 @@ const WRAPPING_CHARACTERS: &[char] = &['"', '\'', '`', ',', ';', '(', ')', '{', 
 pub struct CredentialExtractor {
     line_rules: RuleSet,
     private_key_blocks: RuleSet,
+    public_material: PublicMaterial,
 }
 
 impl CredentialExtractor {
@@ -26,6 +28,7 @@ impl CredentialExtractor {
         Ok(Self {
             line_rules: RuleSet::credential_line_rules()?,
             private_key_blocks: RuleSet::private_key_block_rule()?,
+            public_material: PublicMaterial::new()?,
         })
     }
 
@@ -34,8 +37,10 @@ impl CredentialExtractor {
     /// carrying the line's score.
     ///
     /// A private key block is certain on its own, so it is redacted whatever the model
-    /// thinks, and the lines inside it are not scored. A line with no value to place is not
-    /// scored either, since the model's verdict on it could not change the result.
+    /// thinks, and the lines inside it are not scored. Neither are the lines of a public key
+    /// block, a certificate or an SSH public key, which the model rates as high as a private
+    /// key. A line with no value to place is not scored either, since the model's verdict on
+    /// it could not change the result.
     pub fn find(
         &self,
         text: &str,
@@ -43,6 +48,7 @@ impl CredentialExtractor {
         mut score_line: impl FnMut(&str) -> Result<Score, LocalCredentialMlError>,
     ) -> Result<Vec<Finding>, LocalCredentialMlError> {
         let blocks = self.private_key_blocks.find(text);
+        let public_blocks = self.public_material.public_blocks(text);
         let mut findings: Vec<Finding> = blocks
             .iter()
             .map(|block| Finding {
@@ -57,7 +63,10 @@ impl CredentialExtractor {
             let inside_block = blocks
                 .iter()
                 .any(|block| block.start <= line_range.start && line_range.end <= block.end);
-            if inside_block {
+            let touches_public_block = public_blocks
+                .iter()
+                .any(|block| block.start < line_range.end && line_range.start < block.end);
+            if inside_block || touches_public_block || self.public_material.is_public_line(line) {
                 continue;
             }
             let values = self.values_in_line(line);
@@ -96,12 +105,17 @@ impl CredentialExtractor {
                 .iter()
                 .any(|value| value.start < word.end && word.start < value.end)
         });
-        matched.iter().cloned().chain(unmatched_words).collect()
+        matched
+            .iter()
+            .cloned()
+            .chain(unmatched_words)
+            .filter(|value| !self.public_material.is_public_value(line, value.clone()))
+            .collect()
     }
 }
 
 /// The values of the whitespace-separated words of `line` that hold a letter or digit and a
-/// digit or a credential symbol, without the quotes and brackets around them and without the
+/// digit or a credential symbol, apart from Rust reference types (`&str`, `&[u8]`), without the quotes and brackets around them and without the
 /// `key=` in front of them when they are `key=value` pairs.
 ///
 /// A word is split at each redaction marker an earlier redacter placed, and the marker is
@@ -114,9 +128,27 @@ fn credential_like_words(line: &str) -> Vec<Range<usize>> {
         .map(|piece| value_of_word(line, piece))
         .filter(|value| {
             let text = &line[value.clone()];
-            text.chars().any(char::is_alphanumeric) && quoted_credential_value(text)
+            text.chars().any(char::is_alphanumeric)
+                && quoted_credential_value(text)
+                && !is_reference_type(text)
         })
         .collect()
+}
+
+/// A word such as `&str`, `&mut` or `&[u8]`: the `&` of a Rust reference counts as a
+/// credential symbol, and the type after it is not a value. A word with any other digit
+/// after the `&` (`&hunter2`) is still a candidate; one of letters only (`&hunter`) is lost.
+fn is_reference_type(word: &str) -> bool {
+    const PRIMITIVES: &[&str] = &[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "u128", "i128", "usize", "isize",
+        "f32", "f64",
+    ];
+    let Some(target) = word.strip_prefix('&') else {
+        return false;
+    };
+    let target = target.trim_matches(['[', ']', '\'']);
+    PRIMITIVES.contains(&target)
+        || (!target.is_empty() && target.chars().all(|c| c.is_ascii_alphabetic() || c == '_'))
 }
 
 /// The parts of `word` between its redaction markers. A part that is the key of an
@@ -438,5 +470,57 @@ mod tests {
         let (findings, scored) = find(&text, |_| 0.0);
         assert_eq!(redact(&text, &findings), "key follows\n[REDACTED]\nafter\n");
         assert_eq!(scored, Vec::<String>::new());
+    }
+
+    const PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA3nWuD94S4j/Phw91/bVC\nvych4Kc8bskEO2vh/8cP9Szyw4p5DG2R6uO2Dq6zqn2nAgMBAAE=\n-----END PUBLIC KEY-----";
+
+    #[test]
+    fn a_public_key_block_is_never_scored() {
+        let text = format!("key follows\n{PUBLIC_KEY}\nafter\n");
+        let (findings, scored) = find(&text, |_| 0.99);
+        assert_eq!(findings, Vec::new());
+        assert_eq!(scored, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_line_of_a_public_jwk_is_never_scored() {
+        let (findings, scored) = find(
+            r#"  "x": "YP7UuiVanTHJYet0xjVtaMBJuJI7Yfps5mliLmDyn7Y","#,
+            |_| 0.99,
+        );
+        assert_eq!(findings, Vec::new());
+        assert_eq!(scored, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_secret_beside_a_public_value_is_still_found() {
+        assert_eq!(
+            values(
+                r#"{"x": "YP7UuiVanTHJYet0xjVtaMBJuJI7Yfps5mliLmDyn7Y", "api_key": "k8Jd2Lw9QzX7vNb3RtY5"}"#
+            ),
+            ["k8Jd2Lw9QzX7vNb3RtY5"]
+        );
+    }
+
+    #[test]
+    fn a_ssh_public_key_line_is_never_scored() {
+        let (_, scored) = find(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHN0cmluZ3RoYXRsb29rc2xpa2VhbmVkMjU1MTlrZXk user@host",
+            |_| 0.99,
+        );
+        assert_eq!(scored, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_rust_reference_type_is_not_a_value() {
+        assert_eq!(
+            values(r#"const DNI_LETTERS: &[u8] = b"TRWAGMYFPDXBNJZSQVHLCKE";"#),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            values(r#"fn login(user: &str, password: &str) -> Token // Sup3rS3cret!"#),
+            ["Sup3rS3cret!"]
+        );
+        assert_eq!(values("pass &hunter2 now"), ["&hunter2"]);
     }
 }

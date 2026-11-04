@@ -4,6 +4,7 @@
 mod engine;
 mod error;
 mod extraction;
+mod public_material;
 
 pub use error::LocalCredentialMlError;
 

@@ -1125,6 +1125,11 @@ line is rated only when there is something to redact:
   other symbols (`-`, `.`, `/`, `:`, `_` and `$`) do not count, so `api.example.com` is left alone and
   `correct-horse-battery-staple` is never found by this step. A word is split at a redaction marker that an
   earlier redacter left; the marker is never a value, and the text on either side of it can be;
+- public material is not a value, whatever the model rates: a value named by a public field (`x`, `y` and `kid` of
+  a JWK, a signature, a fingerprint, a field with `public` or `certificate` in its name), a value after `h1:` or
+  `sha256-` and the like, letters that never repeat, as in an alphabet, and hex or base64 that decodes to words or to
+  a counting sequence such as `00 01 02 ...`. The `&` of a Rust reference such as `&str` or `&[u8]` is not a symbol
+  of a value either. A PEM block of a public key or a certificate and an SSH public key line are not rated;
 - a line with no value is not rated.
 
 A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
