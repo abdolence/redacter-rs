@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-const NOTE: &str = concat!("mail ana@example.com\nkey AKI", "AABCDEFGHIJKLMNOP\n");
+const NOTE: &str = "mail ana@example.com\nkey AKIAIOSFODNN7EXAMPLE\n";
 const EMAIL: &str = "ana@example.com";
-const KEY: &str = concat!("AKI", "AABCDEFGHIJKLMNOP");
+const KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
 /// A directory with `in/a.txt` holding an email address and an AWS access key.
 struct Workspace(TempDir);

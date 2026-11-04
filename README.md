@@ -950,22 +950,20 @@ Some values are taken for references or placeholders and left alone:
   `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
   and digits, as in `abcdefgh1234.ijklmnop5678`.
 
-The example credentials of the AWS documentation, the access key id `AKIAIOSFODNN7EXAMPLE` and the secret access key
-`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, are skipped by the `aws-access-key`, `aws-secret-key`, `generic-api-key` and
-`secret-assignment` rules. `authorization-header` and `url-credentials` still report them. Any other value is judged
-on its own, so a password such as `MyCompany2024EXAMPLE` is reported.
-
 The `generic-api-key` rule, taken from gitleaks, reports a random-looking value after a key name that holds `key`,
-`secret`, `token`, `auth`, `access`, `api`, `credential` or `creds`, as in `license_key: vsgm-6vh4-hwnx-zkxt`. The
-separator (`=`, `:`, `=>` and similar) follows the key name directly, and a comma separates only before the quote that
-opens the value, as in `os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")`. Gitleaks also accepts blanks and a bare comma
-there, and reports prose such as `the key, ChaCha20-Poly1305.` or `the key algorithm: KEY_ALG_RSA_1024`.
+`secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`, as in `license_key: vsgm-6vh4-hwnx-zkxt`.
+Only blanks may stand between the key name and the separator (`=`, `:`, `=>` and similar), so aligned assignments are
+found, and a comma separates only before the quote that opens the value, as in
+`os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")`. Gitleaks also lets further words follow the key name and accepts a bare
+comma, and so reports prose such as `the key, ChaCha20-Poly1305.` or `the key algorithm: KEY_ALG_RSA_1024`.
 
 Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
 such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`;
-a password written in a sentence; a `generic-api-key` value after words or a bare comma, such as
-`the signing key is: Zq8Lw3Tn5VxB7mRc` or `signing_key,Zq8Lw3Tn5VxB7mRc`; and a quoted value that does not close on
-its line, such as `password = "Sup3rS3cret1` at a cut-off line end, a YAML `>-` block or a `"""` triple-quoted string.
+a password written in a sentence; a `generic-api-key` value after a label of several words, such as
+`API Key ID: Zq8Lw3Tn5VxB7mRc`, `Client Secret Value: Zq8Lw3Tn5VxB7mRc` or `{"API Key ID": "Zq8Lw3Tn5VxB7mRc"}`; one
+after a bare comma, such as `signing_key,Zq8Lw3Tn5VxB7mRc`; one on a line of its own after the comma, as in a multi-line
+`os.getenv(` call; and a quoted value that does not close on its line, such as `password = "Sup3rS3cret1` at a cut-off
+line end, a YAML `>-` block or a `"""` triple-quoted string.
 
 Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
 `secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
@@ -1149,7 +1147,8 @@ The benchmark is in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 Limits:
 
 - the model rates a line on its own, without the lines around it, and reads the first 128 tokens of a line;
-- it rates `password: value` lines with a plain value low. `local-rules` finds those, which is why it is chained;
+- it rates the AWS documentation example keys and `password: value` lines with a plain value low. `local-rules`
+  finds both, which is why it is chained;
 - every word with a digit or one of `!@#%^&*+=?~` on a flagged line is redacted, so a host name, an IP address or
   a date next to the password is redacted too;
 - it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
@@ -1590,7 +1589,7 @@ starts to the line where it ends. The marker is matched as a substring, so it si
 uses:
 
 ```
-API_KEY=ASIAABCDEFGHIJKLMNOP # redacter:allow
+API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
 ```
 
 A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:

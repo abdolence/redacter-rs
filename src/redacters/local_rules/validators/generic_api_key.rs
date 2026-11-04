@@ -14,8 +14,8 @@ const MIN_ENTROPY: f64 = 3.5;
 /// a placeholder rather than a secret.
 const STOPWORDS: &str = include_str!("generic_api_key_stopwords.txt");
 
-/// A candidate of the `generic-api-key` rule is a secret when it is random enough, is not made
-/// of letters only and contains no stopword. The value is ASCII, which is what the pattern
+/// A candidate of the `generic-api-key` rule is a secret when it is random enough, holds a digit
+/// or one of `!@#%^&*+=?~` and contains no stopword. The value is ASCII, which is what the pattern
 /// captures.
 pub fn generic_api_key_value(value: &str) -> bool {
     shannon_entropy(value) > MIN_ENTROPY && quoted_credential_value(value) && !has_stopword(value)

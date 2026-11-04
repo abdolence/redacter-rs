@@ -105,26 +105,13 @@ pub fn phone_national_digits(value: &str) -> bool {
     phone_digit_count(value, 9)
 }
 
-const AWS_DOCUMENTATION_EXAMPLES: [&str; 2] = [
-    "AKIAIOSFODNN7EXAMPLE",
-    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-];
-
-/// Whether `value` is not one of the two example credentials of the AWS documentation. They
-/// are matched whole: any other value, whatever it ends with, may be a real credential.
-pub fn not_aws_documentation_example(value: &str) -> bool {
-    !AWS_DOCUMENTATION_EXAMPLES.contains(&value)
-}
-
-/// A quoted credential value has a digit or one of `!@#%^&*+=?~`, and is not an example of the
-/// AWS documentation. Words alone (`required`, `changeme`, `SlackApiToken`) are what code puts
-/// after `password =` and `token:`, so a letters-only passphrase is the price of not reporting
-/// them.
+/// A quoted credential value has a digit or one of `!@#%^&*+=?~`. Words alone (`required`,
+/// `changeme`, `SlackApiToken`) are what code puts after `password =` and `token:`, so a
+/// letters-only passphrase is the price of not reporting them.
 pub fn quoted_credential_value(value: &str) -> bool {
     value
         .chars()
         .any(|c| c.is_ascii_digit() || "!@#%^&*+=?~".contains(c))
-        && not_aws_documentation_example(value)
 }
 
 /// An unquoted credential value is at least 8 characters long, passes the quoted check and is
@@ -227,14 +214,5 @@ mod tests {
         assert!(!ipv4("192.168.0.300"));
         assert!(ipv6("2001:db8::1"));
         assert!(!ipv6("2001:db8:::1"));
-    }
-
-    #[test]
-    fn only_the_aws_documentation_examples_are_excluded() {
-        assert!(!not_aws_documentation_example("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!not_aws_documentation_example(
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        ));
-        assert!(not_aws_documentation_example("MyCompany2024EXAMPLE"));
     }
 }

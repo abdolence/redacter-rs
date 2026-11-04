@@ -74,7 +74,7 @@ Select them with `BENCH_DLP_DATASETS`, a comma-separated list. The default is
   vendor API keys, tokens, JWTs, private keys, connection strings), and four control files
   with strings that look like secrets and are not. Files are read with
   `--unsupported-as-text`, since `.env` files and keys have no text media type. The values
-  are made up. `secrets/secrets.json` stores
+  are made up, apart from the AWS documentation example key. `secrets/secrets.json` stores
   each value in two parts and each file as a template over `{{value id}}`, and the harness
   assembles the files at run time, so that no committed line is a complete token that GitHub
   push protection would block. Every value a template names is a credential to find.
