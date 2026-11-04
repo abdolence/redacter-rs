@@ -1125,6 +1125,9 @@ line is rated only when there is something to redact:
   other symbols (`-`, `.`, `/`, `:`, `_` and `$`) do not count, so `api.example.com` is left alone and
   `correct-horse-battery-staple` is never found by this step. A word is split at a redaction marker that an
   earlier redacter left; the marker is never a value, and the text on either side of it can be;
+- the name that an assignment or declaration gives (`API_KEY2 =`, `sha256:`, a JSON key), a Rust reference or type
+  (`&str`, `&[u8; 32]`), a `#define` and the code in front of a string (`String::from(`, `r#`) are never values.
+  In a quoted string the value is the string. A secret that starts with `&` (`PASS=&x9Lq2`) is still found;
 - a line with no value is not rated.
 
 A `-----BEGIN ... PRIVATE KEY-----` block, found by the `private-key-block` rule of `local-rules`, is redacted
