@@ -135,7 +135,7 @@ async fn handle_args(cli: CliArgs, term: &Term) -> AppResult<i32> {
                 &source,
                 copy_result.categories.as_ref(),
             )?;
-            Ok(0)
+            Ok(copy_result.exit_code())
         }
         CliCommand::Scan {
             source,

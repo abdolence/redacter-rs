@@ -533,6 +533,16 @@ category:
 redacter scan . -d local-rules --categories '!other'
 ```
 
+### Copy exit codes
+
+`cp` exits with 1 when at least one file ends in an error. The file is shown as an error in the summary line, is reported
+with the status `failed`, and is not copied. The other files are still copied. An invalid command line exits with 1 as
+well.
+
+Skipped files do not change the exit code: a file that no redacter supports and that `--allow-unsupported-copies` does
+not copy, a file left out by `--max-size-limit` or `--filename-filter`, and a file that needs the `ocr` or `pdf` addon
+when it is not installed. A copy that ends with 0 may therefore have left files at the source.
+
 ### Copy report
 
 The JSON report of `cp` is one object with the counters `files_copied`, `files_redacted` and `files_skipped`, and
