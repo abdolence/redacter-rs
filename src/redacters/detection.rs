@@ -391,19 +391,52 @@ impl Display for DetectionLocation {
 /// comment syntax the file uses.
 pub const ALLOW_MARKER: &str = "redacter:allow";
 
+/// The text that opens a region of a text in which every finding is ignored. It does not act as
+/// [`ALLOW_MARKER`] on its own line.
+pub const ALLOW_BEGIN_MARKER: &str = "redacter:allow-begin";
+
+/// The text that closes the region [`ALLOW_BEGIN_MARKER`] opened. It does not act as
+/// [`ALLOW_MARKER`] on its own line.
+pub const ALLOW_END_MARKER: &str = "redacter:allow-end";
+
 /// Whether [`ALLOW_MARKER`] occurs in `text[window]` clear of every range of `findings`. An
 /// occurrence that overlaps a finding is part of a value, so it cannot be used to hide that value
-/// or any other finding on the line.
+/// or any other finding on the line. An occurrence that starts [`ALLOW_BEGIN_MARKER`] or
+/// [`ALLOW_END_MARKER`] does not count.
 pub fn has_marker_outside(text: &str, window: Range<usize>, findings: &[Range<usize>]) -> bool {
-    text[window.clone()]
-        .match_indices(ALLOW_MARKER)
-        .any(|(at, marker)| {
-            let start = window.start + at;
-            let end = start + marker.len();
-            findings
-                .iter()
-                .all(|finding| end <= finding.start || start >= finding.end)
+    marker_occurrences(text, window, ALLOW_MARKER)
+        .filter(|marker| {
+            let rest = &text[marker.start..];
+            !rest.starts_with(ALLOW_BEGIN_MARKER) && !rest.starts_with(ALLOW_END_MARKER)
         })
+        .any(|marker| is_clear_of(&marker, findings))
+}
+
+/// Whether `block_marker`, [`ALLOW_BEGIN_MARKER`] or [`ALLOW_END_MARKER`], occurs in
+/// `text[window]` clear of every range of `findings`, as [`has_marker_outside`] reads it.
+pub(crate) fn has_block_marker_outside(
+    text: &str,
+    window: Range<usize>,
+    block_marker: &'static str,
+    findings: &[Range<usize>],
+) -> bool {
+    marker_occurrences(text, window, block_marker).any(|marker| is_clear_of(&marker, findings))
+}
+
+fn marker_occurrences<'t>(
+    text: &'t str,
+    window: Range<usize>,
+    marker: &'static str,
+) -> impl Iterator<Item = Range<usize>> + 't {
+    text[window.clone()]
+        .match_indices(marker)
+        .map(move |(at, found)| window.start + at..window.start + at + found.len())
+}
+
+fn is_clear_of(marker: &Range<usize>, findings: &[Range<usize>]) -> bool {
+    findings
+        .iter()
+        .all(|finding| marker.end <= finding.start || marker.start >= finding.end)
 }
 
 /// A text with the byte offset of each line start, so many detections are placed in it without

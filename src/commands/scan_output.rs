@@ -13,7 +13,9 @@ use crate::commands::copy_output::{
 use crate::commands::finding_spill::SpilledFindings;
 use crate::commands::findings::{FileOutcome, Place, ReportedFile};
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{
+    AllowMarkerWarning, Categories, Detection, DetectionLabel, DetectionLocation, Score,
+};
 use crate::AppResult;
 use console::{measure_text_width, pad_str, Alignment};
 use indicatif::HumanBytes;
@@ -182,6 +184,9 @@ pub struct ScanFileReport {
     /// Summed in the result; not part of the JSON report of the file.
     #[serde(skip)]
     findings_ignored: usize,
+    /// The block markers of the file that do not pair up, in the order of the file.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    marker_warnings: Vec<AllowMarkerWarning>,
 }
 
 impl ScanFileReport {
@@ -198,6 +203,13 @@ impl ScanFileReport {
             unlocated_values,
             findings_ignored,
             ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
+        }
+    }
+
+    pub fn with_marker_warnings(self, marker_warnings: Vec<AllowMarkerWarning>) -> Self {
+        Self {
+            marker_warnings,
+            ..self
         }
     }
 
@@ -310,6 +322,7 @@ impl ScanFileReport {
             findings,
             unlocated_values: 0,
             findings_ignored: 0,
+            marker_warnings: Vec::new(),
         }
     }
 }
@@ -434,8 +447,8 @@ impl ScanCommandResult {
     }
 }
 
-/// The lines of one file: its row in `layout`, then its findings, read from the spill as they
-/// are taken.
+/// The lines of one file: its row in `layout`, the warnings about its block markers, then its
+/// findings, read from the spill as they are taken.
 pub fn format_file_lines<'a>(
     file: &'a ScanFileReport,
     layout: RowLayout,
@@ -449,7 +462,15 @@ pub fn format_file_lines<'a>(
         &file.row(styles),
         styles,
     );
-    Ok(std::iter::once(Ok(row)).chain(format_finding_lines(file, styles)?))
+    let warnings = file.marker_warnings.iter().map(|warning| {
+        Ok(format!(
+            "    {}",
+            styles.unconfirmed.apply_to(format!("warning: {warning}"))
+        ))
+    });
+    Ok(std::iter::once(Ok(row))
+        .chain(warnings)
+        .chain(format_finding_lines(file, styles)?))
 }
 
 /// The findings of a file, a line each, indented under its row and in columns as wide as the
@@ -597,7 +618,7 @@ mod tests {
     use crate::commands::finding_spill::FindingSpill;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::SarifLog;
-    use crate::redacters::Category;
+    use crate::redacters::{AllowMarkerProblem, Category};
     use clap::ValueEnum;
     use std::path::Path;
 
@@ -1355,6 +1376,19 @@ mod tests {
             format!("{unlimited} · Categories: secrets")
         );
         assert!(to_text(&result).contains("Categories: secrets"));
+    }
+
+    #[test]
+    fn a_marker_warning_is_listed_under_the_row_of_its_file() {
+        let file = scanned(&file_ref("notes.txt", mime::TEXT_PLAIN), Vec::new(), 0)
+            .with_marker_warnings(vec![AllowMarkerWarning {
+                problem: AllowMarkerProblem::UnclosedBegin,
+                line: 2,
+            }]);
+
+        let lines = file_lines(&file, RowLayout::for_terminal(100), &OutputStyles::plain());
+
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]

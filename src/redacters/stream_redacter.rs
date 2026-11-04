@@ -10,10 +10,10 @@ use crate::redacters::table_pieces::{
     redact_batches, table_csv, TableBatch, TableBatches, TableRedaction, TABLE_BATCH_BYTES,
 };
 use crate::redacters::{
-    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
-    DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
-    RedacterDataItemContent, Redacters, StreamRedactions, TextLines, TextPieceLimits, TextPieces,
-    TextPosition, TextWindow,
+    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, AllowMarkerWarning,
+    AllowRegions, Categories, Detection, DetectionLocation, PieceLayout, RedactSupport, Redacter,
+    RedacterBaseOptions, RedacterDataItem, RedacterDataItemContent, Redacters, StreamRedactions,
+    TextLines, TextPieceLimits, TextPieces, TextPosition, TextWindow,
 };
 use crate::AppResult;
 use futures::future::LocalBoxFuture;
@@ -150,28 +150,42 @@ pub struct DetectStreamResult {
     /// [`crate::redacters::Detections::unlocated`].
     pub unlocated: usize,
     /// The detections moved out of `detections` because a line they cover, or their cell, carries
-    /// [`crate::redacters::ALLOW_MARKER`] outside them, kept so the caller can count them.
+    /// [`crate::redacters::ALLOW_MARKER`] outside them, or because they lie inside a region of
+    /// block markers, kept so the caller can count them.
     pub ignored: Vec<(RedacterType, Detection)>,
+    /// The block markers of the text that do not pair up.
+    pub marker_warnings: Vec<AllowMarkerWarning>,
 }
 
 impl DetectStreamResult {
-    /// Moves the detections that `content` marks as ignored from `detections` to `ignored`.
-    /// Only text and table cells can carry the marker: the words OCR reads from an image or a
-    /// PDF page have no author-controlled place for it.
+    /// Moves the detections that the markers of `content` ignore from `detections` to
+    /// `ignored`. Only text and table cells can carry a marker: the words OCR reads from an
+    /// image or a PDF page have no author-controlled place for it.
     ///
-    /// `whole_lines` is the part of a text that holds whole lines of the file, `None` for all of
-    /// it. A marker outside it does not count.
-    fn set_aside_ignored(
+    /// A content read whole is all of the file; it is read for block markers from start to end.
+    fn set_aside_ignored(&mut self, content: &RedacterDataItemContent) {
+        let whole_lines = match content {
+            RedacterDataItemContent::Value(text) => 0..text.len(),
+            _ => 0..0,
+        };
+        let mut regions = AllowRegions::default();
+        self.set_aside_ignored_in(content, TextPosition::default(), whole_lines, &mut regions);
+        self.marker_warnings.extend(regions.finish());
+    }
+
+    /// As [`Self::set_aside_ignored`] for a window of a text, which starts at `window_start` in the
+    /// file. `whole_lines` is the part of the window that holds whole lines of the file: a marker
+    /// outside it does not count. `regions` carries the block markers of the windows before.
+    fn set_aside_ignored_in(
         &mut self,
         content: &RedacterDataItemContent,
-        whole_lines: Option<Range<usize>>,
+        window_start: TextPosition,
+        whole_lines: Range<usize>,
+        regions: &mut AllowRegions,
     ) {
         let marked: Vec<bool> = match content {
             RedacterDataItemContent::Value(text) => {
-                let lines = match whole_lines {
-                    Some(span) => TextLines::new(text).with_marker_span(span),
-                    None => TextLines::new(text),
-                };
+                let lines = TextLines::new(text).with_marker_span(whole_lines.clone());
                 let findings: Vec<Range<usize>> = self
                     .detections
                     .iter()
@@ -180,11 +194,19 @@ impl DetectStreamResult {
                         _ => None,
                     })
                     .collect();
+                self.marker_warnings.extend(regions.read_window(
+                    text,
+                    window_start,
+                    whole_lines,
+                    &findings,
+                ));
                 self.detections
                     .iter()
                     .map(|(_, detection)| match detection.location {
                         DetectionLocation::Text { start, end, .. } => {
                             lines.has_marker_beside(start..end, &findings)
+                                || regions
+                                    .covers(window_start.offset + start..window_start.offset + end)
                         }
                         _ => false,
                     })
@@ -260,12 +282,14 @@ impl DetectStreamResult {
             detections: self.detections.into_iter().filter_map(owned).collect(),
             ignored: self.ignored.into_iter().filter_map(owned).collect(),
             unlocated: self.unlocated,
+            marker_warnings: self.marker_warnings,
         }
     }
 
     fn absorb(&mut self, other: Self) {
         self.detections.extend(other.detections);
         self.ignored.extend(other.ignored);
+        self.marker_warnings.extend(other.marker_warnings);
         self.unlocated += other.unlocated;
     }
 }
@@ -883,7 +907,7 @@ impl<'a> StreamRedacter<'a> {
             }
             _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
-        result.set_aside_ignored(&item.content, None);
+        result.set_aside_ignored(&item.content);
         found(result)?;
         Ok(None)
     }
@@ -944,6 +968,7 @@ impl<'a> StreamRedacter<'a> {
         let mut pieces = Self::text_pieces(input, layout, unsupported_as_text);
         let mut previous_window_end = 0;
         let mut windows = 0;
+        let mut regions = AllowRegions::default();
         loop {
             let window = match pieces.next_window().await {
                 Ok(Some(window)) => window,
@@ -962,8 +987,9 @@ impl<'a> StreamRedacter<'a> {
                 file_ref: file_ref.clone(),
             };
             let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
-            detected.set_aside_ignored(&item.content, Some(whole_lines));
+            detected.set_aside_ignored_in(&item.content, start, whole_lines, &mut regions);
             if is_whole {
+                detected.marker_warnings.extend(regions.finish());
                 found(detected)?;
                 return Ok(None);
             }
@@ -978,6 +1004,12 @@ impl<'a> StreamRedacter<'a> {
             ?layout,
             "read in pieces"
         );
+        if let Some(warning) = regions.finish() {
+            found(DetectStreamResult {
+                marker_warnings: vec![warning],
+                ..DetectStreamResult::default()
+            })?;
+        }
         Ok(None)
     }
 
@@ -998,7 +1030,7 @@ impl<'a> StreamRedacter<'a> {
             let (rows_before, reaches_end) = (batch.rows_before, batch.reaches_end);
             let item = batch.into_item(file_ref);
             let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
-            detected.set_aside_ignored(&item.content, None);
+            detected.set_aside_ignored(&item.content);
             for (_, detection) in detected.detections.iter_mut().chain(&mut detected.ignored) {
                 detection.location = detection.location.after_rows(rows_before);
             }
@@ -1629,8 +1661,8 @@ impl OcrText {
 mod tests {
     use super::*;
     use crate::redacters::{
-        parse_inline_rule, Category, DetectionLabel, LocalRulesRedacter, LocalRulesRedacterOptions,
-        PresidioRedacter, PresidioRedacterOptions, RuleGroup, UserRule,
+        parse_inline_rule, AllowMarkerProblem, Category, DetectionLabel, LocalRulesRedacter,
+        LocalRulesRedacterOptions, PresidioRedacter, PresidioRedacterOptions, RuleGroup, UserRule,
     };
     use crate::reporter::AppReporter;
     use std::collections::BTreeSet;
@@ -3004,6 +3036,7 @@ mod tests {
             by_location(whole.found.ignored)
         );
         assert_eq!(in_pieces.found.unlocated, whole.found.unlocated);
+        assert_eq!(in_pieces.found.marker_warnings, whole.found.marker_warnings);
     }
 
     const KEY_BLOCK: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
@@ -3071,6 +3104,186 @@ mod tests {
 
         assert_eq!(whole.found.detections.len(), 2);
         assert!(whole.found.ignored.is_empty());
+        assert_same_findings(whole, in_pieces);
+    }
+
+    const PKCS8_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF\n\
+        -----END PRIVATE KEY-----";
+
+    async fn detect_secrets_and_emails(
+        name: &str,
+        media_type: mime::Mime,
+        text: &str,
+    ) -> Collected {
+        detect(
+            &FileConverters::new(),
+            &[secret_rules().await, email_rules().await],
+            &file_ref(name, media_type),
+            text.to_string().into(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn warning(problem: AllowMarkerProblem, line: usize) -> AllowMarkerWarning {
+        AllowMarkerWarning { problem, line }
+    }
+
+    #[tokio::test]
+    async fn a_private_key_in_a_string_literal_is_ignored_between_block_markers() {
+        let text = format!(
+            "fn main() {{}}\n// redacter:allow-begin\nconst TEST_KEY: &str = \"{PKCS8_KEY}\";\n// redacter:allow-end\n"
+        );
+
+        let result = detect_secrets_and_emails("keys.rs", mime::TEXT_PLAIN, &text).await;
+
+        assert!(result.found.detections.is_empty());
+        assert_eq!(result.found.ignored.len(), 1);
+        assert!(result.found.marker_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_markdown_comment_region_ignores_the_key_in_its_code_block() {
+        let text = format!(
+            "Sign with:\n\n<!-- redacter:allow-begin -->\n```text\n{PKCS8_KEY}\n```\n<!-- redacter:allow-end -->\n\nMail ops@example.com.\n"
+        );
+
+        let result =
+            detect_secrets_and_emails("signing.md", "text/markdown".parse().unwrap(), &text).await;
+
+        assert_eq!(result.found.ignored.len(), 1);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "ops@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_finding_that_starts_before_the_begin_line_is_reported() {
+        let text =
+            format!("let key = \"{PKCS8_KEY}\"; // redacter:allow-begin\n// redacter:allow-end\n");
+
+        let result = detect_secrets_and_emails("keys.rs", mime::TEXT_PLAIN, &text).await;
+
+        assert_eq!(result.found.detections.len(), 1);
+        assert!(result.found.ignored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_begin_without_an_end_ignores_nothing_and_is_warned_about() {
+        let text = "a@b.io\n// redacter:allow-begin\nc@d.io\ne@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 3);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::UnclosedBegin, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_end_without_a_begin_is_warned_about_and_ignores_nothing() {
+        let text = "a@b.io\n// redacter:allow-end\nc@d.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::StrayEnd, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_begin_inside_an_open_region_is_warned_about_and_the_region_keeps_its_first_begin() {
+        let text = "// redacter:allow-begin\na@b.io\n// redacter:allow-begin\nc@d.io\n// redacter:allow-end\ne@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.ignored.len(), 2);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "e@f.io");
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::NestedBegin, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_block_marker_does_not_act_as_the_inline_marker_on_its_own_line() {
+        let text = "a@b.io // redacter:allow-end\nc@d.io // redacter:allow-begin\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_inline_marker_works_beside_and_inside_a_region() {
+        let text = "a@b.io # redacter:allow\nc@d.io\n// redacter:allow-begin\ne@f.io\ng@h.io # redacter:allow\n// redacter:allow-end\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.ignored.len(), 3);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "c@d.io");
+    }
+
+    #[tokio::test]
+    async fn a_block_marker_inside_a_value_is_not_a_marker() {
+        let text = "API_KEY=xyz_redacter:allow-begin_123456789\nmail a@b.io\n";
+
+        let result = detect_secrets_and_emails("env.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+        assert!(result.found.marker_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_region_that_spans_windows_ignores_what_a_whole_read_ignores() {
+        let text = ten_byte_lines(
+            100,
+            &[
+                (2, "TOKEN-123\n"),
+                (5, "// redacter:allow-begin\n"),
+                (60, "TOKEN-456\n"),
+                (90, "// redacter:allow-end\n"),
+                (95, "TOKEN-789\n"),
+            ],
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert_eq!(whole.found.detections.len(), 2);
+        assert_eq!(whole.found.ignored.len(), 1);
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn markers_that_do_not_pair_up_are_warned_about_once_across_windows() {
+        let text = ten_byte_lines(
+            100,
+            &[
+                (20, "// redacter:allow-end\n"),
+                (70, "// redacter:allow-begin\n"),
+            ],
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert_eq!(
+            whole.found.marker_warnings,
+            [
+                warning(AllowMarkerProblem::StrayEnd, 21),
+                warning(AllowMarkerProblem::UnclosedBegin, 71)
+            ]
+        );
         assert_same_findings(whole, in_pieces);
     }
 

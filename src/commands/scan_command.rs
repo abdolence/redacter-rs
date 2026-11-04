@@ -292,12 +292,14 @@ async fn detect_in_file(
     };
     let mut findings = SpilledFindings::new(&context.spill);
     let (mut unlocated, mut ignored) = (0, 0);
+    let mut marker_warnings = Vec::new();
     let read = CallPacing::scoped(
         context.call_pacing.as_ref(),
         context
             .stream_redacter
             .detect_stream(reader, &plan, file_ref, &mut |found| {
                 unlocated += found.unlocated;
+                marker_warnings.extend(found.marker_warnings);
                 ignored += found
                     .ignored
                     .iter()
@@ -318,7 +320,8 @@ async fn detect_in_file(
             file_ref,
             SkipReason::NotRedacted(NotRedactedReason::from(blocked)),
         ),
-        Ok(None) => ScanFileReport::scanned(file_ref, findings, unlocated, ignored),
+        Ok(None) => ScanFileReport::scanned(file_ref, findings, unlocated, ignored)
+            .with_marker_warnings(marker_warnings),
         Err(error @ AppError::FindingSpillFailed { .. }) => return Err(error),
         Err(error) => failed_report(file_ref, &error),
     })
@@ -526,6 +529,51 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
         assert_eq!(written["findings_ignored"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_region_is_left_out_of_the_findings_and_counted() {
+        let dir = tempfile::TempDir::with_prefix("scan_allow_region").unwrap();
+        std::fs::write(
+            dir.path().join("config.txt"),
+            "mail a@b.io\n# redacter:allow-begin\nmock c@d.io\n# redacter:allow-end\n",
+        )
+        .unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
+
+        assert_eq!((result.findings, result.findings_ignored), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_begin_without_an_end_is_a_warning_on_its_file_in_the_json_report() {
+        let dir = tempfile::TempDir::with_prefix("scan_unclosed_region").unwrap();
+        std::fs::write(
+            dir.path().join("config.txt"),
+            "mail a@b.io\n# redacter:allow-begin\nmock c@d.io\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("clean.txt"), "nothing here\n").unwrap();
+
+        let result = scan_directory(dir.path(), IgnoreFileChoice::Disabled, None).await;
+
+        assert_eq!((result.findings, result.findings_ignored), (2, 0));
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        let files = written["files"].as_array().unwrap();
+        let warned = files
+            .iter()
+            .find(|file| file["path"] == "config.txt")
+            .unwrap();
+        let clean = files
+            .iter()
+            .find(|file| file["path"] == "clean.txt")
+            .unwrap();
+        assert_eq!(
+            warned["marker_warnings"],
+            serde_json::json!([{"problem": "unclosed_begin", "line": 2}])
+        );
+        assert!(clean.get("marker_warnings").is_none());
     }
 
     #[tokio::test]

@@ -1484,8 +1484,8 @@ OCSF report keeps an event for each file.
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
 
-`scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and an inline
-marker, see [Ignoring files and findings](#ignoring-files-and-findings).
+`scan` can ignore files and findings that are legitimate, such as mock keys, with an ignore file and
+markers, see [Ignoring files and findings](#ignoring-files-and-findings).
 
 ```sh
 redacter scan test-fixtures/documents -d local-rules -d local-ner -f "customer*.{csv,txt,pdf}"
@@ -1554,9 +1554,9 @@ the redacter is only reported when its score reaches them (0.5 by default, 0.74 
 ### Ignoring files and findings
 
 Two mechanisms keep legitimate values, such as the mock keys of a test fixture, out of a scan. Both apply to `scan`
-only. `cp` does not read an ignore file and does not look for the marker: it always redacts everything it finds.
+only. `cp` does not read an ignore file and does not look for the markers: it always redacts everything it finds.
 
-Be aware that both hide real secrets as well as mock ones, so keep the ignore file and the marked lines in code review.
+Be aware that both hide real secrets as well as mock ones, so keep the ignore file, the marked lines and the marked regions in code review.
 
 #### Ignore file
 
@@ -1579,7 +1579,7 @@ docs/**/example-keys.md
   neither scanned nor reported as unsupported, and it is counted in `files_ignored`;
 - `--ignore-file <PATH>` reads the given local file instead, for any source, including GCS and S3;
 - `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
-  marker below still applies;
+  markers below still apply;
 - a file named as the source itself is always scanned;
 - `.git` directories are left out of a local directory source whatever the ignore settings, see
   [Source and destinations](#source-and-destinations);
@@ -1619,8 +1619,51 @@ does not count either.
 - in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
   lines;
 - on a line longer than about 4 MiB, in a file read in pieces, the marker is not read;
+- a line with `redacter:allow-begin` or `redacter:allow-end` is not an inline marker, see [Block markers](#block-markers);
 - an image or a PDF page has no place for the marker, so the findings in them are always reported;
 - `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
+
+#### Block markers
+
+`redacter:allow-begin` and `redacter:allow-end` ignore every finding between them. They are for a value that has no
+line to hold the inline marker, such as a private key inside a string literal:
+
+```rust
+// redacter:allow-begin
+const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIJ+...
+-----END PRIVATE KEY-----";
+// redacter:allow-end
+```
+
+In Markdown the markers sit in HTML comments, `<!-- redacter:allow-begin -->` and `<!-- redacter:allow-end -->`. Like
+the inline marker, they are matched as substrings, in whatever comment syntax the file uses.
+
+Be aware that a region ignores real secrets added inside it later, and nothing reports them. Keep regions small, around
+the one value they are for, and review a change that touches one.
+
+- A region runs from the start of the begin line to the end of the end line, so the marker lines are inside it. A finding
+  is ignored when it lies entirely in a region. One that starts before the begin line, or ends after the end line, is
+  reported;
+- the block markers do not act as the inline marker on their own line, so `a@b.io # redacter:allow-begin` does not
+  ignore the address. The inline marker keeps working on any line, inside a region or outside;
+- a marker inside the value of a finding does not count, as for the inline marker;
+- the ignored findings are counted in `findings_ignored`, as for the inline marker. `--min-score` is applied first;
+- block markers apply to text. A CSV table read by cell has no region, an image or a PDF page has no place for the
+  markers, and `cp` redacts everything.
+
+A marker that does not pair up gives a warning with the line of the marker, and never hides a finding:
+
+- a begin with no end after it ignores nothing. Without this a forgotten end marker would hide the rest of the file;
+- an end with no begin before it is ignored;
+- a begin inside a region that is already open is ignored, and the region keeps its first begin.
+
+The warnings are shown under the row of the file in the terminal and in the `marker_warnings` of the file in the JSON
+report. SARIF and OCSF reports do not carry them. They do not change the exit code.
+
+In a file read in pieces, a region can start in any earlier piece, but a finding is ignored only when its end marker lies
+within the text read with the piece of the finding: the piece and the context after it, 64 KiB for `local-rules` and
+`local-credential-ml`, 1 KiB for the cloud providers. A finding with its end marker further away is reported.
 
 ### Exit codes
 
@@ -1667,8 +1710,11 @@ The report is one JSON object with the counters of the run and an entry for each
 - `files_ignored`: the number of files the [ignore file](#ignoring-files-and-findings) ignored. They have no entry in
   `files`;
 - `findings`: the number of findings, and `findings_by_label`: the same count for each label;
-- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker, not counted in `findings`;
-- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`;
+- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker or by block markers, not counted in
+  `findings`;
+- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
+  A file whose [block markers](#block-markers) do not pair up also has `marker_warnings`, a list of the `line` of each
+  marker and its `problem`: `unclosed_begin`, `stray_end` or `nested_begin`;
 - `categories`: the categories `--categories` limited the scan to, such as `["contact", "secrets"]`. The field is
   left out when the scan looked for every category.
 

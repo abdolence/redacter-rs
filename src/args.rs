@@ -226,7 +226,7 @@ pub struct IgnoreArgs {
 
     #[arg(
         long,
-        help = "Do not read the .redacterignore at the root of a local source. Lines marked with redacter:allow are still ignored"
+        help = "Do not read the .redacterignore at the root of a local source. Findings ignored by the redacter:allow markers are still ignored"
     )]
     pub no_ignore: bool,
 }
