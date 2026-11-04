@@ -27,6 +27,10 @@ fn without_slash_before_drive_letter(path: &str) -> &str {
     }
 }
 
+/// Git's own data is never part of a listing: its object store is large, and its reflog holds
+/// the committer's address. A `.git` file, which a submodule has instead, is an ordinary file.
+const GIT_DIRECTORY_NAME: &str = ".git";
+
 pub struct LocalFileSystem<'a> {
     root_path: String,
     is_dir: bool,
@@ -76,7 +80,7 @@ impl<'a> LocalFileSystem<'a> {
                     entry.metadata().await?.len() as usize,
                 );
                 listing.add(file_ref, *file_matcher);
-            } else if file_type.is_dir() {
+            } else if file_type.is_dir() && entry.file_name() != GIT_DIRECTORY_NAME {
                 let new_max_files_limit =
                     max_files_limit.map(|v| v.saturating_sub(listing.files.len()));
                 let dir_files = self
@@ -475,6 +479,38 @@ mod tests {
 
         fs.close().await?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_listing_skips_git_directories_but_not_git_files(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let term = Term::stdout();
+        let reporter: AppReporter = AppReporter::from(&term);
+        let temp_dir = tempfile::TempDir::with_prefix("local_file_system_tests_git")?;
+        let root = temp_dir.path();
+        std::fs::create_dir_all(root.join(".git/objects"))?;
+        std::fs::write(root.join(".git/HEAD"), "ref")?;
+        std::fs::create_dir_all(root.join("nested/.git"))?;
+        std::fs::write(root.join("nested/.git/HEAD"), "ref")?;
+        std::fs::write(root.join("nested/kept.txt"), "kept")?;
+        std::fs::create_dir_all(root.join("submodule"))?;
+        std::fs::write(
+            root.join("submodule/.git"),
+            "gitdir: ../.git/modules/submodule",
+        )?;
+        let mut fs = open_directory(root, &reporter).await?;
+
+        let mut listed: Vec<String> = fs
+            .list_files(None, None)
+            .await?
+            .files
+            .iter()
+            .map(|file_ref| file_ref.relative_path.value().replace('\\', "/"))
+            .collect();
+        listed.sort();
+
+        assert_eq!(listed, ["nested/kept.txt", "submodule/.git"]);
         Ok(())
     }
 

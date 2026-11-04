@@ -672,6 +672,11 @@ Source/destination can be a local file or directory, or a file in GCS, S3, and o
 - Zip archive: `zip://tmp/archive.zip`
 - Clipboard: `clipboard://`
 
+A local directory source leaves out every `.git` directory below it, nested clones included, in `scan`, `cp` and `ls`,
+whatever the ignore settings. A repository's reflog holds the committer's email address, and its object store is large.
+A source inside a `.git` directory, such as `.git/logs`, is read as given. A `.git` file, which a submodule has instead
+of a directory, is an ordinary file.
+
 A copy that fails leaves no partial file at a local destination. A local file is written to a temporary file beside
 the destination and renamed into place once complete, so a file it would have replaced stays intact. In a zip archive,
 a file that fails is left out of the entries and the other entries stay. The compressed bytes it had written before the
@@ -1556,6 +1561,8 @@ docs/**/example-keys.md
 - `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
   marker below still applies;
 - a file named as the source itself is always scanned;
+- `.git` directories are left out of a local directory source whatever the ignore settings, see
+  [Source and destinations](#source-and-destinations);
 - ignored files do not count towards `--max-files-limit`;
 - a UTF-8 byte order mark at the start of the file is dropped, as git does;
 - a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
@@ -1851,7 +1858,8 @@ for AWS Comprehend.
 
 ## List (LS) command
 
-For convenience, the tool also supports listing files in the source directory so you can see what files will be copied:
+For convenience, the tool also supports listing files in the source directory so you can see what files will be copied.
+It lists what `cp` and `scan` read, so `.git` directories are left out as well:
 
 ```
 Usage: redacter ls [OPTIONS] <SOURCE>
