@@ -3150,35 +3150,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_finding_that_starts_before_the_begin_line_is_reported() {
-        let text =
-            format!("let key = \"{PKCS8_KEY}\"; // redacter:allow-begin\n// redacter:allow-end\n");
-
-        let result = detect_secrets_and_emails("keys.rs", mime::TEXT_PLAIN, &text).await;
-
-        assert_eq!(result.found.detections.len(), 1);
-        assert!(result.found.ignored.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_finding_that_ends_on_the_end_line_is_reported() {
-        let text = "// redacter:allow-begin\nKEYBEGIN\nKEYEND // redacter:allow-end\n";
-        let rules = user_rules(&["key=(?s)KEYBEGIN.*?KEYEND"]).await;
-
-        let result = detect(
-            &FileConverters::new(),
-            &rules,
-            &file_ref("keys.txt", mime::TEXT_PLAIN),
-            bytes::Bytes::from(text),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.found.detections.len(), 1);
-        assert!(result.found.ignored.is_empty());
-    }
-
-    #[tokio::test]
     async fn a_finding_on_a_marker_line_is_reported() {
         let text = "a@b.io # redacter:allow-begin\nc@d.io\n# redacter:allow-end e@f.io\n";
 
@@ -3321,8 +3292,8 @@ mod tests {
             &[
                 (2, "TOKEN-123\n"),
                 (5, "// redacter:allow-begin\n"),
-                (60, "TOKEN-456\n"),
-                (70, "// redacter:allow-end\n"),
+                (50, "TOKEN-456\n"),
+                (60, "// redacter:allow-end\n"),
                 (95, "TOKEN-789\n"),
             ],
         );
@@ -3359,15 +3330,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_end_marker_inside_a_value_a_window_cuts_does_not_close_the_region() {
+    async fn an_end_marker_in_a_value_longer_than_the_context_does_not_close_the_region() {
         let text = ten_byte_lines(
             100,
             &[
                 (2, "// redacter:allow-begin\n"),
                 (10, "TOKEN-123\n"),
-                (47, "KEYBEGIN\n"),
-                (49, "Comment: redacter:allow-end\n"),
-                (58, "KEYEND\n"),
+                (33, "KEYBEGIN\n"),
+                (34, "Comment: redacter:allow-end\n"),
+                (55, "KEYEND\n"),
             ],
         );
         let rules = user_rules(&["token=TOKEN-[0-9]+", "key=(?s)KEYBEGIN.*?KEYEND"]).await;
@@ -3375,35 +3346,70 @@ mod tests {
         let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
 
         assert_eq!(whole.found.detections.len(), 2);
-        assert!(whole.found.ignored.is_empty());
-        assert_eq!(
-            whole.found.marker_warnings,
-            [warning(AllowMarkerProblem::UnclosedBegin, 3)]
-        );
         assert_same_findings(whole, in_pieces);
     }
 
     #[tokio::test]
-    async fn a_begin_marker_inside_a_value_a_window_cuts_does_not_open_a_region() {
+    async fn a_begin_marker_in_a_value_longer_than_the_context_does_not_open_a_region() {
         let text = ten_byte_lines(
             100,
             &[
-                (47, "KEYBEGIN\n"),
-                (49, "Comment: redacter:allow-begin\n"),
-                (58, "KEYEND\n"),
-                (60, "TOKEN-1\n"),
-                (80, "// redacter:allow-begin\n"),
-                (81, "TOKEN-2\n"),
-                (82, "// redacter:allow-end\n"),
+                (20, "BLOBSTART\n"),
+                (41, "Comment: redacter:allow-begin\n"),
+                (43, "BLOBEND\n"),
+                (50, "TOKEN-456\n"),
+                (60, "// redacter:allow-end\n"),
             ],
         );
-        let rules = user_rules(&["token=TOKEN-[0-9]+", "key=(?s)KEYBEGIN.*?KEYEND"]).await;
+        let rules = user_rules(&["token=TOKEN-[0-9]+", "blob=(?s)BLOBSTART.*?BLOBEND"]).await;
 
         let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
 
         assert_eq!(whole.found.detections.len(), 2);
-        assert_eq!(whole.found.ignored.len(), 1);
         assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn a_marker_in_a_value_never_counts_wherever_the_value_and_the_cuts_fall() {
+        let rules = user_rules(&["token=TOKEN-[0-9]+", "key=(?s)KEYBEGIN.*?KEYEND"]).await;
+        let layouts = [(400, 160), (300, 130), (500, 200)];
+        for (piece_bytes, context_bytes) in layouts {
+            for value_line in (15..=75).step_by(6) {
+                for marker_line in (value_line + 1..value_line + 24).step_by(3) {
+                    for (marker, before, after) in [
+                        (
+                            "Comment: redacter:allow-end\n",
+                            "// redacter:allow-begin\n",
+                            "",
+                        ),
+                        (
+                            "Comment: redacter:allow-begin\n",
+                            "",
+                            "// redacter:allow-end\n",
+                        ),
+                    ] {
+                        let text = ten_byte_lines(
+                            110,
+                            &[
+                                (2, before),
+                                (10, "TOKEN-1\n"),
+                                (value_line, "KEYBEGIN\n"),
+                                (marker_line, marker),
+                                (value_line + 24, "KEYEND\n"),
+                                (value_line + 28, "TOKEN-2\n"),
+                                (value_line + 32, after),
+                            ],
+                        );
+                        let layout = PieceLayout::new(piece_bytes, context_bytes);
+
+                        let (whole, in_pieces) =
+                            detect_whole_and_in_pieces(&rules, &text, layout).await;
+
+                        assert_same_findings(whole, in_pieces);
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

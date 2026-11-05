@@ -188,8 +188,11 @@ impl TextWindow {
     pub fn read_spans(&self) -> ReadSpans {
         ReadSpans {
             first_line: self.start.lines_before + 1,
+            offset: self.start.offset,
             whole_lines: self.whole_lines(),
-            piece: self.piece.start - self.start.offset..self.piece.end - self.start.offset,
+            markers_end: self
+                .next_start
+                .map_or(self.text.len(), |next_start| next_start - self.start.offset),
         }
     }
 

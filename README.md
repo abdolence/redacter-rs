@@ -1700,10 +1700,15 @@ notifications of the run, on the line of the marker. OCSF reports do not carry t
 code. With `--sampling-size`, a begin with no end in the sample gets no warning, as the sample can end inside a region.
 
 A file larger than one request is read in pieces: about 3.9 MiB for `local-rules` and `local-credential-ml`, and the
-request size of the provider less its context for the cloud providers. When several redacters are selected, the pieces
-fit all of them. A block marker is read with the piece it starts in, on a line of any length. A region can start in an
-earlier piece than a finding, but a finding is ignored only when the end marker lies in the piece of the finding or in
-an earlier one. A finding with its end marker in a later piece is reported.
+request size of the provider less twice its context for the cloud providers. When several redacters are selected, the
+pieces fit all of them. Block markers are read on a line of any length, and the region state is carried from one piece to
+the next, so a region can start in an earlier piece than a finding. Two things differ from a whole read:
+
+- a finding is ignored only when its end marker lies before the last context of its piece (the last 64 KiB with
+  `local-rules`). A finding with its end marker in that context, or in a later piece, is reported;
+- a marker inside a value of up to twice the context (128 KiB with `local-rules`) never counts, wherever the pieces
+  are cut. A longer value that crosses the end of a piece can be missed, as for any finding, and then
+  a marker inside it counts.
 
 ### Exit codes
 

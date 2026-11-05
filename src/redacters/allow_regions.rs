@@ -7,11 +7,18 @@
 //! it lies entirely inside one region. A begin that no end follows ignores nothing, since a
 //! forgotten end marker would otherwise hide the rest of the file.
 //!
-//! A text read in pieces reads the markers that start in a piece with the window of that piece.
-//! A value no longer than the context of a window that includes a byte of the piece lies whole
-//! inside that window, so a marker that starts in the piece is judged against every value it can
-//! be inside. A marker in the context after the piece is left to the window of the next piece.
-//! A finding is therefore ignored only by a region whose end lies in its own piece or before.
+//! A text read in pieces reads each marker once, in the last window that holds it: the markers
+//! from the start of a window's text to where the next window starts. A marker is judged against
+//! the findings of its window and of the earlier windows that reach into it.
+//!
+//! A marker so read lies at least one context before the end of its window, so a value of up to
+//! twice the context that holds it ends inside the window, and one that starts before the window
+//! lies whole in the window before. Either way the marker is inside a finding that one of those
+//! windows made. A value longer than twice the context is found by no window, as for any
+//! finding, so a marker inside it counts.
+//!
+//! A finding is ignored only by a region whose end was read before the finding's window was
+//! judged, so one whose end marker lies in the last context of its piece is reported.
 
 use crate::redacters::{markers_outside, AllowMarker, ALLOW_BEGIN_MARKER, ALLOW_END_MARKER};
 use serde::Serialize;
@@ -62,11 +69,14 @@ impl Display for AllowMarkerWarning {
 pub(crate) struct ReadSpans {
     /// The 1-based line number in the file of the first line of the window's text.
     pub first_line: usize,
+    /// Where the window's text starts in the file, in bytes.
+    pub offset: usize,
     /// The bytes of the window's text that hold whole lines, in which the inline marker counts.
     pub whole_lines: Range<usize>,
-    /// The bytes of the window's text that are the piece of the window, in which the block
-    /// markers count.
-    pub piece: Range<usize>,
+    /// The end of the bytes of the window's text in which the block markers count: where the next
+    /// window starts, or the end of the text for the last window. They count from the start of
+    /// the text.
+    pub markers_end: usize,
 }
 
 impl ReadSpans {
@@ -74,10 +84,18 @@ impl ReadSpans {
     pub fn whole(text: &str) -> Self {
         Self {
             first_line: 1,
+            offset: 0,
             whole_lines: 0..text.len(),
-            piece: 0..text.len(),
+            markers_end: text.len(),
         }
     }
+}
+
+/// A region between two block markers, as the 1-based lines of the markers.
+#[derive(Debug, Clone, Copy)]
+struct Region {
+    begin: usize,
+    end: usize,
 }
 
 /// The regions of one text, read window by window in file order. Every line is the 1-based
@@ -86,17 +104,21 @@ impl ReadSpans {
 pub(crate) struct AllowRegions {
     /// The line of the begin that no end closed yet.
     open: Option<usize>,
-    /// The closed regions as the lines of their begin and their end, in file order and apart.
-    /// The regions that end before the last window started are dropped.
-    closed: Vec<Range<usize>>,
+    /// The closed regions, in file order and apart. The regions that end before the last window
+    /// started are dropped.
+    closed: Vec<Region>,
+    /// The findings of the windows before that reach past the start of the next window, as byte
+    /// ranges in the file.
+    carried: Vec<Range<usize>>,
 }
 
 impl AllowRegions {
-    /// Reads the block markers that start in `spans.piece` of `text`, and returns what does not
-    /// pair up. Windows are read in file order, each piece once.
+    /// Reads the block markers that start in `text[..spans.markers_end]`, and returns what does
+    /// not pair up. Windows are read in file order, each marker once.
     ///
     /// A marker inside a range of `findings`, the findings of the window as byte ranges in
-    /// `text`, is part of a value and does not count.
+    /// `text`, or of a finding of an earlier window that reaches into `text`, is part of a value
+    /// and does not count.
     pub fn read_window(
         &mut self,
         text: &str,
@@ -108,10 +130,17 @@ impl AllowRegions {
             .partition_point(|region| region.end <= spans.first_line);
         self.closed.drain(..dropped);
 
+        let judged_against: Vec<Range<usize>> = findings
+            .iter()
+            .cloned()
+            .chain(self.carried.iter().map(|carried| {
+                carried.start.saturating_sub(spans.offset)..carried.end.saturating_sub(spans.offset)
+            }))
+            .collect();
         let mut warnings = Vec::new();
         let (mut line, mut counted_to) = (spans.first_line, 0);
-        for (at, marker) in markers_outside(text, spans.piece.start..text.len(), findings)
-            .take_while(|(at, _)| *at < spans.piece.end)
+        for (at, marker) in markers_outside(text, 0..text.len(), &judged_against)
+            .take_while(|(at, _)| *at < spans.markers_end)
         {
             line += text[counted_to..at].matches('\n').count();
             counted_to = at;
@@ -124,7 +153,7 @@ impl AllowRegions {
                 }),
                 (AllowMarker::End, Some(begin)) => {
                     self.open = None;
-                    self.closed.push(begin..line);
+                    self.closed.push(Region { begin, end: line });
                 }
                 (AllowMarker::End, None) => warnings.push(AllowMarkerWarning {
                     problem: AllowMarkerProblem::StrayEnd,
@@ -132,6 +161,15 @@ impl AllowRegions {
                 }),
             }
         }
+
+        let next_start = spans.offset + spans.markers_end;
+        self.carried.retain(|carried| carried.end > next_start);
+        self.carried.extend(
+            findings
+                .iter()
+                .map(|finding| finding.start + spans.offset..finding.end + spans.offset)
+                .filter(|finding| finding.end > next_start),
+        );
         warnings
     }
 
@@ -139,7 +177,7 @@ impl AllowRegions {
     pub fn covers(&self, lines: RangeInclusive<usize>) -> bool {
         let regions_before = self
             .closed
-            .partition_point(|region| region.start < *lines.start());
+            .partition_point(|region| region.begin < *lines.start());
         regions_before
             .checked_sub(1)
             .is_some_and(|last| *lines.end() < self.closed[last].end)
