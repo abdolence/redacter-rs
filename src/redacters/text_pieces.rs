@@ -7,7 +7,7 @@
 //! cut inside, at a character boundary.
 
 use crate::errors::AppError;
-use crate::redacters::{ContentStream, TextPieceLimits};
+use crate::redacters::{ContentStream, ReadSpans, TextPieceLimits};
 use crate::AppResult;
 use bytes::Bytes;
 use futures::{stream, Stream, StreamExt, TryStreamExt};
@@ -184,9 +184,21 @@ impl TextWindow {
         self.start.offset == 0 && self.reaches_end
     }
 
+    /// Where the markers of `text` are read: see [`ReadSpans`].
+    pub fn read_spans(&self) -> ReadSpans {
+        ReadSpans {
+            first_line: self.start.lines_before + 1,
+            offset: self.start.offset,
+            whole_lines: self.whole_lines(),
+            markers_end: self
+                .next_start
+                .map_or(self.text.len(), |next_start| next_start - self.start.offset),
+        }
+    }
+
     /// The bytes of `text` that hold only whole lines of the file: a window that starts or ends
     /// inside a line leaves that line's part out.
-    pub fn whole_lines(&self) -> Range<usize> {
+    fn whole_lines(&self) -> Range<usize> {
         let from = if self.start.columns_before == 0 {
             0
         } else {

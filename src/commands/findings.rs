@@ -3,7 +3,7 @@
 
 use crate::commands::copy_output::NotRedactedReason;
 use crate::commands::finding_spill::SpilledFindings;
-use crate::redacters::DetectionLocation;
+use crate::redacters::{AllowMarkerWarning, DetectionLocation};
 use serde::{Deserialize, Serialize};
 
 /// A file of a run and what the command found in it.
@@ -12,6 +12,8 @@ pub struct ReportedFile {
     /// The path as the source's file system names it, relative to the source.
     pub path: String,
     pub outcome: FileOutcome,
+    /// The block markers of the file that do not pair up.
+    pub marker_warnings: Vec<AllowMarkerWarning>,
 }
 
 #[derive(Debug, Clone)]

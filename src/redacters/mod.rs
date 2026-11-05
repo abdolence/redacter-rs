@@ -71,6 +71,9 @@ pub use category_filter::*;
 mod detection;
 pub use detection::*;
 
+mod allow_regions;
+pub use allow_regions::*;
+
 mod text_changes;
 
 mod text_pieces;

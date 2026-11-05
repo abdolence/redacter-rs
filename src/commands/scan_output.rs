@@ -13,7 +13,9 @@ use crate::commands::copy_output::{
 use crate::commands::finding_spill::SpilledFindings;
 use crate::commands::findings::{FileOutcome, Place, ReportedFile};
 use crate::file_systems::FileSystemRef;
-use crate::redacters::{Categories, Detection, DetectionLabel, DetectionLocation, Score};
+use crate::redacters::{
+    AllowMarkerWarning, Categories, Detection, DetectionLabel, DetectionLocation, Score,
+};
 use crate::AppResult;
 use console::{measure_text_width, pad_str, Alignment};
 use indicatif::HumanBytes;
@@ -182,21 +184,29 @@ pub struct ScanFileReport {
     /// Summed in the result; not part of the JSON report of the file.
     #[serde(skip)]
     findings_ignored: usize,
+    /// The block markers of the file that do not pair up, in the order of the file.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    marker_warnings: Vec<AllowMarkerWarning>,
 }
 
 impl ScanFileReport {
     /// A scanned file. Its findings are in the order of the windows it was read in, sorted by
     /// location within a window, so a value over 64 KiB that crosses the end of a window is
-    /// listed after the later findings of the window before it.
+    /// listed after the later findings of the window before it. Its `marker_warnings` are put
+    /// in the order of the file.
     pub fn scanned(
         file_ref: &FileSystemRef,
         findings: SpilledFindings,
         unlocated_values: usize,
         findings_ignored: usize,
+        mut marker_warnings: Vec<AllowMarkerWarning>,
     ) -> Self {
+        // The warning of a begin without an end comes last from the read of the file.
+        marker_warnings.sort_by_key(|warning| warning.line);
         Self {
             unlocated_values,
             findings_ignored,
+            marker_warnings,
             ..Self::new(file_ref, ScanFileStatus::Scanned, None, findings)
         }
     }
@@ -248,6 +258,7 @@ impl ScanFileReport {
         Some(ReportedFile {
             path: self.path.clone(),
             outcome,
+            marker_warnings: self.marker_warnings.clone(),
         })
     }
 
@@ -310,6 +321,7 @@ impl ScanFileReport {
             findings,
             unlocated_values: 0,
             findings_ignored: 0,
+            marker_warnings: Vec::new(),
         }
     }
 }
@@ -434,8 +446,8 @@ impl ScanCommandResult {
     }
 }
 
-/// The lines of one file: its row in `layout`, then its findings, read from the spill as they
-/// are taken.
+/// The lines of one file: its row in `layout`, the warnings about its block markers, then its
+/// findings, read from the spill as they are taken.
 pub fn format_file_lines<'a>(
     file: &'a ScanFileReport,
     layout: RowLayout,
@@ -449,7 +461,17 @@ pub fn format_file_lines<'a>(
         &file.row(styles),
         styles,
     );
-    Ok(std::iter::once(Ok(row)).chain(format_finding_lines(file, styles)?))
+    let warnings = file.marker_warnings.iter().map(|warning| {
+        Ok(format!(
+            "    {}",
+            styles
+                .unconfirmed
+                .apply_to(format_args!("warning: {warning}"))
+        ))
+    });
+    Ok(std::iter::once(Ok(row))
+        .chain(warnings)
+        .chain(format_finding_lines(file, styles)?))
 }
 
 /// The findings of a file, a line each, indented under its row and in columns as wide as the
@@ -597,7 +619,7 @@ mod tests {
     use crate::commands::finding_spill::FindingSpill;
     use crate::commands::ocsf::{EpochMillis, OcsfEvents};
     use crate::commands::sarif::SarifLog;
-    use crate::redacters::Category;
+    use crate::redacters::{AllowMarkerProblem, Category};
     use clap::ValueEnum;
     use std::path::Path;
 
@@ -638,7 +660,13 @@ mod tests {
         unlocated_values: usize,
     ) -> ScanFileReport {
         FindingReport::sort_by_location(&mut findings);
-        ScanFileReport::scanned(file_ref, spilled_findings(&findings), unlocated_values, 0)
+        ScanFileReport::scanned(
+            file_ref,
+            spilled_findings(&findings),
+            unlocated_values,
+            0,
+            Vec::new(),
+        )
     }
 
     fn to_text(result: &ScanCommandResult) -> String {
@@ -779,6 +807,65 @@ mod tests {
                 assert!(!report.contains(hidden), "{values:?}: {report}");
             }
         }
+    }
+
+    fn with_marker_warnings(marker_warnings: Vec<AllowMarkerWarning>) -> ScanFileReport {
+        ScanFileReport::scanned(
+            &file_ref("notes.txt", mime::TEXT_PLAIN),
+            spilled_findings(&[]),
+            0,
+            0,
+            marker_warnings,
+        )
+    }
+
+    #[test]
+    fn marker_warnings_are_listed_in_the_order_of_the_file() {
+        let file = with_marker_warnings(vec![
+            AllowMarkerWarning {
+                problem: AllowMarkerProblem::NestedBegin,
+                line: 3,
+            },
+            AllowMarkerWarning {
+                problem: AllowMarkerProblem::UnclosedBegin,
+                line: 1,
+            },
+        ]);
+
+        let written = serde_json::to_value(&file).unwrap();
+
+        assert_eq!(
+            written["marker_warnings"],
+            serde_json::json!([
+                {"problem": "unclosed_begin", "line": 1},
+                {"problem": "nested_begin", "line": 3},
+            ])
+        );
+    }
+
+    #[test]
+    fn a_marker_warning_is_a_notification_with_the_line_in_the_sarif_report() {
+        let mut result = ScanCommandResult::default();
+        result.push(with_marker_warnings(vec![AllowMarkerWarning {
+            problem: AllowMarkerProblem::StrayEnd,
+            line: 4,
+        }]));
+        let locator = ArtifactLocator::new("./", Path::new("/work"));
+
+        let log = serde_json::to_value(
+            SarifLog::try_new(&result.reported_files(), &locator, None).unwrap(),
+        )
+        .unwrap();
+
+        let invocation = &log["runs"][0]["invocations"][0];
+        let notification = &invocation["toolExecutionNotifications"][0];
+        assert_eq!(notification["level"], "warning");
+        assert_eq!(
+            notification["locations"][0]["physicalLocation"]["region"]["startLine"],
+            4
+        );
+        assert_eq!(invocation["executionSuccessful"], true);
+        assert!(log["runs"][0]["results"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1355,6 +1442,18 @@ mod tests {
             format!("{unlimited} · Categories: secrets")
         );
         assert!(to_text(&result).contains("Categories: secrets"));
+    }
+
+    #[test]
+    fn a_marker_warning_is_listed_under_the_row_of_its_file() {
+        let file = with_marker_warnings(vec![AllowMarkerWarning {
+            problem: AllowMarkerProblem::UnclosedBegin,
+            line: 2,
+        }]);
+
+        let lines = file_lines(&file, RowLayout::for_terminal(100), &OutputStyles::plain());
+
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]

@@ -10,8 +10,9 @@ use crate::redacters::table_pieces::{
     redact_batches, table_csv, TableBatch, TableBatches, TableRedaction, TABLE_BATCH_BYTES,
 };
 use crate::redacters::{
-    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, Categories, Detection,
-    DetectionLocation, PieceLayout, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
+    has_marker_outside, redact_rgba_image_at_coords, words_to_redact, AllowMarkerProblem,
+    AllowMarkerWarning, AllowRegions, Categories, Detection, DetectionLocation, PieceLayout,
+    ReadSpans, RedactSupport, Redacter, RedacterBaseOptions, RedacterDataItem,
     RedacterDataItemContent, Redacters, StreamRedactions, TextLines, TextPieceLimits, TextPieces,
     TextPosition, TextWindow,
 };
@@ -150,82 +151,120 @@ pub struct DetectStreamResult {
     /// [`crate::redacters::Detections::unlocated`].
     pub unlocated: usize,
     /// The detections moved out of `detections` because a line they cover, or their cell, carries
-    /// [`crate::redacters::ALLOW_MARKER`] outside them, kept so the caller can count them.
+    /// [`crate::redacters::ALLOW_MARKER`] outside them, or because they lie inside a region of
+    /// block markers, kept so the caller can count them.
     pub ignored: Vec<(RedacterType, Detection)>,
+    /// The block markers of the text that do not pair up.
+    pub marker_warnings: Vec<AllowMarkerWarning>,
 }
 
 impl DetectStreamResult {
-    /// Moves the detections that `content` marks as ignored from `detections` to `ignored`.
-    /// Only text and table cells can carry the marker: the words OCR reads from an image or a
-    /// PDF page have no author-controlled place for it.
+    /// Moves the detections that the markers of `content` ignore from `detections` to
+    /// `ignored`. Only text and table cells can carry a marker: the words OCR reads from an
+    /// image or a PDF page have no author-controlled place for it.
     ///
-    /// `whole_lines` is the part of a text that holds whole lines of the file, `None` for all of
-    /// it. A marker outside it does not count.
-    fn set_aside_ignored(
-        &mut self,
-        content: &RedacterDataItemContent,
-        whole_lines: Option<Range<usize>>,
-    ) {
-        let marked: Vec<bool> = match content {
+    /// A text is read whole, from its first line to its last.
+    fn set_aside_ignored(&mut self, content: &RedacterDataItemContent) {
+        match content {
             RedacterDataItemContent::Value(text) => {
-                let lines = match whole_lines {
-                    Some(span) => TextLines::new(text).with_marker_span(span),
-                    None => TextLines::new(text),
-                };
-                let findings: Vec<Range<usize>> = self
-                    .detections
-                    .iter()
-                    .filter_map(|(_, detection)| match detection.location {
-                        DetectionLocation::Text { start, end, .. } => Some(start..end),
-                        _ => None,
-                    })
-                    .collect();
-                self.detections
-                    .iter()
-                    .map(|(_, detection)| match detection.location {
-                        DetectionLocation::Text { start, end, .. } => {
-                            lines.has_marker_beside(start..end, &findings)
-                        }
-                        _ => false,
-                    })
-                    .collect()
+                let mut regions = AllowRegions::default();
+                self.set_aside_in_text(text, &ReadSpans::whole(text), None, &mut regions);
+                self.marker_warnings.extend(regions.finish());
             }
-            RedacterDataItemContent::Table { rows, .. } => {
-                let mut findings_by_cell: HashMap<(usize, usize), Vec<Range<usize>>> =
-                    HashMap::new();
-                for (_, detection) in &self.detections {
-                    if let DetectionLocation::TableCell {
-                        row,
-                        column,
-                        start,
-                        end,
-                    } = detection.location
-                    {
-                        findings_by_cell
-                            .entry((row, column))
-                            .or_default()
-                            .push(start..end);
-                    }
+            RedacterDataItemContent::Table { rows, .. } => self.set_aside_in_cells(rows),
+            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => {}
+        }
+    }
+
+    /// As [`Self::set_aside_ignored`] for the window `text` of a longer text, where `spans` says
+    /// which parts of the window the markers are read in. `regions` carries the block markers of
+    /// the windows before.
+    ///
+    /// `ownership` says which of the window's findings it reports, `None` for a text read whole.
+    /// The block markers are judged against those findings only: a finding the window leaves to
+    /// an earlier one is not promised to be what a whole read finds, since the window may start
+    /// inside the value.
+    fn set_aside_in_text(
+        &mut self,
+        text: &str,
+        spans: &ReadSpans,
+        ownership: Option<&Ownership>,
+        regions: &mut AllowRegions,
+    ) {
+        let lines = TextLines::new(text).with_marker_span(spans.whole_lines.clone());
+        let findings: Vec<Range<usize>> = self
+            .detections
+            .iter()
+            .filter_map(|(_, detection)| match detection.location {
+                DetectionLocation::Text { start, end, .. } => Some(start..end),
+                _ => None,
+            })
+            .collect();
+        let reported: Vec<Range<usize>> = findings
+            .iter()
+            .filter(|finding| {
+                ownership.is_none_or(|ownership| {
+                    ownership.reports(&(finding.start + spans.offset..finding.end + spans.offset))
+                })
+            })
+            .cloned()
+            .collect();
+        self.marker_warnings
+            .extend(regions.read_window(text, spans, &reported));
+        let marked = self
+            .detections
+            .iter()
+            .map(|(_, detection)| match detection.location {
+                DetectionLocation::Text { start, end, .. } => {
+                    let region_lines = lines.line_span(start..end);
+                    let first_line = spans.first_line;
+                    lines.has_marker_beside(start..end, &findings)
+                        || regions.covers(
+                            region_lines.start() + first_line..=region_lines.end() + first_line,
+                        )
                 }
-                self.detections
-                    .iter()
-                    .map(|(_, detection)| match detection.location {
-                        DetectionLocation::TableCell { row, column, .. } => rows
-                            .get(row.saturating_sub(1))
-                            .and_then(|cells| cells.get(column.saturating_sub(1)))
-                            .is_some_and(|cell| {
-                                has_marker_outside(
-                                    cell,
-                                    0..cell.len(),
-                                    &findings_by_cell[&(row, column)],
-                                )
-                            }),
-                        _ => false,
-                    })
-                    .collect()
+                _ => false,
+            })
+            .collect();
+        self.move_marked(marked);
+    }
+
+    /// As [`Self::set_aside_ignored`] for the cells of a table, which hold the marker of the
+    /// findings in them. A table has no block markers.
+    fn set_aside_in_cells(&mut self, rows: &[Vec<String>]) {
+        let mut findings_by_cell: HashMap<(usize, usize), Vec<Range<usize>>> = HashMap::new();
+        for (_, detection) in &self.detections {
+            if let DetectionLocation::TableCell {
+                row,
+                column,
+                start,
+                end,
+            } = detection.location
+            {
+                findings_by_cell
+                    .entry((row, column))
+                    .or_default()
+                    .push(start..end);
             }
-            RedacterDataItemContent::Image { .. } | RedacterDataItemContent::Pdf { .. } => return,
-        };
+        }
+        let marked = self
+            .detections
+            .iter()
+            .map(|(_, detection)| match detection.location {
+                DetectionLocation::TableCell { row, column, .. } => rows
+                    .get(row.saturating_sub(1))
+                    .and_then(|cells| cells.get(column.saturating_sub(1)))
+                    .is_some_and(|cell| {
+                        has_marker_outside(cell, 0..cell.len(), &findings_by_cell[&(row, column)])
+                    }),
+                _ => false,
+            })
+            .collect();
+        self.move_marked(marked);
+    }
+
+    /// Moves the detections that `marked` flags, one flag for each, to `ignored`.
+    fn move_marked(&mut self, marked: Vec<bool>) {
         for (detection, is_marked) in std::mem::take(&mut self.detections).into_iter().zip(marked) {
             if is_marked {
                 self.ignored.push(detection);
@@ -235,38 +274,50 @@ impl DetectStreamResult {
         }
     }
 
-    /// What the window that starts at `window_start` of the file reports, placed in the file,
-    /// given that `piece` is the byte range of the file the window owns and the window before
-    /// it ended at `previous_window_end`.
-    ///
-    /// A detection is reported by the window of the piece it starts in. One that starts before
-    /// the piece is reported here only when it ends past the end of the window before: that
-    /// window could not see it whole, and this is the first window that does.
-    fn owned_by(
-        self,
-        piece: &Range<usize>,
-        window_start: TextPosition,
-        previous_window_end: usize,
-    ) -> Self {
+    /// What the window that starts at `window_start` of the file reports, placed in the file.
+    /// See [`Ownership::reports`].
+    fn owned_by(self, ownership: &Ownership, window_start: TextPosition) -> Self {
         let owned = |(redacter, mut detection): (RedacterType, Detection)| {
             detection.location = detection.location.in_file(window_start);
-            let reported = detection.location.byte_range().is_none_or(|range| {
-                piece.contains(&range.start)
-                    || (range.start < piece.start && range.end > previous_window_end)
-            });
+            let reported = detection
+                .location
+                .byte_range()
+                .is_none_or(|range| ownership.reports(&range));
             reported.then_some((redacter, detection))
         };
         Self {
             detections: self.detections.into_iter().filter_map(owned).collect(),
             ignored: self.ignored.into_iter().filter_map(owned).collect(),
             unlocated: self.unlocated,
+            marker_warnings: self.marker_warnings,
         }
     }
 
     fn absorb(&mut self, other: Self) {
         self.detections.extend(other.detections);
         self.ignored.extend(other.ignored);
+        self.marker_warnings.extend(other.marker_warnings);
         self.unlocated += other.unlocated;
+    }
+}
+
+/// Which findings of a window of a text read in pieces the window reports.
+struct Ownership<'a> {
+    /// The byte range of the file the window owns.
+    piece: &'a Range<usize>,
+    /// Where the window before it ended, in bytes of the file.
+    previous_window_end: usize,
+}
+
+impl Ownership<'_> {
+    /// Whether the window reports a finding at `range` of the file.
+    ///
+    /// A finding is reported by the window of the piece it starts in. One that starts before the
+    /// piece is reported here only when it ends past the end of the window before: that window
+    /// could not see it whole, and this is the first window that does.
+    fn reports(&self, range: &Range<usize>) -> bool {
+        self.piece.contains(&range.start)
+            || (range.start < self.piece.start && range.end > self.previous_window_end)
     }
 }
 
@@ -883,7 +934,13 @@ impl<'a> StreamRedacter<'a> {
             }
             _ => result = Self::detect_all(redacters, &item, None, categories).await?,
         }
-        result.set_aside_ignored(&item.content, None);
+        result.set_aside_ignored(&item.content);
+        if self.redacter_base_options.sampling_size.is_some() {
+            // A sample can end inside a region that the file closes further on.
+            result
+                .marker_warnings
+                .retain(|warning| warning.problem != AllowMarkerProblem::UnclosedBegin);
+        }
         found(result)?;
         Ok(None)
     }
@@ -944,6 +1001,7 @@ impl<'a> StreamRedacter<'a> {
         let mut pieces = Self::text_pieces(input, layout, unsupported_as_text);
         let mut previous_window_end = 0;
         let mut windows = 0;
+        let mut regions = AllowRegions::default();
         loop {
             let window = match pieces.next_window().await {
                 Ok(Some(window)) => window,
@@ -955,19 +1013,26 @@ impl<'a> StreamRedacter<'a> {
             };
             let is_whole = window.is_whole_text();
             let window_end = window.start.offset + window.text.len();
-            let whole_lines = window.whole_lines();
+            let spans = window.read_spans();
             let (piece, start) = (window.piece, window.start);
+            let ownership = Ownership {
+                piece: &piece,
+                previous_window_end,
+            };
             let item = RedacterDataItem {
                 content: RedacterDataItemContent::Value(window.text),
                 file_ref: file_ref.clone(),
             };
             let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
-            detected.set_aside_ignored(&item.content, Some(whole_lines));
+            if let RedacterDataItemContent::Value(text) = &item.content {
+                detected.set_aside_in_text(text, &spans, Some(&ownership), &mut regions);
+            }
             if is_whole {
+                detected.marker_warnings.extend(regions.finish());
                 found(detected)?;
                 return Ok(None);
             }
-            found(detected.owned_by(&piece, start, previous_window_end))?;
+            found(detected.owned_by(&ownership, start))?;
             previous_window_end = window_end;
             windows += 1;
         }
@@ -978,6 +1043,12 @@ impl<'a> StreamRedacter<'a> {
             ?layout,
             "read in pieces"
         );
+        if let Some(warning) = regions.finish() {
+            found(DetectStreamResult {
+                marker_warnings: vec![warning],
+                ..DetectStreamResult::default()
+            })?;
+        }
         Ok(None)
     }
 
@@ -998,7 +1069,7 @@ impl<'a> StreamRedacter<'a> {
             let (rows_before, reaches_end) = (batch.rows_before, batch.reaches_end);
             let item = batch.into_item(file_ref);
             let mut detected = Self::detect_all(redacters, &item, None, categories).await?;
-            detected.set_aside_ignored(&item.content, None);
+            detected.set_aside_ignored(&item.content);
             for (_, detection) in detected.detections.iter_mut().chain(&mut detected.ignored) {
                 detection.location = detection.location.after_rows(rows_before);
             }
@@ -2981,6 +3052,15 @@ mod tests {
         findings
     }
 
+    fn only_tokens(mut collected: Collected) -> Collected {
+        let is_token = |(_, detection): &(RedacterType, Detection)| {
+            detection.label == DetectionLabel::new("token")
+        };
+        collected.found.detections.retain(is_token);
+        collected.found.ignored.retain(is_token);
+        collected
+    }
+
     fn assert_same_findings(whole: Collected, in_pieces: Collected) {
         let (whole_detections, piece_detections) = (
             by_location(whole.found.detections),
@@ -3004,6 +3084,7 @@ mod tests {
             by_location(whole.found.ignored)
         );
         assert_eq!(in_pieces.found.unlocated, whole.found.unlocated);
+        assert_eq!(in_pieces.found.marker_warnings, whole.found.marker_warnings);
     }
 
     const KEY_BLOCK: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
@@ -3072,6 +3153,337 @@ mod tests {
         assert_eq!(whole.found.detections.len(), 2);
         assert!(whole.found.ignored.is_empty());
         assert_same_findings(whole, in_pieces);
+    }
+
+    const PKCS8_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF\n\
+        -----END PRIVATE KEY-----";
+
+    async fn detect_secrets_and_emails(
+        name: &str,
+        media_type: mime::Mime,
+        text: &str,
+    ) -> Collected {
+        detect(
+            &FileConverters::new(),
+            &[secret_rules().await, email_rules().await],
+            &file_ref(name, media_type),
+            text.to_string().into(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn warning(problem: AllowMarkerProblem, line: usize) -> AllowMarkerWarning {
+        AllowMarkerWarning { problem, line }
+    }
+
+    #[tokio::test]
+    async fn a_markdown_comment_region_ignores_the_key_in_its_code_block() {
+        let text = format!(
+            "Sign with:\n\n<!-- redacter:allow-begin -->\n```text\n{PKCS8_KEY}\n```\n<!-- redacter:allow-end -->\n\nMail ops@example.com.\n"
+        );
+
+        let result =
+            detect_secrets_and_emails("signing.md", "text/markdown".parse().unwrap(), &text).await;
+
+        assert_eq!(result.found.ignored.len(), 1);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "ops@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_finding_on_a_marker_line_is_reported() {
+        let text = "a@b.io # redacter:allow-begin\nc@d.io\n# redacter:allow-end e@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        let values = |found: &[(RedacterType, Detection)]| {
+            found
+                .iter()
+                .map(|(_, detection)| detection.value.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&result.found.detections), ["a@b.io", "e@f.io"]);
+        assert_eq!(values(&result.found.ignored), ["c@d.io"]);
+        assert!(result.found.marker_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_inline_marker_ignores_a_finding_on_a_marker_line() {
+        let text = "a@b.io redacter:allow redacter:allow-begin\nc@d.io\n# redacter:allow-end\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert!(result.found.detections.is_empty());
+        assert_eq!(result.found.ignored.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_begin_without_an_end_ignores_nothing_and_is_warned_about() {
+        let text = "a@b.io\n// redacter:allow-begin\nc@d.io\ne@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 3);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::UnclosedBegin, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_end_without_a_begin_is_warned_about_and_ignores_nothing() {
+        let text = "a@b.io\n// redacter:allow-end\nc@d.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::StrayEnd, 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_begin_inside_an_open_region_is_warned_about_and_the_region_keeps_its_first_begin() {
+        let text = "// redacter:allow-begin\na@b.io\n// redacter:allow-begin\nc@d.io\n// redacter:allow-end\ne@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.ignored.len(), 2);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "e@f.io");
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::NestedBegin, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn markers_on_a_line_are_read_in_the_order_they_stand() {
+        let text = "x@y.io redacter:allow-end redacter:allow-begin\nz@w.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [
+                warning(AllowMarkerProblem::StrayEnd, 1),
+                warning(AllowMarkerProblem::UnclosedBegin, 1)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_end_and_a_begin_on_one_line_close_one_region_and_open_the_next() {
+        let text = "// redacter:allow-begin\na@b.io\n// redacter:allow-end redacter:allow-begin\nc@d.io\n// redacter:allow-end\ne@f.io\n";
+
+        let result = detect_secrets_and_emails("notes.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.ignored.len(), 2);
+        assert_eq!(result.found.detections.len(), 1);
+        assert_eq!(result.found.detections[0].1.value, "e@f.io");
+        assert!(result.found.marker_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_block_marker_inside_a_value_is_not_a_marker() {
+        let text =
+            "API_KEY=xyz_redacter:allow-begin_123456789\nmail a@b.io\n# redacter:allow-end\n";
+
+        let result = detect_secrets_and_emails("env.txt", mime::TEXT_PLAIN, text).await;
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.ignored.is_empty());
+        assert_eq!(
+            result.found.marker_warnings,
+            [warning(AllowMarkerProblem::StrayEnd, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sample_that_ends_inside_a_region_gives_no_warning() {
+        let options = RedacterBaseOptions {
+            sampling_size: Some(40),
+            ..base_options()
+        };
+        let text = "// redacter:allow-begin\na@b.io\nc@d.io\n// redacter:allow-end\n";
+
+        let result = detect_with(
+            &options,
+            &FileConverters::new(),
+            &[email_rules().await],
+            &file_ref("notes.txt", mime::TEXT_PLAIN),
+            bytes::Bytes::from(text),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.found.detections.len(), 2);
+        assert!(result.found.marker_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_region_that_spans_windows_ignores_what_a_whole_read_ignores() {
+        let text = ten_byte_lines(
+            100,
+            &[
+                (2, "TOKEN-123\n"),
+                (5, "// redacter:allow-begin\n"),
+                (50, "TOKEN-456\n"),
+                (60, "// redacter:allow-end\n"),
+                (95, "TOKEN-789\n"),
+            ],
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert_eq!(whole.found.detections.len(), 2);
+        assert_eq!(whole.found.ignored.len(), 1);
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn markers_that_do_not_pair_up_are_warned_about_once_across_windows() {
+        let text = ten_byte_lines(
+            100,
+            &[
+                (20, "// redacter:allow-end\n"),
+                (70, "// redacter:allow-begin\n"),
+            ],
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert_eq!(
+            whole.found.marker_warnings,
+            [
+                warning(AllowMarkerProblem::StrayEnd, 21),
+                warning(AllowMarkerProblem::UnclosedBegin, 71)
+            ]
+        );
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn a_value_only_a_leading_context_finds_does_not_take_out_a_marker() {
+        let text = ten_byte_lines(
+            100,
+            &[
+                (21, "redacter:allow-begin BLOB\n"),
+                (22, "BLOB two.\n"),
+                (28, "redacter:allow-end\n"),
+                (50, "TOKEN-9\n"),
+                (60, "// redacter:allow-end\n"),
+            ],
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+", "blob=(?s)BLOB.{0,60}"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert_same_findings(whole, in_pieces);
+    }
+
+    #[tokio::test]
+    async fn a_marker_in_a_value_never_counts_wherever_the_value_and_the_cuts_fall() {
+        let rules = user_rules(&["token=TOKEN-[0-9]+", "key=(?s)KEYBEGIN.*?KEYEND"]).await;
+        let layouts = [(400, 160), (300, 140), (500, 200)];
+        for (piece_bytes, context_bytes) in layouts {
+            for value_line in (15..=75).step_by(6) {
+                for marker_line in (value_line + 1..value_line + 24).step_by(3) {
+                    for (marker, before, after) in [
+                        (
+                            "Comment: redacter:allow-end\n",
+                            "// redacter:allow-begin\n",
+                            "",
+                        ),
+                        (
+                            "Comment: redacter:allow-begin\n",
+                            "",
+                            "// redacter:allow-end\n",
+                        ),
+                    ] {
+                        let text = ten_byte_lines(
+                            110,
+                            &[
+                                (2, before),
+                                (10, "TOKEN-1\n"),
+                                (value_line, "KEYBEGIN\n"),
+                                (marker_line, marker),
+                                (value_line + 24, "KEYEND\n"),
+                                (value_line + 28, "TOKEN-2\n"),
+                                (value_line + 32, after),
+                            ],
+                        );
+                        let layout = PieceLayout::new(piece_bytes, context_bytes);
+
+                        let (whole, in_pieces) =
+                            detect_whole_and_in_pieces(&rules, &text, layout).await;
+
+                        assert_same_findings(whole, in_pieces);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_value_only_a_leading_context_finds_never_takes_out_a_marker_wherever_the_cuts_fall()
+    {
+        let rules = user_rules(&["token=TOKEN-[0-9]+", "blob=(?s)BLOB.{0,60}"]).await;
+        for (piece_bytes, context_bytes) in [(400, 160), (300, 140), (500, 200)] {
+            for first_blob_line in 10..=70 {
+                let text = ten_byte_lines(
+                    110,
+                    &[
+                        (2, "// redacter:allow-begin\n"),
+                        (first_blob_line, "BLOB one\n"),
+                        (first_blob_line + 1, "BLOB two.\n"),
+                        (first_blob_line + 7, "redacter:allow-end\n"),
+                        (first_blob_line + 29, "TOKEN-9\n"),
+                        (first_blob_line + 39, "// redacter:allow-end\n"),
+                    ],
+                );
+                let layout = PieceLayout::new(piece_bytes, context_bytes);
+
+                let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, layout).await;
+
+                // The blob rule itself finds different spans from different starts, so only the
+                // tokens, which no marker is part of, are compared.
+                assert_same_findings(only_tokens(whole), only_tokens(in_pieces));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_end_marker_on_a_line_longer_than_a_window_closes_the_region() {
+        let long_line = format!("redacter:allow-end {}\n", "y".repeat(1500));
+        let text = format!(
+            "// redacter:allow-begin\nTOKEN-1\n{long_line}TOKEN-9\n// redacter:allow-begin\nTOKEN-2\n// redacter:allow-end\n{}",
+            "012345678\n".repeat(60)
+        );
+        let rules = user_rules(&["token=TOKEN-[0-9]+"]).await;
+
+        let (whole, in_pieces) = detect_whole_and_in_pieces(&rules, &text, cut_at_400()).await;
+
+        assert!(in_pieces
+            .found
+            .detections
+            .iter()
+            .any(|(_, detection)| detection.value == "TOKEN-9"));
+        assert_eq!(in_pieces.found.marker_warnings, whole.found.marker_warnings);
+        assert!(in_pieces
+            .found
+            .ignored
+            .iter()
+            .all(|ignored| whole.found.ignored.contains(ignored)));
     }
 
     async fn user_rules(rules: &[&str]) -> Vec<Redacters<'static>> {

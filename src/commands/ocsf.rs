@@ -644,6 +644,7 @@ mod tests {
         ReportedFile {
             path: path.to_string(),
             outcome,
+            marker_warnings: Vec::new(),
         }
     }
 
