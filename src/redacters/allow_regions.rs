@@ -9,12 +9,14 @@
 //!
 //! A text read in pieces reads each marker once, in the last window that holds it: the markers
 //! from the start of a window's text to where the next window starts. A marker is judged against
-//! the findings of its window and of the earlier windows that reach into it.
+//! the findings that the window reports and the earlier windows reported, never against one a
+//! window leaves to an earlier window: a window that starts inside a value need not find what a
+//! whole read finds there.
 //!
-//! A marker so read lies at least one context before the end of its window, so a value of up to
+//! A marker so read lies at least two contexts before the end of its window, so a value of up to
 //! twice the context that holds it ends inside the window, and one that starts before the window
-//! lies whole in the window before. Either way the marker is inside a finding that one of those
-//! windows made. A value longer than twice the context is found by no window, as for any
+//! lies whole in an earlier window. Either way the marker is inside a finding that one of those
+//! windows reports. A value longer than twice the context is found by no window, as for any
 //! finding, so a marker inside it counts.
 //!
 //! A finding is ignored only by a region whose end was read before the finding's window was
@@ -107,8 +109,8 @@ pub(crate) struct AllowRegions {
     /// The closed regions, in file order and apart. The regions that end before the last window
     /// started are dropped.
     closed: Vec<Region>,
-    /// The findings of the windows before that reach past the start of the next window, as byte
-    /// ranges in the file.
+    /// The findings that the windows before reported and that reach past the start of the next
+    /// window, as byte ranges in the file.
     carried: Vec<Range<usize>>,
 }
 
@@ -116,9 +118,9 @@ impl AllowRegions {
     /// Reads the block markers that start in `text[..spans.markers_end]`, and returns what does
     /// not pair up. Windows are read in file order, each marker once.
     ///
-    /// A marker inside a range of `findings`, the findings of the window as byte ranges in
-    /// `text`, or of a finding of an earlier window that reaches into `text`, is part of a value
-    /// and does not count.
+    /// A marker inside a range of `findings`, the findings the window reports as byte ranges in
+    /// `text`, or inside a finding of an earlier window that reaches into `text`, is part of a
+    /// value and does not count.
     pub fn read_window(
         &mut self,
         text: &str,
