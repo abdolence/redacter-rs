@@ -16,7 +16,7 @@ cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redac
 costs nothing per file. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured recall and
 speed of every redacter.
 
-![redacter-demo](media/redacter-demo.gif)
+![redacter-demo](media/redacter-demo.webp)
 
 ## Features
 
