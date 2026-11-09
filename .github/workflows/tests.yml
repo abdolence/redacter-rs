@@ -5,11 +5,18 @@ on:
       - master
   pull_request:
   workflow_dispatch:
+    inputs:
+      local-models:
+        description: Also install and test the local NER, GLiNER and credential models
+        type: boolean
+        default: false
 env:
   GCP_PROJECT: latestbit
   GCP_PROJECT_ID: 288860578009
   TEST_GCS_BUCKET_NAME: latestbit.appspot.com
   TEST_GCP_PROJECT: latestbit
+  LOCAL_MODEL_ADDONS: ${{ inputs.local-models && ',local-ner,local-gliner,local-credential-ml' || '' }}
+  LOCAL_MODEL_FEATURES: ${{ inputs.local-models && ',ci-local-ner,ci-local-gliner,ci-local-credential-ml' || '' }}
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_protected && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -25,8 +32,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
-      - name: Install pdfium and the models
-        run: cargo run -- addons install pdf,ocr,local-ner,local-gliner,local-credential-ml
+      - name: Install pdfium and the OCR models
+        run: cargo run -- addons install pdf,ocr$LOCAL_MODEL_ADDONS
       - name: Authenticate to Google Cloud development
         id: auth
         uses: google-github-actions/auth@v3
@@ -42,8 +49,8 @@ jobs:
       - name: 'Checking formatting and clippy'
         run: cargo fmt -- --check && cargo clippy -- -Dwarnings
       - name: 'Run tests without access to GCP'
-        run: cargo test --features "ci-ocr,ci-local-ner,ci-local-gliner,ci-local-credential-ml"
+        run: cargo test --features "ci-ocr$LOCAL_MODEL_FEATURES"
         if: github.ref != 'refs/heads/master'
       - name: 'Run all test'
-        run: cargo test --features "ci-gcp,ci-ocr,ci-local-ner,ci-local-gliner,ci-local-credential-ml"
+        run: cargo test --features "ci-gcp,ci-ocr$LOCAL_MODEL_FEATURES"
         if: github.ref == 'refs/heads/master'
