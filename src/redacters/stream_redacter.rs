@@ -2577,7 +2577,6 @@ mod tests {
         ),
     ];
 
-    /// Pdfium binds once per process, so the image and the PDF share one set of converters.
     async fn form_converters() -> FileConverters<'static> {
         use crate::addon_store::{AddonStore, AddonStoreOptions};
         let store = AddonStore::new(&AddonStoreOptions::default());
@@ -2624,7 +2623,6 @@ mod tests {
         );
     }
 
-    /// Pdfium binds once per process, so detection and redaction share one test.
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-ocr"), ignore)]
     async fn detections_and_redactions_in_the_form_fixtures_are_boxed_where_the_values_are_printed()

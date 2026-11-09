@@ -19,19 +19,28 @@ impl PdfImageConverter {
     /// tool itself; on Linux and other Unix systems the system loader follows
     /// `LD_LIBRARY_PATH`, where an empty entry means the current directory.
     pub fn new(addons: &AddonStore) -> AppResult<Self> {
-        let bindings = match addons.find(Addon::Pdf) {
+        let bound = match addons.find(Addon::Pdf) {
             Ok(files) => {
-                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(files.dir()))?
+                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(files.dir()))
+                    .map_err(AppError::from)
             }
             Err(
                 AddonStoreError::NotInstalled { .. }
                 | AddonStoreError::NotAvailableForPlatform { .. },
-            ) => Self::bind_by_hand()?,
+            ) => Self::bind_by_hand(),
             Err(err) => return Err(err.into()),
         };
-        Ok(Self {
-            pdfium: Pdfium::new(bindings),
-        })
+        let pdfium = match bound {
+            Ok(bindings) => Pdfium::new(bindings),
+            // The library binds once per process and every converter shares that binding.
+            // The default constructor only searches for a library when none is bound yet,
+            // which is not the case here.
+            Err(AppError::PdfiumError(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized)) => {
+                Pdfium::default()
+            }
+            Err(err) => return Err(err),
+        };
+        Ok(Self { pdfium })
     }
 
     fn bind_by_hand() -> AppResult<Box<dyn PdfiumLibraryBindings>> {
@@ -40,16 +49,21 @@ impl PdfImageConverter {
             message: "No parent directory for executable".to_string(),
         })?;
         let lib_dir = executable_dir.parent().map(|parent| parent.join("lib"));
-        let bound = lib_dir
+        for dir in lib_dir
             .iter()
             .map(PathBuf::as_path)
             .chain([executable_dir])
             .chain(SYSTEM_LIBRARY_DIRS.iter().map(Path::new))
-            .find_map(|dir| {
-                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir)).ok()
-            })
-            .map_or_else(bind_by_system_loader, Ok);
-        bound
+        {
+            match Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir)) {
+                Ok(bindings) => return Ok(bindings),
+                Err(err @ PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => {
+                    return Err(err.into())
+                }
+                Err(_) => {}
+            }
+        }
+        bind_by_system_loader()
     }
 }
 
@@ -166,6 +180,25 @@ mod tests {
             !round_tripped.is_empty(),
             "converting the rendered page back to a PDF should not be empty"
         );
+
+        Ok(())
+    }
+
+    /// Every `command_copy` call builds its own converter, and the library binds only once
+    /// per process.
+    #[test]
+    fn a_second_converter_in_the_same_process_renders_pages() -> AppResult<()> {
+        let _guard = crate::redacters::test_support::pdfium_test_lock().blocking_lock();
+
+        let Some(_first) =
+            converter_or_skip("a_second_converter_in_the_same_process_renders_pages")
+        else {
+            return Ok(());
+        };
+        let second = PdfImageConverter::new(&AddonStore::new(&AddonStoreOptions::default()))?;
+
+        let pdf_bytes: Bytes = std::fs::read("test-fixtures/documents/customer-form.pdf")?.into();
+        assert_eq!(second.convert_to_images(pdf_bytes)?.pages.len(), 1);
 
         Ok(())
     }
