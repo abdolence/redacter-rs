@@ -97,6 +97,9 @@ pub enum AppError {
     #[cfg(feature = "ocr")]
     #[error("OCR image error: {0}")]
     OcrImageError(#[from] ocrs::ImageSourceError),
+    #[cfg(feature = "ocr")]
+    #[error("OCR engine error: {0}")]
+    OcrEngineError(#[from] ocrs::OcrError),
     #[error("Addon store error: {0}")]
     AddonStoreError(#[from] crate::addon_store::AddonStoreError),
     #[error("{failed} of {requested} addons are not installed")]
@@ -213,15 +216,6 @@ impl<
 {
     fn from(err: aws_sdk_s3::error::SdkError<O, H>) -> Self {
         Self::AwsSdkError(Box::new(err))
-    }
-}
-
-impl From<anyhow::Error> for AppError {
-    fn from(err: anyhow::Error) -> Self {
-        Self::SystemErrorWithCause {
-            message: err.to_string(),
-            cause: Box::new(err),
-        }
     }
 }
 

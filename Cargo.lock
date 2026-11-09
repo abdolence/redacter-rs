@@ -4115,7 +4115,6 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 name = "redacter"
 version = "0.22.2"
 dependencies = [
- "anyhow",
  "arboard",
  "async-recursion",
  "aws-config",
