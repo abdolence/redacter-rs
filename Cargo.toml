@@ -140,3 +140,29 @@ cargo-husky = { version = "1.5", default-features = false, features = [
     "prepush-hook",
     "run-cargo-fmt",
 ] }
+
+# The OCR models run on these crates, and unoptimised inference makes the OCR tests take minutes.
+[profile.dev.package.ocrs]
+opt-level = 3
+[profile.dev.package.rten]
+opt-level = 3
+[profile.dev.package.rten-base]
+opt-level = 3
+[profile.dev.package.rten-gemm]
+opt-level = 3
+[profile.dev.package.rten-imageproc]
+opt-level = 3
+[profile.dev.package.rten-onnx]
+opt-level = 3
+[profile.dev.package.rten-parallel]
+opt-level = 3
+[profile.dev.package.rten-sequence]
+opt-level = 3
+[profile.dev.package.rten-shape-inference]
+opt-level = 3
+[profile.dev.package.rten-simd]
+opt-level = 3
+[profile.dev.package.rten-tensor]
+opt-level = 3
+[profile.dev.package.rten-vecmath]
+opt-level = 3
