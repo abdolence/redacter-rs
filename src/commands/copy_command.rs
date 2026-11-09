@@ -1527,12 +1527,8 @@ mod tests {
         Ok(chunks?.concat())
     }
 
-    /// Drives `StreamRedacter` directly instead of `command_copy`: pdfium can only be bound
-    /// successfully once per process on this platform (a second `PdfImageConverter::new()`
-    /// call fails), and `command_copy` binds its own converters internally on every call, so
-    /// redacting the PDF and then reading its output back through `command_copy` a second
-    /// time would need a bind that never succeeds. Binding once here and reusing it for both
-    /// the redaction and the read-back avoids that.
+    /// Drives `StreamRedacter` directly instead of `command_copy`, so the redacted PDF is read
+    /// back with the same converters that redacted it.
     #[tokio::test]
     #[cfg_attr(not(feature = "ci-ocr"), ignore)]
     async fn command_copy_local_rules_redacts_ocr_documents_test(
@@ -1693,11 +1689,6 @@ mod tests {
             ))
         };
 
-        // The PDF copy goes first: it is the only one of the two that needs pdfium, and
-        // pdfium has been observed to bind successfully only once per process (a second
-        // `PdfImageConverter::new()` call in the same process fails even after the first
-        // instance was dropped). Running it first gives it the best chance of a live bind
-        // when this test is the first thing in the process to touch pdfium.
         let pdf_destination = temp_dir.path().join("customer-form.pdf");
         command_copy(
             &term,
