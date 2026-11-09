@@ -25,8 +25,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
-      - name: Install pdfium
-        run: cargo run -- addons install pdf
+      - name: Install pdfium and the OCR models
+        run: cargo run -- addons install pdf,ocr
       - name: Authenticate to Google Cloud development
         id: auth
         uses: google-github-actions/auth@v3
@@ -42,8 +42,8 @@ jobs:
       - name: 'Checking formatting and clippy'
         run: cargo fmt -- --check && cargo clippy -- -Dwarnings
       - name: 'Run tests without access to GCP'
-        run: cargo test
+        run: cargo test --features ci-ocr
         if: github.ref != 'refs/heads/master'
       - name: 'Run all test'
-        run: cargo test --features "ci-gcp"
+        run: cargo test --features "ci-gcp,ci-ocr"
         if: github.ref == 'refs/heads/master'
