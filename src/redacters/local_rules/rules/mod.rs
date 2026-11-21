@@ -7,6 +7,7 @@ use clap::ValueEnum;
 use regex::{Match, Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fmt::Display;
+use std::sync::LazyLock;
 
 mod table;
 use table::builtin_rules;
@@ -310,19 +311,38 @@ fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, L
 }
 
 /// True if the characters immediately outside `start..end` (if any) are not word
-/// characters, matching `\b` semantics without requiring the matched text itself to
-/// start or end on a word character. Lets a dictionary entry like `#tag` or `C++` match
-/// even though its first or last character is not alphanumeric.
+/// characters, with the same notion of a word character as the regex `\b`, without
+/// requiring the matched text itself to start or end on a word character. Lets a
+/// dictionary entry like `#tag` or `C++` match even though its first or last character is
+/// not alphanumeric.
+///
+/// Before the match, combining marks are skipped to reach the character they belong to, so
+/// a mark after a symbol (`\u{26a0}\u{fe0f}`) or at the start of the text does not make the
+/// match look like the continuation of a word. After the match a mark counts as a word
+/// character, because it belongs to the last character of the match.
 fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
     let before_is_word = text[..start]
         .chars()
-        .next_back()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let after_is_word = text[end..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        .rev()
+        .find(|c| !is_combining_mark(*c))
+        .is_some_and(is_word_char);
+    let after_is_word = text[end..].chars().next().is_some_and(is_word_char);
     !before_is_word && !after_is_word
+}
+
+/// Exactly the characters the regex `\w` matches, so that whole-word checks agree with the
+/// built-in rules' `\b`. The standard library has no equivalent: its `is_alphanumeric`
+/// misses combining marks and joiners, and includes superscript digits.
+fn is_word_char(c: char) -> bool {
+    static WORD_CHAR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\w$").expect("a fixed, valid pattern"));
+    WORD_CHAR.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+fn is_combining_mark(c: char) -> bool {
+    static COMBINING_MARK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\p{M}$").expect("a fixed, valid pattern"));
+    COMBINING_MARK.is_match(c.encode_utf8(&mut [0; 4]))
 }
 
 /// How closely a built-in rule insists on a value that looks like a credential.
@@ -1438,6 +1458,54 @@ mod tests {
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "hashtags").0, "hashtags");
         assert_eq!(redact(&rules, "tag_line").0, "tag_line");
+    }
+
+    #[test]
+    fn user_dictionary_word_followed_by_a_combining_mark_is_not_a_whole_word() {
+        let rule = UserRule {
+            name: RuleName::new("cafe"),
+            matcher: UserMatcher::Dictionary(vec!["cafe".to_string()]),
+            case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
+            category: Category::Other,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        let decomposed = "caf\u{65}\u{301}";
+        let (redacted, findings) = redact(&rules, decomposed);
+        assert_eq!(redacted, decomposed);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            redact(&rules, "a cafe, a caf\u{e9}").0,
+            "a [REDACTED], a caf\u{e9}"
+        );
+    }
+
+    fn dictionary_rule_set(word: &str) -> RuleSet {
+        rule_set_from_file(&format!(
+            r#"{{"rules":[{{"name":"words","dictionary":["{word}"]}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn user_dictionary_word_after_a_mark_that_follows_a_non_word_character_is_a_whole_word() {
+        let rules = dictionary_rule_set("Bluebird");
+        assert_eq!(
+            redact(&rules, "\u{26a0}\u{fe0f}Bluebird is late").0,
+            "\u{26a0}\u{fe0f}[REDACTED] is late"
+        );
+        assert_eq!(redact(&rules, "\u{301}Bluebird").0, "\u{301}[REDACTED]");
+    }
+
+    #[test]
+    fn user_dictionary_word_is_not_matched_inside_a_word_joined_by_a_zero_width_non_joiner() {
+        let rules = dictionary_rule_set("\u{645}\u{6cc}");
+        let verb = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        assert_eq!(redact(&rules, verb).0, verb);
     }
 
     #[test]

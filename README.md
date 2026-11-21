@@ -213,11 +213,11 @@ Arguments:
           Destination directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
 Options:
-  -m, --max-size-limit <MAX_SIZE_LIMIT>
-          Maximum size of files to copy in bytes
-
       --addons-dir <ADDONS_DIR>
           Directory holding the addons that `addons install` installs and manually placed copies, one subdirectory per addon. Overrides the REDACTER_ADDONS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/addons
+
+  -m, --max-size-limit <MAX_SIZE_LIMIT>
+          Maximum size of files to copy in bytes
 
   -n, --max-files-limit <MAX_FILES_LIMIT>
           Maximum number of files to copy. Sort order is not guaranteed and depends on the provider
@@ -362,9 +362,14 @@ Options:
 
       --report-format <REPORT_FORMAT>
           Format of the report file: 'json' for machines, 'text' for people, 'sarif' for GitHub code scanning, 'ocsf' for SIEMs and security data lakes (SARIF and OCSF reports always hold masked values). Requires --report-file. Default is 'json'
+
+          Possible values:
+          - json
+          - text
+          - sarif: SARIF 2.1.0, for GitHub code scanning
+          - ocsf:  OCSF 1.9.0 Data Security Finding events, one JSON object per line, for SIEMs and security data lakes
           
           [default: json]
-          [possible values: json, text, sarif, ocsf]
 
   -h, --help
           Print help (see a summary with '-h')
@@ -1443,9 +1448,14 @@ Arguments:
   <SOURCE>  Source directory or file such as /tmp, /tmp/file.txt or gs://bucket/file.txt and others supported providers
 
 Options:
-  -m, --max-size-limit <MAX_SIZE_LIMIT>    Maximum size of files to copy in bytes
-  -f, --filename-filter <FILENAME_FILTER>  Filter by name using glob patterns such as *.txt
-  -h, --help                               Print help
+      --addons-dir <ADDONS_DIR>
+          Directory holding the addons that `addons install` installs and manually placed copies, one subdirectory per addon. Overrides the REDACTER_ADDONS_DIR environment variable. Default is the user cache directory, for example ~/.cache/redacter/addons
+  -m, --max-size-limit <MAX_SIZE_LIMIT>
+          Maximum size of files to copy in bytes
+  -f, --filename-filter <FILENAME_FILTER>
+          Filter by name using glob patterns such as *.txt
+  -h, --help
+          Print help
 ```
 
 Example: list files in the GCS bucket:
