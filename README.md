@@ -203,9 +203,6 @@ is no longer accepted. `scan` takes the same two options, see [Scan command](#sc
 <summary>Full output of <code>redacter cp --help</code></summary>
 
 ```
-Redacter v0.22.3 (https://github.com/abdolence/redacter-rs)
-Copy and redact files from source to destination. Exits with 0 on success, 1 when a file fails or on errors
-
 Usage: redacter cp [OPTIONS] <SOURCE> <DESTINATION>
 
 Arguments:
@@ -1445,9 +1442,6 @@ For convenience, the tool also supports listing files in the source directory so
 It lists what `cp` and `scan` read, so `.git` directories are left out as well:
 
 ```
-Redacter v0.22.3 (https://github.com/abdolence/redacter-rs)
-List files in the source
-
 Usage: redacter ls [OPTIONS] <SOURCE>
 
 Arguments:
