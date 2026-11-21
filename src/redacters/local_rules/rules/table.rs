@@ -69,7 +69,8 @@ const RULES: &[RuleSpec] = &[
         // matches only to consume the credentials, so the `password@host` inside them cannot
         // start an email match that overlaps the credentials and, once overlapping findings
         // are united, pulls the host into the redaction. The local part takes any letter, as
-        // internationalised addresses do (RFC 6531); the domain stays ASCII.
+        // internationalised addresses do (RFC 6531), except that the search hides Han, Kana
+        // and Hangul, so `张伟@example.com` is not found; the domain stays ASCII.
         pattern: r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@|\b([\p{L}\p{M}0-9._%+-]+@(?:[a-z0-9-]+\.)+[a-z]{2,}\b)",
     },
     RuleSpec {

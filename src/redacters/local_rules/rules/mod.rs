@@ -332,14 +332,30 @@ fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, L
 /// a mark after a symbol (`\u{26a0}\u{fe0f}`) or at the start of the text does not make the
 /// match look like the continuation of a word. After the match a mark counts as a word
 /// character, because it belongs to the last character of the match.
+///
+/// A character followed by an enclosing mark is a symbol, not part of a word: the digit of a
+/// keycap (`1\u{fe0f}\u{20e3}`), before or after the match.
 fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
-    let before_is_word = text[..start]
+    let before = &text[..start];
+    let base_end = before.trim_end_matches(is_combining_mark).len();
+    let before_is_word = before[..base_end]
         .chars()
-        .rev()
-        .find(|c| !is_combining_mark(*c))
-        .is_some_and(is_word_char);
-    let after_is_word = text[end..].chars().next().is_some_and(is_word_char);
+        .next_back()
+        .is_some_and(is_word_char)
+        && !holds_enclosing_mark(&before[base_end..]);
+    let after_is_word = text[end..].chars().next().is_some_and(|first| {
+        let rest = &text[end + first.len_utf8()..];
+        let marks = &rest[..rest.len() - rest.trim_start_matches(is_combining_mark).len()];
+        is_word_char(first) && (is_combining_mark(first) || !holds_enclosing_mark(marks))
+    });
     !before_is_word && !after_is_word
+}
+
+/// True if `marks` holds an enclosing mark, such as the combining keycap U+20E3.
+fn holds_enclosing_mark(marks: &str) -> bool {
+    static ENCLOSING_MARK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\p{Me}").expect("a fixed, valid pattern"));
+    ENCLOSING_MARK.is_match(marks)
 }
 
 /// Exactly the characters the regex `\w` matches, so that whole-word checks agree with the
@@ -363,8 +379,10 @@ enum Masking {
     Marks,
     /// Marks as for [`Self::Marks`], and Han, Kana and Hangul characters, letter-like symbols
     /// and symbols that Unicode counts as alphabetic (`\u{2139}`, circled and squared letters
-    /// such as `\u{1f17f}`). For the built-in patterns only: a user regex may name Chinese
-    /// text, and no built-in pattern does.
+    /// such as `\u{1f17f}`). For the built-in patterns only, because a user regex may name
+    /// Chinese text. No built-in pattern names these characters, except that the `\p{L}` of
+    /// the email local part includes them and never reaches them: `\u{5f20}\u{4f1f}@example.com`
+    /// is not found.
     MarksAndSymbols,
 }
 
@@ -376,11 +394,12 @@ enum Masking {
 /// A mark belongs to the character before it. A run of marks after a word character stays
 /// with that word, which agrees with [`is_word_boundary`]; a run at the start of the text, or
 /// after a symbol or a masked character, is masked, such as the emoji variation selector in
-/// `\u{26a0}\u{fe0f}`.
+/// `\u{26a0}\u{fe0f}`. A run holding an enclosing mark is masked with its base character, so
+/// that a keycap such as `1\u{fe0f}\u{20e3}` acts as a symbol.
 fn mask_outside_words(text: &str, masking: Masking) -> Cow<'_, str> {
     static MASKABLE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
-            r"\p{M}+|[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}\u{2100}-\u{214F}[\w&&\p{So}]]+",
+            r"\p{M}+|[\p{Han}\p{scx=Hiragana}\p{scx=Katakana}\p{Hangul}\u{2100}-\u{214F}[\w&&\p{So}]]+",
         )
         .expect("a fixed, valid pattern")
     });
@@ -393,23 +412,35 @@ fn mask_outside_words(text: &str, masking: Masking) -> Cow<'_, str> {
     let mut masked_until = 0;
     for run in MASKABLE.find_iter(text) {
         let is_marks = run.as_str().chars().next().is_some_and(is_combining_mark);
-        let hide = if is_marks {
-            let follows_word = run.start() > masked_until
-                && text[..run.start()]
-                    .chars()
-                    .next_back()
-                    .is_some_and(is_word_char);
-            !follows_word
+        let hide_from = if is_marks {
+            let base = (run.start() > masked_until)
+                .then(|| text[..run.start()].chars().next_back())
+                .flatten()
+                .filter(|base| is_word_char(*base));
+            match base {
+                None => Some(run.start()),
+                Some(base) if holds_enclosing_mark(run.as_str()) => {
+                    Some(run.start() - base.len_utf8())
+                }
+                Some(_) => None,
+            }
+        } else if masking == Masking::MarksAndSymbols {
+            Some(run.start())
         } else {
-            masking == Masking::MarksAndSymbols
+            None
         };
-        if hide {
-            masked.push_str(&text[copied..run.start()]);
-            masked.extend(run.as_str().chars().map(|hidden| match hidden.len_utf8() {
-                2 => '\u{b7}',
-                3 => '\u{2022}',
-                _ => '\u{1f600}',
-            }));
+        if let Some(from) = hide_from {
+            masked.push_str(&text[copied..from]);
+            masked.extend(
+                text[from..run.end()]
+                    .chars()
+                    .map(|hidden| match hidden.len_utf8() {
+                        1 => '~',
+                        2 => '\u{b7}',
+                        3 => '\u{2022}',
+                        _ => '\u{1f600}',
+                    }),
+            );
             copied = run.end();
             masked_until = run.end();
         }
@@ -644,7 +675,7 @@ pub(super) mod test_support {
                 !matched.is_empty()
                     && spec
                         .validator
-                        .is_none_or(|(_, validate)| validate(&text[matched.range()]))
+                        .is_none_or(|(_, validate)| validate(matched.as_str()))
             })
         });
         matched_any
@@ -760,7 +791,8 @@ mod tests {
         }
     }
 
-    /// The findings of the built-in rule `spec` alone, through the same path a scan takes.
+    /// Whether the built-in rule `spec` alone finds anything in `text`, through the same path a
+    /// scan takes.
     fn rule_finds(spec: &RuleSpec, text: &str) -> bool {
         let rules =
             RuleSet::from_builtin(|candidate| candidate.name == spec.name, Strictness::Strict)
@@ -777,54 +809,55 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_rule_finds_its_example_after_a_symbol_with_a_variation_selector() {
-        let missed: Vec<&str> = builtin_rules()
-            .iter()
-            .filter(|spec| !rule_finds(spec, &format!("\u{26a0}\u{fe0f}{}", spec.example.text())))
-            .map(|spec| spec.name)
-            .collect();
-        assert!(missed.is_empty(), "{missed:#?}");
-    }
-
-    #[test]
-    fn every_builtin_rule_finds_its_example_beside_a_symbol_that_is_a_word_character() {
+    fn every_builtin_rule_finds_its_example_beside_a_symbol_or_an_ideograph() {
         let missed: Vec<String> = builtin_rules()
             .iter()
             .flat_map(|spec| {
                 let example = spec.example.text();
-                ["\u{2139}", "\u{53f7}", "\u{1f17f}\u{fe0f}"]
-                    .into_iter()
-                    .flat_map(move |symbol| {
-                        [format!("{symbol}{example}"), format!("{example}{symbol}")]
-                    })
-                    .filter(|text| !rule_finds(spec, text))
-                    .map(|text| format!("{}: {text}", spec.name))
-                    .collect::<Vec<_>>()
+                [
+                    "\u{26a0}\u{fe0f}",
+                    "\u{2139}",
+                    "\u{53f7}",
+                    "\u{1f17f}\u{fe0f}",
+                    "\u{30b5}\u{30fc}\u{30d0}\u{30fc}",
+                    "\u{ff7b}\u{ff70}\u{ff8a}\u{ff9e}\u{ff70}",
+                    "1\u{fe0f}\u{20e3}",
+                ]
+                .into_iter()
+                .flat_map(move |symbol| {
+                    [format!("{symbol}{example}"), format!("{example}{symbol}")]
+                })
+                .filter(|text| !rule_finds(spec, text))
+                .map(|text| format!("{}: {text}", spec.name))
+                .collect::<Vec<_>>()
             })
             .collect();
         assert!(missed.is_empty(), "{missed:#?}");
     }
 
     #[test]
-    fn a_value_after_a_letter_like_symbol_or_a_han_character_is_redacted() {
+    fn a_value_after_a_katakana_word_ending_in_the_long_vowel_mark_is_redacted() {
         assert_redacts(
-            "\u{2139}\u{fe0f}john@example.com",
-            "\u{2139}\u{fe0f}[REDACTED]",
+            "\u{30e6}\u{30fc}\u{30b6}\u{30fc}john@example.com",
+            "\u{30e6}\u{30fc}\u{30b6}\u{30fc}[REDACTED]",
         );
         assert_redacts(
-            "\u{1f17f}\u{fe0f}john@example.com",
-            "\u{1f17f}\u{fe0f}[REDACTED]",
-        );
-        assert_redacts(
-            "\u{8eab}\u{4efd}\u{8bc1}\u{53f7}11010519491231002X",
-            "\u{8eab}\u{4efd}\u{8bc1}\u{53f7}[REDACTED]",
+            "\u{ff7b}\u{ff70}\u{ff8a}\u{ff9e}\u{ff70}192.168.1.20",
+            "\u{ff7b}\u{ff70}\u{ff8a}\u{ff9e}\u{ff70}[REDACTED]",
         );
     }
 
     #[test]
     fn a_mark_after_a_word_character_keeps_a_value_glued_to_the_word() {
         assert_untouched("caf\u{65}\u{301}+44 20 7946 0958");
-        assert_untouched("1\u{fe0f}\u{20e3}+44 20 7946 0958");
+    }
+
+    #[test]
+    fn a_value_after_a_keycap_is_redacted() {
+        assert_redacts(
+            "1\u{fe0f}\u{20e3}+44 20 7946 0958",
+            "1\u{fe0f}\u{20e3}[REDACTED]",
+        );
     }
 
     #[test]
@@ -1728,6 +1761,29 @@ mod tests {
         let rules = dictionary_rule_set("\u{645}\u{6cc}");
         let verb = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
         assert_eq!(redact(&rules, verb).0, verb);
+    }
+
+    #[test]
+    fn user_dictionary_word_beside_a_keycap_is_a_whole_word() {
+        let rules = dictionary_rule_set("Bluebird");
+        assert_eq!(
+            redact(&rules, "1\u{fe0f}\u{20e3}Bluebird").0,
+            "1\u{fe0f}\u{20e3}[REDACTED]"
+        );
+        assert_eq!(
+            redact(&rules, "Bluebird1\u{fe0f}\u{20e3}").0,
+            "[REDACTED]1\u{fe0f}\u{20e3}"
+        );
+        assert_eq!(redact(&rules, "1Bluebird").0, "1Bluebird");
+    }
+
+    #[test]
+    fn user_dictionary_word_holding_a_variation_selector_matches() {
+        let rules = dictionary_rule_set("\u{26a0}\u{fe0f}");
+        assert_eq!(
+            redact(&rules, "send \u{26a0}\u{fe0f} now").0,
+            "send [REDACTED] now"
+        );
     }
 
     #[test]
