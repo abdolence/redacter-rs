@@ -5,6 +5,7 @@ use crate::redacters::text_spans::{merge_findings, Finding, RuleName};
 use crate::redacters::Category;
 use clap::ValueEnum;
 use regex::{Match, Regex, RegexBuilder};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::sync::LazyLock;
@@ -165,6 +166,11 @@ struct CompiledRule {
     /// any) are not word characters. Used for dictionary rules, whose alternatives may
     /// start or end with punctuation (`#tag`, `C++`) that `\b` cannot anchor on.
     whole_word: bool,
+    /// True for a built-in rule: its pattern is searched in the text returned by
+    /// [`mask_marks_outside_words`], so that a mark after a symbol does not hide the `\b`
+    /// before the value. A user rule is searched in the text as written, because its
+    /// pattern or dictionary may name such a mark itself.
+    marks_end_words: bool,
     category: Category,
     resume: Resume,
 }
@@ -217,11 +223,12 @@ impl TryFrom<&UserRule> for CompiledRule {
             capture_group: rule.capture_group,
             validator,
             whole_word: rule.whole_word.unwrap_or(default_whole_word),
+            marks_end_words: false,
             category: rule.category,
             resume: Resume::AfterMatch,
         };
         for example in &rule.examples {
-            if compiled.findings(example).next().is_none() {
+            if compiled.findings(example, example).next().is_none() {
                 return Err(LocalRulesError::ExampleNotMatched {
                     rule: rule.name.to_string(),
                     example: example.clone(),
@@ -229,7 +236,7 @@ impl TryFrom<&UserRule> for CompiledRule {
             }
         }
         for example in &rule.counter_examples {
-            if compiled.findings(example).next().is_some() {
+            if compiled.findings(example, example).next().is_some() {
                 return Err(LocalRulesError::CounterExampleMatched {
                     rule: rule.name.to_string(),
                     example: example.clone(),
@@ -243,11 +250,17 @@ impl TryFrom<&UserRule> for CompiledRule {
 impl CompiledRule {
     /// The findings of this rule alone in `text`: its values that pass its validator and,
     /// for a whole-word rule, stand on word boundaries. Not merged with other findings.
-    fn findings<'t>(&'t self, text: &'t str) -> impl Iterator<Item = Finding> + 't {
-        self.values(text)
+    /// `searched` is the text the pattern runs on and must have the byte offsets of `text`:
+    /// `text` itself, or for a built-in rule its [`mask_marks_outside_words`] form.
+    fn findings<'t>(
+        &'t self,
+        text: &'t str,
+        searched: &'t str,
+    ) -> impl Iterator<Item = Finding> + 't {
+        self.values(searched)
             .filter(|matched| {
                 self.validator
-                    .is_none_or(|validate| validate(matched.as_str()))
+                    .is_none_or(|validate| validate(&text[matched.range()]))
                     && (!self.whole_word || is_word_boundary(text, matched.start(), matched.end()))
             })
             .map(|matched| Finding {
@@ -337,6 +350,56 @@ fn is_word_char(c: char) -> bool {
     static WORD_CHAR: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^\w$").expect("a fixed, valid pattern"));
     WORD_CHAR.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// `text` with every combining mark that does not belong to a word replaced by a symbol of the
+/// same UTF-8 width, so byte offsets stay valid and the symbol is neither a word character nor
+/// whitespace. Such a mark is the emoji variation selector after `\u{26a0}`, or any mark at the
+/// start of the text, and the regex `\b` counts it as a word character: without this, `\b`
+/// finds no boundary between `\u{26a0}\u{fe0f}` and the value that follows.
+///
+/// A mark after a word character stays, as part of that word, except from an enclosing mark on:
+/// the keycap in `1\u{fe0f}\u{20e3}` turns the digit into a symbol.
+fn mask_marks_outside_words(text: &str) -> Cow<'_, str> {
+    static MARK_RUN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\p{M}+").expect("a fixed, valid pattern"));
+    static ENCLOSING_MARK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\p{Me}").expect("a fixed, valid pattern"));
+
+    let mut runs = MARK_RUN.find_iter(text).peekable();
+    if runs.peek().is_none() {
+        return Cow::Borrowed(text);
+    }
+    let mut masked = String::with_capacity(text.len());
+    let mut copied = 0;
+    for run in runs {
+        let follows_word = text[..run.start()]
+            .chars()
+            .next_back()
+            .is_some_and(is_word_char);
+        let masked_from = if follows_word {
+            ENCLOSING_MARK
+                .find(run.as_str())
+                .map(|enclosing| run.start() + enclosing.start())
+        } else {
+            Some(run.start())
+        };
+        if let Some(from) = masked_from {
+            masked.push_str(&text[copied..from]);
+            masked.extend(
+                text[from..run.end()]
+                    .chars()
+                    .map(|mark| match mark.len_utf8() {
+                        2 => '\u{b7}',
+                        3 => '\u{2022}',
+                        _ => '\u{1f600}',
+                    }),
+            );
+            copied = run.end();
+        }
+    }
+    masked.push_str(&text[copied..]);
+    Cow::Owned(masked)
 }
 
 fn is_combining_mark(c: char) -> bool {
@@ -464,6 +527,7 @@ impl RuleSet {
                     .filter(|_| strictness == Strictness::Strict)
                     .map(|(_, validate)| validate),
                 whole_word: false,
+                marks_end_words: true,
                 category: spec.group.category(),
                 resume: Resume::AfterValue,
             });
@@ -503,10 +567,14 @@ impl RuleSet {
 
     /// Every validated match of every rule, merged so no two findings overlap.
     pub fn find(&self, text: &str) -> Vec<Finding> {
+        let masked = mask_marks_outside_words(text);
         let findings = self
             .rules
             .iter()
-            .flat_map(|rule| rule.findings(text))
+            .flat_map(|rule| {
+                let searched = if rule.marks_end_words { &masked } else { text };
+                rule.findings(text, searched)
+            })
             .collect();
         merge_findings(findings)
     }
@@ -514,7 +582,7 @@ impl RuleSet {
 
 #[cfg(test)]
 pub(super) mod test_support {
-    use super::{compile, RuleGroup, RuleSet, RuleSpec};
+    use super::{compile, mask_marks_outside_words, RuleGroup, RuleSet, RuleSpec};
     use crate::redacters::text_spans::{apply_redaction, Finding, REDACTED};
     use std::sync::OnceLock;
 
@@ -547,12 +615,13 @@ pub(super) mod test_support {
     /// the other rules and without the merge.
     pub(super) fn rule_matches(spec: &RuleSpec, text: &str) -> bool {
         let regex = compile(spec.name, spec.pattern, false).unwrap();
-        let matched_any = regex.captures_iter(text).any(|captures| {
+        let searched = mask_marks_outside_words(text);
+        let matched_any = regex.captures_iter(&searched).any(|captures| {
             captures.get(spec.capture_group).is_some_and(|matched| {
                 !matched.is_empty()
                     && spec
                         .validator
-                        .is_none_or(|(_, validate)| validate(matched.as_str()))
+                        .is_none_or(|(_, validate)| validate(&text[matched.range()]))
             })
         });
         matched_any
@@ -666,6 +735,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn email_after_an_emoji_with_a_variation_selector_is_redacted() {
+        assert_redacts(
+            "\u{26a0}\u{fe0f}john@example.com",
+            "\u{26a0}\u{fe0f}[REDACTED]",
+        );
+        assert_redacts("\u{26a0}john@example.com", "\u{26a0}[REDACTED]");
+    }
+
+    #[test]
+    fn a_mark_that_belongs_to_a_word_still_glues_the_value_to_it() {
+        assert_untouched("caf\u{65}\u{301}john@example.com");
+        assert_redacts(
+            "1\u{fe0f}\u{20e3}john@example.com",
+            "1\u{fe0f}\u{20e3}[REDACTED]",
+        );
+        assert_redacts(
+            "\u{301}john@example.com \u{1f600}\u{fe0f}+44 20 7946 0958",
+            "\u{301}[REDACTED] \u{1f600}\u{fe0f}[REDACTED]",
+        );
+    }
+
+    #[test]
+    fn every_rule_example_is_found_beside_an_emoji_with_a_variation_selector() {
+        let emoji = "\u{26a0}\u{fe0f}";
+        let missed: Vec<String> = builtin_rules()
+            .iter()
+            .flat_map(|spec| {
+                let example = spec.example.text();
+                [
+                    ("before", format!("{emoji}{example}")),
+                    ("after", format!("{example}{emoji}")),
+                ]
+                .into_iter()
+                .filter(|(_, text)| !rule_matches(spec, text))
+                .map(|(side, _)| format!("{} ({side})", spec.name))
+                .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(missed.is_empty(), "{missed:#?}");
     }
 
     #[test]
