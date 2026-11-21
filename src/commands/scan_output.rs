@@ -14,7 +14,7 @@ use crate::commands::finding_spill::SpilledFindings;
 use crate::commands::findings::{FileOutcome, Place, ReportedFile};
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    AllowMarkerWarning, Categories, Detection, DetectionLabel, DetectionLocation, Score,
+    AllowMarkerWarning, Categories, Category, Detection, DetectionLabel, DetectionLocation, Score,
 };
 use crate::AppResult;
 use console::{measure_text_width, pad_str, Alignment};
@@ -83,6 +83,10 @@ enum ScanFileStatus {
 pub struct FindingReport {
     pub(super) redacter: RedacterType,
     pub(super) label: DetectionLabel,
+    /// The category the redacter placed the label in. The OCSF severity reads it; it is not
+    /// part of the JSON report.
+    #[serde(skip)]
+    pub(super) category: Category,
     pub(super) score: Option<Score>,
     pub(super) location: DetectionLocation,
     value: String,
@@ -93,10 +97,16 @@ pub struct FindingReport {
 }
 
 impl FindingReport {
-    pub fn new(redacter: RedacterType, detection: &Detection, values: ValueDisplay) -> Self {
+    pub fn new(
+        redacter: RedacterType,
+        category: Category,
+        detection: &Detection,
+        values: ValueDisplay,
+    ) -> Self {
         Self {
             redacter,
             label: detection.label.clone(),
+            category,
             score: detection.score,
             location: detection.location,
             place: Place::new(detection.location, &detection.value),
@@ -120,6 +130,7 @@ impl FindingReport {
             &(
                 &self.redacter,
                 &self.label,
+                &self.category,
                 &self.score,
                 &self.location,
                 &self.place,
@@ -130,10 +141,12 @@ impl FindingReport {
 
     /// The finding that `write_spilled` wrote.
     pub(super) fn read_spilled(line: &[u8]) -> AppResult<Self> {
-        let (redacter, label, score, location, place, value) = serde_json::from_slice(line)?;
+        let (redacter, label, category, score, location, place, value) =
+            serde_json::from_slice(line)?;
         Ok(Self {
             redacter,
             label,
+            category,
             score,
             location,
             place,
@@ -640,6 +653,7 @@ mod tests {
         FindingReport {
             redacter: RedacterType::LocalRules,
             label: DetectionLabel::new(label),
+            category: Category::Other,
             score: score.map(|score| Score::try_from(score).unwrap()),
             location,
             place: Place::new(location, value),
@@ -796,6 +810,7 @@ mod tests {
                 &file_ref("note.txt", mime::TEXT_PLAIN),
                 vec![FindingReport::new(
                     RedacterType::LocalRules,
+                    Category::Contact,
                     &email_detection(),
                     values,
                 )],
@@ -875,6 +890,7 @@ mod tests {
             &file_ref("note.txt", mime::TEXT_PLAIN),
             vec![FindingReport::new(
                 RedacterType::LocalRules,
+                Category::Contact,
                 &email_detection(),
                 ValueDisplay::Raw,
             )],
@@ -898,6 +914,7 @@ mod tests {
             &file_ref("note.txt", mime::TEXT_PLAIN),
             vec![FindingReport::new(
                 RedacterType::LocalRules,
+                Category::Contact,
                 &email_detection(),
                 ValueDisplay::Raw,
             )],
@@ -976,6 +993,7 @@ mod tests {
             &file_ref("key.pem", mime::TEXT_PLAIN),
             vec![FindingReport::new(
                 RedacterType::LocalRules,
+                Category::Other,
                 &detection,
                 ValueDisplay::Raw,
             )],
@@ -1247,6 +1265,7 @@ mod tests {
             |redacter, label: &str, location, score: Option<f32>, value: &str| FindingReport {
                 redacter,
                 label: DetectionLabel::new(label),
+                category: Category::Other,
                 score: score.map(|score| Score::try_from(score).unwrap()),
                 location,
                 place: Place::new(location, value),

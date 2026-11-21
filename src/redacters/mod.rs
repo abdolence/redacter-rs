@@ -683,6 +683,34 @@ impl RedacterProviderOptions {
     }
 }
 
+impl Redacters<'_> {
+    /// The category of a finding of this redacter. Local rules know the categories their user
+    /// rules were given; every other redacter places a label by its own map.
+    pub fn category_of(&self, label: &DetectionLabel) -> Category {
+        match self {
+            Redacters::LocalRules(redacter) => redacter.category_of(label),
+            _ => label.category(self.redacter_type()),
+        }
+    }
+
+    /// The category of a finding that `redacter` made with `label`, placed by that redacter
+    /// among `redacters`. A redacter that is not among them is placed by the static map of
+    /// [`DetectionLabel::category`], which does not know the user rules of local rules.
+    pub fn category_of_finding(
+        redacters: &[Redacters<'_>],
+        redacter: RedacterType,
+        label: &DetectionLabel,
+    ) -> Category {
+        redacters
+            .iter()
+            .find(|candidate| candidate.redacter_type() == redacter)
+            .map_or_else(
+                || label.category(redacter),
+                |candidate| candidate.category_of(label),
+            )
+    }
+}
+
 impl RedacterType {
     /// Whether the redacter sends the text to a provider over the network, whose quotas bound
     /// the calls it makes.
@@ -820,7 +848,7 @@ impl<'a> Redacters<'a> {
             return Err(CategoriesError::ContentNotText { redacter }.into());
         };
         let mut detections = self.detect(&input).await?;
-        detections.retain_categories(redacter, categories);
+        detections.retain_categories(categories, |label| self.category_of(label));
         Redacted::masked(input.file_ref, text, detections, redacter, self.text_mask())
     }
 

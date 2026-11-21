@@ -17,8 +17,8 @@ pub use user_rules::UserMatcher;
 use crate::args::RedacterType;
 use crate::file_systems::FileSystemRef;
 use crate::redacters::{
-    text_or_table_support, Detections, RedactSupport, Redacted, Redacter, RedacterDataItem,
-    TextMask, TextPieceLimits,
+    text_or_table_support, Category, DetectionLabel, Detections, RedactSupport, Redacted, Redacter,
+    RedacterDataItem, TextMask, TextPieceLimits,
 };
 use crate::reporter::AppReporter;
 use crate::AppResult;
@@ -52,6 +52,14 @@ impl<'a> LocalRulesRedacter<'a> {
             rules: Arc::new(rules),
             reporter,
         })
+    }
+}
+
+impl LocalRulesRedacter<'_> {
+    /// The category of a finding of this redacter, which knows the categories its user rules
+    /// were given.
+    pub fn category_of(&self, label: &DetectionLabel) -> Category {
+        self.rules.category_of_rule(label.as_str())
     }
 }
 

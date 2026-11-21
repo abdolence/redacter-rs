@@ -1,7 +1,7 @@
 //! The categories `--categories` chose, and the errors of choosing them.
 
 use crate::args::RedacterType;
-use crate::redacters::{Category, Detections};
+use crate::redacters::{Category, DetectionLabel, Detections};
 use clap::builder::{PossibleValue, TypedValueParser};
 use clap::ValueEnum;
 use serde::Serialize;
@@ -213,13 +213,17 @@ pub enum CategoriesError {
 }
 
 impl Detections {
-    /// Drops the findings and the unlocated values whose label `redacter` places outside
+    /// Drops the findings and the unlocated values whose label `category_of` places outside
     /// `categories`.
-    pub fn retain_categories(&mut self, redacter: RedacterType, categories: &Categories) {
+    pub fn retain_categories(
+        &mut self,
+        categories: &Categories,
+        category_of: impl Fn(&DetectionLabel) -> Category,
+    ) {
         self.found
-            .retain(|detection| categories.contains(detection.label.category(redacter)));
+            .retain(|detection| categories.contains(category_of(&detection.label)));
         self.unlocated
-            .retain(|label| categories.contains(label.category(redacter)));
+            .retain(|label| categories.contains(category_of(label)));
     }
 }
 
@@ -316,10 +320,9 @@ mod tests {
             .into_iter()
             .map(DetectionLabel::new)
             .collect();
-        detections.retain_categories(
-            RedacterType::LocalRules,
-            &chosen(&[Category::Secrets, Category::Other]),
-        );
+        detections.retain_categories(&chosen(&[Category::Secrets, Category::Other]), |label| {
+            label.category(RedacterType::LocalRules)
+        });
         assert_eq!(
             detections.unlocated,
             [DetectionLabel::new("secret-assignment")]

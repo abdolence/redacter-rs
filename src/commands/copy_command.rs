@@ -610,7 +610,11 @@ async fn redact_upload_file<
     if !redact_plan.supported_redacters.is_empty() {
         let mut redactions = SpilledFindings::new(spill);
         let mut record = |records: Vec<(RedacterType, Detection)>| {
-            redactions.append_window(&records, ValueDisplay::Masked)
+            redactions.append_window(
+                &records,
+                |redacter, label| Redacters::category_of_finding(redacters, redacter, label),
+                ValueDisplay::Masked,
+            )
         };
         let RedactStreamResult {
             number_of_redactions,
@@ -838,7 +842,11 @@ mod tests {
         };
         let mut spilled = SpilledFindings::new(&FindingSpill::default());
         spilled
-            .append_window(redactions, ValueDisplay::Masked)
+            .append_window(
+                redactions,
+                |redacter, label| label.category(redacter),
+                ValueDisplay::Masked,
+            )
             .unwrap();
         CopyFileReport::new(&file_ref, outcome, spilled)
     }

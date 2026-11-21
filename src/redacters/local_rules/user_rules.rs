@@ -1,5 +1,6 @@
 use super::error::LocalRulesError;
 use crate::redacters::text_spans::RuleName;
+use crate::redacters::Category;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -9,6 +10,19 @@ pub struct UserRule {
     pub name: RuleName,
     pub matcher: UserMatcher,
     pub case_insensitive: bool,
+    /// The group of the regex to redact, 0 for the whole match. A dictionary has none.
+    pub capture_group: usize,
+    /// `None` takes the default of the matcher: whole words for a dictionary, any match for a
+    /// regex.
+    pub whole_word: Option<bool>,
+    /// The name of a built-in rule whose value check a match must pass.
+    pub validator: Option<RuleName>,
+    /// Texts the rule must find a value in, checked when the rules are compiled.
+    pub examples: Vec<String>,
+    /// Texts the rule must find nothing in, checked when the rules are compiled.
+    pub counter_examples: Vec<String>,
+    /// The category its findings are in for `--categories` and the reports.
+    pub category: Category,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +44,14 @@ struct RuleEntry {
     regex: Option<String>,
     dictionary: Option<Vec<String>>,
     case_insensitive: Option<bool>,
+    capture_group: Option<usize>,
+    whole_word: Option<bool>,
+    validator: Option<String>,
+    #[serde(default)]
+    examples: Vec<String>,
+    #[serde(default)]
+    counter_examples: Vec<String>,
+    category: Option<Category>,
 }
 
 /// Parses a `name=regex` rule given on the command line, splitting on the first `=`.
@@ -47,11 +69,21 @@ pub fn parse_inline_rule(value: &str) -> Result<UserRule, LocalRulesError> {
         name: RuleName::new(name),
         matcher: UserMatcher::Regex(pattern.to_string()),
         case_insensitive: false,
+        capture_group: 0,
+        whole_word: None,
+        validator: None,
+        examples: Vec::new(),
+        counter_examples: Vec::new(),
+        category: Category::Other,
     })
 }
 
 /// Loads user rules from a JSON rule file. Each entry must have exactly one of `regex` or
-/// `dictionary`; a dictionary is case-insensitive by default, a regex is not.
+/// `dictionary`; a dictionary is case-insensitive and matches whole words by default, a regex
+/// is neither, and a rule is in the `other` category unless it names one. `capture_group` is
+/// for a regex only. What the rest of the entry asks of the
+/// compiled rule (`validator`, `capture_group` range, `examples`) is checked by
+/// `RuleSet::with_user_rules`.
 pub fn load_rules_file(path: &Path) -> Result<Vec<UserRule>, LocalRulesError> {
     let file_error = |reason: String| LocalRulesError::RuleFile {
         path: path.display().to_string(),
@@ -73,6 +105,9 @@ pub fn load_rules_file(path: &Path) -> Result<Vec<UserRule>, LocalRulesError> {
                 EntryError::BlankDictionaryWord(name) => {
                     LocalRulesError::EmptyDictionaryWord { name }
                 }
+                EntryError::CaptureGroupOnDictionary(name) => {
+                    LocalRulesError::CaptureGroupOnDictionary { name }
+                }
             })
         })
         .collect()
@@ -83,6 +118,7 @@ enum EntryError {
     BlankName,
     EmptyDictionary(String),
     BlankDictionaryWord(String),
+    CaptureGroupOnDictionary(String),
 }
 
 fn entry_to_rule(entry: RuleEntry) -> Result<UserRule, EntryError> {
@@ -99,6 +135,9 @@ fn entry_to_rule(entry: RuleEntry) -> Result<UserRule, EntryError> {
         (None, Some(words)) if words.iter().any(|word| word.trim().is_empty()) => {
             return Err(EntryError::BlankDictionaryWord(entry.name))
         }
+        (None, Some(_)) if entry.capture_group.is_some() => {
+            return Err(EntryError::CaptureGroupOnDictionary(entry.name))
+        }
         (None, Some(words)) => (UserMatcher::Dictionary(words), true),
         _ => return Err(EntryError::Matcher(entry.name)),
     };
@@ -106,6 +145,12 @@ fn entry_to_rule(entry: RuleEntry) -> Result<UserRule, EntryError> {
         name: RuleName::new(&entry.name),
         matcher,
         case_insensitive: entry.case_insensitive.unwrap_or(default_case_insensitive),
+        capture_group: entry.capture_group.unwrap_or(0),
+        whole_word: entry.whole_word,
+        validator: entry.validator.as_deref().map(RuleName::new),
+        examples: entry.examples,
+        counter_examples: entry.counter_examples,
+        category: entry.category.unwrap_or(Category::Other),
     })
 }
 
@@ -226,6 +271,16 @@ mod tests {
         let err = load_rules_file(file.path()).unwrap_err();
         assert!(
             matches!(err, LocalRulesError::EmptyDictionaryWord { ref name } if name == "x"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rules_file_rejects_a_capture_group_on_a_dictionary_rule() {
+        let file = write_temp(r#"{"rules":[{"name":"x","dictionary":["a"],"capture_group":1}]}"#);
+        let err = load_rules_file(file.path()).unwrap_err();
+        assert!(
+            matches!(err, LocalRulesError::CaptureGroupOnDictionary { ref name } if name == "x"),
             "{err}"
         );
     }

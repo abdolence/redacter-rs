@@ -5,7 +5,7 @@
 
 use crate::args::RedacterType;
 use crate::commands::scan_output::{FindingReport, FindingsByLabel, ValueDisplay};
-use crate::redacters::Detection;
+use crate::redacters::{Category, Detection, DetectionLabel};
 use crate::{AppError, AppResult};
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -79,16 +79,21 @@ impl SpilledFindings {
         Ok(())
     }
 
-    /// Appends the detections of one window of a file, sorted by location within the window.
-    /// Windows follow one another in the file, so the order holds across them.
+    /// Appends the detections of one window of a file, sorted by location within the window,
+    /// each in the category `category_of` gives its redacter and label. Windows follow one
+    /// another in the file, so the order holds across them.
     pub fn append_window<'a>(
         &mut self,
         detections: impl IntoIterator<Item = &'a (RedacterType, Detection)>,
+        category_of: impl Fn(RedacterType, &DetectionLabel) -> Category,
         values: ValueDisplay,
     ) -> AppResult<()> {
         let mut window: Vec<FindingReport> = detections
             .into_iter()
-            .map(|(redacter, detection)| FindingReport::new(*redacter, detection, values))
+            .map(|(redacter, detection)| {
+                let category = category_of(*redacter, &detection.label);
+                FindingReport::new(*redacter, category, detection, values)
+            })
             .collect();
         FindingReport::sort_by_location(&mut window);
         self.append(&window)
@@ -233,6 +238,7 @@ mod tests {
     fn email_finding() -> FindingReport {
         FindingReport::new(
             RedacterType::LocalRules,
+            Category::Contact,
             &Detection {
                 label: DetectionLabel::new("email"),
                 location: DetectionLocation::File,
@@ -254,6 +260,19 @@ mod tests {
 
         assert!(matches!(result, Err(AppError::FindingSpillFailed { .. })));
         assert_eq!(first.iter().count(), 1);
+    }
+
+    #[test]
+    fn a_finding_read_back_from_the_spill_keeps_its_category() {
+        let mut findings = SpilledFindings::new(&FindingSpill::default());
+        let mut gift_card = email_finding();
+        gift_card.category = Category::Financial;
+        findings.append(&[gift_card.clone()]).unwrap();
+
+        let read: Vec<_> = findings.iter().collect::<Result<_, _>>().unwrap();
+
+        assert_eq!(read, [gift_card]);
+        assert_eq!(read[0].category, Category::Financial);
     }
 
     #[test]

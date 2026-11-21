@@ -1112,7 +1112,7 @@ impl<'a> StreamRedacter<'a> {
             );
             let mut detected = redacter.detect(item).await?;
             if let Some(categories) = categories {
-                detected.retain_categories(redacter.redacter_type(), categories);
+                detected.retain_categories(categories, |label| redacter.category_of(label));
             }
             result.unlocated += detected.unlocated.len();
             for mut detection in detected.found {
@@ -2176,6 +2176,34 @@ mod tests {
         };
         assert_eq!(values(&everything), ["hunter2-Secret", "ops@example.com"]);
         assert_eq!(values(&credentials), ["hunter2-Secret"]);
+    }
+
+    #[tokio::test]
+    async fn a_user_rule_finding_is_in_the_category_the_rule_names() {
+        let converters = FileConverters::new();
+        let mut gift_card = parse_inline_rule("gift-card=GC-[0-9]{4}").unwrap();
+        gift_card.category = Category::Financial;
+        let redacters = vec![Redacters::LocalRules(
+            local_rules(BTreeSet::new(), vec![gift_card]).await,
+        )];
+        let text = bytes::Bytes::from("voucher GC-1234\n");
+        let file = file_ref("note.txt", mime::TEXT_PLAIN);
+        let found_under = |category| {
+            let mut options = base_options();
+            options.categories = Categories::limiting([category]);
+            let (converters, redacters, file, text) = (&converters, &redacters, &file, &text);
+            async move {
+                detect_with(&options, converters, redacters, file, text.clone())
+                    .await
+                    .unwrap()
+                    .found
+                    .detections
+                    .len()
+            }
+        };
+
+        assert_eq!(found_under(Category::Financial).await, 1);
+        assert_eq!(found_under(Category::Contact).await, 0);
     }
 
     fn located(result: &Collected) -> Vec<(DetectionLocation, &str)> {

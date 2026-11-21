@@ -96,6 +96,7 @@ The `aws-bedrock` cell for `secrets` and the `gcp-vertex-ai` cell for `public` a
 
 - `local-rules` found 93% with no false alarm and no keep string hit. The chains with `local-ner` and `local-gliner` keep that recall and add false alarms (precision 97% and 95%);
 - `local-credential-ml` alone found 61% with no false alarm and no keep string hit, and chained after `local-rules` 95% (39 of 41). The two it and `local-rules` both miss are the cookie value and the `.netrc` password. With `--local-credential-ml-min-score 0.5` the two rows found 76% (31 of 41) and 100% (41 of 41), again with 100% precision and no keep string hit;
+- each of the 25 findings of `local-credential-ml` at 0.74 covered exactly the planted value. At 0.50, 29 of 30 did, and the other left the `sessionid=` of a cookie in place;
 
 ## Public PII sample
 
@@ -165,6 +166,14 @@ The whole run over the 200 files of `public`:
 | `aws-bedrock` | 2 min 21 s |
 
 Public PII sample is `public`: 200 records of synthetic personal data.
+
+## Resource use of the local models
+
+The speed and memory of the models that the local redacters load. The figures are approximate and depend on the hardware and on the amount of text. The sizes of the downloads are listed in [Addons](../README.md#addons).
+
+- `local-ner`: a debug build spends about 12 seconds per 512-token window of text, against about 95 ms in a release build. In release, loading the model takes about 100 ms and the process holds about 232 MiB at its peak. The download is about 131.6 MiB in total. A table costs one forward pass per cell that holds a letter, so a CSV of many short rows is far slower than a text file of the same size;
+- `local-gliner`: in a release build on an Intel i7-10700K (16 threads), loading the model takes about 0.6 s and the process holds about 1.5 GB at its peak while redacting a small text corpus. The download is about 1.17 GB, almost all of it the fp32 model weights; the int8 export cannot be used, because its span head has an operator that the ONNX runtime of the tool does not support. The forward pass takes roughly 100-200 ms per 384-token window. A document scores each label in batches of at most 25, so more labels cost more passes. The time per file on the datasets is in [Speed](#speed);
+- `local-credential-ml`: the process holds 190 to 210 MiB and loading takes about 60 ms. The model takes 4 to 6 ms for a line, and a line with no value is not rated. A scan of Rust source of 30,036 non-blank lines took 32 s, and a log of 10,000 lines of 100 characters, each holding a digit, took 58 s (5.8 ms a line). On 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly all of them test data that holds passwords and tokens. These numbers are from an Apple M6 Mac mini that was running other work, with a load average of about 2.4.
 
 ## Local or cloud
 

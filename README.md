@@ -10,82 +10,47 @@ Data Leak/Loss Prevention (DLP) capabilities.
 `redacter cp` copies files and redacts them on the way; `redacter scan` only reads them and reports what was found and
 where, with an exit code a CI pipeline can gate on.
 
-The tool ships three redacters that run entirely on your machine, a rule-based one with checksum validation, a small
-multilingual named-entity model and a zero-shot span model that looks for labels you choose, and can also delegate to
-cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local redaction keeps the data on the host and
-costs nothing per file. See [Local or cloud](#local-or-cloud-quality-versus-performance) for the measured recall and
-speed of every redacter.
+The tool ships four redacters that run entirely on your machine, a rule-based one with checksum validation, a small
+multilingual named-entity model, a zero-shot span model that looks for labels you choose and a classifier for
+credentials, and can also delegate to cloud DLP services and LLMs such as Google Cloud Platform's DLP API. Local
+redaction keeps the data on the host and costs nothing per file. See [Choosing a redacter](#choosing-a-redacter) for the
+measured recall and speed of every redacter.
 
 ![redacter-demo](media/redacter-demo.webp)
 
 ## Features
 
-* **Copy & Redact:**  copy files while applying DLP redaction to protect sensitive information.
-* **Scan:** detect sensitive information in files without changing them, with the same providers, and report what was
+* **Copy and redact:** copy files while applying DLP redaction to protect sensitive information.
+* **Scan:** detect sensitive information in files without changing them, with the same redacters, and report what was
   found and where as text or JSON. See [Scan command](#scan-command).
-* **Multiple Sources & Destinations:** interact with:
-    * Local filesystem
-    * Google Cloud Storage (GCS)
-    * Amazon Simple Storage Service (S3)
-    * Zip files
-    * Clipboard (text content and images)
-* **DLP Integration:**
-    * [Google Cloud Platform DLP](https://cloud.google.com/security/products/dlp?hl=en) for accurate and customizable
-      redaction for:
-        * text, html, json files
-        * structured data table files (csv)
-        * images (jpeg, png, bpm, gif)
-        * PDF files (rendering as images)
-    * [Presidio](https://github.com/data-privacy-stack/presidio) for PII redaction, with no built-in secret detection
-      (open source project, maintained by Data Privacy Stack, that you can install on-prem).
-        * text, html, csv, json files
-        * images
-        * PDF files (rendering as images)
-    * [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs) based redaction using any available models such as
-      Gemini, Claude, etc.:
-        * text, html, csv, json files
-        * images, redacted by the model itself or by blacking out the coordinates it reports
-        * PDF files (rendering as images)
-    * [Google Gemini API](https://ai.google.dev/) based redaction
-        * text, html, csv, json files
-        * images, redacted by the model itself or by blacking out the coordinates it reports
-        * PDF files (rendering as images)
-    * [Open AI LLM](https://openai.com/) based redaction
-        * text, html, csv, json files
-        * images, redacted by the model itself or by blacking out the coordinates it reports
-        * PDF files (rendering as images)
-    * [AWS Comprehend](https://aws.amazon.com/comprehend/) PII redaction:
-        * text, html, csv, json files
-        * images through text extraction using OCR
-        * PDF files (rendering as images from OCR)
-    * Local rules redacter: offline regex and checksum based redaction of emails, phone numbers,
-      payment cards, IBANs, network addresses, secrets, national identifiers of 43 countries,
-      postcodes and dates of birth, plus your own regex and dictionary rules. No cloud account needed.
-    * Local NER redacter: offline detection of people, organisations and locations with a
-      multilingual transformer model running on your CPU. No cloud account needed:
-        * text, html, csv, json files
-        * images through text extraction using OCR
-        * PDF files (rendering as images from OCR)
-    * Local GLiNER redacter: offline, zero-shot span detection against free-text labels you
-      choose, understanding context that `local-ner` cannot. No cloud account needed:
-        * text, html, csv, json files
-        * images through text extraction using OCR
-        * PDF files (rendering as images from OCR)
-    * Local credential ML redacter: offline detection of passwords, API keys and tokens with a
-      line classifier running on your CPU, for the secrets that `local-rules` has no pattern for.
-      No cloud account needed:
-        * text, html, csv, json files
-        * images through text extraction using OCR
-        * PDF files (rendering as images from OCR)
-    * [AWS Bedrock](https://aws.amazon.com/bedrock/) based redaction using Amazon Nova and other models available on Bedrock
-        * text, html, csv, json files
-        * images, redacted by blacking out the coordinates the model reports
-        * PDF files (rendering as images)
-    * [AWS Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/) based redaction
-        * text, html, csv, json files
-    * ... more DLP providers can be added in the future.
-* **CLI:**  Easy-to-use command-line interface for streamlined workflows.
+* **Multiple sources and destinations:** the local filesystem, Google Cloud Storage (GCS), Amazon Simple Storage Service
+  (S3), zip files and the clipboard (text content and images).
+* **Local redacters:** four redacters that run offline on your machine. No cloud account needed:
+    * `local-rules`: regex and checksum based redaction of emails, phone numbers, payment cards, IBANs, network
+      addresses, secrets, national identifiers of 43 countries, postcodes and dates of birth, plus your own regex and
+      dictionary rules;
+    * `local-ner`: people, organisations and locations, found by a multilingual transformer model running on your CPU;
+    * `local-gliner`: zero-shot span detection against free-text labels you choose, understanding context that
+      `local-ner` cannot;
+    * `local-credential-ml`: passwords, API keys and tokens, found by a line classifier running on your CPU, for the
+      secrets that `local-rules` has no pattern for.
+* **Cloud and self-hosted redacters:** see the table below. More providers can be added in the future.
+* **CLI:** easy-to-use command-line interface for streamlined workflows.
 * Built with Rust to ensure speed, safety, and reliability.
+
+The files each redacter handles:
+
+| Redacter | Text, HTML, CSV and JSON files | Images and PDF files |
+|---|---|---|
+| [Google Cloud Platform DLP](https://cloud.google.com/security/products/dlp?hl=en), `gcp-dlp`, accurate and customizable redaction | Text, HTML and JSON files; structured data table files (CSV) | Images (JPEG, PNG, BMP, GIF); PDF files, rendered as images |
+| [Presidio](https://github.com/data-privacy-stack/presidio), `presidio`, PII redaction with no built-in secret detection; an open source project maintained by Data Privacy Stack that you can install on-prem | Text, HTML, CSV and JSON files | Images; PDF files, rendered as images |
+| [GCP Vertex AI](https://cloud.google.com/vertex-ai/docs), `gcp-vertex-ai`, using any available models such as Gemini, Claude, etc. | Text, HTML, CSV and JSON files | Images, redacted by the model itself or by blacking out the coordinates it reports; PDF files, rendered as images |
+| [Google Gemini API](https://ai.google.dev/), `gemini-llm` | Text, HTML, CSV and JSON files | Images, redacted by the model itself or by blacking out the coordinates it reports; PDF files, rendered as images |
+| [Open AI LLM](https://openai.com/), `open-ai-llm` | Text, HTML, CSV and JSON files | Images, redacted by the model itself or by blacking out the coordinates it reports; PDF files, rendered as images |
+| [AWS Comprehend](https://aws.amazon.com/comprehend/), `aws-comprehend`, PII redaction | Text, HTML, CSV and JSON files | Images through text extraction using OCR; PDF files, rendered as images and read through OCR |
+| [AWS Bedrock](https://aws.amazon.com/bedrock/), `aws-bedrock`, using Amazon Nova and other models available on Bedrock | Text, HTML, CSV and JSON files | Images, redacted by blacking out the coordinates the model reports; PDF files, rendered as images |
+| [AWS Bedrock Guardrails](https://aws.amazon.com/bedrock/guardrails/), `aws-bedrock-guardrails` | Text, HTML, CSV and JSON files | Not supported |
+| `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml` | Text, HTML, CSV and JSON files | Images through text extraction using OCR; PDF files, rendered as images and read through OCR |
 
 ## What each redacter finds
 
@@ -109,6 +74,43 @@ Models answer differently from run to run, so check the output of an LLM redacte
 kinds of data, chain redacters: for a text file, `-d local-rules -d gcp-dlp` redacts the secrets and the pattern-shaped
 PII locally before the rest is sent to GCP DLP. GCP DLP reads an image, or a PDF rendered to page images, natively, so
 those go to it whole, see [Multiple redacters](#multiple-redacters).
+
+## Choosing a redacter
+
+The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials.
+`presidio` runs where you deploy it. The cloud services and LLMs are billed for what they read, and they receive the
+content of the files, see [what is sent where](docs/dlp-comparison.md#local-or-cloud). The table gives the recall of each
+redacter on four datasets (recall is the share of the sensitive values that it found) and the time per file on `public`.
+A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
+
+| Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form | Per file on public PII sample |
+|---|---|---|---|---|---|
+| `local-rules` | 54% | 93% | 24% | 62% | under 1 ms |
+| `local-ner` | 23% | 0% | 23% | 19% | 37 ms |
+| `local-gliner` | 100% | 2% | 55% | 88% | 423 ms |
+| `local-rules+local-ner` | 77% | 93% | 46% | 94% | 38 ms |
+| `local-rules+local-gliner` | 100% | 93% | 57% | 88% | 421 ms |
+| `local-credential-ml` | 0% | 61% | 2% | 0% | 28 ms |
+| `local-rules+local-credential-ml` | 54% | 95% | 25% | 62% | 28 ms |
+| `presidio` | 69% | 7% | 66% | 69% | 11 ms |
+| `gcp-dlp` | 85% | 41% | 49% | 94% | 77 ms |
+| `aws-comprehend` | 98% | 56% | 80% | 94% | 86 ms |
+| `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 175 ms |
+| `gcp-vertex-ai` | 100% | 100% | 84% | 100% | 11.3 s |
+| `aws-bedrock` | 98% | 88% | 85% | 88% | 704 ms |
+
+PII documents is `fixtures`: 8 text files with personal data in several formats and languages. Secrets in config and code is `secrets`: 29 files with 41 planted passwords, keys and tokens. Public PII sample is `public`: 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0), synthetic personal data. Scanned form is `images`: a PNG and a PDF of one customer form. The image rows measure the coordinates a redacter reports to `scan`, not the native image edit of the LLM redacters.
+
+Measured on commit `3a089bb` on an Apple M6 Mac mini. The time per file includes the start of the process and the load of the
+models. `gemini-llm` and `open-ai-llm` were not measured.
+
+- To keep the data on the machine, start with `local-rules+local-gliner`, which is `-d local-rules -d local-gliner`.
+- For secrets, `local-rules` found 93% at 1 ms per file, `local-rules+local-credential-ml` 95%, and `gcp-vertex-ai` found all of them.
+- For personal information in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (85%), `gcp-vertex-ai` (84%) and `aws-comprehend` (80%) found the most.
+- To find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters). Which redacter finds the most depends on the data, so use several for the most protection.
+- The local redacters give the same output for the same input, which makes results easy to test and audit. The model of `local-gliner` is a ~1.17 GB download and needs about 1.5 GB of memory while running, against 132 MB and 232 MB for `local-ner`. The `local-credential-ml` model is a 126 MiB download and the process holds about 190 MiB.
+
+Precision, recall per category, speed on every dataset, the speed and memory of the local models, what each redacter sends out, the limits of the measurement and the commands to reproduce it are in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 
 ## Installation
 
@@ -184,6 +186,21 @@ PDF redaction, OCR (for the DLP providers that can't read images) and the `local
 ## Command line options
 
 Copy and redact files from a source to a destination.
+
+DLP is optional and should be enabled with `--redact` (`-d`) option.
+Without DLP enabled, the tool will copy all files without redaction.
+With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
+
+`--report-file` saves the result of the command to a file as JSON by default, as the three counts with
+`--report-format text`, as a [SARIF report](docs/reports.md#sarif-report) with `--report-format sarif`, or as an
+[OCSF report](docs/reports.md#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
+is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
+
+`--categories` limits a run to some kinds of data, such as secrets only. `scan` takes it too, see
+[Limiting to data categories](#limiting-to-data-categories).
+
+<details>
+<summary>Full output of <code>redacter cp --help</code></summary>
 
 ```
 Usage: redacter cp [OPTIONS] <SOURCE> <DESTINATION>
@@ -353,17 +370,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-DLP is optional and should be enabled with `--redact` (`-d`) option.
-Without DLP enabled, the tool will copy all files without redaction.
-With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
-
-`--report-file` saves the result of the command to a file as JSON by default, as the three counts with
-`--report-format text`, as a [SARIF report](#sarif-report) with `--report-format sarif`, or as an
-[OCSF report](#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
-is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
-
-`--categories` limits a run to some kinds of data, such as secrets only. `scan` takes it too, see
-[Limiting to data categories](#limiting-to-data-categories).
+</details>
 
 ### Limiting to data categories
 
@@ -415,12 +422,14 @@ redacters put there:
 | Nationality, religious or political group | `NRP` of `presidio` |
 | Medical details | `medical condition` of `local-gliner`, and the `MEDICAL_*` entities of `presidio` but `MEDICAL_LICENSE` |
 | UUIDs | `UUID` of `presidio` |
-| Every user rule | `--local-rule` and `--local-rules-file` |
+| Every user rule without a `category` | `--local-rule`, and a rule of `--local-rules-file` that names none |
 | Info types the user adds | `--gcp-dlp-stored-info-type`, and a `--gcp-dlp-built-in-info-type` that is not a default |
 | Anything a model could not classify | `sensitive_data` of the LLM redacters, a label added with `--local-gliner-labels` that names no organisation or place, `ALL` and the types later added of `aws-comprehend`, the regex filters of `aws-bedrock-guardrails` and an entity that a custom recogniser of `presidio` adds |
 
-`--categories secrets` therefore skips the custom rules of the user, since they are `other`. Add `other` to keep them, as in
-`--categories secrets,other`.
+`--categories secrets` therefore leaves out a rule of a rules file that has no `category`, since it is `other`, and
+refuses an inline `--local-rule`, which is always `other`, see
+[Categories and redacter options](#categories-and-redacter-options). Add `other` to keep them, as in
+`--categories secrets,other`. A rule of a rules file with a `category` is kept when that category is chosen.
 
 How a redacter honours the categories depends on what its service lets the tool ask for. A redacter is *narrowed* when
 its request or configuration holds only the chosen categories, so the other kinds are not looked for at all, and
@@ -464,8 +473,9 @@ category is chosen.
   when `--local-ner-entities` is absent, the default `--local-gliner-labels` and the 28 default info types of GCP DLP.
 - A value named on the command line is checked, and one outside the chosen categories is refused before any file is
   read. This covers `--local-rules`, `--local-ner-entities`, `--local-gliner-labels`, `--gcp-dlp-built-in-info-type`,
-  `--gcp-dlp-stored-info-type`, `--local-rule` and `--local-rules-file`. `--local-rules-disable` only removes groups,
-  so it is applied after.
+  `--gcp-dlp-stored-info-type` and `--local-rule`. `--local-rules-disable` only removes groups, so it is applied
+  after. A rule of a `--local-rules-file` in a category that is not chosen is left out of the run without a message,
+  as a rule group is, since one file can hold rules of several categories.
 - A redacter left with nothing to find is refused too.
 - The options that steer how Presidio and the LLM redacters redact images are refused, since those redacters read
   images with OCR instead: `--llm-image-mode`, `--presidio-image-redact-url`, `--gemini-image-model`,
@@ -505,11 +515,11 @@ in `scan`.
 #### Categories in the reports
 
 With `--categories` the reports state the categories, and without it they have no such field or line. The
-[JSON report](#json-report) of `scan` and the [copy report](#copy-report) have `categories`, the
-[SARIF report](#sarif-report) has it in the properties of the run, and the [text report](#text-report) states it in the
+[JSON report](docs/reports.md#json-report) of `scan` and the [copy report](docs/reports.md#copy-report) have `categories`, the
+[SARIF report](docs/reports.md#sarif-report) has it in the properties of the run, and the [text report](docs/reports.md#text-report) states it in the
 closing summary line of `scan` and in a first line of `cp`. The terminal shows the categories at the end of the line
 that lists the redacters and converters and at the end of the closing summary line. A finding in the `secrets` category is High severity in the
-[OCSF report](#ocsf-report).
+[OCSF report](docs/reports.md#ocsf-report).
 
 #### Examples of limiting to categories
 
@@ -545,122 +555,14 @@ when it is not installed. A copy that ends with 0 may therefore have left files 
 
 ### Copy report
 
-The JSON report of `cp` is one object with the counters `files_copied`, `files_redacted` and `files_skipped`, and
-`files`, an entry for each file the copy met, in the order it met them. Files that `--max-size-limit` or
-`--filename-filter` leave out of a directory listing are only counted in `files_skipped` and have no entry. With
-`--categories` the report also has `categories`, the list of the categories the copy was limited to, such as
-`["contact", "secrets"]`. A copy without `--categories`, or with every category, has no such field.
-
-An entry has the fields `path`, `mime_type`, `status`, `reason` and `redactions`:
-
-- `status` is `redacted`, `copied`, `copied_unredacted`, `skipped` or `failed`. `copied` is a file copied as it is
-  because no redacter was selected, and `copied_unredacted` a file copied as it is because
-  `--allow-unsupported-copies` is set;
-- `reason` is `null` for a redacted or copied file and says why for the others;
-- `redactions` lists what the redacters replaced in the file, sorted by location as in the scan report. A file with
-  the status `redacted` and no redactions went through the redacters unchanged.
-
-A redaction has the fields `redacter`, `label`, `score`, `location` and `value`, as a [finding of `scan`](#json-report)
-has. The `value` is always masked, since `cp` has no `--show-values`, see [Masking](#masking). The `location` has the
-`kind` `text`, `table_cell` or `image` of the scan report, and two more:
-
-- `page`: the `page` of a PDF file, counted from 1, when the position on it is not known;
-- `file`: the file as a whole, when the position in it is not known.
-
-How exactly a redaction is located depends on the redacter and the content:
-
-| Content | Location | Redacters |
-|---|---|---|
-| Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails` does when its answer gives readable locations; the LLM redacters do with `--categories` |
-| Text rewritten by the redacter | The `file` | `gcp-dlp`, the LLM redacters without `--categories`, and `aws-bedrock-guardrails` when its answer gives no readable locations return only the new text |
-| Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner` and `local-credential-ml`. `gcp-dlp` reports a table at the `file`; other redacters read a CSV file as text |
-| Image or PDF page read with OCR | Page and box in pixels, around the words OCR blacked out | Any redacter that reads text |
-| Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode, or in the default `auto` mode when the native edit is not available |
-| Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode, or in the `auto` mode when the native edit succeeds |
-
-A text or table redaction located at the `file`, or at the `page` of a PDF, has the label `sensitive_data`, no score and
-no value. Each step of `gcp-dlp`, or of an LLM redacter without `--categories`, on a text or a table that changes more
-than whitespace is one such redaction, and so is every later step on the same text or table. So is a step that changes
-the shape of a table. The boxes of an image step that follows a step that changed the size of the image are located at
-the `page` or the `file` too, and keep their label, score and value; the step that changed the size still reports its
-boxes.
-
-A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
-takes.
+`--report-file` writes a report of the files a copy met: the counters `files_copied`, `files_redacted` and `files_skipped`, and for each file its `status`, its `reason` and the `redactions` that were made, each with its `location`. The fields, the statuses and how a redaction is located are in [docs/reports.md](docs/reports.md#copy-report).
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
-`local-credential-ml`, and each piece is written to the destination as it is finished. This covers plain text and logs,
-JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with 64 KiB of text on
-each side, in windows of at most 4 MiB. Each redacter keeps its mask, and a value that crosses the end of a piece is
-masked whole. A value of up to 128 KiB across lines, such as a private key block, is found wherever a piece ends, and a
-longer one that crosses the end of a piece can be missed. With several redacters, each reads the text the ones before it
-left, so the first reads the contexts of all of them. A line longer than a window is cut inside.
-
-The output is the same as when the file is read whole, with two exceptions. A rule of your own that is anchored with `^`
-or `$` and has no `(?m)` can match at the edge of a piece, and masks more than it does in a whole read. A redacter that
-finds part of the mask of an earlier one masks the original value in its place, where a whole read leaves a broken mask.
-
-Every redaction of a large file read in pieces is located, in the report too. The LLM redacters, `local-ner`,
-`local-gliner` and `--sampling-size` read the file whole. A model read in pieces loses recall and precision on the
-bench, see [Large files and the models](docs/dlp-comparison.md#large-files-and-the-models).
-`cp -d local-rules` on a 319 MB log with 26 findings peaks near 81 MiB of memory, against 695 MiB in 0.21, in about 3%
-more time. The same copy of a 366 MB log with 5.2 million findings peaks near 423 MiB on macOS, against 1.7 GiB in 0.21.
-The system allocator of macOS keeps freed memory, so the peak it reports can be several times what the run needs.
-
-With a JSON, SARIF or OCSF report, the redactions of a copy are kept in a temporary file instead of in memory, the one
-`scan` keeps its findings in. The file is in the system temporary directory, has no name, is removed when the copy ends,
-however it ends, and on Unix is readable by the current user only. It holds values masked. A copy that cannot write to
-it stops with an error that names the directory.
-
-`cp -d local-rules --report-file r.json` on a 23 MB log with 700 000 redactions peaks near 317 MiB on macOS. The
-temporary file adds 10 to 20% to the time of that copy.
-Building the SARIF report keeps at most 5000 results for each rule in memory, and building the
-OCSF report keeps an event for each file.
-
-`aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
-request of the provider, where it fails otherwise. A text that fits in one request is sent as it is and redacted by the
-provider as before. A longer text is cut into pieces that fill a request, read with 1 KiB of text on each side. Four
-requests are in flight at a time for `aws-comprehend` and `gcp-dlp`, and one for `presidio` and `aws-bedrock-guardrails`.
-With a local redacter in the chain, at most two requests are in flight. A cloud redacter before the local one, as in
-`-d gcp-dlp -d local-rules`, is sent the 64 KiB of context of the local redacter on each side of a piece, which the
-provider bills as well. With the local redacter first, as in `-d local-rules -d gcp-dlp`, the provider is sent 1 KiB.
-The provider only finds the values here, and each is masked as the provider masks it: one `X` for each character for `aws-comprehend` and `presidio`, `[REDACTED]` for `gcp-dlp`, and the type or the name of the regex
-in braces, such as `{NAME}`, for `aws-bedrock-guardrails`. The rest of the text is copied as it is, and a value of up to
-2 KiB across the end of a piece is masked whole. A provider reads a piece without the rest of the text, so it can find
-other values in it than in a whole text. A request of `gcp-dlp` that reaches the limit of 3000 findings is sent again as
-its two halves. Each request holds at most:
-
-| Redacter | Request | Limit it follows |
-|---|---|---|
-| `aws-comprehend` | 100 000 bytes | The 100 KB document of `DetectPiiEntities` |
-| `presidio` | 512 KiB | The 1 000 000 characters that spaCy accepts in `nlp.max_length`, which the analyzer refuses above; a character takes at least one byte |
-| `gcp-dlp` | 480 000 bytes | The 0.5 MB request, less the fields around the text |
-| `aws-bedrock-guardrails` | 100 000 bytes | 106 text units of 1000 characters, the least a Region takes in a request for the sensitive information policy |
-
-The 64 KiB context of `local-rules` and `local-credential-ml` does not fit in a request of `aws-comprehend` or
-`aws-bedrock-guardrails`. With one of them, `cp` reads a text in pieces only when the local redacter comes first in the
-chain, and reads it whole otherwise, so a text over the request limit of the provider then fails. `scan` also reads it whole, but sends it to the provider in parts that fit a request, so it succeeds.
-The container of the `presidio-analyzer` image answers one request at a time, and `aws-bedrock-guardrails` is limited in
-some Regions to 75 text units per second, against the 100 text units of a full request, so the pieces of both are read
-one after another.
-
-A CSV file whose cells take more than about 4 MiB of memory is redacted in batches of rows when every selected redacter is `local-rules`,
-`local-credential-ml`, `local-ner` or `local-gliner`, and each batch is written to the destination as it is finished.
-A batch holds about 4 MiB of cells, each counted with the memory it takes beside its text, and a row is never cut.
-The output is the same as when the file is read whole. A batch is placed as a table of its own, and every
-redaction is located in its cell. Other redacters
-read the file whole.
-
-A file that is not valid UTF-8 fails with the byte it fails at, also when that byte is far into the file. The file is
-not written to a local destination and is left out of a zip archive, see below.
-
-A file that `--unsupported-as-text` reads as text is redacted in pieces in the same way, so `.jsonl`, `.env`, logs with
-other extensions and source code take the same memory as a `.log`. `cp -d local-rules` on a 150 MB `.dat` log with
-10 900 findings peaks near 81 MiB of memory, against 639 MiB when it is read whole, in about 4% more time. A file with a
-NUL byte or bytes that are not UTF-8 in its first window, the first 4 MiB or so, is skipped without
-`--allow-unsupported-copies` and copied as it is with it, as when it is read whole. One that turns out not to be text
-later fails with the byte it fails at, and nothing of it is left at the destination, where a whole read skips it
-without `--allow-unsupported-copies`. `scan` reports the first as unsupported and the second as failed.
+`local-credential-ml`, a CSV file with a lot of cells in batches of rows, and a text that does not fit in one request of
+`aws-comprehend`, `presidio`, `gcp-dlp` or `aws-bedrock-guardrails` in pieces that fill a request. The LLM redacters,
+`local-ner`, `local-gliner` and `--sampling-size` read the file whole. A file that is not valid UTF-8 fails with the byte
+it fails at. The limits, the memory and time measured and the temporary file that keeps the redactions of a report are in
+[docs/large-files.md](docs/large-files.md#copy).
 
 ## Source and destinations
 
@@ -850,17 +752,27 @@ aws bedrock create-guardrail --region eu-north-1 --name redacter-pii \
   --sensitive-information-policy-config file://guardrail-pii.json
 ```
 
+### Local redacters
+
+`local-rules`, `local-ner`, `local-gliner` and `local-credential-ml` run entirely on your machine and replace each match
+with `[REDACTED]`. With `redacter scan` they report the matches instead. Nothing leaves your computer: the only network
+access is `redacter addons install`, which installs the model files, see [Addons](#addons).
+
+They work natively on text, HTML, JSON and CSV files. On an image or a PDF, the file first goes through the OCR engine:
+every word it recognises is passed to the redacter (and, with more than one `-d`, to the whole chain in turn) as if it
+were reading the page as text, and every word the chain changes is blacked out on a rasterised copy of the page. The
+output PDF or image carries no text layer for the original words to survive in. A PDF is rendered as images first. Both
+steps need the optional capabilities installed, the OCR models and Pdfium; without them images and PDFs are skipped
+unless `--allow-unsupported-copies` is set. How fast each redacter is, and how much memory and download its model
+takes, is in [Choosing a redacter](#choosing-a-redacter). Use a release binary (or `cargo run --release`) for
+`local-ner` and `local-gliner`: a debug build is far slower.
+
 ### Local rules redacter
 
-The `local-rules` redacter runs entirely on your machine. It finds pattern-shaped personal information
+The `local-rules` redacter finds pattern-shaped personal information
 and secrets with curated regular expressions and checksum validators (Luhn for payment cards, mod-97 for IBANs,
-national checks for identifiers) and replaces each match with `[REDACTED]`. With `redacter scan` it reports
-the matches instead, labelled with the name of the rule, see [Scan command](#scan-command).
-
-On an image or a PDF, the file first goes through the OCR engine: every word it recognises is passed
-to the redacter (and, with more than one `-d`, to the whole chain in turn) as if it were reading the
-page as text, and every word the chain changes is blacked out on a rasterised copy of the page — the
-output PDF or image carries no text layer for the original words to survive in.
+national checks for identifiers). With `redacter scan` the matches are labelled with the name of the rule, see
+[Scan command](#scan-command).
 
 Built-in rule groups, all enabled by default:
 
@@ -874,25 +786,18 @@ Built-in rule groups, all enabled by default:
 | `url` | Credentials embedded in URLs |
 | `secrets` | Passwords and keys in `key=value` lines; AWS, GCP, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, npm, SendGrid, Discord and Hugging Face credentials; values that look random after a key name (`generic-api-key`); JWTs; authorization headers; PEM and PGP private keys |
 | `us-identifiers` | SSN and ITIN, passport numbers next to the word passport (in 9 languages), US driver's license numbers |
-| `eu-identifiers` | European identifiers: the national personal numbers of Albania, Austria, Belgium, Bosnia and Herzegovina, Bulgaria, Croatia, Czechia, Denmark, Estonia, Finland, France, Germany (Steuer-ID), Greece (AMKA and AFM), Hungary (személyi szám and TAJ), Iceland, Ireland, Italy, Latvia, Lithuania, Luxembourg, Malta, Montenegro, the Netherlands, North Macedonia, Norway, Poland, Portugal, Romania, Serbia, Slovakia, Slovenia, Spain, Sweden, Switzerland, Turkey and the United Kingdom (NINO and driving licence), plus EU VAT numbers |
+| `eu-identifiers` | European identifiers: the national personal numbers of the countries listed in [docs/local-rules-details.md](docs/local-rules-details.md#identifiers), the United Kingdom (NINO and driving licence) and EU VAT numbers |
 | `world-identifiers` | Canadian SIN, Australian TFN, Brazilian CPF, Indian Aadhaar, South African ID, Chinese resident ID |
 | `postcodes` | UK postcodes, Irish Eircodes, Canadian postal codes |
 | `birth-dates` | Dates of birth next to a birth keyword (`date of birth`, `Geburtsdatum`, `né le`, `fecha de nacimiento`, ...) in English, German, French, Spanish, Italian, Dutch, Portuguese, Polish and Swedish |
 
-`eu-identifiers` covers the whole of Europe including the Nordics, Baltics, Balkans, Switzerland, Turkey
-and the UK. Every rule with its check, whether it needs a context word, and an example is listed in
-[docs/local-rules.md](docs/local-rules.md). Each identifier is verified with its published check digit
-and, where the number embeds one, its birth date. Not covered, because the country publishes no format
-or no check digit for its personal number: Cyprus, Liechtenstein, Monaco, Andorra, San Marino, Vatican
-City and Kosovo; Ukraine, Moldova and Belarus are out of scope.
-
-Identifiers whose check digit alone would accept too many ordinary numbers (Danish CPR, Portuguese NIF,
-Greek AFM, Hungarian TAJ, Croatian OIB, Turkish TCKN, a bare Brazilian CPF, Canadian SIN, Australian TFN,
-Indian Aadhaar) and shapes without a check (passports, driving licences, dates of birth, Albanian and
-Maltese ids) are only redacted within 20 characters (30 for dates of birth) of a context word such as
-`CPR`, `NIF`, `passport` or `date of birth`, in the local language. The keyword has to be in the same
-text unit: a CSV cell is redacted on its own, so a column of bare CPFs under a `cpf` header is not found
-while the written `NNN.NNN.NNN-NN` form is.
+Every rule with its check, whether it needs a context word, and an example is listed in
+[docs/local-rules.md](docs/local-rules.md). Each identifier is verified with its published check digit and, where the
+number embeds one, its birth date. An identifier whose check digit alone would accept too many ordinary numbers, and a
+shape without a check, such as a passport or a driving licence, is only redacted within 20 characters (30 for dates of
+birth) of a context word such as `CPR`, `NIF`, `passport` or `date of birth`, in the local language. The countries
+covered, the countries that are not and the rules for context words are in
+[docs/local-rules-details.md](docs/local-rules-details.md#identifiers).
 
 ```sh
 # Only emails and phone numbers
@@ -923,78 +828,64 @@ built-in rule, whether its group is enabled or not, see [the rules](docs/local-r
 always run: they are not one of the switchable groups, so `--local-rules-disable custom` does not
 suppress them; drop the `--local-rule` and `--local-rules-file` options instead.
 
-The local rules redacter does not detect names, addresses or organisations, and it only matches
-pattern-shaped values. Combine it with a cloud redacter to cover names and addresses, for example
-`-d local-rules -d gcp-dlp` removes the pattern-shaped data locally before the remainder is sent to GCP
-DLP. It works natively on text, html, json and csv files, and handles images and PDFs the same way the
-AWS Comprehend redacter does: images through text extraction using OCR, blacking out the words the rules
-matched, and PDF files by rendering them as images first. Both need the optional capabilities installed
-(the OCR models, and Pdfium for PDFs); without them images and PDFs are skipped unless
-`--allow-unsupported-copies` is set.
+A rule in a `--local-rules-file` can have these optional fields as well. A rule given inline with `--local-rule` has
+none of them:
+
+- `capture_group`: an integer. Only that group of the regex is redacted, so a context word around the value stays. For
+  regex rules only;
+- `validator`: the name of a built-in rule that has a value check, such as `payment-card` (Luhn) or `iban`. A value is
+  redacted only when it passes the check of that rule. The rules with a check are the ones marked in the Validator
+  column of [docs/local-rules.md](docs/local-rules.md). Only the check is reused, not the pattern of the rule, so the
+  regex of the user rule has to supply the shape. Some checks accept any value for some inputs, such as the EU VAT one
+  for some country prefixes;
+- `category`: one of the `--categories` values. The default is `other`. It decides whether the rule runs under
+  `--categories`, see [Categories and redacter options](#categories-and-redacter-options), and a rule in `secrets`
+  makes the severity of an OCSF event High;
+- `whole_word`: a boolean. A match is kept only when the characters next to it are not letters, digits or `_`. The
+  default is `true` for a dictionary and `false` for a regex. With `capture_group` the boundary is checked around the
+  captured group, so `{"regex": "id(\\d+)", "capture_group": 1, "whole_word": true}` finds nothing in `id123`;
+- `examples` and `counter_examples`: arrays of strings. When the file loads, every example must match the rule and no
+  counter-example may, or the load fails.
+
+This rule redacts only the 16 digits of a loyalty card number, so the words `Loyalty card` stay. It redacts a number
+only when it passes the Luhn check of `payment-card`, and puts it in the `financial` category:
+
+```json
+{
+  "rules": [
+    {
+      "name": "loyalty-card",
+      "regex": "(?i)loyalty card:? ?([0-9]{16})\\b",
+      "capture_group": 1,
+      "validator": "payment-card",
+      "category": "financial",
+      "examples": ["Loyalty card: 4111111111111111"],
+      "counter_examples": ["Loyalty card: 4111111111111112"]
+    }
+  ]
+}
+```
+
+The local rules redacter does not detect names, addresses or organisations, and it only matches pattern-shaped values.
+Combine it with a cloud redacter to cover names and addresses, for example `-d local-rules -d gcp-dlp` removes the
+pattern-shaped data locally before the remainder is sent to GCP DLP.
 
 A password or key written as `key=value`, `key: value` or a JSON field is redacted when the key ends in a word such as
 `password`, `secret`, `token`, `api_key` or `private_key`, and the value has at least 8 characters with a digit or one
-of `!@#%^&*+=?~` among them. The key name stays. A quoted value ends at the next quote of the kind that opened it,
-single, double or backtick, and may hold spaces, commas, semicolons, the other two quote kinds, escaped quotes such as
-`\"` and, in a single-quoted value, the SQL and YAML doubled quote `''`. JSON written inside a JSON string, where the
-quotes are `\"`, is redacted as well. A value in braces directly after the `=`, such as the ODBC `Pwd={Sup3r;S3cret1}`,
-is redacted and the braces stay. An unquoted value ends at a space, comma, semicolon, quote, `<`, a closing bracket
-(`)`, `]`, `}` or `>`) or an `&` that starts a `name=` pair, so in `?token=abc123def456&user=alice` only the token is
-redacted.
+of `!@#%^&*+=?~` among them. The key name stays. The quoting rules, the values taken for placeholders, the
+`generic-api-key` rule and the known misses and over-redactions are in
+[docs/local-rules-details.md](docs/local-rules-details.md#secrets).
 
-Some values are taken for references or placeholders and left alone:
-
-- a quoted value starting with whitespace, `<`, `$`, `%`, `*`, `[` or `{`;
-- an unquoted value starting with `$`, `%`, `*`, `&`, `:`, `<`, `>`, `(`, `)`, `[`, `]`, `{` or `}`;
-- an unquoted value that is a dotted or `::` path of identifiers, such as `process.env.API_KEY_V2` or
-  `crate::signing::private_key::Key`, unless one segment has more than 32 characters or every segment mixes letters
-  and digits, as in `abcdefgh1234.ijklmnop5678`.
-
-The `generic-api-key` rule, taken from gitleaks, reports a random-looking value after a key name that holds `key`,
-`secret`, `token`, `password`, `auth`, `access`, `api`, `credential` or `creds`, as in `license_key: vsgm-6vh4-hwnx-zkxt`.
-Only blanks may stand between the key name and the separator (`=`, `:`, `=>` and similar), so aligned assignments are
-found, and a comma separates only before the quote that opens the value, as in
-`os.getenv("SIGNING_KEY", "Zq8Lw3Tn5VxB7mRc")`. Gitleaks also lets further words follow the key name and accepts a bare
-comma, and so reports prose such as `the key, ChaCha20-Poly1305.` or `the key algorithm: KEY_ALG_RSA_1024`.
-
-Known misses: a value of letters only, such as `password: my-secret-pass`; a password starting with a listed character,
-such as `password=$ecretPa55word`; an unquoted password written as a dotted path, such as `password: john.smith2024`;
-a password written in a sentence; a `generic-api-key` value after a label of several words, such as
-`API Key ID: Zq8Lw3Tn5VxB7mRc`, `Client Secret Value: Zq8Lw3Tn5VxB7mRc` or `{"API Key ID": "Zq8Lw3Tn5VxB7mRc"}`; one
-after a bare comma, such as `signing_key,Zq8Lw3Tn5VxB7mRc`; one on a line of its own after the comma, as in a multi-line
-`os.getenv(` call; and a quoted value that does not close on its line, such as `password = "Sup3rS3cret1` at a cut-off
-line end, a YAML `>-` block or a `"""` triple-quoted string.
-
-Known over-redactions: a value that names a secret instead of holding it, such as the Terraform
-`secret = "ip2location-token"` that points to a Secret Manager secret, and any other literal with a digit or a symbol
-after such a key, such as `token: v2-beta-channel`; and a file path after such a key, such as
-`PWD=/home/runner/work/app2` or `secret: /run/secrets/db_password1`, because one base64 secret in 64 starts with `/`.
-The `generic-api-key` rule also reports a cipher or identifier name directly after a key name and a separator, such as
-`the cipher key: ChaCha20-Poly1305`.
-
-Matching on shape alone over-redacts in places. The known cases: a number of 13 to 19 digits starting
-with 3 to 6 that passes the Luhn check is taken for a payment card, which also catches the rarer case of
-a 13-digit EAN barcode starting with 3 to 6 whose own check digit happens to pass Luhn too
-(`--local-rules-disable payment-card` is the lever for either); a national phone number written with
-a leading `0` is any 9 to 12 digits in 2 to 5 groups, which also fits some reference numbers; any 6 to 9
-digit number within 20 characters of the word `passport` is taken for a passport number; and national
-identifiers without a keyword are accepted on their check digit and embedded date alone, so a bare
-10-digit run of digits has about a 2% chance and an 11-digit run about 1.5% of passing one of the
-checksummed rules. For a document that is mostly numbers, `--local-rules-disable eu-identifiers` (or
-disabling the specific groups that don't apply) is the lever to pull.
+Matching on shape alone over-redacts in places: a 13-digit EAN barcode can pass for a payment card, and a reference
+number for a phone number. `--local-rules-disable payment-card` and `--local-rules-disable eu-identifiers` are the
+levers, see [docs/local-rules-details.md](docs/local-rules-details.md#matching-on-shape).
 
 ### Local NER redacter
 
 The `local-ner` redacter finds names of people (`per`), organisations (`org`) and locations (`loc`)
-with a multilingual named-entity model running entirely on your machine, and replaces each of them
-with `[REDACTED]`. It uses the `distilbert-base-multilingual-cased-ner-hrl` model, trained on ten
+with a multilingual named-entity model. It uses the `distilbert-base-multilingual-cased-ner-hrl` model, trained on ten
 high-resource languages: Arabic, German, English, Spanish, French, Italian, Latvian, Dutch,
-Portuguese and Chinese. Nothing leaves your computer; the only network access is
-`redacter addons install local-ner`, which installs the model files described in [Addons](#addons).
-
-Like `local-rules`, an image or a PDF first goes through the OCR engine: every recognised word is
-passed to the model as if it were reading the page as text, and every word the chain redacts is
-blacked out on a rasterised copy of the page.
+Portuguese and Chinese. Install the model with `redacter addons install local-ner`, see [Addons](#addons).
 
 ```sh
 # People, organisations and locations, the default
@@ -1007,19 +898,10 @@ redacter cp -d local-ner --local-ner-entities per --local-ner-min-score 0.3 tmp/
 redacter cp -d local-rules -d local-ner tmp/source/ tmp/redacted/
 ```
 
-Use a release binary (or `cargo run --release`) for `local-ner`: a debug build spends about 12
-seconds per 512-token window of text, against about 95 ms in release. In release, loading the model
-takes about 100 ms and it holds about 232 MiB of peak memory; the download in
-[Addons](#addons) is about 131.6 MiB in total. A table costs one forward
-pass per cell that holds a letter, so a CSV of many short rows is far slower than a text file of the
-same size. These numbers are approximate and depend on your hardware and the amount of text.
-
 `--local-ner-min-score` is the model confidence a word needs to be redacted, between 0 and 1
 (default 0.5); lower values redact more and produce more false positives. The model does not detect
 dates, emails, phone numbers or identifiers: combine it with `local-rules` for those. Its accuracy is
-below the cloud DLP services, and the CPU time grows with the amount of text. It works natively on
-text, html, json and csv files, and handles images and PDFs the way the AWS Comprehend redacter does:
-through OCR and Pdfium, when those optional capabilities are installed.
+below the cloud DLP services, and the CPU time grows with the amount of text.
 
 A single word with nothing around it carries no context for the model, so a one-word text file may
 not be tagged at all; a name in a table cell is scored together with its column header, which is why
@@ -1033,21 +915,15 @@ The model is not bundled with the tool.
 
 ### Local GLiNER redacter
 
-The `local-gliner` redacter runs a zero-shot span model entirely on your machine: instead of a fixed
+The `local-gliner` redacter runs a zero-shot span model: instead of a fixed
 label set, you give it the entity labels to look for as free text, and it scores every span of the
-document against each one. It replaces each match with `[REDACTED]`, like the other local redacters.
-Unlike `local-ner`, it reads context: it finds a lower-case name with no capitalisation to key off, a
+document against each one. Unlike `local-ner`, it reads context: it finds a lower-case name with no capitalisation to key off, a
 medical condition described in a sentence, a date of birth with no `date of birth` keyword next to it,
 and handles and usernames written as free text, none of which `local-rules` or `local-ner` can find on
 their own. It uses [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
 (the [onnx-community](https://huggingface.co/onnx-community/gliner_multi_pii-v1) ONNX export),
-trained on six languages: English, French, German, Spanish, Italian and Portuguese. Nothing leaves your
-computer; the only network access is `redacter addons install local-gliner`, which installs the model files
-described in [Addons](#addons).
-
-Like `local-rules` and `local-ner`, an image or a PDF first goes through the OCR engine: every recognised
-word is passed to the model as if it were reading the page as text, and every word the chain redacts is
-blacked out on a rasterised copy of the page.
+trained on six languages: English, French, German, Spanish, Italian and Portuguese. Install the model with
+`redacter addons install local-gliner`, see [Addons](#addons).
 
 ```sh
 # The default PII label list
@@ -1070,17 +946,7 @@ default; add it with `--local-gliner-labels` when you do. Under `--categories`, 
 `organisation`, `company` or `employer` is in the `organization` category, and one of `location`, `city`, `country` or
 `place` is in `location`; any other added label is in `other`. `--local-gliner-min-score` is the model
 confidence a span needs to be redacted, between 0 and 1 (default 0.5); lower values redact more. Scores
-are well separated in practice, so lowering the threshold rarely changes the result.
-
-Use a release binary (or `cargo run --release`) for `local-gliner`: like `local-ner`, a debug build is
-far slower than release. In release, on an Intel i7-10700K (16 threads), loading the model takes about
-0.6 s and it holds about 1.5 GB of peak memory while redacting a small text corpus; the download in
-[Addons](#addons) is about 1.17 GB, almost all of it the fp32 model weights
-(the int8 export cannot be used: its span head has an operator this tool's ONNX runtime does not
-support). The time per file on the benchmark datasets is in [docs/dlp-comparison.md](docs/dlp-comparison.md#speed).
-The forward pass takes roughly 100-200 ms per 384-token window. A document
-scores each label in batches of at most 25, so more labels cost more passes and, as with
-`organization` above, more false positives.
+are well separated in practice, so lowering the threshold rarely changes the result. A document scores each label in batches of at most 25, so more labels cost more passes and, as with `organization`, more false positives.
 
 A date that merely looks like a date of birth may still be redacted regardless of context, since the
 model has learned the shape as well as the wording -- on the benchmark corpus this catches the invoice
@@ -1096,15 +962,12 @@ tool.
 
 ### Local credential ML redacter
 
-The `local-credential-ml` redacter finds passwords, API keys and access tokens with a small classifier model
-running entirely on your machine. The model reads one line at a time and rates how likely the line is to hold a
+The `local-credential-ml` redacter finds passwords, API keys and access tokens with a small classifier model.
+The model reads one line at a time and rates how likely the line is to hold a
 credential. The redacter replaces the credential on every line rated 0.74 or more with `[REDACTED]`. It finds
 secrets that `local-rules` has no pattern for: a password written in a sentence, a token with no known prefix, an
-OAuth client secret after a label, a `.netrc` password. Nothing leaves your computer; the only network access is
-`redacter addons install local-credential-ml`, which installs the model files described in [Addons](#addons).
-
-Like `local-rules`, an image or a PDF first goes through the OCR engine, and the recognised text is passed to the
-model as if it were a text file.
+OAuth client secret after a label, a `.netrc` password. Install the model with `redacter addons install local-credential-ml`,
+see [Addons](#addons).
 
 ```sh
 # Secrets by rules first, then the secrets the rules missed, found by the model
@@ -1142,11 +1005,7 @@ threshold of the model card). Lower values redact more and produce more false al
 `cp` applies the redacters in the order given, so the model rates the text with the values that rules found
 already replaced.
 
-On the `secrets` dataset of the benchmark (41 planted secrets, 19 strings that look like secrets and are not) the
-model alone found 25 values at 0.74 and 31 at 0.50. Chained after `local-rules`, which found 38 alone, it found
-39 and 41, with no false alarm and no keep string hit at either threshold. Each of the 25 findings at 0.74
-covered exactly the planted value. At 0.50, 29 of 30 did, and the other left the `sessionid=` of a cookie in place.
-The benchmark is in [docs/dlp-comparison.md](docs/dlp-comparison.md).
+The benchmark on planted secrets is in [docs/dlp-comparison.md](docs/dlp-comparison.md#secrets-in-config-and-code).
 
 Limits:
 
@@ -1160,12 +1019,8 @@ Limits:
   (`password: &hunter`, `#hunter is the password`), and the part of a password that has letters only after a `"`
   inside it (`x9#"Lq` leaves `Lq`). A `\` at either end of a secret is left out of the value;
 - it found 6 of the 33 credentials of the `public` dataset, and it does not look for personal information;
-- on 30,350 non-blank lines of Rust and Markdown source it flagged 32 lines (0.11%) at the default threshold, nearly
-  all of them test data that holds passwords and tokens;
-- the model takes 4 to 6 ms for a line, and a line with no value is not rated. A scan of Rust source of 30,036
-  non-blank lines took 32 s, and a log of 10,000 lines of 100 characters, each holding a digit, took 58 s (5.8 ms a
-  line). The process holds 190 to 210 MiB and loading takes about 60 ms. These numbers are from an Apple M6 Mac
-  mini that was running other work, with a load average of about 2.4.
+- how many lines of source code it flags and how long it takes for a line are in
+  [docs/dlp-comparison.md](docs/dlp-comparison.md#resource-use-of-the-local-models).
 
 The model is [zaindanaharper/credential-line-32m](https://huggingface.co/zaindanaharper/credential-line-32m) by
 Zain Dana Harper, released under the MIT licence and fine-tuned from
@@ -1173,45 +1028,6 @@ Zain Dana Harper, released under the MIT licence and fine-tuned from
 Center for Language and Speech Processing). Its card reports a precision of 0.92 and a recall of 0.81 on 1,264
 human-written lines; these figures are the author's own. The model is not bundled with the tool.
 
-### Local or cloud: quality versus performance
-
-The local redacters run on your machine, so nothing leaves it, nothing is billed and nothing needs credentials.
-`presidio` runs where you deploy it. The cloud services and LLMs are billed for what they read, and they receive the
-content of the files. The table gives the recall of each redacter on four datasets (recall is the share of the
-sensitive values that it found) and the time per file on `public`. A `+` joins redacters given to one scan, such as `-d local-rules -d local-gliner`.
-
-| Redacter | PII documents | Secrets in config and code | Public PII sample | Scanned form | Per file on public PII sample |
-|---|---|---|---|---|---|
-| `local-rules` | 54% | 93% | 24% | 62% | under 1 ms |
-| `local-ner` | 23% | 0% | 23% | 19% | 37 ms |
-| `local-gliner` | 100% | 2% | 55% | 88% | 423 ms |
-| `local-rules+local-ner` | 77% | 93% | 46% | 94% | 38 ms |
-| `local-rules+local-gliner` | 100% | 93% | 57% | 88% | 421 ms |
-| `local-credential-ml` | 0% | 61% | 2% | 0% | 28 ms |
-| `local-rules+local-credential-ml` | 54% | 95% | 25% | 62% | 28 ms |
-| `presidio` | 69% | 7% | 66% | 69% | 11 ms |
-| `gcp-dlp` | 85% | 41% | 49% | 94% | 77 ms |
-| `aws-comprehend` | 98% | 56% | 80% | 94% | 86 ms |
-| `aws-bedrock-guardrails` | 90% | 46% | 74% | 81% | 175 ms |
-| `gcp-vertex-ai` | 100% | 100% | 84% | 100% | 11.3 s |
-| `aws-bedrock` | 98% | 88% | 85% | 88% | 704 ms |
-
-PII documents is `fixtures`: 8 text files with personal data in several formats and languages. Secrets in config and code is `secrets`: 29 files with 41 planted passwords, keys and tokens. Public PII sample is `public`: 200 records of [nvidia/Nemotron-PII](https://huggingface.co/datasets/nvidia/Nemotron-PII) (CC BY 4.0), synthetic personal data. Scanned form is `images`: a PNG and a PDF of one customer form.
-
-Measured on commit `3a089bb` on an Apple M6 Mac mini. The time per file includes the start of the process and the load of the
-models. `gemini-llm` and `open-ai-llm` were not measured.
-
-For secrets, `local-rules` found 93% at 1 ms per file, `local-rules+local-credential-ml` 95%, and `gcp-vertex-ai` found all of them. For personal information
-in free text, `local-gliner` found every value in `fixtures`, and on `public` `aws-bedrock` (85%), `gcp-vertex-ai` (84%)
-and `aws-comprehend` (80%) found the most. To keep the data on the machine, start with `local-rules+local-gliner`. To
-find more, chain a cloud redacter after the local pass, see [Multiple redacters](#multiple-redacters).
-
-The local redacters give the same output for the same input, which makes results easy to test and audit.
-`local-gliner`'s model is a ~1.17 GB download and needs about 1.5 GB of memory while running, against 132 MB and 232 MB
-for `local-ner`. The `local-credential-ml` model is a 126 MiB download and the process holds about 190 MiB.
-
-Precision, recall per category, speed on every dataset, what each redacter sends out, the limits of the measurement and
-the commands to reproduce it are in [docs/dlp-comparison.md](docs/dlp-comparison.md).
 
 ## Multiple redacters
 
@@ -1311,26 +1127,25 @@ An interrupted install can leave `*.part` files in the addon's directory; they a
 For air-gapped machines, download the files listed above on another computer and copy them into the addon's
 directory under the names in the table, for example `~/.cache/redacter/addons/ocrs-2/text-detection.onnx`. This works
 for Pdfium too, which is checked against its digest. For the models the tool also looks in
-`addons/<addon directory>/` next to its own executable. Breaking change: earlier versions used `models/<addon directory>/`;
-move it to `addons/` or run `redacter addons install` again. Copies of the OCR models named `text-detection.onnx` and `text-recognition.onnx` are still found in
-`~/.cache/ocrs` and `../share/ocrs`; these are used as they are, checked against nothing.
+`addons/<addon directory>/` next to its own executable. Copies of the OCR models named `text-detection.onnx` and
+`text-recognition.onnx` are still found in `~/.cache/ocrs` and `../share/ocrs`; these are used as they are, checked
+against nothing.
 
-Breaking change: the OCR models are now ONNX files in the `ocrs-2/` directory, and the `.rten` files of earlier
-versions are not read any more. Run `redacter addons install ocr` again; the old `ocrs/` directory is not used and can
-be deleted.
+### Upgrading from earlier versions
 
-`--download-models` and its download prompt are removed: install the addons with `addons install` instead.
-`--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
-directory is `addons` instead of `models`: move the old `models` directory to `addons` or run
-`redacter addons install` again. For the same reason the `models` directory next to the executable is now named
-`addons`.
+- The OCR models are now ONNX files in the `ocrs-2/` directory, and the `.rten` files of earlier versions are not read
+  any more. Run `redacter addons install ocr` again; the old `ocrs/` directory is not used and can be deleted;
+- `--download-models` and its download prompt are removed: install the addons with `addons install` instead;
+- `--models-dir` and `REDACTER_MODELS_DIR` are replaced by `--addons-dir` and `REDACTER_ADDONS_DIR`, and the default
+  directory is `addons` instead of `models`, also next to the executable: move the old `models` directory to `addons`
+  or run `redacter addons install` again.
 
 ## OCR
 
 The tool supports OCR for images and PDF files using [ocrs engine](https://github.com/robertknight/ocrs).
 Install the OCR models with `redacter addons install ocr`, see [Addons](#addons).
 
-## Examples:
+## Examples
 
 ```sh
 # Copy and redact a file from local filesystem to GCS
@@ -1458,28 +1273,9 @@ For example:
 To have every redacter read a file its own way, run `scan` once for each redacter.
 
 A text file of more than about 4 MiB is read in pieces when every selected redacter is `local-rules` or
-`local-credential-ml`. This covers plain text and logs, JSON, YAML, XML, HTML, CSS and Markdown. A piece is read with
-64 KiB of text on each side, in windows of at most 4 MiB. A value of up to 128 KiB
-across lines, such as a private key block, is found wherever a piece ends, and a longer one that crosses the end of a
-piece can be missed. A finding is reported once, at the location it has when the file is read whole, except that a
-value longer than 64 KiB that crosses the end of a window can also be reported in part. Findings are sorted by location
-within a window, so such a value is listed after the findings of the window before it that start later in the file. A line longer than a
-window is cut inside, so the text sets a few MiB of the memory `scan` needs, however long its lines are.
-`aws-comprehend`, `presidio`, `gcp-dlp` and `aws-bedrock-guardrails` read a text in pieces when it does not fit in one
-request, with the limits listed for `cp`. The LLM redacters, `local-ner` and `local-gliner` read the file whole. A CSV file whose cells take more than about 4 MiB of memory is read in batches of rows
-when every selected redacter is `local-rules`, `local-credential-ml`, `local-ner` or `local-gliner`, with the findings and
-locations of a whole read. With `--sampling-size`, `scan` reads only as much of a text
-file as the sample needs. `scan -d local-rules` on a 329 MB log with 27 findings peaks near 66 MB of memory, against
-755 MB in 0.21, in about 2% more time.
-
-The findings of a scan are kept in a temporary file instead of in memory. The file is in the system temporary
-directory, has no name, is removed when the scan ends, however it ends, and on Unix is readable by the current user only.
-It holds values masked, or as found with `--show-values`, and takes about 200 bytes of disk for each finding. A scan that
-cannot write to it stops with an error that names the directory.
-
-`scan -d local-rules --report-file r.json` on an 88 MB log with 2.4 million findings peaks near 910 MB on macOS, where
-0.21 peaks near 1.6 GB on the same log. The scan takes about 15% more time than in 0.21. The SARIF report still lists at most 5000 results, and building it keeps at most that many in memory. Building the
-OCSF report keeps an event for each file.
+`local-credential-ml`, and a CSV file with a lot of cells in batches of rows. The findings of a scan are kept in a
+temporary file instead of in memory. The limits, and the memory and time measured, are in
+[docs/large-files.md](docs/large-files.md#scan).
 
 `scan` can look for some kinds of data only, such as secrets, with `--categories`, see
 [Limiting to data categories](#limiting-to-data-categories).
@@ -1556,159 +1352,7 @@ the redacter is only reported when its score reaches them (0.5 by default, 0.74 
 Two mechanisms keep legitimate values, such as the mock keys of a test fixture, out of a scan. Both apply to `scan`
 only. `cp` does not read an ignore file and does not look for the markers: it always redacts everything it finds.
 
-Be aware that both hide real secrets as well as mock ones, so keep the ignore file, the marked lines and the marked regions in code review.
-
-#### Ignore file
-
-An ignore file lists the files `scan` does not read. It uses the gitignore syntax: `#` comments, `*` and `**`
-wildcards, a trailing `/` for a directory, a leading `/` to anchor a pattern at the source root and `!` to bring back a
-file an earlier pattern ignored. Unlike git, `!` also brings back a file inside an ignored directory: with `fixtures/`
-and `!fixtures/keep.txt`, `keep.txt` is scanned. Patterns match the path of a file relative to the source root, the path
-the reports show, with `/` or `\` as the separator, so the same file works for a local directory, GCS, S3 and a zip
-archive.
-
-```
-# Mock credentials used by the tests
-test-fixtures/
-*.mock.txt
-docs/**/example-keys.md
-!docs/real/example-keys.md
-```
-
-- A local directory source uses the `.redacterignore` at its root when it has one. The file leaves itself out, so it is
-  neither scanned nor reported as unsupported, and it is counted in `files_ignored`;
-- `--ignore-file <PATH>` reads the given local file instead, for any source, including GCS and S3;
-- `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
-  markers below still apply;
-- a file named as the source itself is always scanned;
-- `.git` directories are left out of a local directory source whatever the ignore settings, see
-  [Source and destinations](#source-and-destinations);
-- ignored files do not count towards `--max-files-limit`;
-- a UTF-8 byte order mark at the start of the file is dropped, as git does;
-- a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
-
-An ignored file is not read. It is counted in `files_ignored`, which is part of the file total of the summary, and has no
-entry in the `files` of the report. The other counters keep their meaning.
-
-#### Inline marker
-
-The text `redacter:allow` on a line ignores every finding that covers that line, from the line where the finding
-starts to the line where it ends. The marker is matched as a substring, so it sits in whatever comment syntax the file
-uses:
-
-```
-API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
-```
-
-A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:
-
-```
------BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA...
------END RSA PRIVATE KEY----- # redacter:allow
-```
-
-A marker inside the value of any finding does not count, and ignores nothing: `API_KEY=xyz_redacter:allow_123` is still
-reported, and so is an email on the same line. A marker on a line the finding does not cover, such as the line above it,
-does not count either.
-
-- The ignored findings are not in `findings`, in the rows or in the exit code. They are counted in `findings_ignored`,
-  so the suppression stays visible in the summary and in the JSON report;
-- the marker works for every redacter, since it acts on the location of a finding. A value an LLM redacter named
-  without being able to locate it has no line and is not ignored; it stays in `unlocated_values`;
-- in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
-  lines;
-- on a line longer than about 4 MiB, in a file read in pieces, the marker is not read;
-- `redacter:allow-begin` and `redacter:allow-end` are not inline markers, see [Block markers](#block-markers);
-- an image or a PDF page has no place for the marker, so the findings in them are always reported;
-- `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
-
-#### Block markers
-
-`redacter:allow-begin` and `redacter:allow-end` ignore every finding on the lines between them. The inline marker has to
-stand on a line of the finding. A region is for a value that has no such line to spare, such as a key in a Markdown code
-block, where a marker would show in the rendered page, and for a place that holds several values, such as a fixture,
-where a marker on each line is noise.
-
-In Markdown the markers sit in HTML comments:
-
-````markdown
-<!-- redacter:allow-begin -->
-```text
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIJ+...
------END PRIVATE KEY-----
-```
-<!-- redacter:allow-end -->
-````
-
-In source code they sit in a comment above and below the value:
-
-```rust
-// redacter:allow-begin
-const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIJ+...
------END PRIVATE KEY-----";
-// redacter:allow-end
-```
-
-Like the inline marker, they are matched as substrings, in whatever comment syntax the file uses.
-
-Be aware that a region ignores real secrets added inside it later, and nothing reports them. Keep regions small, around
-the one value they are for, and review a change that touches one.
-
-On a marker line, only the inline marker ignores a finding. Here `a@b.io` is reported and `c@d.io` is ignored, and in the
-second example both are ignored, since the inline marker stands beside the begin:
-
-```
-a@b.io # redacter:allow-begin
-c@d.io
-# redacter:allow-end
-
-a@b.io redacter:allow redacter:allow-begin
-c@d.io
-# redacter:allow-end
-```
-
-The markers of a line are read in the order they stand, so an end before a begin closes a region and opens the next one:
-
-```
-# redacter:allow-begin
-first value
-# redacter:allow-end redacter:allow-begin
-second value
-# redacter:allow-end
-```
-
-- A region is the lines between the begin line and the end line, not including them. A finding is ignored when it lies
-  entirely in a region. One that starts on the begin line, or ends on the end line, is reported;
-- a marker inside the value of a finding does not count, as for the inline marker. With `--categories`, a value of a
-  category that is not selected is not a finding, so a marker inside it counts, for both forms of the marker;
-- the ignored findings are counted in `findings_ignored`, as for the inline marker. `--min-score` is applied first;
-- block markers apply to text. A CSV table read by cell has no region, an image or a PDF page has no place for the
-  markers, and `cp` redacts everything.
-
-A marker that does not pair up gives a warning with the line of the marker, and never hides a finding:
-
-- a begin with no end after it has no effect, so a forgotten end marker does not hide the rest of the file;
-- an end with no begin before it has no effect;
-- a begin inside a region that is already open has no effect, and the region keeps its first begin.
-
-The warnings are listed in the order of the file. They are shown under the row of the file in the terminal and in the
-text report, and are the `marker_warnings` of the file in the JSON report. In a SARIF report each is a warning in the
-notifications of the run, on the line of the marker. OCSF reports do not carry them. The warnings do not change the exit
-code. With `--sampling-size`, a begin with no end in the sample gets no warning, as the sample can end inside a region.
-
-A file larger than one request is read in pieces: about 3.9 MiB for `local-rules` and `local-credential-ml`, and the
-request size of the provider less twice its context for the cloud providers. When several redacters are selected, the
-pieces fit all of them. Block markers are read on a line of any length, and the region state is carried from one piece to
-the next, so a region can start in an earlier piece than a finding. Two things differ from a whole read:
-
-- a finding is ignored only when its end marker lies before the last context of its piece (the last 64 KiB with
-  `local-rules`). A finding with its end marker in that context, or in a later piece, is reported;
-- a marker inside a value of up to twice the context (128 KiB with `local-rules`) never counts, wherever the pieces
-  are cut. A longer value that crosses the end of a piece can be missed, as for any finding, and then
-  a marker inside it counts.
+An ignore file lists the files `scan` does not read: a `.redacterignore` at the root of a local source, or the file given with `--ignore-file`. The text `redacter:allow` on a line ignores the findings that cover that line, and `redacter:allow-begin` and `redacter:allow-end` ignore the findings on the lines between them. Be aware that both hide real secrets as well as mock ones, so keep the ignore file, the marked lines and the marked regions in code review. The syntax, the options and the rules for each mechanism are in [docs/ignoring-findings.md](docs/ignoring-findings.md).
 
 ### Exit codes
 
@@ -1742,190 +1386,10 @@ as for any failed file, since `--fail-on` governs findings only. Without the opt
 and do not change the exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match code: `::de` in a Rust
 path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
-### JSON report
+### Reports
 
-`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text`, `sarif` or `ocsf`. The terminal always shows the usual output,
-whatever the report options are; there is no mode that prints the JSON to stdout.
+`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text` for people, `sarif` for GitHub code scanning or `ocsf` for SIEMs and security data lakes. The terminal always shows the usual output, whatever the report options are; there is no mode that prints the JSON to stdout. The SARIF and OCSF reports always hold masked values. The fields of each format are in [docs/reports.md](docs/reports.md): the [JSON report](docs/reports.md#json-report), the [text report](docs/reports.md#text-report), the [SARIF report](docs/reports.md#sarif-report) and the [OCSF report](docs/reports.md#ocsf-report).
 
-The report is one JSON object with the counters of the run and an entry for each file:
-
-- `files_scanned`, `files_with_findings`, `files_unconfirmed`, `files_skipped`, `files_unsupported`, `files_blocked`
-  and `files_failed`: the number of files in each state. `files_unconfirmed` counts the scanned files without findings
-  that have `unlocated_values`, and is part of `files_scanned`;
-- `files_ignored`: the number of files the [ignore file](#ignoring-files-and-findings) ignored. They have no entry in
-  `files`;
-- `findings`: the number of findings, and `findings_by_label`: the same count for each label;
-- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker or by block markers, not counted in
-  `findings`;
-- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
-  A file whose [block markers](#block-markers) do not pair up also has `marker_warnings`, a list of the `line` of each
-  marker and its `problem`: `unclosed_begin`, `stray_end` or `nested_begin`;
-- `categories`: the categories `--categories` limited the scan to, such as `["contact", "secrets"]`. The field is
-  left out when the scan looked for every category.
-
-A finding has the fields `redacter`, `label`, `score`, `location` and `value`.
-
-`files_scanned` counts the files the redacters read, and these count the files they did not:
-
-- `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`. Files that the filters leave out of a
-  directory listing are only counted here, and have no entry in `files`;
-- `files_unsupported`: files that no selected redacter reads, including image formats that OCR cannot read, such as
-  SVG;
-- `files_blocked`: files that need a converter the run lacks, such as OCR or PDF rendering;
-- `files_failed`: files that could not be read or scanned.
-
-The `status` of a file is `scanned`, `unsupported`, `blocked`, `skipped` or `failed`, and its `reason` is `null` for a
-scanned file and says why for the others. `unlocated_values` counts the values an LLM redacter or AWS Bedrock Guardrails
-named that are not in the file as written, such as a value the model reformatted. The values are not reported. A
-scanned file without `findings` and with `unlocated_values` above 0 is the unconfirmed file of the terminal, and the row
-of any file with such values shows the count as `2 values not located`: the file may hold more than its findings.
-
-The `findings` of a file are sorted by location, as in the terminal, and the `score` is `null` when the redacter gives
-none. The `value` is masked unless `--show-values` is set. The `location` has a `kind`:
-
-- `text`: `start` and `end` are byte offsets in the text of the file, and `line` and `column` are the position of
-  `start`, both counted from 1, the column in characters;
-- `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
-  cell;
-- `image`: the `page` of a PDF file counted from 1 (`null` for an image), and the box `y1`, `x1`, `y2`, `x2` in pixels.
-
-Fields are only ever added to the report, never renamed or removed.
-
-### Text report
-
-`--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
-enough for the longest path, so no path is shortened. With `--categories` the summary line of `scan` ends with
-`· Categories: contact, secrets`. The text report of `cp` starts with the line `Categories: contact, secrets`.
-
-### SARIF report
-
-`--report-format sarif` writes the report as [SARIF](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
-2.1.0, the format GitHub code scanning reads, so the findings show in the code scanning tab and as annotations on pull
-requests. `scan` and `cp` both write it, and a redaction of `cp` is a finding here.
-
-| SARIF | What `scan` and `cp` write |
-|---|---|
-| `tool.driver` | `redacter`, its version and the repository URL |
-| rule | One for each redacter and label found, with the `ruleId` `<redacter>/<label>`, such as `local-rules/email`, and `redacter/unconfirmed` for unconfirmed files |
-| `level` | `error` for a finding, `warning` for an unconfirmed file |
-| text finding | A `region` with `startLine`, `startColumn`, `endLine` and `endColumn`, counted from 1; `endColumn` is the column after the last character |
-| table cell | No region, since the line of a cell in its file is not known; the message gives the row and column |
-| image or PDF page | No region; the message gives the page and the box in pixels |
-| a page of a PDF, or the whole file | No region; the message gives the page, if there is one, and has no value |
-| unconfirmed file | One result for the file, without a region |
-| failed, blocked and unsupported files | `invocations[0].toolExecutionNotifications` with the reason; `executionSuccessful` is `false` when a file failed or is blocked |
-| skipped files | Not reported |
-| `partialFingerprints` | `primaryLocationLineHash`, see below |
-| `properties` of the run | `categories`, the categories `--categories` limited the run to; left out when the run looked for every category |
-
-Columns count characters (Unicode code points), as in the other reports, and the run says so with
-`columnKind` `unicodeCodePoints`. GitHub does not document which unit it counts columns in. GitHub shows a result under the file of its location, and a pull request annotation
-needs a line in the diff, so annotations appear for text findings only.
-
-A path is relative to the working directory, with `uriBaseId` `%SRCROOT%`, which GitHub resolves against the root of the
-repository: run the command from the root of the checkout. A path outside the working directory is a `file:///` URI, and a
-file of a `gs://`, `s3://` or `zip://` source is a URI of that scheme.
-
-The message of a result has the label, the redacter, the score when there is one, and the masked value. SARIF always
-holds the masked value: `--show-values` does not apply to it, since the report is stored by GitHub and shown to everyone
-who can read the alerts. A result without a value, such as a page or a file that a redacter changed without saying where,
-has no value in its message.
-
-The SARIF report of `cp` has a result for each redaction of the [copy report](#copy-report) and these for the other
-files:
-
-- a file copied or skipped without being redacted, which includes every file of a copy without a redacter, is
-  `unsupported`, or `blocked` when OCR or the PDF renderer is missing, as for `scan`;
-- a file left out by `--max-size-limit` or `--filename-filter` is not reported;
-- a file with the status `failed` is `failed`;
-- a file with the status `redacted` and no redactions has no result.
-
-The fingerprint is a SHA-256 hash of the rule, the path and the masked value, followed by `:` and the number of earlier
-findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
-every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
-shows at most 5,000 results of a run, the most severe first, and rejects a file with more than 25,000 results in a run.
-The SARIF report of `cp` and of `scan` keeps 5,000 results: the most severe first, and within a severity
-the first result of every rule before the second of any, so a rule with few results is not crowded out by one with
-many. It says in a notification of the run how many it left out. The JSON report always lists all of them.
-
-GitHub tells the analyses of one tool apart by the `category` of the upload, and an upload replaces the earlier one with
-the same `category`. `scan` and `cp` write the same tool, so a workflow that uploads both sets a different `category`
-for each.
-
-A workflow that uploads the findings to code scanning without failing the job:
-
-```yaml
-name: Scan for secrets
-on: [push, pull_request]
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install redacter
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Scan
-        run: >
-          redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text
-          --report-file redacter.sarif --report-format sarif --fail-on never
-      - uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: redacter.sarif
-          category: redacter-scan
-```
-
-### OCSF report
-
-`--report-format ocsf` writes the report as [OCSF](https://schema.ocsf.io/1.9.0/) 1.9.0, the Open Cybersecurity Schema
-Framework, a vendor-neutral schema for security events. Use it to send the findings to a SIEM or a security data lake.
-`scan` and `cp` both write it, and a redaction of `cp` is a finding here.
-
-The file is NDJSON, newline-delimited JSON: one JSON object on each line and no enclosing array, so a log shipper can
-read it line by line. Every line is an event of the class Data Security Finding (`class_uid` 2006, `type_uid` 200601),
-one for each file that has findings or is unconfirmed. A run without such a file writes an empty file. A clean,
-skipped, unsupported, blocked or failed file has no event: the [JSON report](#json-report) and the exit code report
-them.
-
-| OCSF | What `scan` and `cp` write |
-|---|---|
-| `metadata` | `version` `1.9.0` and the `product`: `redacter`, its version and the repository URL |
-| `time`, `finding_info.created_time` | When the report was written, in milliseconds since the Unix epoch |
-| `finding_info.uid` | The URI of the file, so a file has the same `uid` in every run; the value is not part of it |
-| `metadata.uid` | A UUID version 7 that is new for every event, so the events of two runs never share it |
-| `file` | `name`, the full `path` (the URI for a file of a remote source) and the full `uri`, a `file:///` URI for a local file |
-| `data_security.discovery_details` | One entry for each redacter, label and masked value in the file: `type` is the label, `rule.name` the redacter, `value` the masked value, `count` the number of findings |
-| text finding | An `occurrences` entry with `start_line`, `end_line` and `column_number`, counted from 1 |
-| table cell | An `occurrences` entry with `row_number` and `column_number`. The row counts data rows, so with a header row the first data row is 1 and the row in a spreadsheet is one more, as in the JSON and SARIF reports |
-| image or PDF page | An `occurrences` entry with `page_number` when there is a page |
-| `unmapped.redacter.findings` | One entry for each listed finding: its `discovery_detail`, the index in `discovery_details`, its `occurrence`, the index in the `occurrences` of that detail (left out when the finding has none), its `location` as the [JSON report](#json-report) gives it (byte offsets, the box in pixels of an image), and the `score` as the redacter gave it |
-| `unmapped.redacter.listing_limit` | Present when an event lists fewer findings than the file holds: `omitted_findings` and `max_findings_per_detail` |
-| unconfirmed file | An event with the severity Informational, no `data_security`, and `unmapped.redacter.unlocated_values` |
-
-An event lists the first 1000 findings of each discovery detail, in the order of the file, with their `occurrences` and
-`unmapped.redacter.findings` entries. The `count` of a detail is always exact, and `unmapped.redacter.listing_limit`
-says how many findings the event leaves out and what the limit is. A file that holds one value thousands of times then
-writes an event of bounded size.
-
-The values are masked as in the other reports, and `--show-values` does not apply: an OCSF report is stored with a long
-retention and read by many. There is no hash of a value in it.
-
-The severity and the confidence of an event come from its findings:
-
-| Attribute | Value |
-|---|---|
-| `severity_id` | High (4) when the file has a credential: a finding in the `credential` category, such as one of the `secrets` or `url-credentials` rules of `local-rules`, one of `local-credential-ml`, or a `PASSWORD` of GCP DLP. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
-| `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
-| `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
-
-Amazon Security Lake accepts custom sources in OCSF 1.3 or earlier only, as Parquet files, so this report is
-not accepted there as it is.
 
 ### Detection per redacter
 
@@ -2007,18 +1471,6 @@ redacter ls gs://my-little-bucket/my-big-files/
 - Integrity of the files is not guaranteed due to DLP implementation specifics. Some formats such as
   HTML/XML/JSON may be corrupted after redaction since they treated as text.
 - Use it at your own risk. The author is not responsible for any data loss or security breaches.
-
-## Recommended DLP providers
-
-Which redacter finds the most depends on the data. The recall of each one on text, secrets and images is in [Local or
-cloud](#local-or-cloud-quality-versus-performance). The image rows measure the coordinates a redacter reports to
-`scan`, not the native image edit of the LLM redacters.
-
-For the most protection, you can use multiple DLP providers, see [Multiple redacters](#multiple-redacters).
-
-For secrets, `gcp-vertex-ai` found all 41 planted secrets, `local-rules+local-credential-ml` 39, `local-rules` 38 and `aws-bedrock` 36. `aws-comprehend`,
-`aws-bedrock-guardrails` and `gcp-dlp` found 23, 19 and 17, `local-credential-ml` alone 25, and `presidio`, `local-ner` and `local-gliner` 3, 0 and 1.
-AWS Comprehend and AWS Bedrock Guardrails find passwords, AWS keys, PINs and usernames only.
 
 ## Licence
 
