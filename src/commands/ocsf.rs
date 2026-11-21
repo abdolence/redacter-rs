@@ -269,7 +269,7 @@ impl Summary {
         findings.for_each(|finding| {
             count += 1;
             redacters.insert(finding.redacter.to_string());
-            has_secret |= finding.label.category(finding.redacter) == Category::Secrets;
+            has_secret |= finding.category == Category::Secrets;
             confidence = confidence.max(finding.score.map(ConfidenceScore::from));
             let group = (
                 finding.redacter.to_string(),
@@ -633,7 +633,12 @@ mod tests {
             score: score.map(|score| Score::try_from(score).unwrap()),
             value: value.to_string(),
         };
-        FindingReport::new(redacter, &detection, ValueDisplay::Masked)
+        FindingReport::new(
+            redacter,
+            detection.label.category(redacter),
+            &detection,
+            ValueDisplay::Masked,
+        )
     }
 
     fn email(location: DetectionLocation, value: &str) -> FindingReport {
@@ -960,6 +965,33 @@ mod tests {
             "Akira",
         );
         assert_eq!(event_of(found("a.txt", vec![name]))["severity_id"], 3);
+    }
+
+    #[test]
+    fn a_finding_in_the_secrets_category_is_high_whatever_its_label() {
+        let detection = Detection {
+            label: DetectionLabel::new("internal-token"),
+            location: DetectionLocation::File,
+            score: None,
+            value: "tok-12345678".to_string(),
+        };
+        let user_rule_finding = |category| {
+            FindingReport::new(
+                RedacterType::LocalRules,
+                category,
+                &detection,
+                ValueDisplay::Masked,
+            )
+        };
+
+        assert_eq!(
+            event_of(found("a.txt", vec![user_rule_finding(Category::Secrets)]))["severity_id"],
+            4
+        );
+        assert_eq!(
+            event_of(found("a.txt", vec![user_rule_finding(Category::Other)]))["severity_id"],
+            3
+        );
     }
 
     #[test]

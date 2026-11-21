@@ -656,7 +656,12 @@ mod tests {
             score,
             value: value.to_string(),
         };
-        FindingReport::new(redacter, &detection, ValueDisplay::Masked)
+        FindingReport::new(
+            redacter,
+            detection.label.category(redacter),
+            &detection,
+            ValueDisplay::Masked,
+        )
     }
 
     fn email(location: DetectionLocation, value: &str) -> FindingReport {

@@ -560,7 +560,7 @@ mod tests {
             Some(&kind_names(&categories)),
         )
         .unwrap();
-        detections.retain_categories(RedacterType::GeminiLlm, &categories);
+        detections.retain_categories(&categories, |label| label.category(RedacterType::GeminiLlm));
 
         assert_eq!(detections.found.len(), 1);
         assert_eq!(detections.unlocated.len(), 2);
@@ -581,7 +581,7 @@ mod tests {
             Some(&kind_names(&categories)),
         )
         .unwrap();
-        detections.retain_categories(RedacterType::GeminiLlm, &categories);
+        detections.retain_categories(&categories, |label| label.category(RedacterType::GeminiLlm));
 
         assert_eq!(detections.found.len(), 1);
         assert!(

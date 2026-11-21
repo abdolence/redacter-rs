@@ -153,6 +153,7 @@ struct CompiledRule {
     /// any) are not word characters. Used for dictionary rules, whose alternatives may
     /// start or end with punctuation (`#tag`, `C++`) that `\b` cannot anchor on.
     whole_word: bool,
+    category: Category,
 }
 
 impl CompiledRule {
@@ -201,6 +202,7 @@ impl CompiledRule {
             capture_group: rule.capture_group,
             validator,
             whole_word: rule.whole_word.unwrap_or(default_whole_word),
+            category: rule.category,
         };
         for example in &rule.examples {
             if compiled.findings(example).next().is_none() {
@@ -347,6 +349,15 @@ impl RuleSet {
             .map_or(Category::Other, |spec| spec.group.category())
     }
 
+    /// The category of the findings of the rule named `rule` in this set, `other` when the set
+    /// has no such rule. Unlike [`Self::category_of`] it knows the user's rules.
+    pub fn category_of_rule(&self, rule: &str) -> Category {
+        self.rules
+            .iter()
+            .find(|candidate| candidate.name.as_str() == rule)
+            .map_or(Category::Other, |candidate| candidate.category)
+    }
+
     /// The value check of the built-in rule `name`, for a user rule that wants the same check.
     /// `None` when no built-in rule has that name or the rule has no value check.
     fn builtin_validator(name: &RuleName) -> Option<Validator> {
@@ -414,6 +425,7 @@ impl RuleSet {
                     .filter(|_| strictness == Strictness::Strict)
                     .map(|(_, validate)| validate),
                 whole_word: false,
+                category: spec.group.category(),
             });
         }
         Ok(Self { rules })
@@ -1287,6 +1299,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         let (redacted, findings) = redact(&rules, "badge EMP-123456 issued");
@@ -1305,6 +1318,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1325,6 +1339,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "a.b axb").0, "[REDACTED] axb");
@@ -1341,6 +1356,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1360,6 +1376,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1379,6 +1396,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "#tag #tag").0, "[REDACTED] [REDACTED]");
@@ -1395,6 +1413,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "hashtags").0, "hashtags");
@@ -1412,6 +1431,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "#tagline").0, "[REDACTED]");
@@ -1428,6 +1448,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap_err();
         assert!(
@@ -1447,6 +1468,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         let (redacted, findings) = redact(&rules, "xyz");
@@ -1466,6 +1488,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("tag")]).unwrap();
         assert_eq!(redact(&rules, "étag").0, "étag");
@@ -1485,6 +1508,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule("a"), rule("b")]).unwrap_err();
         assert!(
@@ -1618,6 +1642,7 @@ mod tests {
             validator: None,
             examples: Vec::new(),
             counter_examples: Vec::new(),
+            category: Category::Other,
         };
         for groups in [RuleGroup::all(), BTreeSet::new()] {
             let err = RuleSet::with_user_rules(&groups, &[rule()]).unwrap_err();

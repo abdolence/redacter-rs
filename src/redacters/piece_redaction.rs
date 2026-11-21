@@ -179,7 +179,7 @@ impl<'a> PieceRedaction<'a> {
                 .categories
                 .filter(|_| !step.redacter_type.narrows_itself())
             {
-                detections.retain_categories(step.redacter_type, categories);
+                detections.retain_categories(categories, |label| step.redacter.category_of(label));
             }
             if !detections.unlocated.is_empty() {
                 return Err(AppError::UnlocatedValues {

@@ -422,12 +422,12 @@ redacters put there:
 | Nationality, religious or political group | `NRP` of `presidio` |
 | Medical details | `medical condition` of `local-gliner`, and the `MEDICAL_*` entities of `presidio` but `MEDICAL_LICENSE` |
 | UUIDs | `UUID` of `presidio` |
-| Every user rule without a `category` | `--local-rule` and `--local-rules-file` |
+| Every user rule without a `category` | `--local-rule`, and a rule of `--local-rules-file` that names none |
 | Info types the user adds | `--gcp-dlp-stored-info-type`, and a `--gcp-dlp-built-in-info-type` that is not a default |
 | Anything a model could not classify | `sensitive_data` of the LLM redacters, a label added with `--local-gliner-labels` that names no organisation or place, `ALL` and the types later added of `aws-comprehend`, the regex filters of `aws-bedrock-guardrails` and an entity that a custom recogniser of `presidio` adds |
 
 `--categories secrets` therefore skips the custom rules of the user that have no `category`, since they are `other`. Add `other` to keep them, as in
-`--categories secrets,other`.
+`--categories secrets,other`. A rule of a rules file with a `category` is kept when that category is chosen.
 
 How a redacter honours the categories depends on what its service lets the tool ask for. A redacter is *narrowed* when
 its request or configuration holds only the chosen categories, so the other kinds are not looked for at all, and
@@ -471,8 +471,9 @@ category is chosen.
   when `--local-ner-entities` is absent, the default `--local-gliner-labels` and the 28 default info types of GCP DLP.
 - A value named on the command line is checked, and one outside the chosen categories is refused before any file is
   read. This covers `--local-rules`, `--local-ner-entities`, `--local-gliner-labels`, `--gcp-dlp-built-in-info-type`,
-  `--gcp-dlp-stored-info-type`, `--local-rule` and `--local-rules-file`. `--local-rules-disable` only removes groups,
-  so it is applied after.
+  `--gcp-dlp-stored-info-type` and `--local-rule`. `--local-rules-disable` only removes groups, so it is applied
+  after. A rule of a `--local-rules-file` in a category that is not chosen is left out of the run without a message,
+  as a rule group is, since one file can hold rules of several categories.
 - A redacter left with nothing to find is refused too.
 - The options that steer how Presidio and the LLM redacters redact images are refused, since those redacters read
   images with OCR instead: `--llm-image-mode`, `--presidio-image-redact-url`, `--gemini-image-model`,

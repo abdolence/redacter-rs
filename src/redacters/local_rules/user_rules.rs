@@ -1,5 +1,6 @@
 use super::error::LocalRulesError;
 use crate::redacters::text_spans::RuleName;
+use crate::redacters::Category;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -20,6 +21,8 @@ pub struct UserRule {
     pub examples: Vec<String>,
     /// Texts the rule must find nothing in, checked when the rules are compiled.
     pub counter_examples: Vec<String>,
+    /// The category its findings are in for `--categories` and the reports.
+    pub category: Category,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +51,7 @@ struct RuleEntry {
     examples: Vec<String>,
     #[serde(default)]
     counter_examples: Vec<String>,
+    category: Option<Category>,
 }
 
 /// Parses a `name=regex` rule given on the command line, splitting on the first `=`.
@@ -70,12 +74,14 @@ pub fn parse_inline_rule(value: &str) -> Result<UserRule, LocalRulesError> {
         validator: None,
         examples: Vec::new(),
         counter_examples: Vec::new(),
+        category: Category::Other,
     })
 }
 
 /// Loads user rules from a JSON rule file. Each entry must have exactly one of `regex` or
 /// `dictionary`; a dictionary is case-insensitive and matches whole words by default, a regex
-/// is neither. `capture_group` is for a regex only. What the rest of the entry asks of the
+/// is neither, and a rule is in the `other` category unless it names one. `capture_group` is
+/// for a regex only. What the rest of the entry asks of the
 /// compiled rule (`validator`, `capture_group` range, `examples`) is checked by
 /// `RuleSet::with_user_rules`.
 pub fn load_rules_file(path: &Path) -> Result<Vec<UserRule>, LocalRulesError> {
@@ -144,6 +150,7 @@ fn entry_to_rule(entry: RuleEntry) -> Result<UserRule, EntryError> {
         validator: entry.validator.as_deref().map(RuleName::new),
         examples: entry.examples,
         counter_examples: entry.counter_examples,
+        category: entry.category.unwrap_or(Category::Other),
     })
 }
 

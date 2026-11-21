@@ -692,9 +692,10 @@ impl RedacterArgs {
         .collect();
         if let Some(categories) = categories {
             let inline_names: Vec<_> = inline_rules.iter().map(|rule| &rule.name).collect();
-            let file_names: Vec<_> = file_rules.iter().map(|rule| &rule.name).collect();
             categories.check("--local-rule", &inline_names, |_| Category::Other)?;
-            categories.check("--local-rules-file", &file_names, |_| Category::Other)?;
+            // A rule file can mix categories, so what is outside the selection is left out,
+            // as for a built-in group.
+            file_rules.retain(|rule| categories.contains(rule.category));
         }
         let finds_any = groups.iter().any(|group| *group != RuleGroup::Custom)
             || !inline_rules.is_empty()
@@ -1379,6 +1380,30 @@ mod tests {
                 Some(RedacterProviderOptions::LocalRules(options)) => options,
                 other => panic!("expected local rules options, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn a_rules_file_rule_outside_the_categories_is_skipped() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                r#"{"rules":[
+                    {"name":"gift-card","regex":"GC-[0-9]{4}","category":"financial"},
+                    {"name":"codenames","dictionary":["Bluebird"]}
+                ]}"#,
+            )
+            .unwrap();
+            let path = file.path().to_string_lossy().to_string();
+            let names_under = |categories: &str| -> Vec<String> {
+                local_rules_of(&["--local-rules-file", &path, "--categories", categories])
+                    .user_rules
+                    .iter()
+                    .map(|rule| rule.name.to_string())
+                    .collect()
+            };
+
+            assert_eq!(names_under("financial"), ["gift-card"]);
+            assert_eq!(names_under("contact,other"), ["codenames"]);
         }
 
         fn dlp_of(args: &[&str]) -> Result<GcpDlpRedacterOptions, AppError> {

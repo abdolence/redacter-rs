@@ -310,6 +310,9 @@ async fn detect_in_file(
                         .detections
                         .iter()
                         .filter(|(_, detection)| meets_min_score(detection)),
+                    |redacter, label| {
+                        Redacters::category_of_finding(context.redacters, redacter, label)
+                    },
                     context.options.values,
                 )
             }),

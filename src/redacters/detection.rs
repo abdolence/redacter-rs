@@ -36,6 +36,10 @@ impl DetectionLabel {
         Self::new("sensitive_data")
     }
 
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The category of a finding `redacter` labelled with this label. A label the redacter's
     /// map does not know is `other`.
     pub fn category(&self, redacter: RedacterType) -> Category {

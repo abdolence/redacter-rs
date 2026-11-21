@@ -225,7 +225,7 @@ The severity and the confidence of an event come from its findings:
 
 | Attribute | Value |
 |---|---|
-| `severity_id` | High (4) when the file has a credential: a finding in the `credential` category, such as one of the `secrets` or `url-credentials` rules of `local-rules`, one of `local-credential-ml`, or a `PASSWORD` of GCP DLP. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
+| `severity_id` | High (4) when the file has a credential: a finding in the `credential` category, such as one of the `secrets` or `url-credentials` rules of `local-rules`, one of `local-credential-ml`, a `PASSWORD` of GCP DLP, or a user rule with `category` `secrets`. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
 | `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
 | `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
 
