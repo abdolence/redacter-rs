@@ -7,6 +7,7 @@ use clap::ValueEnum;
 use regex::{Match, Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fmt::Display;
+use std::sync::LazyLock;
 
 mod table;
 use table::builtin_rules;
@@ -314,15 +315,19 @@ fn compile(name: &str, pattern: &str, case_insensitive: bool) -> Result<Regex, L
 /// start or end on a word character. Lets a dictionary entry like `#tag` or `C++` match
 /// even though its first or last character is not alphanumeric.
 fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
-    let before_is_word = text[..start]
-        .chars()
-        .next_back()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let after_is_word = text[end..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let before_is_word = text[..start].chars().next_back().is_some_and(is_word_char);
+    let after_is_word = text[end..].chars().next().is_some_and(is_word_char);
     !before_is_word && !after_is_word
+}
+
+/// A word character for [`is_word_boundary`]. A combining mark counts: text in decomposed
+/// form stores an accent as its own character after the letter, and the letter and its
+/// accent are one word. The standard library has no test for marks, so the `regex` crate's
+/// Unicode tables answer it.
+fn is_word_char(c: char) -> bool {
+    static COMBINING_MARK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\p{M}$").expect("a fixed, valid pattern"));
+    c.is_alphanumeric() || c == '_' || COMBINING_MARK.is_match(c.encode_utf8(&mut [0; 4]))
 }
 
 /// How closely a built-in rule insists on a value that looks like a credential.
@@ -1438,6 +1443,40 @@ mod tests {
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "hashtags").0, "hashtags");
         assert_eq!(redact(&rules, "tag_line").0, "tag_line");
+    }
+
+    #[test]
+    fn user_dictionary_word_followed_by_a_combining_mark_is_not_a_whole_word() {
+        let rule = UserRule {
+            name: RuleName::new("cafe"),
+            matcher: UserMatcher::Dictionary(vec!["cafe".to_string()]),
+            case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
+            category: Category::Other,
+        };
+        let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
+        let decomposed = "caf\u{65}\u{301}";
+        let (redacted, findings) = redact(&rules, decomposed);
+        assert_eq!(redacted, decomposed);
+        assert!(findings.is_empty(), "{findings:?}");
+        assert_eq!(
+            redact(&rules, "a cafe, a caf\u{e9}").0,
+            "a [REDACTED], a caf\u{e9}"
+        );
+    }
+
+    #[test]
+    fn whole_word_regex_rule_is_not_matched_before_a_combining_mark() {
+        let rules = rule_set_from_file(
+            r#"{"rules":[{"name":"ticket","regex":"TK-\\d+","whole_word":true}]}"#,
+        )
+        .unwrap();
+        let marked = "TK-1\u{301} TK-2";
+        assert_eq!(redact(&rules, marked).0, "TK-1\u{301} [REDACTED]");
     }
 
     #[test]
