@@ -426,7 +426,9 @@ redacters put there:
 | Info types the user adds | `--gcp-dlp-stored-info-type`, and a `--gcp-dlp-built-in-info-type` that is not a default |
 | Anything a model could not classify | `sensitive_data` of the LLM redacters, a label added with `--local-gliner-labels` that names no organisation or place, `ALL` and the types later added of `aws-comprehend`, the regex filters of `aws-bedrock-guardrails` and an entity that a custom recogniser of `presidio` adds |
 
-`--categories secrets` therefore skips the custom rules of the user that have no `category`, since they are `other`. Add `other` to keep them, as in
+`--categories secrets` therefore leaves out a rule of a rules file that has no `category`, since it is `other`, and
+refuses an inline `--local-rule`, which is always `other`, see
+[Categories and redacter options](#categories-and-redacter-options). Add `other` to keep them, as in
 `--categories secrets,other`. A rule of a rules file with a `category` is kept when that category is chosen.
 
 How a redacter honours the categories depends on what its service lets the tool ask for. A redacter is *narrowed* when
@@ -554,10 +556,6 @@ when it is not installed. A copy that ends with 0 may therefore have left files 
 ### Copy report
 
 `--report-file` writes a report of the files a copy met: the counters `files_copied`, `files_redacted` and `files_skipped`, and for each file its `status`, its `reason` and the `redactions` that were made, each with its `location`. The fields, the statuses and how a redaction is located are in [docs/reports.md](docs/reports.md#copy-report).
-
-A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
-takes.
-
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, a CSV file with a lot of cells in batches of rows, and a text that does not fit in one request of
@@ -766,7 +764,8 @@ were reading the page as text, and every word the chain changes is blacked out o
 output PDF or image carries no text layer for the original words to survive in. A PDF is rendered as images first. Both
 steps need the optional capabilities installed, the OCR models and Pdfium; without them images and PDFs are skipped
 unless `--allow-unsupported-copies` is set. How fast each redacter is, and how much memory and download its model
-takes, is in [Choosing a redacter](#choosing-a-redacter).
+takes, is in [Choosing a redacter](#choosing-a-redacter). Use a release binary (or `cargo run --release`) for
+`local-ner` and `local-gliner`: a debug build is far slower.
 
 ### Local rules redacter
 
@@ -836,15 +835,20 @@ none of them:
   regex rules only;
 - `validator`: the name of a built-in rule that has a value check, such as `payment-card` (Luhn) or `iban`. A value is
   redacted only when it passes the check of that rule. The rules with a check are the ones marked in the Validator
-  column of [docs/local-rules.md](docs/local-rules.md);
-- `category`: one of the `--categories` values. The default is `other`. The findings of the rule are in that category
-  for `--categories` and in the reports;
-- `whole_word`: a boolean for a regex rule, `false` by default. Dictionary rules always match whole words;
+  column of [docs/local-rules.md](docs/local-rules.md). Only the check is reused, not the pattern of the rule, so the
+  regex of the user rule has to supply the shape. Some checks accept any value for some inputs, such as the EU VAT one
+  for some country prefixes;
+- `category`: one of the `--categories` values. The default is `other`. It decides whether the rule runs under
+  `--categories`, see [Categories and redacter options](#categories-and-redacter-options), and a rule in `secrets`
+  makes the severity of an OCSF event High;
+- `whole_word`: a boolean. A match is kept only when the characters next to it are not letters, digits or `_`. The
+  default is `true` for a dictionary and `false` for a regex. With `capture_group` the boundary is checked around the
+  captured group, so `{"regex": "id(\\d+)", "capture_group": 1, "whole_word": true}` finds nothing in `id123`;
 - `examples` and `counter_examples`: arrays of strings. When the file loads, every example must match the rule and no
   counter-example may, or the load fails.
 
 This rule redacts only the 16 digits of a loyalty card number, so the words `Loyalty card` stay. It redacts a number
-only when it passes the Luhn check of `payment-card`, and reports it in the `financial` category:
+only when it passes the Luhn check of `payment-card`, and puts it in the `financial` category:
 
 ```json
 {
@@ -894,9 +898,6 @@ redacter cp -d local-ner --local-ner-entities per --local-ner-min-score 0.3 tmp/
 redacter cp -d local-rules -d local-ner tmp/source/ tmp/redacted/
 ```
 
-Use a release binary (or `cargo run --release`) for `local-ner`: a debug build is far slower. Download size, memory and
-speed are in [Choosing a redacter](#choosing-a-redacter).
-
 `--local-ner-min-score` is the model confidence a word needs to be redacted, between 0 and 1
 (default 0.5); lower values redact more and produce more false positives. The model does not detect
 dates, emails, phone numbers or identifiers: combine it with `local-rules` for those. Its accuracy is
@@ -916,8 +917,7 @@ The model is not bundled with the tool.
 
 The `local-gliner` redacter runs a zero-shot span model: instead of a fixed
 label set, you give it the entity labels to look for as free text, and it scores every span of the
-document against each one. It replaces each match with `[REDACTED]`, like the other local redacters.
-Unlike `local-ner`, it reads context: it finds a lower-case name with no capitalisation to key off, a
+document against each one. Unlike `local-ner`, it reads context: it finds a lower-case name with no capitalisation to key off, a
 medical condition described in a sentence, a date of birth with no `date of birth` keyword next to it,
 and handles and usernames written as free text, none of which `local-rules` or `local-ner` can find on
 their own. It uses [`urchade/gliner_multi_pii-v1`](https://huggingface.co/urchade/gliner_multi_pii-v1)
@@ -947,9 +947,6 @@ default; add it with `--local-gliner-labels` when you do. Under `--categories`, 
 `place` is in `location`; any other added label is in `other`. `--local-gliner-min-score` is the model
 confidence a span needs to be redacted, between 0 and 1 (default 0.5); lower values redact more. Scores
 are well separated in practice, so lowering the threshold rarely changes the result. A document scores each label in batches of at most 25, so more labels cost more passes and, as with `organization`, more false positives.
-
-Use a release binary (or `cargo run --release`) for `local-gliner`: a debug build is far slower. Download size, memory and
-speed are in [Choosing a redacter](#choosing-a-redacter).
 
 A date that merely looks like a date of birth may still be redacted regardless of context, since the
 model has learned the shape as well as the wording -- on the benchmark corpus this catches the invoice
@@ -1008,8 +1005,7 @@ threshold of the model card). Lower values redact more and produce more false al
 `cp` applies the redacters in the order given, so the model rates the text with the values that rules found
 already replaced.
 
-Download size, memory and speed are in [Choosing a redacter](#choosing-a-redacter). The benchmark on planted secrets
-is in [docs/dlp-comparison.md](docs/dlp-comparison.md#secrets-in-config-and-code).
+The benchmark on planted secrets is in [docs/dlp-comparison.md](docs/dlp-comparison.md#secrets-in-config-and-code).
 
 Limits:
 

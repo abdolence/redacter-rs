@@ -1,6 +1,6 @@
 # Large files
 
-How `cp` and `scan` read a file that is too large to hold in memory or to send in one request, and the memory and time it takes. The summary is in [Copy report](reports.md#copy-report) and [Scan command](../README.md#scan-command).
+How `cp` and `scan` read a file that is too large to hold in memory or to send in one request, and the memory and time it takes. The summary is in [Copy report](../README.md#copy-report) and [Scan command](../README.md#scan-command).
 
 ## Copy
 
