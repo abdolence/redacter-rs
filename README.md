@@ -192,8 +192,8 @@ Without DLP enabled, the tool will copy all files without redaction.
 With DLP enabled, the tool will redact files based on the DLP model and skip unsupported files.
 
 `--report-file` saves the result of the command to a file as JSON by default, as the three counts with
-`--report-format text`, as a [SARIF report](#sarif-report) with `--report-format sarif`, or as an
-[OCSF report](#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
+`--report-format text`, as a [SARIF report](docs/reports.md#sarif-report) with `--report-format sarif`, or as an
+[OCSF report](docs/reports.md#ocsf-report) with `--report-format ocsf`. The terminal output is the same with or without it. `--report-file` and `--report-format` replace `--save-json-results`, which
 is no longer accepted. `scan` takes the same two options, see [Scan command](#scan-command).
 
 `--categories` limits a run to some kinds of data, such as secrets only. `scan` takes it too, see
@@ -512,11 +512,11 @@ in `scan`.
 #### Categories in the reports
 
 With `--categories` the reports state the categories, and without it they have no such field or line. The
-[JSON report](#json-report) of `scan` and the [copy report](#copy-report) have `categories`, the
-[SARIF report](#sarif-report) has it in the properties of the run, and the [text report](#text-report) states it in the
+[JSON report](docs/reports.md#json-report) of `scan` and the [copy report](docs/reports.md#copy-report) have `categories`, the
+[SARIF report](docs/reports.md#sarif-report) has it in the properties of the run, and the [text report](docs/reports.md#text-report) states it in the
 closing summary line of `scan` and in a first line of `cp`. The terminal shows the categories at the end of the line
 that lists the redacters and converters and at the end of the closing summary line. A finding in the `secrets` category is High severity in the
-[OCSF report](#ocsf-report).
+[OCSF report](docs/reports.md#ocsf-report).
 
 #### Examples of limiting to categories
 
@@ -552,48 +552,11 @@ when it is not installed. A copy that ends with 0 may therefore have left files 
 
 ### Copy report
 
-The JSON report of `cp` is one object with the counters `files_copied`, `files_redacted` and `files_skipped`, and
-`files`, an entry for each file the copy met, in the order it met them. Files that `--max-size-limit` or
-`--filename-filter` leave out of a directory listing are only counted in `files_skipped` and have no entry. With
-`--categories` the report also has `categories`, the list of the categories the copy was limited to, such as
-`["contact", "secrets"]`. A copy without `--categories`, or with every category, has no such field.
-
-An entry has the fields `path`, `mime_type`, `status`, `reason` and `redactions`:
-
-- `status` is `redacted`, `copied`, `copied_unredacted`, `skipped` or `failed`. `copied` is a file copied as it is
-  because no redacter was selected, and `copied_unredacted` a file copied as it is because
-  `--allow-unsupported-copies` is set;
-- `reason` is `null` for a redacted or copied file and says why for the others;
-- `redactions` lists what the redacters replaced in the file, sorted by location as in the scan report. A file with
-  the status `redacted` and no redactions went through the redacters unchanged.
-
-A redaction has the fields `redacter`, `label`, `score`, `location` and `value`, as a [finding of `scan`](#json-report)
-has. The `value` is always masked, since `cp` has no `--show-values`, see [Masking](#masking). The `location` has the
-`kind` `text`, `table_cell` or `image` of the scan report, and two more:
-
-- `page`: the `page` of a PDF file, counted from 1, when the position on it is not known;
-- `file`: the file as a whole, when the position in it is not known.
-
-How exactly a redaction is located depends on the redacter and the content:
-
-| Content | Location | Redacters |
-|---|---|---|
-| Text | Exact span: `start`, `end`, `line` and `column` | `local-rules`, `local-ner`, `local-gliner`, `local-credential-ml`, `aws-comprehend` and `presidio` report the span they replaced. `aws-bedrock-guardrails` does when its answer gives readable locations; the LLM redacters do with `--categories` |
-| Text rewritten by the redacter | The `file` | `gcp-dlp`, the LLM redacters without `--categories`, and `aws-bedrock-guardrails` when its answer gives no readable locations return only the new text |
-| Table | Cell: `row`, `column` and the span in the cell | `local-rules`, `local-ner`, `local-gliner` and `local-credential-ml`. `gcp-dlp` reports a table at the `file`; other redacters read a CSV file as text |
-| Image or PDF page read with OCR | Page and box in pixels, around the words OCR blacked out | Any redacter that reads text |
-| Image read by the redacter | Page and box in pixels | `gcp-dlp`, and the LLM redacters in the `coords` image mode, or in the default `auto` mode when the native edit is not available |
-| Image edited by the redacter | The `page` of a PDF, or the `file` | `presidio`, and the LLM redacters in the `native` image mode, or in the `auto` mode when the native edit succeeds |
-
-A text or table redaction located at the `file`, or at the `page` of a PDF, has the label `sensitive_data`, no score and
-no value. Each step of `gcp-dlp`, or of an LLM redacter without `--categories`, on a text or a table that changes more
-than whitespace is one such redaction, and so is every later step on the same text or table. So is a step that changes
-the shape of a table. The boxes of an image step that follows a step that changed the size of the image are located at
-the `page` or the `file` too, and keep their label, score and value; the step that changed the size still reports its
-boxes.
+`--report-file` writes a report of the files a copy met: the counters `files_copied`, `files_redacted` and `files_skipped`, and for each file its `status`, its `reason` and the `redactions` that were made, each with its `location`. The fields, the statuses and how a redaction is located are in [docs/reports.md](docs/reports.md#copy-report).
 
 A copy without `--report-file`, or with `--report-format text`, places nothing and takes what a copy without reports
 takes.
+
 
 A text file of more than about 4 MiB is redacted in pieces when every selected redacter is `local-rules` or
 `local-credential-ml`, a CSV file with a lot of cells in batches of rows, and a text that does not fit in one request of
@@ -1392,159 +1355,7 @@ the redacter is only reported when its score reaches them (0.5 by default, 0.74 
 Two mechanisms keep legitimate values, such as the mock keys of a test fixture, out of a scan. Both apply to `scan`
 only. `cp` does not read an ignore file and does not look for the markers: it always redacts everything it finds.
 
-Be aware that both hide real secrets as well as mock ones, so keep the ignore file, the marked lines and the marked regions in code review.
-
-#### Ignore file
-
-An ignore file lists the files `scan` does not read. It uses the gitignore syntax: `#` comments, `*` and `**`
-wildcards, a trailing `/` for a directory, a leading `/` to anchor a pattern at the source root and `!` to bring back a
-file an earlier pattern ignored. Unlike git, `!` also brings back a file inside an ignored directory: with `fixtures/`
-and `!fixtures/keep.txt`, `keep.txt` is scanned. Patterns match the path of a file relative to the source root, the path
-the reports show, with `/` or `\` as the separator, so the same file works for a local directory, GCS, S3 and a zip
-archive.
-
-```
-# Mock credentials used by the tests
-test-fixtures/
-*.mock.txt
-docs/**/example-keys.md
-!docs/real/example-keys.md
-```
-
-- A local directory source uses the `.redacterignore` at its root when it has one. The file leaves itself out, so it is
-  neither scanned nor reported as unsupported, and it is counted in `files_ignored`;
-- `--ignore-file <PATH>` reads the given local file instead, for any source, including GCS and S3;
-- `--no-ignore` skips the `.redacterignore` of a local source. It cannot be combined with `--ignore-file`, and the
-  markers below still apply;
-- a file named as the source itself is always scanned;
-- `.git` directories are left out of a local directory source whatever the ignore settings, see
-  [Source and destinations](#source-and-destinations);
-- ignored files do not count towards `--max-files-limit`;
-- a UTF-8 byte order mark at the start of the file is dropped, as git does;
-- a pattern that cannot be compiled is an error that names the file and the line, and the command exits with 1.
-
-An ignored file is not read. It is counted in `files_ignored`, which is part of the file total of the summary, and has no
-entry in the `files` of the report. The other counters keep their meaning.
-
-#### Inline marker
-
-The text `redacter:allow` on a line ignores every finding that covers that line, from the line where the finding
-starts to the line where it ends. The marker is matched as a substring, so it sits in whatever comment syntax the file
-uses:
-
-```
-API_KEY=AKIAIOSFODNN7EXAMPLE # redacter:allow
-```
-
-A private key block spans several lines, so a marker on any of them, such as the `END` line, ignores the whole key:
-
-```
------BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA...
------END RSA PRIVATE KEY----- # redacter:allow
-```
-
-A marker inside the value of any finding does not count, and ignores nothing: `API_KEY=xyz_redacter:allow_123` is still
-reported, and so is an email on the same line. A marker on a line the finding does not cover, such as the line above it,
-does not count either.
-
-- The ignored findings are not in `findings`, in the rows or in the exit code. They are counted in `findings_ignored`,
-  so the suppression stays visible in the summary and in the JSON report;
-- the marker works for every redacter, since it acts on the location of a finding. A value an LLM redacter named
-  without being able to locate it has no line and is not ignored; it stays in `unlocated_values`;
-- in a CSV table the marker has to be inside the cell of the finding. A CSV file read as plain text follows the rule of
-  lines;
-- on a line longer than about 4 MiB, in a file read in pieces, the marker is not read;
-- `redacter:allow-begin` and `redacter:allow-end` are not inline markers, see [Block markers](#block-markers);
-- an image or a PDF page has no place for the marker, so the findings in them are always reported;
-- `--min-score` is applied first, so `findings_ignored` counts only the findings that would have been reported.
-
-#### Block markers
-
-`redacter:allow-begin` and `redacter:allow-end` ignore every finding on the lines between them. The inline marker has to
-stand on a line of the finding. A region is for a value that has no such line to spare, such as a key in a Markdown code
-block, where a marker would show in the rendered page, and for a place that holds several values, such as a fixture,
-where a marker on each line is noise.
-
-In Markdown the markers sit in HTML comments:
-
-````markdown
-<!-- redacter:allow-begin -->
-```text
------BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIJ+...
------END PRIVATE KEY-----
-```
-<!-- redacter:allow-end -->
-````
-
-In source code they sit in a comment above and below the value:
-
-```rust
-// redacter:allow-begin
-const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEIJ+...
------END PRIVATE KEY-----";
-// redacter:allow-end
-```
-
-Like the inline marker, they are matched as substrings, in whatever comment syntax the file uses.
-
-Be aware that a region ignores real secrets added inside it later, and nothing reports them. Keep regions small, around
-the one value they are for, and review a change that touches one.
-
-On a marker line, only the inline marker ignores a finding. Here `a@b.io` is reported and `c@d.io` is ignored, and in the
-second example both are ignored, since the inline marker stands beside the begin:
-
-```
-a@b.io # redacter:allow-begin
-c@d.io
-# redacter:allow-end
-
-a@b.io redacter:allow redacter:allow-begin
-c@d.io
-# redacter:allow-end
-```
-
-The markers of a line are read in the order they stand, so an end before a begin closes a region and opens the next one:
-
-```
-# redacter:allow-begin
-first value
-# redacter:allow-end redacter:allow-begin
-second value
-# redacter:allow-end
-```
-
-- A region is the lines between the begin line and the end line, not including them. A finding is ignored when it lies
-  entirely in a region. One that starts on the begin line, or ends on the end line, is reported;
-- a marker inside the value of a finding does not count, as for the inline marker. With `--categories`, a value of a
-  category that is not selected is not a finding, so a marker inside it counts, for both forms of the marker;
-- the ignored findings are counted in `findings_ignored`, as for the inline marker. `--min-score` is applied first;
-- block markers apply to text. A CSV table read by cell has no region, an image or a PDF page has no place for the
-  markers, and `cp` redacts everything.
-
-A marker that does not pair up gives a warning with the line of the marker, and never hides a finding:
-
-- a begin with no end after it has no effect, so a forgotten end marker does not hide the rest of the file;
-- an end with no begin before it has no effect;
-- a begin inside a region that is already open has no effect, and the region keeps its first begin.
-
-The warnings are listed in the order of the file. They are shown under the row of the file in the terminal and in the
-text report, and are the `marker_warnings` of the file in the JSON report. In a SARIF report each is a warning in the
-notifications of the run, on the line of the marker. OCSF reports do not carry them. The warnings do not change the exit
-code. With `--sampling-size`, a begin with no end in the sample gets no warning, as the sample can end inside a region.
-
-A file larger than one request is read in pieces: about 3.9 MiB for `local-rules` and `local-credential-ml`, and the
-request size of the provider less twice its context for the cloud providers. When several redacters are selected, the
-pieces fit all of them. Block markers are read on a line of any length, and the region state is carried from one piece to
-the next, so a region can start in an earlier piece than a finding. Two things differ from a whole read:
-
-- a finding is ignored only when its end marker lies before the last context of its piece (the last 64 KiB with
-  `local-rules`). A finding with its end marker in that context, or in a later piece, is reported;
-- a marker inside a value of up to twice the context (128 KiB with `local-rules`) never counts, wherever the pieces
-  are cut. A longer value that crosses the end of a piece can be missed, as for any finding, and then
-  a marker inside it counts.
+An ignore file lists the files `scan` does not read: a `.redacterignore` at the root of a local source, or the file given with `--ignore-file`. The text `redacter:allow` on a line ignores the findings that cover that line, and `redacter:allow-begin` and `redacter:allow-end` ignore the findings on the lines between them. Be aware that both hide real secrets as well as mock ones, so keep the ignore file, the marked lines and the marked regions in code review. The syntax, the options and the rules for each mechanism are in [docs/ignoring-findings.md](docs/ignoring-findings.md).
 
 ### Exit codes
 
@@ -1578,190 +1389,10 @@ as for any failed file, since `--fail-on` governs findings only. Without the opt
 and do not change the exit code. Only the `secrets` and `url` rule groups are selected, since the other groups match code: `::de` in a Rust
 path is a valid IPv6 address, and a Unix timestamp has the shape of a Swedish personal number.
 
-### JSON report
+### Reports
 
-`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text`, `sarif` or `ocsf`. The terminal always shows the usual output,
-whatever the report options are; there is no mode that prints the JSON to stdout.
+`--report-file <FILE>` writes the report to a file in JSON by default; `--report-format` selects `text` for people, `sarif` for GitHub code scanning or `ocsf` for SIEMs and security data lakes. The terminal always shows the usual output, whatever the report options are; there is no mode that prints the JSON to stdout. The SARIF and OCSF reports always hold masked values. The fields of each format are in [docs/reports.md](docs/reports.md): the [JSON report](docs/reports.md#json-report), the [text report](docs/reports.md#text-report), the [SARIF report](docs/reports.md#sarif-report) and the [OCSF report](docs/reports.md#ocsf-report).
 
-The report is one JSON object with the counters of the run and an entry for each file:
-
-- `files_scanned`, `files_with_findings`, `files_unconfirmed`, `files_skipped`, `files_unsupported`, `files_blocked`
-  and `files_failed`: the number of files in each state. `files_unconfirmed` counts the scanned files without findings
-  that have `unlocated_values`, and is part of `files_scanned`;
-- `files_ignored`: the number of files the [ignore file](#ignoring-files-and-findings) ignored. They have no entry in
-  `files`;
-- `findings`: the number of findings, and `findings_by_label`: the same count for each label;
-- `findings_ignored`: the number of findings ignored by the `redacter:allow` marker or by block markers, not counted in
-  `findings`;
-- `files`: one entry for each file with its `path`, `mime_type`, `status`, `reason`, `unlocated_values` and `findings`.
-  A file whose [block markers](#block-markers) do not pair up also has `marker_warnings`, a list of the `line` of each
-  marker and its `problem`: `unclosed_begin`, `stray_end` or `nested_begin`;
-- `categories`: the categories `--categories` limited the scan to, such as `["contact", "secrets"]`. The field is
-  left out when the scan looked for every category.
-
-A finding has the fields `redacter`, `label`, `score`, `location` and `value`.
-
-`files_scanned` counts the files the redacters read, and these count the files they did not:
-
-- `files_skipped`: files left out by `--max-size-limit` or `--filename-filter`. Files that the filters leave out of a
-  directory listing are only counted here, and have no entry in `files`;
-- `files_unsupported`: files that no selected redacter reads, including image formats that OCR cannot read, such as
-  SVG;
-- `files_blocked`: files that need a converter the run lacks, such as OCR or PDF rendering;
-- `files_failed`: files that could not be read or scanned.
-
-The `status` of a file is `scanned`, `unsupported`, `blocked`, `skipped` or `failed`, and its `reason` is `null` for a
-scanned file and says why for the others. `unlocated_values` counts the values an LLM redacter or AWS Bedrock Guardrails
-named that are not in the file as written, such as a value the model reformatted. The values are not reported. A
-scanned file without `findings` and with `unlocated_values` above 0 is the unconfirmed file of the terminal, and the row
-of any file with such values shows the count as `2 values not located`: the file may hold more than its findings.
-
-The `findings` of a file are sorted by location, as in the terminal, and the `score` is `null` when the redacter gives
-none. The `value` is masked unless `--show-values` is set. The `location` has a `kind`:
-
-- `text`: `start` and `end` are byte offsets in the text of the file, and `line` and `column` are the position of
-  `start`, both counted from 1, the column in characters;
-- `table_cell`: the `row` and `column` of the cell, both counted from 1, and the byte offsets `start` and `end` in the
-  cell;
-- `image`: the `page` of a PDF file counted from 1 (`null` for an image), and the box `y1`, `x1`, `y2`, `x2` in pixels.
-
-Fields are only ever added to the report, never renamed or removed.
-
-### Text report
-
-`--report-format text` writes what the terminal shows for the files and the summary, without colours. The rows are wide
-enough for the longest path, so no path is shortened. With `--categories` the summary line of `scan` ends with
-`· Categories: contact, secrets`. The text report of `cp` starts with the line `Categories: contact, secrets`.
-
-### SARIF report
-
-`--report-format sarif` writes the report as [SARIF](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
-2.1.0, the format GitHub code scanning reads, so the findings show in the code scanning tab and as annotations on pull
-requests. `scan` and `cp` both write it, and a redaction of `cp` is a finding here.
-
-| SARIF | What `scan` and `cp` write |
-|---|---|
-| `tool.driver` | `redacter`, its version and the repository URL |
-| rule | One for each redacter and label found, with the `ruleId` `<redacter>/<label>`, such as `local-rules/email`, and `redacter/unconfirmed` for unconfirmed files |
-| `level` | `error` for a finding, `warning` for an unconfirmed file |
-| text finding | A `region` with `startLine`, `startColumn`, `endLine` and `endColumn`, counted from 1; `endColumn` is the column after the last character |
-| table cell | No region, since the line of a cell in its file is not known; the message gives the row and column |
-| image or PDF page | No region; the message gives the page and the box in pixels |
-| a page of a PDF, or the whole file | No region; the message gives the page, if there is one, and has no value |
-| unconfirmed file | One result for the file, without a region |
-| failed, blocked and unsupported files | `invocations[0].toolExecutionNotifications` with the reason; `executionSuccessful` is `false` when a file failed or is blocked |
-| skipped files | Not reported |
-| `partialFingerprints` | `primaryLocationLineHash`, see below |
-| `properties` of the run | `categories`, the categories `--categories` limited the run to; left out when the run looked for every category |
-
-Columns count characters (Unicode code points), as in the other reports, and the run says so with
-`columnKind` `unicodeCodePoints`. GitHub does not document which unit it counts columns in. GitHub shows a result under the file of its location, and a pull request annotation
-needs a line in the diff, so annotations appear for text findings only.
-
-A path is relative to the working directory, with `uriBaseId` `%SRCROOT%`, which GitHub resolves against the root of the
-repository: run the command from the root of the checkout. A path outside the working directory is a `file:///` URI, and a
-file of a `gs://`, `s3://` or `zip://` source is a URI of that scheme.
-
-The message of a result has the label, the redacter, the score when there is one, and the masked value. SARIF always
-holds the masked value: `--show-values` does not apply to it, since the report is stored by GitHub and shown to everyone
-who can read the alerts. A result without a value, such as a page or a file that a redacter changed without saying where,
-has no value in its message.
-
-The SARIF report of `cp` has a result for each redaction of the [copy report](#copy-report) and these for the other
-files:
-
-- a file copied or skipped without being redacted, which includes every file of a copy without a redacter, is
-  `unsupported`, or `blocked` when OCR or the PDF renderer is missing, as for `scan`;
-- a file left out by `--max-size-limit` or `--filename-filter` is not reported;
-- a file with the status `failed` is `failed`;
-- a file with the status `redacted` and no redactions has no result.
-
-The fingerprint is a SHA-256 hash of the rule, the path and the masked value, followed by `:` and the number of earlier
-findings with the same three. The value itself is not part of it, since a hash of a secret can be reversed by trying
-every candidate. It does not change when lines are added above a finding, so the alert stays the same alert. GitHub
-shows at most 5,000 results of a run, the most severe first, and rejects a file with more than 25,000 results in a run.
-The SARIF report of `cp` and of `scan` keeps 5,000 results: the most severe first, and within a severity
-the first result of every rule before the second of any, so a rule with few results is not crowded out by one with
-many. It says in a notification of the run how many it left out. The JSON report always lists all of them.
-
-GitHub tells the analyses of one tool apart by the `category` of the upload, and an upload replaces the earlier one with
-the same `category`. `scan` and `cp` write the same tool, so a workflow that uploads both sets a different `category`
-for each.
-
-A workflow that uploads the findings to code scanning without failing the job:
-
-```yaml
-name: Scan for secrets
-on: [push, pull_request]
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install redacter
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/abdolence/redacter-rs/master/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Scan
-        run: >
-          redacter scan . -d local-rules --local-rules secrets,url --unsupported-as-text
-          --report-file redacter.sarif --report-format sarif --fail-on never
-      - uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: redacter.sarif
-          category: redacter-scan
-```
-
-### OCSF report
-
-`--report-format ocsf` writes the report as [OCSF](https://schema.ocsf.io/1.9.0/) 1.9.0, the Open Cybersecurity Schema
-Framework, a vendor-neutral schema for security events. Use it to send the findings to a SIEM or a security data lake.
-`scan` and `cp` both write it, and a redaction of `cp` is a finding here.
-
-The file is NDJSON, newline-delimited JSON: one JSON object on each line and no enclosing array, so a log shipper can
-read it line by line. Every line is an event of the class Data Security Finding (`class_uid` 2006, `type_uid` 200601),
-one for each file that has findings or is unconfirmed. A run without such a file writes an empty file. A clean,
-skipped, unsupported, blocked or failed file has no event: the [JSON report](#json-report) and the exit code report
-them.
-
-| OCSF | What `scan` and `cp` write |
-|---|---|
-| `metadata` | `version` `1.9.0` and the `product`: `redacter`, its version and the repository URL |
-| `time`, `finding_info.created_time` | When the report was written, in milliseconds since the Unix epoch |
-| `finding_info.uid` | The URI of the file, so a file has the same `uid` in every run; the value is not part of it |
-| `metadata.uid` | A UUID version 7 that is new for every event, so the events of two runs never share it |
-| `file` | `name`, the full `path` (the URI for a file of a remote source) and the full `uri`, a `file:///` URI for a local file |
-| `data_security.discovery_details` | One entry for each redacter, label and masked value in the file: `type` is the label, `rule.name` the redacter, `value` the masked value, `count` the number of findings |
-| text finding | An `occurrences` entry with `start_line`, `end_line` and `column_number`, counted from 1 |
-| table cell | An `occurrences` entry with `row_number` and `column_number`. The row counts data rows, so with a header row the first data row is 1 and the row in a spreadsheet is one more, as in the JSON and SARIF reports |
-| image or PDF page | An `occurrences` entry with `page_number` when there is a page |
-| `unmapped.redacter.findings` | One entry for each listed finding: its `discovery_detail`, the index in `discovery_details`, its `occurrence`, the index in the `occurrences` of that detail (left out when the finding has none), its `location` as the [JSON report](#json-report) gives it (byte offsets, the box in pixels of an image), and the `score` as the redacter gave it |
-| `unmapped.redacter.listing_limit` | Present when an event lists fewer findings than the file holds: `omitted_findings` and `max_findings_per_detail` |
-| unconfirmed file | An event with the severity Informational, no `data_security`, and `unmapped.redacter.unlocated_values` |
-
-An event lists the first 1000 findings of each discovery detail, in the order of the file, with their `occurrences` and
-`unmapped.redacter.findings` entries. The `count` of a detail is always exact, and `unmapped.redacter.listing_limit`
-says how many findings the event leaves out and what the limit is. A file that holds one value thousands of times then
-writes an event of bounded size.
-
-The values are masked as in the other reports, and `--show-values` does not apply: an OCSF report is stored with a long
-retention and read by many. There is no hash of a value in it.
-
-The severity and the confidence of an event come from its findings:
-
-| Attribute | Value |
-|---|---|
-| `severity_id` | High (4) when the file has a credential: a finding in the `credential` category, such as one of the `secrets` or `url-credentials` rules of `local-rules`, one of `local-credential-ml`, or a `PASSWORD` of GCP DLP. Medium (3) for any other finding. Informational (1) for an unconfirmed file |
-| `confidence_score` | The highest score of the findings in the file, from 0 to 100; left out when no finding has a score |
-| `confidence_id` | Low (1) below 50, Medium (2) from 50 to 79, High (3) from 80; Unknown (0) when there is no score, which is the case for rule-based and LLM redacters and for unconfirmed files |
-
-Amazon Security Lake accepts custom sources in OCSF 1.3 or earlier only, as Parquet files, so this report is
-not accepted there as it is.
 
 ### Detection per redacter
 
