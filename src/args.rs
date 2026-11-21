@@ -11,7 +11,7 @@ use crate::redacters::{
     Categories, CategoriesError, CategoriesParser, Category, GcpDlpRedacter, GcpDlpRedacterOptions,
     GcpVertexAiModelName, GeminiLlmModelName, LlmImageMode, LocalRulesRedacterOptions,
     OpenAiLlmApiKey, OpenAiModelName, RedacterBaseOptions, RedacterOptions,
-    RedacterProviderOptions, RuleGroup, Score, UserRule,
+    RedacterProviderOptions, RuleGroup, RuleSet, Score, UserRule,
 };
 #[cfg(feature = "local-ner")]
 use crate::redacters::{Entity, LocalNerRedacterOptions};
@@ -681,15 +681,10 @@ impl RedacterArgs {
         for path in self.local_rules_file.iter().flatten() {
             file_rules.extend(crate::redacters::load_rules_file(path)?);
         }
-        let mut groups: BTreeSet<RuleGroup> = Categories::narrow(
-            categories,
-            "--local-rules",
-            self.local_rules.as_deref(),
-            RuleGroup::all(),
-            |group| group.category(),
-        )?
-        .into_iter()
-        .collect();
+        // Every rule is compiled and checked before `--categories` leaves any out, so a broken
+        // rule is reported whichever category it is in.
+        let every_rule: Vec<UserRule> = inline_rules.iter().chain(&file_rules).cloned().collect();
+        RuleSet::with_user_rules(&BTreeSet::new(), &every_rule)?;
         if let Some(categories) = categories {
             let inline_names: Vec<_> = inline_rules.iter().map(|rule| &rule.name).collect();
             categories.check("--local-rule", &inline_names, |_| Category::Other)?;
@@ -697,13 +692,31 @@ impl RedacterArgs {
             // as for a built-in group.
             file_rules.retain(|rule| categories.contains(rule.category));
         }
+        // The `custom` group stands for the user's rules, so it is inside the selection
+        // when a rule that is left is.
+        let custom_category = inline_rules
+            .first()
+            .or(file_rules.first())
+            .map_or(Category::Other, |rule| rule.category);
+        let mut groups: BTreeSet<RuleGroup> = Categories::narrow(
+            categories,
+            "--local-rules",
+            self.local_rules.as_deref(),
+            RuleGroup::all(),
+            |group| match group {
+                RuleGroup::Custom => custom_category,
+                group => group.category(),
+            },
+        )?
+        .into_iter()
+        .collect();
+        for group in self.local_rules_disable.iter().flatten() {
+            groups.remove(group);
+        }
         let finds_any = groups.iter().any(|group| *group != RuleGroup::Custom)
             || !inline_rules.is_empty()
             || !file_rules.is_empty();
         Categories::ensure_finds(categories, RedacterType::LocalRules, finds_any)?;
-        for group in self.local_rules_disable.iter().flatten() {
-            groups.remove(group);
-        }
         let user_rules = inline_rules.into_iter().chain(file_rules).collect();
         Ok(LocalRulesRedacterOptions { groups, user_rules })
     }
@@ -1404,6 +1417,61 @@ mod tests {
 
             assert_eq!(names_under("financial"), ["gift-card"]);
             assert_eq!(names_under("contact,other"), ["codenames"]);
+            let custom_only = local_rules_of(&[
+                "--local-rules",
+                "custom",
+                "--local-rules-file",
+                &path,
+                "--categories",
+                "financial",
+            ]);
+            assert_eq!(custom_only.user_rules.len(), 1);
+        }
+
+        #[test]
+        fn a_broken_rules_file_rule_outside_the_categories_still_fails_to_load() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                r#"{"rules":[{"name":"ticket","regex":"TK-[0-9]+","category":"secrets","examples":["no ticket"]}]}"#,
+            )
+            .unwrap();
+            let path = file.path().to_string_lossy().to_string();
+
+            let result = options_of(&[
+                "-d",
+                "local-rules",
+                "--local-rules-file",
+                &path,
+                "--categories",
+                "financial",
+            ]);
+
+            assert!(matches!(result, Err(AppError::RedacterConfigError { .. })));
+        }
+
+        #[test]
+        fn a_rules_file_left_with_no_rule_in_the_categories_and_no_group_finds_nothing() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                r#"{"rules":[{"name":"codenames","dictionary":["Bluebird"]}]}"#,
+            )
+            .unwrap();
+            let path = file.path().to_string_lossy().to_string();
+
+            let error = error_of(&[
+                "-d",
+                "local-rules",
+                "--local-rules-file",
+                &path,
+                "--categories",
+                "financial",
+                "--local-rules-disable",
+                "payment-card,iban",
+            ]);
+
+            assert!(matches!(error, CategoriesError::NothingToFind { .. }));
         }
 
         fn dlp_of(args: &[&str]) -> Result<GcpDlpRedacterOptions, AppError> {

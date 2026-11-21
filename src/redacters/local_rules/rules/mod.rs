@@ -143,6 +143,17 @@ impl Example {
     }
 }
 
+/// Where the search for the next value of a rule starts after a value.
+#[derive(Debug, Clone, Copy)]
+enum Resume {
+    /// At the end of the captured value: a built-in pattern may consume context around its
+    /// value (the separator before and after a postcode) that the next value needs as its own.
+    AfterValue,
+    /// At the end of the whole match: a user pattern such as `(\d{3})\d*-ID` must not find a
+    /// second value in the rest of the text it already matched.
+    AfterMatch,
+}
+
 #[derive(Debug)]
 struct CompiledRule {
     name: RuleName,
@@ -154,14 +165,17 @@ struct CompiledRule {
     /// start or end with punctuation (`#tag`, `C++`) that `\b` cannot anchor on.
     whole_word: bool,
     category: Category,
+    resume: Resume,
 }
 
-impl CompiledRule {
-    /// The rule as the user wrote it. Fails when the regex does not compile, when it has no
-    /// capture group `capture_group`, when `validator` names no built-in value check, and when
-    /// an example is not found or a counter-example is. A user mistake stops the run here
-    /// rather than leaving a rule that silently finds nothing, or too much.
-    fn from_user(rule: &UserRule) -> Result<Self, LocalRulesError> {
+/// The rule as the user wrote it. Fails when the regex does not compile, when it has no
+/// capture group `capture_group`, when `validator` names no built-in value check, and when
+/// an example is not found or a counter-example is. A user mistake stops the run here
+/// rather than leaving a rule that silently finds nothing, or too much.
+impl TryFrom<&UserRule> for CompiledRule {
+    type Error = LocalRulesError;
+
+    fn try_from(rule: &UserRule) -> Result<Self, Self::Error> {
         let (pattern, default_whole_word) = match &rule.matcher {
             UserMatcher::Regex(pattern) => (pattern.clone(), false),
             UserMatcher::Dictionary(words) => {
@@ -203,6 +217,7 @@ impl CompiledRule {
             validator,
             whole_word: rule.whole_word.unwrap_or(default_whole_word),
             category: rule.category,
+            resume: Resume::AfterMatch,
         };
         for example in &rule.examples {
             if compiled.findings(example).next().is_none() {
@@ -222,7 +237,9 @@ impl CompiledRule {
         }
         Ok(compiled)
     }
+}
 
+impl CompiledRule {
     /// The findings of this rule alone in `text`: its values that pass its validator and,
     /// for a whole-word rule, stand on word boundaries. Not merged with other findings.
     fn findings<'t>(&'t self, text: &'t str) -> impl Iterator<Item = Finding> + 't {
@@ -242,11 +259,8 @@ impl CompiledRule {
 
     /// The non-empty text each match of the rule captured in its capture group.
     ///
-    /// The search resumes at the end of the captured text, not at the end of the whole
-    /// match, because a pattern may consume context around its value (the separator before
-    /// and after a postcode) that the next value needs as its own. A match with an empty
-    /// capture, such as one of a user pattern like `a*`, yields nothing and the search moves
-    /// on by one character.
+    /// The search resumes where [`Resume`] says. A match with an empty capture, such as one of
+    /// a user pattern like `a*`, yields nothing and the search moves on by one character.
     fn values<'t>(&'t self, text: &'t str) -> impl Iterator<Item = Match<'t>> + 't {
         let mut from = 0;
         std::iter::from_fn(move || {
@@ -257,7 +271,10 @@ impl CompiledRule {
                     .get(self.capture_group)
                     .filter(|value| !value.is_empty());
                 from = match value {
-                    Some(value) => value.end(),
+                    Some(value) => match self.resume {
+                        Resume::AfterValue => value.end(),
+                        Resume::AfterMatch => whole.end(),
+                    },
                     None if whole.is_empty() => text[whole.end()..]
                         .chars()
                         .next()
@@ -341,7 +358,9 @@ pub const GENERIC_API_KEY_RULE: &str = "generic-api-key";
 
 impl RuleSet {
     /// The category of a finding named `rule`: that of the group of the built-in rule of the
-    /// name, `other` for any other name, which is a user-defined rule.
+    /// name, `other` for any other name. It knows the built-in rules only; the categories of
+    /// the user's rules are in the rule set, see [`Self::category_of_rule`] and
+    /// `Redacters::category_of`.
     pub fn category_of(rule: &str) -> Category {
         builtin_rules()
             .iter()
@@ -426,6 +445,7 @@ impl RuleSet {
                     .map(|(_, validate)| validate),
                 whole_word: false,
                 category: spec.group.category(),
+                resume: Resume::AfterValue,
             });
         }
         Ok(Self { rules })
@@ -456,7 +476,7 @@ impl RuleSet {
                     name: rule.name.to_string(),
                 });
             }
-            set.rules.push(CompiledRule::from_user(rule)?);
+            set.rules.push(CompiledRule::try_from(rule)?);
         }
         Ok(set)
     }
@@ -1580,6 +1600,17 @@ mod tests {
                 "{validator}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_capture_group_rule_makes_one_finding_for_one_match() {
+        let rules = rule_set_from_file(
+            r#"{"rules":[{"name":"ref","regex":"(\\d{3})\\d*-ID","capture_group":1}]}"#,
+        )
+        .unwrap();
+        let (redacted, findings) = redact(&rules, "ref 123456789-ID end");
+        assert_eq!(redacted, "ref [REDACTED]456789-ID end");
+        assert_eq!(findings.len(), 1, "{findings:?}");
     }
 
     #[test]

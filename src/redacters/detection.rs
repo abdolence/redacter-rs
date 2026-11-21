@@ -40,8 +40,9 @@ impl DetectionLabel {
         &self.0
     }
 
-    /// The category of a finding `redacter` labelled with this label. A label the redacter's
-    /// map does not know is `other`.
+    /// The category of a finding `redacter` labelled with this label, by the redacter's static
+    /// map. A label the map does not know is `other`, which includes every user rule of
+    /// local rules: their categories come from `Redacters::category_of`.
     pub fn category(&self, redacter: RedacterType) -> Category {
         let label = self.0.as_str();
         match redacter {

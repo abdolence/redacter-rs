@@ -83,8 +83,8 @@ enum ScanFileStatus {
 pub struct FindingReport {
     pub(super) redacter: RedacterType,
     pub(super) label: DetectionLabel,
-    /// The category the redacter placed the label in. The reports that group by category read
-    /// it; it is not part of the JSON report.
+    /// The category the redacter placed the label in. The OCSF severity reads it; it is not
+    /// part of the JSON report.
     #[serde(skip)]
     pub(super) category: Category,
     pub(super) score: Option<Score>,

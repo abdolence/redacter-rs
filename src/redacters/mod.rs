@@ -694,7 +694,8 @@ impl Redacters<'_> {
     }
 
     /// The category of a finding that `redacter` made with `label`, placed by that redacter
-    /// among `redacters`.
+    /// among `redacters`. A redacter that is not among them is placed by the static map of
+    /// [`DetectionLabel::category`], which does not know the user rules of local rules.
     pub fn category_of_finding(
         redacters: &[Redacters<'_>],
         redacter: RedacterType,
