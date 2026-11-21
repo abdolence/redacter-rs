@@ -156,6 +156,88 @@ struct CompiledRule {
 }
 
 impl CompiledRule {
+    /// The rule as the user wrote it. Fails when the regex does not compile, when it has no
+    /// capture group `capture_group`, when `validator` names no built-in value check, and when
+    /// an example is not found or a counter-example is. A user mistake stops the run here
+    /// rather than leaving a rule that silently finds nothing, or too much.
+    fn from_user(rule: &UserRule) -> Result<Self, LocalRulesError> {
+        let (pattern, default_whole_word) = match &rule.matcher {
+            UserMatcher::Regex(pattern) => (pattern.clone(), false),
+            UserMatcher::Dictionary(words) => {
+                if words.is_empty() {
+                    return Err(LocalRulesError::EmptyDictionary {
+                        name: rule.name.to_string(),
+                    });
+                }
+                // Longest first, so the alternation prefers e.g. `#tagline` over `#tag`
+                // when both are present and the input is `#tagline`.
+                let mut words = words.clone();
+                words.sort_unstable_by_key(|w| std::cmp::Reverse(w.len()));
+                let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
+                (format!("(?:{})", escaped.join("|")), true)
+            }
+        };
+        let regex = compile(rule.name.as_str(), &pattern, rule.case_insensitive)?;
+        if rule.capture_group >= regex.captures_len() {
+            return Err(LocalRulesError::CaptureGroupOutOfRange {
+                name: rule.name.to_string(),
+                capture_group: rule.capture_group,
+                groups: regex.captures_len(),
+            });
+        }
+        let validator = rule
+            .validator
+            .as_ref()
+            .map(|named| {
+                RuleSet::builtin_validator(named).ok_or_else(|| LocalRulesError::UnknownValidator {
+                    rule: rule.name.to_string(),
+                    validator: named.to_string(),
+                })
+            })
+            .transpose()?;
+        let compiled = Self {
+            name: rule.name.clone(),
+            regex,
+            capture_group: rule.capture_group,
+            validator,
+            whole_word: rule.whole_word.unwrap_or(default_whole_word),
+        };
+        for example in &rule.examples {
+            if compiled.findings(example).next().is_none() {
+                return Err(LocalRulesError::ExampleNotMatched {
+                    rule: rule.name.to_string(),
+                    example: example.clone(),
+                });
+            }
+        }
+        for example in &rule.counter_examples {
+            if compiled.findings(example).next().is_some() {
+                return Err(LocalRulesError::CounterExampleMatched {
+                    rule: rule.name.to_string(),
+                    example: example.clone(),
+                });
+            }
+        }
+        Ok(compiled)
+    }
+
+    /// The findings of this rule alone in `text`: its values that pass its validator and,
+    /// for a whole-word rule, stand on word boundaries. Not merged with other findings.
+    fn findings<'t>(&'t self, text: &'t str) -> impl Iterator<Item = Finding> + 't {
+        self.values(text)
+            .filter(|matched| {
+                self.validator
+                    .is_none_or(|validate| validate(matched.as_str()))
+                    && (!self.whole_word || is_word_boundary(text, matched.start(), matched.end()))
+            })
+            .map(|matched| Finding {
+                start: matched.start(),
+                end: matched.end(),
+                rule: self.name.clone(),
+                score: None,
+            })
+    }
+
     /// The non-empty text each match of the rule captured in its capture group.
     ///
     /// The search resumes at the end of the captured text, not at the end of the whole
@@ -265,6 +347,16 @@ impl RuleSet {
             .map_or(Category::Other, |spec| spec.group.category())
     }
 
+    /// The value check of the built-in rule `name`, for a user rule that wants the same check.
+    /// `None` when no built-in rule has that name or the rule has no value check.
+    fn builtin_validator(name: &RuleName) -> Option<Validator> {
+        builtin_rules()
+            .iter()
+            .find(|spec| spec.name == name.as_str())
+            .and_then(|spec| spec.validator)
+            .map(|(_, validate)| validate)
+    }
+
     /// Whether `name` is the name of a built-in rule, enabled or not.
     fn is_builtin_name(name: &str) -> bool {
         builtin_rules().iter().any(|spec| spec.name == name)
@@ -352,55 +444,18 @@ impl RuleSet {
                     name: rule.name.to_string(),
                 });
             }
-            let (pattern, whole_word) = match &rule.matcher {
-                UserMatcher::Regex(pattern) => (pattern.clone(), false),
-                UserMatcher::Dictionary(words) => {
-                    if words.is_empty() {
-                        return Err(LocalRulesError::EmptyDictionary {
-                            name: rule.name.to_string(),
-                        });
-                    }
-                    // Longest first, so the alternation prefers e.g. `#tagline` over `#tag`
-                    // when both are present and the input is `#tagline`.
-                    let mut words = words.clone();
-                    words.sort_unstable_by_key(|w| std::cmp::Reverse(w.len()));
-                    let escaped: Vec<String> = words.iter().map(|w| regex::escape(w)).collect();
-                    (format!("(?:{})", escaped.join("|")), true)
-                }
-            };
-            set.rules.push(CompiledRule {
-                name: rule.name.clone(),
-                regex: compile(rule.name.as_str(), &pattern, rule.case_insensitive)?,
-                capture_group: 0,
-                validator: None,
-                whole_word,
-            });
+            set.rules.push(CompiledRule::from_user(rule)?);
         }
         Ok(set)
     }
 
     /// Every validated match of every rule, merged so no two findings overlap.
     pub fn find(&self, text: &str) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        for rule in &self.rules {
-            for matched in rule.values(text) {
-                if rule
-                    .validator
-                    .is_some_and(|validate| !validate(matched.as_str()))
-                {
-                    continue;
-                }
-                if rule.whole_word && !is_word_boundary(text, matched.start(), matched.end()) {
-                    continue;
-                }
-                findings.push(Finding {
-                    start: matched.start(),
-                    end: matched.end(),
-                    rule: rule.name.clone(),
-                    score: None,
-                });
-            }
-        }
+        let findings = self
+            .rules
+            .iter()
+            .flat_map(|rule| rule.findings(text))
+            .collect();
         merge_findings(findings)
     }
 }
@@ -454,6 +509,7 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::super::user_rules::load_rules_file;
     use super::test_support::*;
     use super::*;
 
@@ -1226,6 +1282,11 @@ mod tests {
             name: RuleName::new("employee-id"),
             matcher: UserMatcher::Regex(r"\bEMP-\d{6}\b".to_string()),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         let (redacted, findings) = redact(&rules, "badge EMP-123456 issued");
@@ -1239,6 +1300,11 @@ mod tests {
             name: RuleName::new("codenames"),
             matcher: UserMatcher::Dictionary(vec!["Bluebird".to_string(), "Kestrel".to_string()]),
             case_insensitive: true,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1254,6 +1320,11 @@ mod tests {
             name: RuleName::new("special"),
             matcher: UserMatcher::Dictionary(vec!["a.b".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "a.b axb").0, "[REDACTED] axb");
@@ -1265,6 +1336,11 @@ mod tests {
             name: RuleName::new("hashtags"),
             matcher: UserMatcher::Dictionary(vec!["#tag".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1279,6 +1355,11 @@ mod tests {
             name: RuleName::new("langs"),
             matcher: UserMatcher::Dictionary(vec!["C++".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(
@@ -1293,6 +1374,11 @@ mod tests {
             name: RuleName::new("hashtags"),
             matcher: UserMatcher::Dictionary(vec!["#tag".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "#tag #tag").0, "[REDACTED] [REDACTED]");
@@ -1304,6 +1390,11 @@ mod tests {
             name: RuleName::new("tag"),
             matcher: UserMatcher::Dictionary(vec!["tag".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "hashtags").0, "hashtags");
@@ -1316,6 +1407,11 @@ mod tests {
             name: RuleName::new("hashtags"),
             matcher: UserMatcher::Dictionary(vec!["#tag".to_string(), "#tagline".to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         assert_eq!(redact(&rules, "#tagline").0, "[REDACTED]");
@@ -1327,6 +1423,11 @@ mod tests {
             name: RuleName::new("broken"),
             matcher: UserMatcher::Regex("(".to_string()),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap_err();
         assert!(
@@ -1341,6 +1442,11 @@ mod tests {
             name: RuleName::new("empty"),
             matcher: UserMatcher::Regex("a*".to_string()),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[rule]).unwrap();
         let (redacted, findings) = redact(&rules, "xyz");
@@ -1355,6 +1461,11 @@ mod tests {
             name: RuleName::new("tags"),
             matcher: UserMatcher::Dictionary(vec![word.to_string()]),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let rules = RuleSet::with_user_rules(&BTreeSet::new(), &[word_rule("tag")]).unwrap();
         assert_eq!(redact(&rules, "étag").0, "étag");
@@ -1369,10 +1480,129 @@ mod tests {
             name: RuleName::new("employee-id"),
             matcher: UserMatcher::Regex(pattern.to_string()),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         let err = RuleSet::with_user_rules(&BTreeSet::new(), &[rule("a"), rule("b")]).unwrap_err();
         assert!(
             matches!(err, LocalRulesError::DuplicateRule { ref name } if name == "employee-id"),
+            "{err}"
+        );
+    }
+
+    fn rule_set_from_file(contents: &str) -> Result<RuleSet, LocalRulesError> {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), contents).unwrap();
+        RuleSet::with_user_rules(&BTreeSet::new(), &load_rules_file(file.path())?)
+    }
+
+    #[test]
+    fn a_capture_group_redacts_the_group_and_keeps_its_context() {
+        let rules = rule_set_from_file(
+            r#"{"rules":[{"name":"badge","regex":"badge (EMP-\\d+)","capture_group":1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            redact(&rules, "badge EMP-123 issued").0,
+            "badge [REDACTED] issued"
+        );
+    }
+
+    #[test]
+    fn a_capture_group_the_regex_lacks_is_rejected() {
+        let err = rule_set_from_file(
+            r#"{"rules":[{"name":"badge","regex":"badge (EMP-\\d+)","capture_group":2}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LocalRulesError::CaptureGroupOutOfRange { ref name, capture_group: 2, groups: 2 }
+                    if name == "badge"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_validator_keeps_the_values_that_fail_the_check() {
+        let rules = rule_set_from_file(
+            r#"{"rules":[{"name":"gift-card","regex":"GC \\d{4} \\d{4} \\d{4} \\d{4}","validator":"payment-card"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(redact(&rules, "GC 4111 1111 1111 1111").0, "[REDACTED]");
+        assert_eq!(
+            redact(&rules, "GC 4111 1111 1111 1112").0,
+            "GC 4111 1111 1111 1112"
+        );
+    }
+
+    #[test]
+    fn a_validator_that_is_not_a_built_in_check_is_rejected() {
+        for validator in ["no-such-rule", "email"] {
+            let err = rule_set_from_file(&format!(
+                r#"{{"rules":[{{"name":"x","regex":"a","validator":"{validator}"}}]}}"#
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    LocalRulesError::UnknownValidator { ref rule, validator: ref named }
+                        if rule == "x" && named == validator
+                ),
+                "{validator}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_word_on_a_regex_rule_skips_a_match_inside_a_longer_word() {
+        let rules = rule_set_from_file(
+            r#"{"rules":[{"name":"ticket","regex":"TK-\\d+","whole_word":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(redact(&rules, "xTK-12 TK-34").0, "xTK-12 [REDACTED]");
+    }
+
+    #[test]
+    fn examples_that_hold_let_the_rule_load() {
+        rule_set_from_file(
+            r#"{"rules":[{"name":"ticket","regex":"TK-\\d+","examples":["see TK-1"],"counter_examples":["TK-","tk-1"]}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_example_the_rule_does_not_match_is_rejected() {
+        let err = rule_set_from_file(
+            r#"{"rules":[{"name":"ticket","regex":"TK-\\d+","examples":["TK-1","TK-"]}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LocalRulesError::ExampleNotMatched { ref rule, ref example }
+                    if rule == "ticket" && example == "TK-"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_counter_example_the_rule_matches_is_rejected() {
+        let err = rule_set_from_file(
+            r#"{"rules":[{"name":"ticket","regex":"TK-\\d+","counter_examples":["TK-1"]}]}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LocalRulesError::CounterExampleMatched { ref rule, ref example }
+                    if rule == "ticket" && example == "TK-1"
+            ),
             "{err}"
         );
     }
@@ -1383,6 +1613,11 @@ mod tests {
             name: RuleName::new("email"),
             matcher: UserMatcher::Regex("x".to_string()),
             case_insensitive: false,
+            capture_group: 0,
+            whole_word: None,
+            validator: None,
+            examples: Vec::new(),
+            counter_examples: Vec::new(),
         };
         for groups in [RuleGroup::all(), BTreeSet::new()] {
             let err = RuleSet::with_user_rules(&groups, &[rule()]).unwrap_err();

@@ -14,6 +14,23 @@ pub enum LocalRulesError {
     EmptyDictionary { name: String },
     #[error("rule `{name}` has a dictionary word that is empty or only whitespace")]
     EmptyDictionaryWord { name: String },
+    #[error("rule `{name}` is a dictionary, which has no capture group to choose")]
+    CaptureGroupOnDictionary { name: String },
+    #[error(
+        "rule `{name}` redacts capture group {capture_group}, but its regex has {groups} groups \
+         counting the whole match"
+    )]
+    CaptureGroupOutOfRange {
+        name: String,
+        capture_group: usize,
+        groups: usize,
+    },
+    #[error("rule `{rule}` names the validator `{validator}`, which is not a built-in rule with a value check")]
+    UnknownValidator { rule: String, validator: String },
+    #[error("rule `{rule}` finds nothing in its example `{example}`")]
+    ExampleNotMatched { rule: String, example: String },
+    #[error("rule `{rule}` finds a value in its counter-example `{example}`")]
+    CounterExampleMatched { rule: String, example: String },
     #[error("inline rule `{value}` must have the form name=regex")]
     InvalidInlineRule { value: String },
     #[error("rule file {path}: {reason}")]
