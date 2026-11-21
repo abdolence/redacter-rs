@@ -833,6 +833,10 @@ built-in rule, whether its group is enabled or not, see [the rules](docs/local-r
 always run: they are not one of the switchable groups, so `--local-rules-disable custom` does not
 suppress them; drop the `--local-rule` and `--local-rules-file` options instead.
 
+A regex rule searches a copy of the text in which a combining mark that follows a symbol, such as the emoji variation
+selector U+FE0F in `⚠️`, is replaced by a neutral symbol, so that `\b` finds a boundary after the symbol. A regex that
+names such a mark itself, as `⚠\x{FE0F}EMP` does, therefore does not match it.
+
 A rule in a `--local-rules-file` can have these optional fields as well. A rule given inline with `--local-rule` has
 none of them:
 
