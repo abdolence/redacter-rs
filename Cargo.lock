@@ -278,9 +278,9 @@ dependencies = [
 
 [[package]]
 name = "aws-config"
-version = "1.13.3"
+version = "1.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a3a314ce5fe1e5bdfbc6495e5e1f9ad066d34e567b26c41864eef40c22bfe16"
+checksum = "dc9f8505240e2371ce912cb5b0c5f99754f32ba7187b77c6c6ba74b56f97f4fa"
 dependencies = [
  "aws-credential-types",
  "aws-runtime",
@@ -376,9 +376,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-bedrockruntime"
-version = "1.157.0"
+version = "1.158.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1cd120cc746e32388787009be64a82213f1bd7bcdc3e366f3a4e53236b5eaf1"
+checksum = "5100e12af2338177084fcd2b315011f19a7b1cd28a4a64f7ceceb73d1c861917"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -404,9 +404,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-comprehend"
-version = "1.123.0"
+version = "1.124.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a458b372d63c9a27f6bde471d159143207028950a12d6661738031cbda8e8fa9"
+checksum = "63f6dd7d599e616ee98cbe038b11a69a02cf0bda4bdedd6576f53c1339158313"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -422,15 +422,16 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "fastrand",
+ "http",
  "regex-lite",
  "tracing",
 ]
 
 [[package]]
 name = "aws-sdk-s3"
-version = "1.161.0"
+version = "1.162.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c63e3ca6e56670513469e992759f4a51041603fde329471b29c5c1f5eaeefe"
+checksum = "4ffd93a622eaef65d9dee213b1c8afb8b5d999aa2020fe1c9ba6a94ec5e973e4"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -457,16 +458,16 @@ dependencies = [
  "lru",
  "percent-encoding",
  "regex-lite",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "aws-sdk-signin"
-version = "1.37.0"
+version = "1.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "128a21866eb52587db8974845099d7306c3e6b1d684c37f7d1d6b13664e8381e"
+checksum = "55013775d85fcb639c1a3422996d2a8f2b3f6328db029a870e3f4addcb943bab"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -489,9 +490,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sso"
-version = "1.122.0"
+version = "1.123.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2dd812c2090bec82fd410ac3fb37e72432c8830eb1293c19d49d1ebd4c30c0e"
+checksum = "079bf718682e4f41ccb38b3a7e0817bfea9f290cb3d7d9aa780c633fc984d53d"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -514,9 +515,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-ssooidc"
-version = "1.124.0"
+version = "1.125.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba228d6f4566858501a057dd1febc225a0f7a22b6f66f1475e2445d72d40621"
+checksum = "74311f2de3e5f8559a419eb82edc4f533a3d81a94e170f78cc471f5059fbb286"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -537,9 +538,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sts"
-version = "1.128.0"
+version = "1.129.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29c357588cdf8c9ae96c0d9930fff757f9b678d06b8f68d8e37a1278fe034912"
+checksum = "801a8310fa3cb59c4f74679421170c2a93b3e91ccb02f9e1305cc99f4dc5aaa6"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -581,7 +582,7 @@ dependencies = [
  "http",
  "p256",
  "percent-encoding",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "subtle",
  "time",
  "tracing",
@@ -630,7 +631,7 @@ dependencies = [
  "md-5",
  "pin-project-lite",
  "sha1 0.11.0",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tracing",
 ]
 
@@ -750,9 +751,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-runtime-api"
-version = "1.22.0"
+version = "1.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0b79dbb5331ccd297686df811d50ab3f39db171f5c765372a69272a0990b014"
+checksum = "20b0ce5fd8f8ec576f6737cf9a3a02172fddad2b90b8874577a4647fab11425c"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api-macros",
@@ -789,9 +790,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-types"
-version = "1.9.4"
+version = "1.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aff4bf014c512840b2bba80a20417b723cbd6a0a65c02e2d81f50b4268aedfc7"
+checksum = "2085f9721fb3755821f8db7611a67ed15f4d6fdba6785b4db8ed7cd18eebee0f"
 dependencies = [
  "base64-simd",
  "bytes",
@@ -1146,9 +1147,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.9"
+version = "4.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "844c5c0b65be192cb68d570cca1b21a6444431d24e39c084dc0336177015337c"
+checksum = "50066ca966813ca8957ee15361752f19424a8ff620dbe9c8993d9f99d99b04b3"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -1156,9 +1157,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.7"
+version = "4.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
+checksum = "a0ed97c96ef4efb3cc84e09fa388df4463e7cc3224ec38d7b1d9e45749333590"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2045,9 +2046,9 @@ dependencies = [
 
 [[package]]
 name = "gcloud-sdk"
-version = "0.34.0"
+version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06aad80db2c4c2a5d192f07ac0dca3235afd34fc4fc4babaccf07b50f80a23c6"
+checksum = "33a3b27fa5b90fc911e2601d780372fdd3f7654030330fa1c356467f456bd468"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2142,9 +2143,9 @@ dependencies = [
 
 [[package]]
 name = "globset"
-version = "0.4.21"
+version = "0.4.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f98b0d85522dc0a824cfebbc9594ff4a9b289c568bea0370319dfbdf20ccdd2d"
+checksum = "71217a07f20b48b4938c14203b77b610f8a7fa6762c3f75394a10c5f31e5aee0"
 dependencies = [
  "aho-corasick",
  "bstr",
@@ -2174,7 +2175,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "thiserror",
  "time",
  "tokio",
@@ -2582,9 +2583,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "484be5657551d7868d67587df967fb4fcbe9d266a761cc855aaa148fda0b3cc7"
+checksum = "df0a7d5f105e76bda602bed0a44af048542d3c9af12ec35aaf16f106c6f34270"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -3018,7 +3019,7 @@ version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
 dependencies = [
- "sha2 0.11.1",
+ "sha2 0.11.2",
 ]
 
 [[package]]
@@ -3449,7 +3450,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2 0.11.1",
+ "sha2 0.11.2",
 ]
 
 [[package]]
@@ -3505,9 +3506,9 @@ dependencies = [
 
 [[package]]
 name = "pdfium-render"
-version = "0.9.5"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "296b1146652b486ea6eea0d316e85ab6837ff69e8d2b1568e6fa7bc38bd4c00e"
+checksum = "ea2a078e29ca04924cfd9f5c718b9175d6dbe54ef0959322ae2055dcdb83f5cf"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -4059,7 +4060,7 @@ dependencies = [
  "rvstruct",
  "serde",
  "serde_json",
- "sha2 0.11.1",
+ "sha2 0.11.2",
  "tempfile",
  "thiserror",
  "tokenizers",
@@ -4717,9 +4718,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.1"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+checksum = "5b0e5c7d67bc53f435386b2130fdc900488c5703770f6d8a4633060e34288a27"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -5925,9 +5926,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.8.1"
+version = "9.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9534624d547e3f516ecde0ed9a70d37788f01d340efcfdd03bf3ea8e163c1d0"
+checksum = "2d8dbe089cf6b0448b78f5fc50139ab5aaa40d08ac07cdc1baf2c13add35fcce"
 dependencies = [
  "aes",
  "bzip2",
